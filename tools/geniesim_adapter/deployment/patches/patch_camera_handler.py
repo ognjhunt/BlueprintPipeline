@@ -61,7 +61,13 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 camera_prim_path = "/OmniverseKit_Persp"
 
             # Create a render product for this camera
-            rp = rep.create.render_product(camera_prim_path, (640, 480))
+            import os as _os
+            _cam_res_str = _os.environ.get("CAMERA_RESOLUTION", "1280x720")
+            try:
+                _cam_w, _cam_h = (int(x) for x in _cam_res_str.split("x"))
+            except (ValueError, TypeError):
+                _cam_w, _cam_h = 1280, 720
+            rp = rep.create.render_product(camera_prim_path, (_cam_w, _cam_h))
 
             # Attach annotators
             rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")

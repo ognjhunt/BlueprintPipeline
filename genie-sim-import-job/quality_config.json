@@ -7,8 +7,25 @@
     "task_completion": 0.7,
     "physics_plausibility": 0.7,
     "grasp_success": 0.7,
-    "collision_count": 1.0
+    "collision_count": 1.0,
+    "data_realness": 0.7
   },
+  "provenance_scoring": {
+    "physx_server": 1.0,
+    "isaac_sim_fk": 1.0,
+    "isaac_sim_camera": 1.0,
+    "scene_graph": 1.0,
+    "derived_from_physx_positions": 0.85,
+    "derived_from_fk_positions": 0.6,
+    "gemini_estimated": 0.8,
+    "finite_difference": 0.7,
+    "heuristic_grasp_model_v1": 0.2,
+    "hardcoded_fallback": 0.1,
+    "synthetic_from_task_config": 0.1,
+    "default_placeholder": 0.1,
+    "unavailable": 0.0
+  },
+  "max_heuristic_frame_ratio": 0.3,
   "schema": {
     "default_min_quality_score": "float (0-1) minimum overall quality score used when MIN_QUALITY_SCORE is unset",
     "min_allowed": "float lower bound for MIN_QUALITY_SCORE env overrides",
@@ -18,8 +35,11 @@
       "task_completion": "float (0-1) minimum task completion component score",
       "physics_plausibility": "float (0-1) minimum physics plausibility component score",
       "grasp_success": "float (0-1) minimum grasp success component score",
-      "collision_count": "float (0-1) minimum collision-free component score (1.0 = collision-free)"
+      "collision_count": "float (0-1) minimum collision-free component score (1.0 = collision-free)",
+      "data_realness": "float (0-1) minimum real-data ratio (penalizes synthetic/heuristic channels)"
     },
+    "provenance_scoring": "Maps provenance labels to quality multipliers (1.0 = fully real, 0.0 = missing)",
+    "max_heuristic_frame_ratio": "float (0-1) max fraction of frames with heuristic data before episode fails quality gate",
     "notes": "Per-dimension thresholds are enforced only when the episode metadata includes matching quality_components entries."
   },
   "description": "Minimum acceptable quality score for Genie Sim imports. Override via MIN_QUALITY_SCORE if within allowed range (0.5 - 0.95). Per-dimension thresholds apply when matching quality_components are present in episode metadata."

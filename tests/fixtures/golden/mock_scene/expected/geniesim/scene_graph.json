@@ -55,7 +55,8 @@
         "collisions": [],
         "containment": [],
         "contained_in": null,
-        "contains": null
+        "contains": null,
+        "dimensions_source": ""
       }
     },
     {
@@ -101,7 +102,8 @@
         "collisions": [],
         "containment": [],
         "contained_in": null,
-        "contains": null
+        "contains": null,
+        "dimensions_source": "default_placeholder"
       }
     }
   ],

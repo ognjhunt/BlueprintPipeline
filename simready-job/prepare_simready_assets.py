@@ -2317,6 +2317,7 @@ def prepare_simready_assets_job(
         use_deterministic_physics = True
 
     simready_paths: Dict[Any, str] = {}
+    computed_bounds_map: Dict[str, Dict[str, Any]] = {}  # oid -> bounds dict from compute_bounds()
     fallback_stats = {"total": 0, "covered": 0}
     quality_stats = {"total": 0, "passed": 0}
     fallback_mode = use_deterministic_physics
@@ -2450,7 +2451,7 @@ def prepare_simready_assets_job(
                 sim_rel = f"{assets_prefix}/static/obj_{oid}/simready.usda"
 
             print(f"[SIMREADY] ✓ Processed obj {oid}")
-            return (oid, sim_rel, str(sim_path), fallback_covered, quality_passed, profile_used)
+            return (oid, sim_rel, str(sim_path), fallback_covered, quality_passed, profile_used, bounds)
 
         except Exception as e:
             logger.warning(
@@ -2472,8 +2473,9 @@ def prepare_simready_assets_job(
         # Collect successful results
         for success_item in result.successful:
             if success_item:
-                oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used = success_item
+                oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used, bounds = success_item
                 simready_paths[oid] = sim_rel
+                computed_bounds_map[str(oid)] = bounds
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
                 profiles_used.add(profile_used)
                 if fallback_mode:
@@ -2501,8 +2503,9 @@ def prepare_simready_assets_job(
         for obj in objects:
             result = process_single_object(obj)
             if result:
-                oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used = result
+                oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used, bounds = result
                 simready_paths[oid] = sim_rel
+                computed_bounds_map[str(oid)] = bounds
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
                 profiles_used.add(profile_used)
                 if fallback_mode:
@@ -2597,6 +2600,40 @@ def prepare_simready_assets_job(
             "[SIMREADY] Failed to update progress marker: %s; continuing without progress update.",
             exc,
         )
+
+    # Write computed dimensions back to scene_manifest.json so downstream jobs
+    # (geniesim adapter, episode generation) have real object sizes instead of
+    # placeholder [0.1, 0.1, 0.1] defaults.
+    if computed_bounds_map and manifest_path.exists():
+        try:
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            updated_count = 0
+            for manifest_obj in manifest_data.get("objects", []):
+                oid = manifest_obj.get("id", "")
+                bounds_info = computed_bounds_map.get(oid)
+                if bounds_info is not None:
+                    size_m = bounds_info.get("size_m", [0.1, 0.1, 0.1])
+                    manifest_obj["dimensions_est"] = {
+                        "width": round(size_m[0], 4),
+                        "depth": round(size_m[1], 4),
+                        "height": round(size_m[2], 4),
+                    }
+                    manifest_obj["dimensions_source"] = bounds_info.get("source", "unknown")
+                    updated_count += 1
+            manifest_path.write_text(
+                json.dumps(manifest_data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            print(
+                f"[SIMREADY] Wrote dimensions_est back to scene_manifest.json "
+                f"for {updated_count}/{len(computed_bounds_map)} objects"
+            )
+        except Exception as exc:
+            logger.warning(
+                "[SIMREADY] Failed to write dimensions back to scene_manifest: %s; "
+                "downstream jobs will use fallback dimensions.",
+                exc,
+            )
 
     return 0
 

@@ -3867,6 +3867,89 @@ class GenieSimLocalFramework:
             else:
                 self.log("No scene object prims found — object poses will be synthetic", "WARNING")
 
+            # Build real object properties from scene_graph nodes, replacing
+            # hardcoded lookup tables (_OBJECT_SIZES, _OBJECT_MASSES, etc.).
+            self._object_properties: Dict[str, Dict[str, Any]] = {}
+            self._gemini_client_for_props = None
+            _gemini_client_for_props = None
+            for _node in _sg_nodes:
+                _asset_id = _node.get("asset_id", "")
+                _bp = _node.get("bp_metadata", {})
+                _props = _node.get("properties", {})
+                _size = _node.get("size", [0.1, 0.1, 0.1])
+                _category = _bp.get("category", "")
+                _mass = _props.get("mass") or _bp.get("physics", {}).get("mass")
+                _dim_source = _bp.get("dimensions_source", "")
+                _is_placeholder = all(abs(s - 0.1) < 1e-4 for s in _size)
+
+                # If dimensions are placeholder, try Gemini estimation
+                if _is_placeholder and not _dim_source:
+                    if _gemini_client_for_props is None:
+                        try:
+                            from tools.llm_client.client import create_llm_client
+                            _gemini_client_for_props = create_llm_client()
+                            self._gemini_client_for_props = _gemini_client_for_props
+                        except Exception:
+                            _gemini_client_for_props = False  # sentinel: don't retry
+                    if _gemini_client_for_props and _gemini_client_for_props is not False:
+                        _sem = _node.get("semantic", _category)
+                        try:
+                            _prompt = (
+                                f"Estimate typical real-world dimensions in meters for: {_sem}.\n"
+                                f"Category: {_category}.\n"
+                                f"Respond with ONLY JSON: "
+                                f'{{"width": <float>, "depth": <float>, "height": <float>, '
+                                f'"mass_kg": <float>, "graspable_width_m": <float>}}'
+                            )
+                            _resp = _gemini_client_for_props.generate(prompt=_prompt, json_output=True)
+                            _text = _resp.text.strip()
+                            _start = _text.find("{")
+                            _end = _text.rfind("}") + 1
+                            if _start >= 0 and _end > _start:
+                                import json as _json_mod
+                                _est = _json_mod.loads(_text[_start:_end])
+                                _size = [
+                                    max(float(_est.get("width", 0.1)), 0.01),
+                                    max(float(_est.get("depth", 0.1)), 0.01),
+                                    max(float(_est.get("height", 0.1)), 0.01),
+                                ]
+                                if _mass is None and "mass_kg" in _est:
+                                    _mass = float(_est["mass_kg"])
+                                _dim_source = "gemini_estimated"
+                                self.log(f"Gemini estimated props for {_asset_id}: size={_size}, mass={_mass}")
+                        except Exception as _exc:
+                            self.log(f"Gemini property estimation failed for {_asset_id}: {_exc}", "WARNING")
+
+                # Derive object ID variants for matching
+                _obj_id_short = _asset_id.split("_obj_")[-1] if "_obj_" in _asset_id else _asset_id
+                _obj_type = _category.lower() if _category else ""
+
+                _obj_props = {
+                    "asset_id": _asset_id,
+                    "category": _category,
+                    "object_type": _obj_type,
+                    "size": _size,
+                    "width": _size[0],
+                    "depth": _size[1],
+                    "height": _size[2],
+                    "graspable_width": min(_size[0], _size[1]),
+                    "mass": _mass if _mass is not None else 0.5,
+                    "bbox": _size,
+                    "dimensions_source": _dim_source or "scene_graph",
+                }
+                # Store under multiple keys for easy lookup
+                self._object_properties[_asset_id] = _obj_props
+                self._object_properties[_obj_id_short] = _obj_props
+                if _obj_type:
+                    # Only set type-level entry if not already set (first wins)
+                    if _obj_type not in self._object_properties:
+                        self._object_properties[_obj_type] = _obj_props
+
+            if self._object_properties:
+                self.log(f"Loaded real object properties for {len(_sg_nodes)} scene_graph nodes")
+            else:
+                self.log("No object properties loaded from scene_graph — will use hardcoded fallbacks", "WARNING")
+
             episodes_target = episodes_per_task or self.config.episodes_per_task
             tasks = task_config.get("suggested_tasks", [task_config])
             # Inject top-level config context into each task for enrichment fallbacks
@@ -4700,7 +4783,64 @@ class GenieSimLocalFramework:
                     _tt, ["Task initiated", "Motion completed", "End state reached"]
                 )
 
-            # Geometric task success: goal-region verification (Fix 7)
+            # Gemini-based task success evaluation (primary)
+            _gemini_ts_client = getattr(self, "_gemini_client_for_props", None)
+            if task_success is None and frames and _gemini_ts_client:
+                try:
+                    _task_desc = task.get("description_hint") or task.get("task_type", "manipulation")
+                    _target_obj = task.get("target_object", "unknown")
+                    # Build compact trajectory summary
+                    _gripper_transitions = []
+                    _prev_gc = None
+                    for _fi, _fr in enumerate(frames):
+                        _gc = _fr.get("gripper_command")
+                        if _gc != _prev_gc:
+                            _gripper_transitions.append({"frame": _fi, "state": _gc})
+                            _prev_gc = _gc
+                    _first_ee = frames[0].get("ee_pos", [0, 0, 0])
+                    _last_ee = frames[-1].get("ee_pos", [0, 0, 0])
+                    _summary = {
+                        "task": _task_desc,
+                        "target_object": _target_obj,
+                        "num_frames": len(frames),
+                        "gripper_transitions": _gripper_transitions,
+                        "ee_start": [round(v, 3) for v in _first_ee],
+                        "ee_end": [round(v, 3) for v in _last_ee],
+                    }
+                    # Add object displacement if available
+                    _target_oid_ts = task.get("target_object") or task.get("target_object_id")
+                    if _target_oid_ts:
+                        _ip = frames[0].get("_initial_object_poses", {}).get(_target_oid_ts)
+                        _fp = frames[-1].get("_final_object_poses", {}).get(_target_oid_ts)
+                        if _ip is not None and _fp is not None:
+                            _summary["object_displacement_m"] = round(
+                                float(np.linalg.norm(np.array(_fp) - np.array(_ip))), 3
+                            )
+                    import json as _json_mod
+                    _ts_prompt = (
+                        f"Evaluate whether this robot manipulation trajectory achieved its task.\n"
+                        f"Task: {_task_desc}\n"
+                        f"Trajectory summary: {_json_mod.dumps(_summary)}\n"
+                        f"Respond with ONLY JSON: "
+                        f'{{"success": <bool>, "confidence": <float 0-1>, "reasoning": "<short explanation>"}}'
+                    )
+                    _ts_resp = _gemini_ts_client.generate(prompt=_ts_prompt, json_output=True)
+                    _ts_text = _ts_resp.text.strip()
+                    _ts_start = _ts_text.find("{")
+                    _ts_end = _ts_text.rfind("}") + 1
+                    if _ts_start >= 0 and _ts_end > _ts_start:
+                        _ts_data = _json_mod.loads(_ts_text[_ts_start:_ts_end])
+                        task_success = bool(_ts_data.get("success", False))
+                        _ts_conf = float(_ts_data.get("confidence", 0.5))
+                        llm_metadata["task_success_reasoning"] = (
+                            f"Gemini evaluation (confidence={_ts_conf:.2f}): "
+                            f"{_ts_data.get('reasoning', 'no reasoning')}"
+                        )
+                        llm_metadata["task_success_source"] = "gemini_estimated"
+                except Exception as _ts_exc:
+                    logger.debug("Gemini task success evaluation failed: %s", _ts_exc)
+
+            # Geometric task success: goal-region verification (fallback validation)
             if task_success is None and frames:
                 _target_oid = task.get("target_object") or task.get("target_object_id")
                 if _target_oid:
@@ -4835,6 +4975,54 @@ class GenieSimLocalFramework:
                            else " but no subsequent release detected.")
                     )
 
+            # Gemini-based phase labeling (post-episode batch)
+            _gemini_pl_client = getattr(self, "_gemini_client_for_props", None)
+            if frames and _gemini_pl_client:
+                try:
+                    # Build compact frame data for phase labeling
+                    _pl_frames = []
+                    for _fi, _fr in enumerate(frames):
+                        _pl_frames.append({
+                            "i": _fi,
+                            "gc": _fr.get("gripper_command", ""),
+                            "ez": round(_fr.get("ee_pos", [0, 0, 0])[2], 3) if _fr.get("ee_pos") else 0,
+                        })
+                    # Sample if too many frames (keep ~30 evenly spaced)
+                    if len(_pl_frames) > 30:
+                        _step = len(_pl_frames) // 30
+                        _pl_sampled = _pl_frames[::_step][:30]
+                    else:
+                        _pl_sampled = _pl_frames
+                    import json as _json_mod
+                    _pl_prompt = (
+                        f"Label each frame of this robotics manipulation trajectory with a phase.\n"
+                        f"Valid phases: approach, grasp, lift, transport, place, retract\n"
+                        f"Frames (i=index, gc=gripper_command, ez=end_effector_z):\n"
+                        f"{_json_mod.dumps(_pl_sampled)}\n"
+                        f"Total frames: {len(frames)}.\n"
+                        f"Respond with ONLY a JSON array of objects: "
+                        f'[{{"start": <int>, "end": <int>, "phase": "<phase>"}},...] '
+                        f"covering all frames from 0 to {len(frames)-1}."
+                    )
+                    _pl_resp = _gemini_pl_client.generate(prompt=_pl_prompt, json_output=True)
+                    _pl_text = _pl_resp.text.strip()
+                    _pl_start = _pl_text.find("[")
+                    _pl_end = _pl_text.rfind("]") + 1
+                    if _pl_start >= 0 and _pl_end > _pl_start:
+                        _pl_data = _json_mod.loads(_pl_text[_pl_start:_pl_end])
+                        # Apply Gemini labels to frames
+                        for _segment in _pl_data:
+                            _s = int(_segment.get("start", 0))
+                            _e = min(int(_segment.get("end", 0)), len(frames) - 1)
+                            _ph = str(_segment.get("phase", "approach"))
+                            for _fi in range(_s, _e + 1):
+                                if _fi < len(frames):
+                                    frames[_fi]["phase_heuristic"] = frames[_fi].get("phase", "")
+                                    frames[_fi]["phase"] = _ph
+                        logger.info("[EPISODE] Gemini phase labeling applied: %d segments", len(_pl_data))
+                except Exception as _pl_exc:
+                    logger.debug("Gemini phase labeling failed: %s; keeping heuristic labels", _pl_exc)
+
             # Determine data mode based on what channels actually have real data
             _has_camera = _camera_frame_count > 0
             _has_real_scene = _real_scene_state_count > 0
@@ -4941,13 +5129,16 @@ class GenieSimLocalFramework:
                         "joint_velocities": "physx_server" if _real_velocity_count > 0 else "finite_difference",
                         "joint_accelerations": "finite_difference_smoothed",
                         "joint_efforts": "physx_server" if _real_effort_count > 0 else "unavailable",
-                        "ee_vel": "finite_difference",
-                        "ee_acc": "finite_difference",
-                        "contact_forces": "physx_joint_effort" if _real_effort_count > 0 else "heuristic_grasp_model_v1",
+                        "ee_vel": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
+                        "ee_acc": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
+                        "contact_forces": (
+                            "physx_joint_effort" if _real_effort_count > 0
+                            else ("gemini_estimated" if _contact_force_cache else "heuristic_grasp_model_v1")
+                        ),
                         "camera_frames": "isaac_sim_camera" if _camera_frame_count > 0 else "unavailable",
                         "task_description": "task_config_hint",
                         "scene_state": "physx_server" if _real_scene_state_count > 0 else "synthetic_from_task_config",
-                        "task_success": "geometric_goal_region_v2",
+                        "task_success": llm_metadata.get("task_success_source", "geometric_goal_region_v2"),
                         "quality_score": "weighted_composite_v2",
                         "server_ee_frames": f"{_server_ee_frame_count}/{len(frames)}",
                         "real_scene_state_frames": f"{_real_scene_state_count}/{len(frames)}",
@@ -4962,7 +5153,12 @@ class GenieSimLocalFramework:
                         "joint_velocities": 0.98 if _real_velocity_count > 0 else 0.7,
                         "joint_accelerations": 0.6,
                         "joint_efforts": 0.95 if _real_effort_count > 0 else 0.0,
-                        "contact_forces": 0.9 if _real_effort_count > 0 else 0.2,
+                        "contact_forces": (
+                            0.9 if _real_effort_count > 0
+                            else (0.6 if _contact_force_cache else 0.2)
+                        ),
+                        "ee_vel": 0.85 if _server_ee_frame_count > len(frames) * 0.5 else 0.6,
+                        "ee_acc": 0.85 if _server_ee_frame_count > len(frames) * 0.5 else 0.6,
                         "scene_state": 0.95 if _real_scene_state_count > 0 else 0.3,
                         "camera_frames": 0.95 if _camera_frame_count > 0 else 0.0,
                     },
@@ -5157,25 +5353,25 @@ class GenieSimLocalFramework:
         # --- Grasp physics constants (Improvement J) ---
         _GRIPPER_MAX_APERTURE = 0.08  # meters (Franka gripper max opening)
         _GRIPPER_MAX_FORCE = 40.0     # Newtons
-        # Graspable width: objects can be grasped at their narrowest dimension
-        _OBJECT_SIZES = {
+
+        # Last-resort hardcoded fallback tables — only used when scene_graph
+        # properties AND Gemini estimation are both unavailable.
+        _HARDCODED_OBJECT_SIZES = {
             "pot": 0.06, "cup": 0.06, "plate": 0.02, "bottle": 0.05,
             "toaster": 0.07, "mug": 0.06, "bowl": 0.02, "can": 0.05,
             "box": 0.07, "pan": 0.03, "kettle": 0.06, "jar": 0.06,
         }
-        _OBJECT_MASSES = {
+        _HARDCODED_OBJECT_MASSES = {
             "pot": 0.5, "cup": 0.2, "plate": 0.3, "bottle": 0.4,
             "toaster": 1.0, "mug": 0.25, "bowl": 0.35, "can": 0.3,
             "box": 0.4, "pan": 0.6, "kettle": 0.8, "jar": 0.35,
         }
-        # Object heights for correct table placement (Fix 5)
-        _OBJECT_HEIGHTS = {
+        _HARDCODED_OBJECT_HEIGHTS = {
             "pot": 0.12, "cup": 0.10, "plate": 0.03, "bottle": 0.22,
             "toaster": 0.15, "mug": 0.10, "bowl": 0.08, "can": 0.12,
             "box": 0.10, "pan": 0.06, "kettle": 0.18, "jar": 0.12,
         }
-        # Object bounding boxes [width, depth, height] in meters
-        _OBJECT_BBOXES = {
+        _HARDCODED_OBJECT_BBOXES = {
             "pot": [0.20, 0.20, 0.12], "cup": [0.08, 0.08, 0.10],
             "plate": [0.22, 0.22, 0.03], "bottle": [0.07, 0.07, 0.22],
             "toaster": [0.25, 0.15, 0.15], "mug": [0.10, 0.08, 0.10],
@@ -5184,14 +5380,46 @@ class GenieSimLocalFramework:
             "kettle": [0.18, 0.15, 0.18], "jar": [0.08, 0.08, 0.12],
         }
         _DEFAULT_TABLE_HEIGHT = 0.75
-        # Object semantic categories (Fix 12)
-        _OBJECT_CATEGORIES = {
+        _HARDCODED_OBJECT_CATEGORIES = {
             "pot": "container", "cup": "container", "mug": "container",
             "bowl": "container", "jar": "container", "kettle": "container",
             "plate": "tableware", "pan": "cookware", "can": "container",
             "bottle": "container", "toaster": "appliance", "box": "container",
             "table": "furniture", "surface": "furniture", "shelf": "furniture",
         }
+        _hardcoded_fallback_warned: set = set()
+
+        # Unified property lookup: scene_graph → Gemini estimated → hardcoded fallback
+        _obj_props = getattr(self, "_object_properties", {})
+
+        def _get_obj_prop(obj_id_or_type: str, prop: str, default=None):
+            """Look up an object property, preferring scene_graph data."""
+            # Try exact match, then type-level match
+            for key in (obj_id_or_type, obj_id_or_type.lower()):
+                entry = _obj_props.get(key)
+                if entry and prop in entry:
+                    return entry[prop]
+            # Hardcoded fallback with warning
+            _hc_tables = {
+                "graspable_width": _HARDCODED_OBJECT_SIZES,
+                "mass": _HARDCODED_OBJECT_MASSES,
+                "height": _HARDCODED_OBJECT_HEIGHTS,
+                "bbox": _HARDCODED_OBJECT_BBOXES,
+                "category": _HARDCODED_OBJECT_CATEGORIES,
+            }
+            _table = _hc_tables.get(prop, {})
+            _key_lower = obj_id_or_type.lower()
+            if _key_lower in _table:
+                _warn_key = f"{_key_lower}:{prop}"
+                if _warn_key not in _hardcoded_fallback_warned:
+                    _hardcoded_fallback_warned.add(_warn_key)
+                    logger.warning(
+                        "HARDCODED_FALLBACK: Using hardcoded %s for object type '%s'. "
+                        "Run simready-job or provide scene_graph metadata.",
+                        prop, obj_id_or_type,
+                    )
+                return _table[_key_lower]
+            return default
 
         frames: List[Dict[str, Any]] = []
         _server_ee_frame_count = 0  # Track how many frames used server EE pose
@@ -5199,6 +5427,7 @@ class GenieSimLocalFramework:
         _camera_frame_count = 0  # Track how many frames had camera data
         _real_velocity_count = 0  # Track how many frames had real PhysX velocities
         _real_effort_count = 0  # Track how many frames had real PhysX joint efforts
+        _contact_force_cache: Dict[str, Dict] = {}  # cache Gemini contact force estimates
         self._prev_server_ee_pos = None  # Reset for each episode
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
@@ -5243,7 +5472,17 @@ class GenieSimLocalFramework:
             # Preserve original trajectory timestamp for debugging
             obs["_original_timestamp"] = waypoint["timestamp"]
 
-            # Inject synthetic scene_state when empty (mock/skip-server mode)
+            # Inject synthetic scene_state when empty (mock/skip-server mode).
+            # In production, empty scene_state is an error — real data is required.
+            if not obs.get("scene_state") and step_idx == 0:
+                _is_production = getattr(self.config, "environment", "") == "production"
+                if _is_production:
+                    logger.error(
+                        "EMPTY_SCENE_STATE in production for episode %s frame %d. "
+                        "Real scene object poses required. Check _scene_object_prims "
+                        "initialization and SimObjectService connectivity.",
+                        episode_id, step_idx,
+                    )
             if not obs.get("scene_state"):
                 scene_objects = task.get("objects") or task.get("scene_objects") or []
                 if isinstance(scene_objects, list) and scene_objects:
@@ -5253,15 +5492,15 @@ class GenieSimLocalFramework:
                             "object_type": (o.get("object_type") or o.get("type") or "unknown").lower(),
                             "pose": o.get("pose") or o.get("position") or {"x": 0, "y": 0, "z": 0},
                             "orientation": o.get("orientation", [1.0, 0.0, 0.0, 0.0]),
-                            "bbox": _OBJECT_BBOXES.get(
+                            "bbox": _get_obj_prop(
                                 (o.get("object_type") or o.get("type") or "").lower(),
-                                [0.10, 0.10, 0.10],
+                                "bbox", [0.10, 0.10, 0.10],
                             ),
-                            "mass_kg": _OBJECT_MASSES.get(
-                                (o.get("object_type") or o.get("type") or "").lower(), 0.3
+                            "mass_kg": _get_obj_prop(
+                                (o.get("object_type") or o.get("type") or "").lower(), "mass", 0.3
                             ),
-                            "category": _OBJECT_CATEGORIES.get(
-                                (o.get("object_type") or o.get("type") or "").lower(), "unknown"
+                            "category": _get_obj_prop(
+                                (o.get("object_type") or o.get("type") or "").lower(), "category", "unknown"
                             ),
                             "graspable": (o.get("object_type") or o.get("type") or "").lower() not in ("table", "surface", "shelf"),
                             "support_surface": "table",
@@ -5279,7 +5518,7 @@ class GenieSimLocalFramework:
                         _rc_cfg = task.get("robot_config") or {}
                         _base = _rc_cfg.get("base_position", [0.5, 0.0, 0.8])
                         _obj_type = _readable.lower()
-                        _half_h = _OBJECT_HEIGHTS.get(_obj_type, 0.10) / 2.0
+                        _half_h = _get_obj_prop(_obj_type, "height", 0.10) / 2.0
                         _obj_z = _DEFAULT_TABLE_HEIGHT + _half_h
                         _synth_objs.append({
                             "object_id": _target,
@@ -5289,9 +5528,9 @@ class GenieSimLocalFramework:
                                 "z": round(_obj_z, 4),
                             },
                             "orientation": [1.0, 0.0, 0.0, 0.0],  # identity quaternion [w,x,y,z]
-                            "bbox": _OBJECT_BBOXES.get(_obj_type, [0.10, 0.10, 0.10]),
-                            "mass_kg": _OBJECT_MASSES.get(_obj_type, 0.3),
-                            "category": _OBJECT_CATEGORIES.get(_obj_type, "unknown"),
+                            "bbox": _get_obj_prop(_obj_type, "bbox", [0.10, 0.10, 0.10]),
+                            "mass_kg": _get_obj_prop(_obj_type, "mass", 0.3),
+                            "category": _get_obj_prop(_obj_type, "category", "unknown"),
                             "graspable": _obj_type not in ("table", "surface", "shelf"),
                             "support_surface": "table",
                         })
@@ -5304,6 +5543,8 @@ class GenieSimLocalFramework:
                             "orientation": [1.0, 0.0, 0.0, 0.0],
                         })
                     if _synth_objs:
+                        for _so in _synth_objs:
+                            _so["provenance"] = "synthetic_fallback"
                         obs["scene_state"] = {"objects": _synth_objs}
 
             # Ensure camera_frames is always present (even if empty) so quality
@@ -5469,8 +5710,9 @@ class GenieSimLocalFramework:
             # --- Improvement A: Dynamic scene state + J: Grasp physics ---
             ee_pos_arr = np.array(frame_data["ee_pos"]) if frame_data.get("ee_pos") else None
 
-            # Initialize object poses on first frame
-            if step_idx == 0 and obs.get("scene_state"):
+            # Update object poses from real scene_state every frame (not just frame 0).
+            # On frame 0, also store initial poses for displacement calculation.
+            if obs.get("scene_state"):
                 for _obj in obs["scene_state"].get("objects", []):
                     _oid = _obj.get("object_id", "")
                     _p = _obj.get("pose", {})
@@ -5479,9 +5721,19 @@ class GenieSimLocalFramework:
                     elif "position" in _p:
                         _pos = np.array(_p["position"], dtype=float)
                     else:
-                        _pos = np.zeros(3)
+                        continue  # skip objects with no valid pose
+                    # Validate against kinematic tracking if available
+                    if _oid in _object_poses and step_idx > 0:
+                        _tracked = _object_poses[_oid]
+                        _div = float(np.linalg.norm(_pos - _tracked))
+                        if _div > 0.02:  # >2cm divergence
+                            logger.debug(
+                                "Object %s: real pose diverges from tracked by %.3fm at frame %d",
+                                _oid, _div, step_idx,
+                            )
                     _object_poses[_oid] = _pos.copy()
-                    _initial_object_poses[_oid] = _pos.copy()
+                    if step_idx == 0:
+                        _initial_object_poses[_oid] = _pos.copy()
 
             # Detect grasp: gripper closes near an object
             if (frame_data.get("gripper_command") == "closed"
@@ -5489,14 +5741,17 @@ class GenieSimLocalFramework:
                     and ee_pos_arr is not None):
                 for _oid, _opos in _object_poses.items():
                     _dist = float(np.linalg.norm(ee_pos_arr - _opos))
-                    if _dist < 0.15:
-                        # Check grasp feasibility (Improvement J)
-                        _obj_type = ""
-                        for _obj in obs.get("scene_state", {}).get("objects", []):
-                            if _obj.get("object_id") == _oid:
-                                _obj_type = (_obj.get("object_type") or "").lower()
-                                break
-                        _obj_width = _OBJECT_SIZES.get(_obj_type, 0.06)
+                    # Compute proximity threshold from real object bbox diagonal
+                    _obj_type = ""
+                    for _obj in obs.get("scene_state", {}).get("objects", []):
+                        if _obj.get("object_id") == _oid:
+                            _obj_type = (_obj.get("object_type") or "").lower()
+                            break
+                    _obj_bbox = _get_obj_prop(_obj_type, "bbox", [0.10, 0.10, 0.10])
+                    _bbox_diag = float(np.linalg.norm(_obj_bbox)) / 2.0 + 0.05  # half diagonal + 5cm reach
+                    _grasp_threshold = max(0.08, min(_bbox_diag, 0.25))  # clamp [8cm, 25cm]
+                    if _dist < _grasp_threshold:
+                        _obj_width = _get_obj_prop(_obj_type, "graspable_width", 0.06)
                         if _obj_width <= _GRIPPER_MAX_APERTURE:
                             _attached_object_id = _oid
                             _grasp_ee_offset = _opos - ee_pos_arr
@@ -5506,8 +5761,17 @@ class GenieSimLocalFramework:
                             frame_data["grasp_feasible"] = False
                         break
 
-            # Update attached object pose to follow EE
-            if _attached_object_id is not None and ee_pos_arr is not None:
+            # Update attached object pose: prefer real scene_state (already updated
+            # above), fall back to kinematic EE-offset tracking if no real pose.
+            _attached_has_real_pose = (
+                _attached_object_id is not None
+                and obs.get("scene_state")
+                and any(
+                    _obj.get("object_id") == _attached_object_id
+                    for _obj in obs["scene_state"].get("objects", [])
+                )
+            )
+            if _attached_object_id is not None and ee_pos_arr is not None and not _attached_has_real_pose:
                 _new_pos = ee_pos_arr + _grasp_ee_offset
                 _object_poses[_attached_object_id] = _new_pos.copy()
                 # Update scene_state in observation
@@ -5541,24 +5805,67 @@ class GenieSimLocalFramework:
                         "force_sufficient": _grip_force_real > 0.5,
                     }
                 else:
-                    # Fallback: heuristic grasp model
+                    # Fallback: try Gemini estimation, then heuristic
                     _obj_type = ""
                     for _obj in obs.get("scene_state", {}).get("objects", []):
                         if _obj.get("object_id") == _attached_object_id:
                             _obj_type = (_obj.get("object_type") or "").lower()
                             break
-                    _mass = _OBJECT_MASSES.get(_obj_type, 0.3)
+                    _mass = _get_obj_prop(_obj_type, "mass", 0.3)
                     _weight = _mass * 9.81
-                    _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
-                    frame_data["contact_forces"] = {
-                        "weight_force_N": round(_weight, 2),
-                        "grip_force_N": round(_grip_force, 2),
-                        "force_sufficient": _grip_force >= _weight,
-                        "grasped_object_id": _attached_object_id,
-                    }
+                    _openness_bucket = round(gripper_openness, 1)
+                    _cf_cache_key = f"{_obj_type}:{_openness_bucket}"
+                    _gemini_force = _contact_force_cache.get(_cf_cache_key)
 
-            # Add provenance to contact forces
-            if "contact_forces" in frame_data:
+                    _gemini_cf_client = getattr(self, "_gemini_client_for_props", None)
+                    if _gemini_force is None and _gemini_cf_client:
+                        try:
+                            _obj_width_cf = _get_obj_prop(_obj_type, "graspable_width", 0.06)
+                            _cf_prompt = (
+                                f"A Franka Panda parallel-jaw gripper (max aperture 80mm, max force 40N) "
+                                f"is at {_openness_bucket*100:.0f}% openness grasping a {_obj_type} "
+                                f"(mass={_mass:.2f}kg, width={_obj_width_cf:.3f}m). "
+                                f"Estimate the grip force in Newtons and whether the grasp is stable. "
+                                f'Respond with ONLY JSON: {{"grip_force_N": <float>, "stable": <bool>}}'
+                            )
+                            _cf_resp = _gemini_cf_client.generate(prompt=_cf_prompt, json_output=True)
+                            _cf_text = _cf_resp.text.strip()
+                            _cf_start = _cf_text.find("{")
+                            _cf_end = _cf_text.rfind("}") + 1
+                            if _cf_start >= 0 and _cf_end > _cf_start:
+                                import json as _json_mod
+                                _cf_data = _json_mod.loads(_cf_text[_cf_start:_cf_end])
+                                _gemini_force = {
+                                    "grip_force_N": round(float(_cf_data.get("grip_force_N", 0)), 2),
+                                    "stable": bool(_cf_data.get("stable", False)),
+                                }
+                                _contact_force_cache[_cf_cache_key] = _gemini_force
+                        except Exception as _cf_exc:
+                            logger.debug("Gemini contact force estimation failed: %s", _cf_exc)
+
+                    if _gemini_force is not None:
+                        frame_data["contact_forces"] = {
+                            "weight_force_N": round(_weight, 2),
+                            "grip_force_N": _gemini_force["grip_force_N"],
+                            "force_sufficient": _gemini_force["stable"],
+                            "grasped_object_id": _attached_object_id,
+                            "provenance": "gemini_estimated",
+                            "confidence": 0.6,
+                        }
+                    else:
+                        # Last-resort heuristic
+                        _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
+                        frame_data["contact_forces"] = {
+                            "weight_force_N": round(_weight, 2),
+                            "grip_force_N": round(_grip_force, 2),
+                            "force_sufficient": _grip_force >= _weight,
+                            "grasped_object_id": _attached_object_id,
+                            "provenance": "heuristic_grasp_model_v1",
+                            "confidence": 0.2,
+                        }
+
+            # Add provenance to contact forces (for PhysX real data path)
+            if "contact_forces" in frame_data and "provenance" not in frame_data["contact_forces"]:
                 _real_efforts = robot_state.get("joint_efforts", [])
                 _has_real = _real_efforts and any(abs(e) > 1e-6 for e in _real_efforts)
                 frame_data["contact_forces"]["provenance"] = "physx_joint_effort" if _has_real else "heuristic_grasp_model_v1"

@@ -1280,6 +1280,65 @@ class SceneGraphConverter:
         self.production_mode = resolve_production_mode()
         self._ensure_validation_availability()
         self.relation_inferencer = RelationInferencer(verbose=verbose)
+        self._llm_client = None  # lazy-init for Gemini dimension estimation
+        self._llm_init_attempted = False
+        self._dimension_cache: Dict[str, List[float]] = {}  # category -> [w, d, h]
+
+    def _get_llm_client(self):
+        """Lazy-init LLM client for Gemini dimension estimation."""
+        if self._llm_init_attempted:
+            return self._llm_client
+        self._llm_init_attempted = True
+        try:
+            from tools.llm_client.client import create_llm_client
+            self._llm_client = create_llm_client()
+            logger.info("[SCENE_GRAPH] LLM client initialized for dimension estimation")
+        except Exception as exc:
+            logger.warning(
+                "[SCENE_GRAPH] LLM client unavailable for dimension estimation: %s", exc
+            )
+        return self._llm_client
+
+    def _estimate_dimensions_gemini(
+        self, category: str, semantic: str
+    ) -> Optional[List[float]]:
+        """Estimate object dimensions [w, d, h] in meters via Gemini."""
+        if category in self._dimension_cache:
+            return self._dimension_cache[category]
+        client = self._get_llm_client()
+        if client is None:
+            return None
+        prompt = (
+            f"Estimate the typical real-world dimensions in meters for: {semantic}.\n"
+            f"Category: {category}.\n"
+            f"Respond with ONLY a JSON object: "
+            f'{{"width": <float>, "depth": <float>, "height": <float>}}\n'
+            f"Use meters. Be accurate to real-world objects."
+        )
+        try:
+            response = client.generate(prompt=prompt, json_output=True)
+            text = response.text.strip()
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start >= 0 and end > start:
+                data = json.loads(text[start:end])
+                dims = [
+                    max(float(data.get("width", 0.1)), 0.01),
+                    max(float(data.get("depth", 0.1)), 0.01),
+                    max(float(data.get("height", 0.1)), 0.01),
+                ]
+                self._dimension_cache[category] = dims
+                logger.info(
+                    "[SCENE_GRAPH] Gemini estimated dimensions for %s: %s",
+                    category, dims,
+                )
+                return dims
+        except Exception as exc:
+            logger.warning(
+                "[SCENE_GRAPH] Gemini dimension estimation failed for %s: %s",
+                category, exc,
+            )
+        return None
 
     def _ensure_validation_availability(self) -> None:
         if HAVE_VALIDATION_TOOLS:
@@ -1503,6 +1562,24 @@ class SceneGraphConverter:
             else:
                 size = [0.1, 0.1, 0.1]
 
+            # Track dimension provenance
+            _dim_source = obj.get("dimensions_source", "")
+
+            # If size is still the default placeholder, try Gemini estimation
+            _is_placeholder = all(abs(s - 0.1) < 1e-4 for s in size)
+            if _is_placeholder and not _dim_source:
+                gemini_dims = self._estimate_dimensions_gemini(category, semantic)
+                if gemini_dims is not None:
+                    size = gemini_dims
+                    _dim_source = "gemini_estimated"
+                else:
+                    _dim_source = "default_placeholder"
+                    logger.warning(
+                        "[SCENE_GRAPH] Object %s using placeholder dimensions [0.1, 0.1, 0.1]; "
+                        "run simready-job or provide dimensions_est in scene_manifest.",
+                        obj_id,
+                    )
+
             # Extract pose
             transform = obj.get("transform", {})
             position = transform.get("position", {})
@@ -1580,6 +1657,7 @@ class SceneGraphConverter:
                 "containment": obj.get("containment", obj.get("physics", {}).get("containment", [])),
                 "contained_in": obj.get("contained_in"),
                 "contains": obj.get("contains"),
+                "dimensions_source": _dim_source or obj.get("dimensions_source", ""),
             }
 
             asset_id = _namespaced_asset_id(scene_id, obj_id)
