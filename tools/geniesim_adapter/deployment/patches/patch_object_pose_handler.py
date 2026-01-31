@@ -99,17 +99,25 @@ def patch_file():
     #   prim_path = data.get("prim_path", ...)
     #   prim = stage.GetPrimAtPath(prim_path)
     # and add self._bp_resolve_prim_path() call after prim_path assignment.
+    # Match standalone prim_path assignments (not keyword args ending with comma)
     prim_path_pattern = re.compile(
-        r"((\s+)(prim_path|object_prim_path|_prim_path)\s*=\s*.*(?:prim_path|Prim_path|object_id).*\n)",
+        r"((\s+)(prim_path|object_prim_path|_prim_path)\s*=\s*(?:.*(?:prim_path|Prim_path|object_id).*))\n",
         re.MULTILINE,
     )
-    match = prim_path_pattern.search(patched)
+    # Filter out matches that are keyword arguments (line ends with comma)
+    all_matches = list(prim_path_pattern.finditer(patched))
+    match = None
+    for m in all_matches:
+        line_content = m.group(1).rstrip()
+        if not line_content.endswith(","):
+            match = m
+            break
     if match:
         indent = match.group(2)
         var_name = match.group(3)
         original_line = match.group(1)
-        resolution_line = f"{indent}{var_name} = self._bp_resolve_prim_path({var_name})  # {PATCH_MARKER}\n"
-        patched = patched.replace(original_line, original_line + resolution_line, 1)
+        resolution_line = f"\n{indent}{var_name} = self._bp_resolve_prim_path({var_name})  # {PATCH_MARKER}"
+        patched = patched[:match.end(1)] + resolution_line + patched[match.end(1):]
         print(f"[PATCH] Injected prim path resolution after {var_name} assignment")
     else:
         print("[PATCH] WARNING: Could not find prim_path assignment in get_object_pose handler")

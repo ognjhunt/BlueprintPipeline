@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""
+Patch the Genie Sim server's command_controller.py to handle unknown cameras
+in handle_get_observation.
+
+The server crashes with KeyError when a camera prim path (e.g.
+'/Franka/panda_hand/hand_camera') is not in self.cameras dict (populated
+only from the G1 robot config at init time).
+
+This patch wraps self.cameras[camera] lookups with .get() and a default
+resolution, so unknown cameras don't crash the server.
+
+Usage (inside Docker build or at runtime):
+    python3 /tmp/patches/patch_observation_cameras.py
+
+The script is idempotent — re-running it on an already-patched file is a no-op.
+"""
+import os
+import sys
+
+GENIESIM_ROOT = os.environ.get("GENIESIM_ROOT", "/opt/geniesim")
+COMMAND_CONTROLLER = os.path.join(
+    GENIESIM_ROOT,
+    "source", "data_collection", "server", "command_controller.py",
+)
+
+PATCH_MARKER = "BlueprintPipeline observation_cameras patch"
+
+
+def patch_file():
+    if not os.path.isfile(COMMAND_CONTROLLER):
+        print(f"[PATCH] command_controller.py not found at {COMMAND_CONTROLLER}")
+        print("[PATCH] Skipping observation_cameras patch (server source not available)")
+        sys.exit(0)
+
+    with open(COMMAND_CONTROLLER, "r") as f:
+        content = f.read()
+
+    if PATCH_MARKER in content:
+        print("[PATCH] observation_cameras already patched — skipping")
+        sys.exit(0)
+
+    changes = 0
+
+    # Pattern 1: self.cameras[camera][0] and self.cameras[camera][1]
+    # Replace with .get() that returns a default [1280, 720]
+    old1 = "self.cameras[camera][0]"
+    new1 = "self.cameras.get(camera, [1280, 720])[0]"
+    if old1 in content:
+        content = content.replace(old1, new1)
+        changes += 1
+        print("[PATCH] Fixed self.cameras[camera][0] -> .get() with default")
+
+    old2 = "self.cameras[camera][1]"
+    new2 = "self.cameras.get(camera, [1280, 720])[1]"
+    if old2 in content:
+        content = content.replace(old2, new2)
+        changes += 1
+        print("[PATCH] Fixed self.cameras[camera][1] -> .get() with default")
+
+    # Pattern 2: bare self.cameras[camera] used as a whole value
+    # (only replace remaining instances not already caught above)
+    # We also want to register unknown cameras when first seen.
+    # Inject a camera auto-registration block at the start of handle_get_observation.
+    obs_method = "def handle_get_observation(self"
+    if obs_method in content:
+        idx = content.find(obs_method)
+        # Find the end of the def line (the colon + newline)
+        colon_idx = content.find(":", idx + len(obs_method))
+        newline_idx = content.find("\n", colon_idx)
+        # Detect body indentation
+        rest = content[newline_idx + 1:]
+        body_indent = "        "
+        for line in rest.split("\n"):
+            stripped = line.lstrip()
+            if stripped and not stripped.startswith("#") and not stripped.startswith('"""') and not stripped.startswith("'''"):
+                body_indent = line[:len(line) - len(stripped)]
+                break
+
+        registration_block = (
+            f"\n{body_indent}# {PATCH_MARKER} — auto-register unknown cameras\n"
+            f"{body_indent}if hasattr(self, 'camera_prim_list') and hasattr(self, 'cameras'):\n"
+            f"{body_indent}    import os as _obs_os\n"
+            f"{body_indent}    _default_res = _obs_os.environ.get('CAMERA_RESOLUTION', '1280x720')\n"
+            f"{body_indent}    try:\n"
+            f"{body_indent}        _dw, _dh = (int(x) for x in _default_res.split('x'))\n"
+            f"{body_indent}    except (ValueError, TypeError):\n"
+            f"{body_indent}        _dw, _dh = 1280, 720\n"
+            f"{body_indent}    for _cam in (self.camera_prim_list or []):\n"
+            f"{body_indent}        if _cam not in self.cameras:\n"
+            f"{body_indent}            self.cameras[_cam] = [_dw, _dh]\n"
+            f'{body_indent}            print(f"[PATCH] Auto-registered camera {{_cam}} with resolution {{_dw}}x{{_dh}}")\n'
+        )
+
+        # Insert after the docstring if present, or right after def line
+        # Find position after def line
+        insert_pos = newline_idx + 1
+        # Skip docstring if present
+        check = content[insert_pos:].lstrip()
+        if check.startswith('"""') or check.startswith("'''"):
+            quote = check[:3]
+            # Find closing triple-quote
+            doc_start = content.find(quote, insert_pos)
+            doc_end = content.find(quote, doc_start + 3)
+            if doc_end != -1:
+                insert_pos = content.find("\n", doc_end) + 1
+
+        content = content[:insert_pos] + registration_block + content[insert_pos:]
+        changes += 1
+        print("[PATCH] Injected camera auto-registration in handle_get_observation")
+
+    # Pattern 4: publish_ros ValueError crash
+    # handle_get_observation raises ValueError("publish ros is not enabled")
+    # when startRecording is requested but --publish_ros was not passed.
+    # Replace with a warning so the server doesn't crash.
+    old_raise = 'raise ValueError("publish ros is not enabled")'
+    new_raise = 'print("[PATCH] publish_ros not enabled — skipping ROS recording"); self.data_to_send = "Start"'
+    if old_raise in content:
+        content = content.replace(old_raise, new_raise)
+        changes += 1
+        print("[PATCH] Replaced publish_ros ValueError with warning")
+
+    if changes == 0:
+        print("[PATCH] No matching patterns found — file may already be fixed")
+        sys.exit(0)
+
+    with open(COMMAND_CONTROLLER, "w") as f:
+        f.write(content)
+
+    print(f"[PATCH] Successfully patched {COMMAND_CONTROLLER} ({changes} fixes)")
+
+
+if __name__ == "__main__":
+    patch_file()

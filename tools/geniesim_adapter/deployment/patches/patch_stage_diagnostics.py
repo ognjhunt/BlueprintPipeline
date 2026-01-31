@@ -59,14 +59,14 @@ DIAGNOSTICS_CODE = textwrap.dedent("""\
     # --- END BlueprintPipeline stage diagnostics patch ---
 """)
 
-# Call the diagnostics after init_robot completes
-INIT_HOOK = textwrap.dedent("""\
-        # BlueprintPipeline stage diagnostics hook
-        try:
-            self._bp_log_stage_contents()
-        except Exception as _diag_e:
-            print(f"[DIAG] Stage diagnostics hook failed: {_diag_e}")
-""")
+# Call the diagnostics after init_robot completes (template — indented at runtime)
+INIT_HOOK_LINES = [
+    "# BlueprintPipeline stage diagnostics hook",
+    "try:",
+    "    self._bp_log_stage_contents()",
+    "except Exception as _diag_e:",
+    '    print(f"[DIAG] Stage diagnostics hook failed: {_diag_e}")',
+]
 
 PATCH_MARKER = "BlueprintPipeline stage diagnostics patch"
 
@@ -107,7 +107,13 @@ def patch_file():
     match = init_robot_pattern.search(patched)
     if match:
         insert_pos = match.start(2)
-        patched = patched[:insert_pos] + INIT_HOOK + patched[insert_pos:]
+        # Detect indentation of the notify_all() line we're inserting before
+        line_start = patched.rfind("\n", 0, insert_pos) + 1
+        existing_indent = patched[line_start:insert_pos]
+        # Build hook with matching indentation, preserving indent for notify_all
+        hook_text = "\n".join(existing_indent + line for line in INIT_HOOK_LINES) + "\n" + existing_indent
+        # Replace from start of the notify_all line (including its indent)
+        patched = patched[:line_start] + hook_text + patched[insert_pos:]
         print("[PATCH] Injected stage diagnostics hook after INIT_ROBOT")
     else:
         print("[PATCH] WARNING: Could not find INIT_ROBOT handler — diagnostics method added but not auto-called")

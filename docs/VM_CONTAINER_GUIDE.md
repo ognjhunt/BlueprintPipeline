@@ -8,7 +8,7 @@ Quick reference for getting the BlueprintPipeline running on the GCP VM with Gen
 |-------|-------|
 | Instance | `isaac-sim-ubuntu` |
 | Zone | `us-east1-b` |
-| Machine | `g2-standard-16` (NVIDIA L4, 24GB VRAM) |
+| Machine | `g2-standard-32` (32 vCPUs, 128 GB RAM, NVIDIA L4 24GB VRAM) |
 | Docker | Requires `sudo` |
 | User home | `/home/nijelhunt1` |
 | Repo path | `~/BlueprintPipeline` |
@@ -33,6 +33,7 @@ for f in \
   tools/geniesim_adapter/deployment/patches/patch_omnigraph_dedup.py \
   tools/geniesim_adapter/deployment/patches/patch_grpc_server.py \
   tools/geniesim_adapter/deployment/patches/patch_stage_diagnostics.py \
+  tools/geniesim_adapter/deployment/patches/patch_observation_cameras.py \
   tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh \
   tools/geniesim_adapter/deployment/start_geniesim_server.sh \
   tools/geniesim_adapter/robot_configs/franka_panda.json \
@@ -95,7 +96,8 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="sudo docker log
 ```bash
 gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
   for p in patch_omnigraph_dedup patch_camera_handler patch_object_pose_handler \
-           patch_ee_pose_handler patch_stage_diagnostics patch_grpc_server; do
+           patch_ee_pose_handler patch_stage_diagnostics patch_observation_cameras \
+           patch_grpc_server; do
     sudo docker cp ~/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/\${p}.py geniesim-server:/tmp/
     sudo docker exec geniesim-server /isaac-sim/python.sh /tmp/\${p}.py
   done
@@ -225,6 +227,9 @@ python3 tools/run_local_pipeline.py \
 | `docker restart` loses runtime patches? | No — `restart` preserves filesystem. Only `rm + create` loses changes | Use `docker restart`, not `docker rm` + new container |
 | Container gRPC not listening | Server still initializing (~45s) | Check `/proc/net/tcp6` for port `C383` |
 | `ss` command not found in container | Minimal container image | Use `cat /proc/net/tcp6 | grep C383` instead |
+| VM SSH hangs/unresponsive | OOM — server + pipeline consume >64GB RAM | Use g2-standard-32 (128GB); or run pipeline client outside container |
+| `DEADLINE_EXCEEDED` during trajectory | Trajectory execution takes time in simulation | Normal; retry logic handles it. Extend timeout via `GENIESIM_FIRST_CALL_TIMEOUT_S` |
+| cuRobo `'TensorDeviceType' has no attribute 'mesh'` | cuRobo API version mismatch with Isaac Sim 4.5 | Non-fatal — IK fallback trajectory works. Needs cuRobo version pin investigation |
 
 ## Known Server-Side Bugs (Pre-Existing in Genie Sim)
 
@@ -261,7 +266,8 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 | `patch_object_pose_handler.py` | Fuzzy prim path matching for object pose queries |
 | `patch_ee_pose_handler.py` | Safe unpacking for `get_ee_pose` multi-value returns |
 | `patch_stage_diagnostics.py` | Logs USD stage contents (prims, cameras, meshes) after `init_robot` |
-| `patch_grpc_server.py` | 26 fixes: string conversions, safe unpacking, set literal bugs, numpy scalar conversion |
+| `patch_observation_cameras.py` | Auto-registers unknown cameras in `self.cameras` dict; fixes `publish_ros` ValueError crash |
+| `patch_grpc_server.py` | Fixes: string conversions, safe unpacking, set literal bugs, numpy scalar conversion, position/rotation tuple unpacking |
 
 ## Recent Fixes (2026-01-31)
 
@@ -274,6 +280,54 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 7. **Stage diagnostics patch**: New `patch_stage_diagnostics.py` logs all USD stage prims (cameras, meshes, xforms) after `init_robot` to debug object pose zeros.
 8. **Conditional `--publish_ros`**: Server start scripts no longer pass `--publish_ros` when `GENIESIM_SKIP_ROS_RECORDING=1`, eliminating ROS2 error noise.
 9. **UR10 robot config**: Added `robot_configs/ur10.json` for testing with Universal Robots UR10.
+10. **Camera auto-registration** (`patch_observation_cameras.py`): Server crashes with `KeyError` on Franka camera prims because `self.cameras` dict only contains G1 cameras. Patch auto-registers unknown cameras with default resolution at start of `handle_get_observation`. Also replaces `self.cameras[camera][0]` with `.get()` fallback.
+11. **`publish_ros` ValueError**: Server raises `ValueError("publish ros is not enabled")` during `startRecording` when `--publish_ros` flag not passed. Patched to log warning and continue.
+12. **Position/rotation tuple unpacking**: `grpc_server.py` does `(x, y, z) = position` but position can be numpy arrays with >3 elements. Fixed with safe element-by-element assignment via `float(_pos[i])`.
+13. **`GetJointRsp` has no "errmsg" field**: Previous joint position guard tried to set `rsp.errmsg` which doesn't exist in the protobuf schema. Replaced with `print()` warning.
+14. **VM upgraded to g2-standard-32**: Running both Isaac Sim server + pipeline client in the same container OOM'd at 43/64GB RAM during trajectory execution. Upgraded to 128GB RAM.
+15. **Pipeline achieved `task_success=True`**: End-to-end flow works — IK fallback trajectory (17 waypoints), composed observations with joints, objects(6), cameras(1). cuRobo planner fails with `'TensorDeviceType' object has no attribute 'mesh'` (API version mismatch) but IK fallback works.
+16. **`could not convert string to float: 'm'`**: Some objects (CoffeeMachine006, variation_pot) return unusual prim data that fails `float()` conversion. Non-fatal — client handles gracefully.
+
+## Running Pipeline Client Inside Container
+
+For testing, you can run the pipeline client directly inside the container (requires g2-standard-32 for memory):
+
+```bash
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+  sudo docker exec -d geniesim-server bash -c '
+    export GENIESIM_ROOT=/opt/geniesim
+    export ISAAC_SIM_PATH=/isaac-sim
+    export OMNI_KIT_ALLOW_ROOT=1
+    export PYTHONUNBUFFERED=1
+    export PYTHONPATH=/workspace/BlueprintPipeline/tools/geniesim_adapter:/workspace/BlueprintPipeline:\${PYTHONPATH:-}
+    export GENIESIM_SKIP_ROS_RECORDING=1
+    export ROBOT_TYPES=franka
+    /isaac-sim/python.sh -m tools.geniesim_adapter.local_framework run \
+      --scene /workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/merged_scene_manifest.json \
+      --task-config /workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/task_config.json \
+      --robot franka \
+      --episodes 1 \
+      > /tmp/pipeline_test.log 2>&1
+  '
+"
+# Monitor: gcloud compute ssh ... --command="sudo docker exec geniesim-server tail -f /tmp/pipeline_test.log"
+```
+
+**Important**: Filter log noise with `grep -v "CUROBO_TORCH_COMPILE\|simulation paused"` — cuRobo emits hundreds of env var warnings.
+
+### What to expect from a successful run
+1. cuRobo init logs (many `CUROBO_TORCH_COMPILE` warnings — harmless)
+2. `[GENIESIM-LOCAL]   IK fallback trajectory: 17 waypoints` — trajectory planned
+3. `First trajectory set_joint_position — using extended timeout 300.0s` — execution started
+4. `[OBS] Composed real observation from: joints, objects(N), cameras(N)` — data collected
+5. `task_success=True, near_trajectory_end=True` — episode complete
+
+### Current data quality (as of 2026-01-31)
+- **Joint positions**: Working (real data from server)
+- **Camera images**: 1 camera working (wrist), returns frames via GET_CAMERA_DATA patch
+- **Object poses**: All return identity (0,0,0) — scene objects not loaded in simulation stage
+- **EE pose**: Server-side unpacking error (non-fatal, client uses fallback)
+- **Trajectory**: IK fallback works; cuRobo planner has API version mismatch
 
 ## Pipeline Step Names
 

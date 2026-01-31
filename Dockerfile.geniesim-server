@@ -86,6 +86,7 @@ RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_object_pose_handler.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_ee_pose_handler.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_stage_diagnostics.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_observation_cameras.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_grpc_server.py \
     && rm -rf /tmp/patches
 

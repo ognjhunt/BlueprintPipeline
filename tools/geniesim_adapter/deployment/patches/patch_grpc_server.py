@@ -72,6 +72,48 @@ def patch_file():
         changes += 1
         print("[PATCH] Fixed object_pose unpacking in get_object_pose")
 
+    # Fix 1b: position/rotation tuple unpacking in rsp assignment
+    # position might be a numpy array or list with >3 elements
+    old_pos = (
+        "(\n"
+        "            rsp.object_pose.position.x,\n"
+        "            rsp.object_pose.position.y,\n"
+        "            rsp.object_pose.position.z,\n"
+        "        ) = position"
+    )
+    new_pos = (
+        "# " + PATCH_MARKER + " — safe position assignment\n"
+        "        _pos = list(position) if hasattr(position, '__iter__') else [0, 0, 0]\n"
+        "        rsp.object_pose.position.x = float(_pos[0]) if len(_pos) > 0 else 0.0\n"
+        "        rsp.object_pose.position.y = float(_pos[1]) if len(_pos) > 1 else 0.0\n"
+        "        rsp.object_pose.position.z = float(_pos[2]) if len(_pos) > 2 else 0.0"
+    )
+    if old_pos in content:
+        content = content.replace(old_pos, new_pos, 1)
+        changes += 1
+        print("[PATCH] Fixed position tuple unpacking in get_object_pose")
+
+    old_rot = (
+        "(\n"
+        "            rsp.object_pose.rpy.rw,\n"
+        "            rsp.object_pose.rpy.rx,\n"
+        "            rsp.object_pose.rpy.ry,\n"
+        "            rsp.object_pose.rpy.rz,\n"
+        "        ) = rotation"
+    )
+    new_rot = (
+        "# " + PATCH_MARKER + " — safe rotation assignment\n"
+        "        _rot = list(rotation) if hasattr(rotation, '__iter__') and rotation is not None else [1, 0, 0, 0]\n"
+        "        rsp.object_pose.rpy.rw = float(_rot[0]) if len(_rot) > 0 else 1.0\n"
+        "        rsp.object_pose.rpy.rx = float(_rot[1]) if len(_rot) > 1 else 0.0\n"
+        "        rsp.object_pose.rpy.ry = float(_rot[2]) if len(_rot) > 2 else 0.0\n"
+        "        rsp.object_pose.rpy.rz = float(_rot[3]) if len(_rot) > 3 else 0.0"
+    )
+    if old_rot in content:
+        content = content.replace(old_rot, new_rot, 1)
+        changes += 1
+        print("[PATCH] Fixed rotation tuple unpacking in get_object_pose")
+
     # Fix 2: recordingState assignment
     old = "rsp.recordingState = result"
     new = 'rsp.recordingState = str(result) if result is not None else ""'
@@ -145,7 +187,7 @@ def patch_file():
     old_get_jp = "        for joint_name in joint_positions:"
     new_get_jp = (
         "        if not isinstance(joint_positions, dict):\n"
-        "            rsp.errmsg = str(joint_positions) if joint_positions else 'no joint data'\n"
+        "            print(f'[PATCH] get_joint_position got non-dict: {type(joint_positions)}')\n"
         "            return rsp\n"
         "        for joint_name in joint_positions:"
     )

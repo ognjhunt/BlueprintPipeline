@@ -1368,9 +1368,19 @@ class GenieSimGRPCClient:
         payload = data or {}
         camera_ids = payload.get("camera_ids") or payload.get("camera_prim_list") or self._default_camera_ids
         camera_ids = [str(camera_id) for camera_id in camera_ids]
-        # Resolve logical names (e.g. "wrist") to USD prim paths via map
+        # Resolve logical names (e.g. "wrist") to USD prim paths via map.
+        # Only include cameras that have a valid prim path (starts with "/").
         if self._camera_prim_map:
-            camera_ids = [self._camera_prim_map.get(cid, cid) for cid in camera_ids]
+            resolved = []
+            for cid in camera_ids:
+                prim = self._camera_prim_map.get(cid, cid)
+                if prim.startswith("/"):
+                    resolved.append(prim)
+                else:
+                    if cid not in self._camera_missing_logged:
+                        self._camera_missing_logged.add(cid)
+                        logger.debug("Skipping camera '%s' — no USD prim path mapped", cid)
+            camera_ids = resolved
         include_images = bool(payload.get("include_images", True))
         include_depth = bool(payload.get("include_depth", True))
         include_semantic = bool(payload.get("include_semantic", False))
