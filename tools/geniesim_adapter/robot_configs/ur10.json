@@ -1,0 +1,39 @@
+{
+    "robot": {
+        "robot_name": "ur10",
+        "base_prim_path": "/UR10",
+        "arm": "right",
+        "urdf_name": null,
+        "robot_description": null,
+        "robot_usd": "robot/ur10/ur10.usd",
+        "initial_position": [],
+        "dof_nums": 6,
+        "joint_delta_time": 0.01,
+        "lock_joints": [],
+        "init_joint_position": [
+            0.0, -1.571, 1.571, -1.571, -1.571, 0.0
+        ]
+    },
+    "camera": {},
+    "gripper": {
+        "gripper_type": "none",
+        "gripper_name": {},
+        "max_force": 0,
+        "finger_names": {},
+        "end_effector_name": {
+            "right": "tool0"
+        },
+        "end_effector_prim_path": {
+            "right": "/UR10/tool0"
+        },
+        "gripper_controll_joint": {},
+        "opened_positions": {},
+        "closed_velocities": {}
+    },
+    "closed_positions": {},
+    "curobo": {
+        "curobo_config_file": "ur10.yml",
+        "curobo_urdf_path": "ur10",
+        "curobo_urdf_name": "ur10/ur10.urdf"
+    }
+}

@@ -3896,19 +3896,44 @@ class GenieSimLocalFramework:
                     "WARNING",
                 )
 
-            # Map logical camera names to the G1 robot's USD prim paths.
-            _G1_CAMERA_MAP = {
-                "wrist": "/G1/gripper_r_base_link/Right_Camera",
-                "overhead": "/G1/head_link2/Head_Camera",
-                "side": "/G1/gripper_l_base_link/Left_Camera",
-            }
+            # Map logical camera names to USD prim paths.
+            # Priority: env var > robot config JSON > G1 defaults (legacy).
             camera_map_env = os.environ.get("GENIESIM_CAMERA_PRIM_MAP", "")
             if camera_map_env:
                 import json as _json
                 self._client._camera_prim_map = _json.loads(camera_map_env)
+                self.log(f"Camera prim map (from env): {self._client._camera_prim_map}")
             else:
-                self._client._camera_prim_map = _G1_CAMERA_MAP
-            self.log(f"Camera prim map: {self._client._camera_prim_map}")
+                _cam_map: Dict[str, str] = {}
+                _robot_cfg_dir = Path(__file__).resolve().parent / "robot_configs"
+                _robot_cfg_names = [
+                    robot_type,
+                    robot_type.replace("-", "_"),
+                    f"{robot_type}_panda" if robot_type == "franka" else robot_type,
+                ]
+                _loaded_robot_cfg = None
+                for _cfg_name in _robot_cfg_names:
+                    _cfg_path = _robot_cfg_dir / f"{_cfg_name}.json"
+                    if _cfg_path.is_file():
+                        import json as _json
+                        with open(_cfg_path) as _f:
+                            _loaded_robot_cfg = _json.load(_f)
+                        break
+                if _loaded_robot_cfg and _loaded_robot_cfg.get("camera"):
+                    _cam_prims = list(_loaded_robot_cfg["camera"].keys())
+                    _logical_names = ["wrist", "overhead", "side"]
+                    for _i, _prim in enumerate(_cam_prims):
+                        if _i < len(_logical_names):
+                            _cam_map[_logical_names[_i]] = _prim
+                    self.log(f"Camera prim map (from robot config): {_cam_map}")
+                if not _cam_map:
+                    _cam_map = {
+                        "wrist": "/G1/gripper_r_base_link/Right_Camera",
+                        "overhead": "/G1/head_link2/Head_Camera",
+                        "side": "/G1/gripper_l_base_link/Left_Camera",
+                    }
+                    self.log(f"Camera prim map (G1 defaults — no robot config found): {_cam_map}")
+                self._client._camera_prim_map = _cam_map
 
             # Populate scene object prim paths for real object pose queries.
             # Derive USD prim paths from scene_graph nodes or task_config objects.

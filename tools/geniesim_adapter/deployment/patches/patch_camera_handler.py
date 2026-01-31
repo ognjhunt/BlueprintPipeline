@@ -33,6 +33,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
     _bp_rgb_annotators = {}
     _bp_depth_annotators = {}
     _bp_warmup_done = set()
+    _bp_cameras_logged = False
 
     def handle_get_camera_data(self):
         \"\"\"Handle GET_CAMERA_DATA (Command=1) — render current frame.
@@ -77,10 +78,18 @@ CAMERA_HANDLER = textwrap.dedent("""\
         try:
             import omni.replicator.core as rep
 
+            from pxr import UsdGeom
+            import omni.usd
+            stage = omni.usd.get_context().get_stage()
+
+            # Log all available cameras on first call
+            cls = type(self)
+            if not cls._bp_cameras_logged and stage:
+                _all_cams = [str(p.GetPath()) for p in stage.Traverse() if p.IsA(UsdGeom.Camera)]
+                print(f"[PATCH] Available cameras in stage: {_all_cams}")
+                cls._bp_cameras_logged = True
+
             if not camera_prim_path:
-                from pxr import UsdGeom
-                import omni.usd
-                stage = omni.usd.get_context().get_stage()
                 for prim in stage.Traverse():
                     if prim.IsA(UsdGeom.Camera):
                         camera_prim_path = str(prim.GetPath())
