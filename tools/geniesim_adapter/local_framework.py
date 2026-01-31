@@ -1894,23 +1894,48 @@ class GenieSimGRPCClient:
         object_prims = getattr(self, "_scene_object_prims", [])
         if object_prims and self._channel is not None:
             for prim_path in object_prims:
-                try:
-                    obj_pose = self._get_object_pose_raw(prim_path)
-                    if obj_pose is not None:
-                        scene_objects.append({
-                            "object_id": prim_path,
-                            "pose": obj_pose,
-                        })
-                except Exception as exc:
-                    logger.debug(f"[OBS] get_object_pose({prim_path}) failed: {exc}")
+                # Try the prim path as-is and with common prefixes
+                _candidates = [prim_path]
+                if not prim_path.startswith("/World/"):
+                    _candidates.append(f"/World/{prim_path}")
+                if not prim_path.startswith("/"):
+                    _candidates.append(f"/{prim_path}")
+                _found = False
+                for _candidate in _candidates:
+                    try:
+                        obj_pose = self._get_object_pose_raw(_candidate)
+                        if obj_pose is not None:
+                            scene_objects.append({
+                                "object_id": prim_path,
+                                "pose": obj_pose,
+                            })
+                            _found = True
+                            logger.info(f"[OBS] Got real object pose for {_candidate}: {obj_pose}")
+                            break
+                    except Exception as exc:
+                        logger.debug(f"[OBS] get_object_pose({_candidate}) failed: {exc}")
+                if not _found:
+                    logger.warning(f"[OBS] No object pose for any variant of {prim_path} (tried: {_candidates})")
 
         # --- 4. Camera images ---
-        # NOTE: The server's CameraService.get_camera_data dispatches to
+        # The server's CameraService.get_camera_data dispatches to
         # Command.GET_CAMERA_DATA (=1) which is NOT handled in on_command_step,
         # causing a ValueError that kills the gRPC thread and the entire server.
-        # Camera capture only works internally via _capture_camera() during
-        # startRecording/reset. Skip camera capture until server is patched.
+        # Camera capture requires either:
+        #   (a) Patching the Docker container's command_controller.py to handle
+        #       GET_CAMERA_DATA, or
+        #   (b) Starting the server with --publish_ros and subscribing to ROS
+        #       camera topics (requires ROS infrastructure on client).
+        # For now, camera_frames will be an empty dict; all frames get the key
+        # so quality checks don't fail on missing required observation fields.
         camera_images = []
+        if not hasattr(self, "_camera_warning_logged"):
+            logger.warning(
+                "[OBS] Camera capture is DISABLED. To enable: "
+                "(1) patch Docker server to handle GET_CAMERA_DATA, or "
+                "(2) start server with --publish_ros and configure ROS subscriber."
+            )
+            self._camera_warning_logged = True
 
         # --- Timestamp ---
         mono_ns = _time.monotonic_ns()
@@ -4747,15 +4772,18 @@ class GenieSimLocalFramework:
                            else " but no subsequent release detected.")
                     )
 
-            # Determine data mode
-            _skip_recording = os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", "")
+            # Determine data mode based on what channels actually have real data
+            _has_camera = _camera_frame_count > 0
+            _has_real_scene = _real_scene_state_count > 0
             _has_privileged = any(
                 f.get("observation", {}).get("privileged") for f in frames
             ) if frames else False
-            if _skip_recording:
-                data_mode = "proprioception_with_privileged_state" if _has_privileged else "proprioception_only"
-            else:
+            if _has_camera and _has_real_scene:
                 data_mode = "full"
+            elif _has_real_scene or _has_privileged:
+                data_mode = "proprioception_with_privileged_state"
+            else:
+                data_mode = "proprioception_only"
 
             # Save episode
             episode_path = output_dir / f"{episode_id}.json"
@@ -4843,27 +4871,33 @@ class GenieSimLocalFramework:
                     "robot_metadata": robot_metadata,
                     "episode_seed": episode_seed,
                     "provenance": {
-                        "ee_pos": "analytic_fk",
-                        "ee_quat": "analytic_fk",
+                        "joint_positions": "physx_server",
+                        "ee_pos": "isaac_sim_fk" if _server_ee_frame_count > 0 else "analytic_fk",
+                        "ee_quat": "isaac_sim_fk" if _server_ee_frame_count > 0 else "analytic_fk",
                         "ee_rot6d": "derived_from_ee_quat",
                         "joint_velocities": "finite_difference",
                         "joint_accelerations": "finite_difference_smoothed",
                         "ee_vel": "finite_difference",
                         "ee_acc": "finite_difference",
                         "contact_forces": "heuristic_grasp_model_v1",
+                        "camera_frames": "isaac_sim_camera" if _camera_frame_count > 0 else "unavailable",
                         "task_description": "task_config_hint",
-                        "scene_state": "synthetic_from_task_config",
+                        "scene_state": "physx_server" if _real_scene_state_count > 0 else "synthetic_from_task_config",
                         "task_success": "geometric_goal_region_v2",
                         "quality_score": "weighted_composite_v2",
+                        "server_ee_frames": f"{_server_ee_frame_count}/{len(frames)}",
+                        "real_scene_state_frames": f"{_real_scene_state_count}/{len(frames)}",
+                        "camera_capture_frames": f"{_camera_frame_count}/{len(frames)}",
                     },
                     "channel_confidence": {
                         "joint_positions": 1.0,
-                        "ee_pos": 0.95,
-                        "ee_quat": 0.95,
+                        "ee_pos": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.7,
+                        "ee_quat": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.7,
                         "joint_velocities": 0.8,
                         "joint_accelerations": 0.6,
                         "contact_forces": 0.2,
-                        "scene_state": 0.5,
+                        "scene_state": 0.95 if _real_scene_state_count > 0 else 0.3,
+                        "camera_frames": 0.95 if _camera_frame_count > 0 else 0.0,
                     },
                     "goal_region_verification": llm_metadata.get("goal_region_verification"),
                     "frames": frames,
@@ -5093,6 +5127,10 @@ class GenieSimLocalFramework:
         }
 
         frames: List[Dict[str, Any]] = []
+        _server_ee_frame_count = 0  # Track how many frames used server EE pose
+        _real_scene_state_count = 0  # Track how many frames had real scene state
+        _camera_frame_count = 0  # Track how many frames had camera data
+        self._prev_server_ee_pos = None  # Reset for each episode
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
             # observations may reuse the same dict for multiple frames).
@@ -5199,6 +5237,20 @@ class GenieSimLocalFramework:
                     if _synth_objs:
                         obs["scene_state"] = {"objects": _synth_objs}
 
+            # Ensure camera_frames is always present (even if empty) so quality
+            # checks don't report missing required observation fields.
+            # camera_frames is expected to be a dict keyed by camera_id.
+            _cam_obs = obs.pop("camera_observation", {})
+            _cam_images = _cam_obs.get("images", [])
+            if _cam_images and isinstance(_cam_images, list):
+                # Convert list of camera images to dict keyed by index
+                _cam_dict = {f"camera_{i}": img for i, img in enumerate(_cam_images) if img}
+            elif isinstance(_cam_images, dict):
+                _cam_dict = _cam_images
+            else:
+                _cam_dict = {}
+            obs.setdefault("camera_frames", _cam_dict)
+
             frame_data: Dict[str, Any] = {
                 "step": step_idx,
                 "observation": obs,
@@ -5211,26 +5263,58 @@ class GenieSimLocalFramework:
             # Advance forward-propagated state to this waypoint's target
             current_joint_state = waypoint_joints.copy()
 
-            # End-effector Cartesian pose via FK (best-effort)
-            # FK returns position in robot-local frame; add base_position to
-            # transform into world frame so quality checks compare correctly.
+            # End-effector Cartesian pose: prefer real server data, fallback to local FK.
             _base_pos = np.array(
                 task.get("robot_config", {}).get("base_position", [0, 0, 0]),
                 dtype=float,
             )
-            try:
-                if fk_solver is not None:
-                    ee_pos, ee_quat = fk_solver._forward_kinematics(waypoint_joints[:arm_dof])
-                    _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
-                    frame_data["ee_pos"] = _ee
-                    frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, 'tolist') else ee_quat
+            _used_server_ee = False
+            # Check if the server observation contains a real (dynamic) EE pose
+            _server_ee = robot_state.get("ee_pose") or {}
+            if isinstance(_server_ee, dict) and "position" in _server_ee:
+                _sep = _server_ee["position"]
+                if isinstance(_sep, dict) and "x" in _sep:
+                    _ee_srv = [_sep["x"], _sep["y"], _sep["z"]]
+                elif isinstance(_sep, (list, tuple)) and len(_sep) >= 3:
+                    _ee_srv = list(_sep[:3])
                 else:
-                    ee_pos, ee_quat = _franka_fk(waypoint_joints[:arm_dof])
-                    _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
-                    frame_data["ee_pos"] = _ee
-                    frame_data["ee_quat"] = ee_quat
-            except Exception:
-                pass
+                    _ee_srv = None
+                if _ee_srv is not None:
+                    # Check if server EE is dynamic (differs from previous frame)
+                    _prev_srv_ee = getattr(self, "_prev_server_ee_pos", None)
+                    self._prev_server_ee_pos = _ee_srv
+                    if _prev_srv_ee is None or not np.allclose(_ee_srv, _prev_srv_ee, atol=1e-6):
+                        frame_data["ee_pos"] = _ee_srv
+                        _seq = _server_ee.get("orientation") or _server_ee.get("quaternion")
+                        if _seq:
+                            if isinstance(_seq, dict):
+                                frame_data["ee_quat"] = [_seq.get("w", 1), _seq.get("x", 0), _seq.get("y", 0), _seq.get("z", 0)]
+                            else:
+                                frame_data["ee_quat"] = list(_seq)
+                        _used_server_ee = True
+
+            # Fallback: local FK
+            if not _used_server_ee:
+                try:
+                    if fk_solver is not None:
+                        ee_pos, ee_quat = fk_solver._forward_kinematics(waypoint_joints[:arm_dof])
+                        _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
+                        frame_data["ee_pos"] = _ee
+                        frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, 'tolist') else ee_quat
+                    else:
+                        ee_pos, ee_quat = _franka_fk(waypoint_joints[:arm_dof])
+                        _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
+                        frame_data["ee_pos"] = _ee
+                        frame_data["ee_quat"] = ee_quat
+                except Exception:
+                    pass
+
+            if _used_server_ee:
+                _server_ee_frame_count += 1
+            if obs.get("scene_state", {}).get("objects") and obs.get("data_source") == "real_composed":
+                _real_scene_state_count += 1
+            if obs.get("camera_frames"):
+                _camera_frame_count += 1
 
             # Fix 6: Quaternion normalization, hemisphere continuity, and 6D rotation
             if frame_data.get("ee_quat"):
@@ -7406,6 +7490,8 @@ class GenieSimLocalFramework:
         if target_object_id and frames:
             _min_dist = float("inf")
             _initial_dist = float("inf")
+            # Normalize target ID for fuzzy matching (strip path prefixes)
+            _target_norm = target_object_id.rsplit("/", 1)[-1].lower()
             for _fi, _frame in enumerate(frames):
                 _eep = _frame.get("ee_pos")
                 _obs = _frame.get("observation", {})
@@ -7413,7 +7499,9 @@ class GenieSimLocalFramework:
                 if _eep:
                     _eep_arr = np.array(_eep)
                     for _obj in _ss.get("objects", []):
-                        if _obj.get("object_id") == target_object_id:
+                        _oid = _obj.get("object_id", "")
+                        _oid_norm = _oid.rsplit("/", 1)[-1].lower()
+                        if _oid == target_object_id or _oid_norm == _target_norm:
                             _op = _obj.get("pose", {})
                             if "x" in _op:
                                 _opos = np.array([_op["x"], _op["y"], _op["z"]])
@@ -7426,6 +7514,12 @@ class GenieSimLocalFramework:
                                 _initial_dist = _d
                             _min_dist = min(_min_dist, _d)
                             break
+            if _min_dist == float("inf"):
+                logger.warning(
+                    "Quality check: Could not compute EE-target distance "
+                    "(target=%s not found in scene_state or ee_pos missing)",
+                    target_object_id,
+                )
             if _min_dist > 0.20:
                 ee_approach_penalty = 0.15
                 logger.warning(
