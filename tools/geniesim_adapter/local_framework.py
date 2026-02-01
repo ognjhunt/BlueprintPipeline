@@ -1113,7 +1113,7 @@ class GenieSimGRPCClient:
         import time as _time
         import subprocess as _sp
 
-        max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "10"))
+        max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "3"))
         cooldown_s = int(os.environ.get("GENIESIM_RESTART_COOLDOWN_S", "30"))
 
         if not hasattr(self, "_restart_count"):
@@ -3933,10 +3933,13 @@ class GenieSimLocalFramework:
         collection.
         """
         self.log(f"Initializing robot: cfg_file={robot_cfg_file}, scene_usd={scene_usd}")
+        # Verify gRPC channel is connected before attempting init_robot.
+        if not self._client.connect():
+            self.log("gRPC channel not ready before init_robot — will retry in loop", "WARNING")
         # After docker restart, the server needs time to fully load before
-        # init_robot will succeed. Retry with exponential backoff up to ~5 min.
-        _max_init_attempts = 12
-        _init_backoff = 10.0  # start at 10s, double up to 60s
+        # init_robot will succeed. Retry with exponential backoff.
+        _max_init_attempts = 5
+        _init_backoff = 5.0  # start at 5s, multiply by 1.5 up to 60s
         init_result = None
         for _init_attempt in range(1, _max_init_attempts + 1):
             init_result = self._client.init_robot(

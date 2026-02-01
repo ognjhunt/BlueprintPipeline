@@ -49,6 +49,12 @@ services:
       - "${GENIESIM_PORT:-50051}:50051"
     shm_size: "16gb"
     privileged: true
+    healthcheck:
+      test: ["CMD", "/isaac-sim/python.sh", "/workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/readiness_probe.py"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 30s
     deploy:
       resources:
         reservations:

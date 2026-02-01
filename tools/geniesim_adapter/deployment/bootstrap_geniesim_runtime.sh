@@ -37,7 +37,8 @@ if [ -d "${PATCHES_DIR}" ]; then
     "${PATCHES_DIR}/patch_ee_pose_handler.py" \
     "${PATCHES_DIR}/patch_stage_diagnostics.py" \
     "${PATCHES_DIR}/patch_observation_cameras.py" \
-    "${PATCHES_DIR}/patch_grpc_server.py"; do
+    "${PATCHES_DIR}/patch_grpc_server.py" \
+    "${PATCHES_DIR}/_apply_safe_float.py"; do
     if [ -f "${patch_script}" ]; then
       "${ISAAC_SIM_PATH}/python.sh" "${patch_script}" || echo "[geniesim] WARNING: ${patch_script} failed (non-fatal)"
     fi
@@ -78,12 +79,24 @@ export GENIESIM_ROOT
 export ISAAC_SIM_PATH
 export GENIESIM_HOST
 export GENIESIM_PORT
-export PYTHONPATH="${REPO_ROOT}/tools/geniesim_adapter:${REPO_ROOT}:${PYTHONPATH:-}"
 
 # Enable Isaac Sim's internal ROS 2 libraries for rclpy
 # Genie Sim's command_controller.py imports rclpy unconditionally
+if [ -f /etc/geniesim-ros2.env ]; then
+  # shellcheck disable=SC1091
+  source /etc/geniesim-ros2.env
+else
+  _ROS2_DISTRO="humble"
+  if [ -d "${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/jazzy/lib" ]; then
+    _ROS2_DISTRO="jazzy"
+  fi
+  _ROS2_BASE="${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/${_ROS2_DISTRO}"
+  export LD_LIBRARY_PATH="${_ROS2_BASE}/lib:${LD_LIBRARY_PATH:-}"
+  export PYTHONPATH="${_ROS2_BASE}/rclpy:${_ROS2_BASE}:${PYTHONPATH:-}"
+fi
+
+export PYTHONPATH="${REPO_ROOT}/tools/geniesim_adapter:${REPO_ROOT}:${PYTHONPATH:-}"
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export LD_LIBRARY_PATH="${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/humble/lib:${LD_LIBRARY_PATH:-}"
 
 if [ "${GENIESIM_START_SERVER}" = "1" ]; then
   echo "[geniesim] Starting Genie Sim server (logs: ${GENIESIM_SERVER_LOG})"

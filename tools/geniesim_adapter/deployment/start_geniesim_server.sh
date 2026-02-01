@@ -4,7 +4,7 @@ set -euo pipefail
 # Lightweight entrypoint for the pre-baked geniesim-server image.
 # All dependencies are already installed — this script only starts the server.
 # Includes a restart loop: if the server crashes, it auto-restarts up to
-# GENIESIM_MAX_SERVER_RESTARTS times (default 3).
+# GENIESIM_MAX_SERVER_RESTARTS times (default 1).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
@@ -13,9 +13,8 @@ GENIESIM_ROOT=${GENIESIM_ROOT:-/opt/geniesim}
 ISAAC_SIM_PATH=${ISAAC_SIM_PATH:-/isaac-sim}
 GENIESIM_PORT=${GENIESIM_PORT:-50051}
 GENIESIM_HEADLESS=${GENIESIM_HEADLESS:-1}
-GENIESIM_HEALTHCHECK=${GENIESIM_HEALTHCHECK:-1}
 GENIESIM_SERVER_LOG=${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
-GENIESIM_MAX_SERVER_RESTARTS=${GENIESIM_MAX_SERVER_RESTARTS:-3}
+GENIESIM_MAX_SERVER_RESTARTS=${GENIESIM_MAX_SERVER_RESTARTS:-1}
 
 if [ ! -x "${ISAAC_SIM_PATH}/python.sh" ]; then
   echo "[geniesim] ERROR: Isaac Sim not found at ${ISAAC_SIM_PATH}." >&2
@@ -30,9 +29,23 @@ fi
 
 export GENIESIM_ROOT
 export ISAAC_SIM_PATH
+
+# Source pre-baked ROS 2 env if available, otherwise detect at runtime.
+if [ -f /etc/geniesim-ros2.env ]; then
+  # shellcheck disable=SC1091
+  source /etc/geniesim-ros2.env
+else
+  _ROS2_DISTRO="humble"
+  if [ -d "${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/jazzy/lib" ]; then
+    _ROS2_DISTRO="jazzy"
+  fi
+  _ROS2_BASE="${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/${_ROS2_DISTRO}"
+  export LD_LIBRARY_PATH="${_ROS2_BASE}/lib:${LD_LIBRARY_PATH:-}"
+  export PYTHONPATH="${_ROS2_BASE}/rclpy:${_ROS2_BASE}:${PYTHONPATH:-}"
+fi
+
 export PYTHONPATH="${REPO_ROOT}/tools/geniesim_adapter:${REPO_ROOT}:${PYTHONPATH:-}"
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export LD_LIBRARY_PATH="${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/humble/lib:${LD_LIBRARY_PATH:-}"
 
 _SERVER_ARGS=""
 [ "${GENIESIM_HEADLESS}" = "1" ] && _SERVER_ARGS="${_SERVER_ARGS} --headless"
@@ -54,13 +67,6 @@ while true; do
     >> "${GENIESIM_SERVER_LOG}" 2>&1 &
   _PID=$!
 
-  if [ "${GENIESIM_HEALTHCHECK}" = "1" ] && [ "${_restart_count}" -eq 0 ]; then
-    echo "[geniesim] Running health check (informational only)"
-    "${ISAAC_SIM_PATH}/python.sh" -m tools.geniesim_adapter.geniesim_healthcheck || {
-      echo "[geniesim] Health check not yet passing - server may still be starting"
-    }
-  fi
-
   # Wait for server process to exit
   _exit_code=0
   wait $_PID || _exit_code=$?
@@ -73,6 +79,6 @@ while true; do
     exit 1
   fi
 
-  echo "[geniesim] Restarting server in 10s..."
-  sleep 10
+  echo "[geniesim] Restarting server in 2s..."
+  sleep 2
 done

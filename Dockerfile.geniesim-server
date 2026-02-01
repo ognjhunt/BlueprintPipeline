@@ -103,7 +103,25 @@ RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_stage_diagnostics.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_observation_cameras.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_grpc_server.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/_apply_safe_float.py \
     && rm -rf /tmp/patches
+
+# ----- Bake ROS 2 environment for rclpy -----
+# Detect which ROS 2 distro Isaac Sim ships and write env vars so the
+# entrypoint scripts can source them without runtime detection.
+RUN _ROS2_BASE="" \
+    && if [ -d "${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/jazzy/lib" ]; then \
+         _ROS2_BASE="${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/jazzy"; \
+       elif [ -d "${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/humble/lib" ]; then \
+         _ROS2_BASE="${ISAAC_SIM_PATH}/exts/isaacsim.ros2.bridge/humble"; \
+       fi \
+    && if [ -n "${_ROS2_BASE}" ]; then \
+         printf 'export LD_LIBRARY_PATH="%s/lib:${LD_LIBRARY_PATH:-}"\nexport PYTHONPATH="%s/rclpy:%s:${PYTHONPATH:-}"\n' \
+           "${_ROS2_BASE}" "${_ROS2_BASE}" "${_ROS2_BASE}" \
+           > /etc/geniesim-ros2.env; \
+       else \
+         touch /etc/geniesim-ros2.env; \
+       fi
 
 # ----- Pre-bake robot USD assets -----
 # Download manipulator + humanoid USD assets from the public Isaac Sim

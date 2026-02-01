@@ -9,7 +9,7 @@ set -euo pipefail
 # What it does:
 #   1. Checks if geniesim-server container is already running
 #   2. If not, starts it via docker compose
-#   3. Polls gRPC port 50051 until the server is accepting connections
+#   3. Polls Docker health status until the server's gRPC port is ready
 #   4. Prints READY when done
 # =============================================================================
 
@@ -17,7 +17,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 CONTAINER_NAME="geniesim-server"
-GRPC_PORT_HEX="C383"  # 50051 in hex
 TIMEOUT_S=${VM_START_TIMEOUT_S:-120}
 
 # ---- Step 1: Check if container is already running ----
@@ -35,20 +34,37 @@ else
   fi
 fi
 
-# ---- Step 2: Wait for gRPC server readiness ----
-echo "[vm-start] Waiting for gRPC server on port 50051 (timeout: ${TIMEOUT_S}s)..."
+# ---- Step 2: Wait for gRPC server readiness via Docker health status ----
+echo "[vm-start] Waiting for server to become healthy (timeout: ${TIMEOUT_S}s)..."
 
 _elapsed=0
 _interval=5
 
 while [ "${_elapsed}" -lt "${TIMEOUT_S}" ]; do
-  if sudo docker exec "${CONTAINER_NAME}" bash -c "cat /proc/net/tcp6 2>/dev/null | grep -q ${GRPC_PORT_HEX}" 2>/dev/null; then
-    echo "[vm-start] READY - gRPC server is listening on port 50051 (${_elapsed}s elapsed)"
-    exit 0
-  fi
+  _health=$(sudo docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "${CONTAINER_NAME}" 2>/dev/null || echo "missing")
+
+  case "${_health}" in
+    healthy)
+      echo "[vm-start] READY - server is healthy (${_elapsed}s elapsed)"
+      exit 0
+      ;;
+    unhealthy)
+      echo "[vm-start] ERROR: Container is unhealthy" >&2
+      echo "[vm-start] Check logs: sudo docker logs ${CONTAINER_NAME} --tail 50" >&2
+      exit 1
+      ;;
+    none)
+      # No healthcheck configured — fall back to TCP port check
+      if sudo docker exec "${CONTAINER_NAME}" bash -c "cat /proc/net/tcp6 2>/dev/null | grep -q C383" 2>/dev/null; then
+        echo "[vm-start] READY - gRPC server is listening on port 50051 (${_elapsed}s elapsed)"
+        exit 0
+      fi
+      ;;
+  esac
+
   sleep "${_interval}"
   _elapsed=$((_elapsed + _interval))
-  echo "[vm-start]   ...still waiting (${_elapsed}s / ${TIMEOUT_S}s)"
+  echo "[vm-start]   ...still waiting (${_elapsed}s / ${TIMEOUT_S}s) [status: ${_health}]"
 done
 
 echo "[vm-start] ERROR: Server did not become ready within ${TIMEOUT_S}s" >&2
