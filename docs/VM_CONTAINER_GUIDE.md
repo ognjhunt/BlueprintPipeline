@@ -290,7 +290,7 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 | `patch_object_pose_handler.py` | Fuzzy prim path matching for object pose queries |
 | `patch_ee_pose_handler.py` | Safe unpacking for `get_ee_pose` multi-value returns |
 | `patch_stage_diagnostics.py` | Logs USD stage contents (prims, cameras, meshes) after `init_robot` |
-| `patch_observation_cameras.py` | Auto-registers unknown cameras in `self.cameras` dict; fixes `publish_ros` ValueError crash |
+| `patch_observation_cameras.py` | Auto-registers unknown cameras in `self.cameras` using `{camera_info, prim_path}` dict entries; fixes `publish_ros` ValueError crash |
 | `patch_grpc_server.py` | Fixes: string conversions, safe unpacking, set literal bugs, numpy scalar conversion, position/rotation tuple unpacking |
 
 ## Recent Fixes (2026-01-31)
@@ -304,7 +304,7 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 7. **Stage diagnostics patch**: New `patch_stage_diagnostics.py` logs all USD stage prims (cameras, meshes, xforms) after `init_robot` to debug object pose zeros.
 8. **Conditional `--publish_ros`**: Server start scripts no longer pass `--publish_ros` when `GENIESIM_SKIP_ROS_RECORDING=1`, eliminating ROS2 error noise.
 9. **UR10 robot config**: Added `robot_configs/ur10.json` for testing with Universal Robots UR10.
-10. **Camera auto-registration** (`patch_observation_cameras.py`): Server crashes with `KeyError` on Franka camera prims because `self.cameras` dict only contains G1 cameras. Patch auto-registers unknown cameras with default resolution at start of `handle_get_observation`. Also replaces `self.cameras[camera][0]` with `.get()` fallback.
+10. **Camera auto-registration** (`patch_observation_cameras.py`): Server crashes with `KeyError` on Franka camera prims because `self.cameras` dict only contains G1 cameras. Patch auto-registers unknown cameras with default resolution at start of `handle_get_observation`, storing `{camera_info: {width, height, ppx, ppy, fx, fy}, prim_path}` dict entries. Legacy list/string entries are normalized before access, and `self.cameras[camera][0]` is replaced with a safe dict fallback.
 11. **`publish_ros` ValueError**: Server raises `ValueError("publish ros is not enabled")` during `startRecording` when `--publish_ros` flag not passed. Patched to log warning and continue.
 12. **Position/rotation tuple unpacking**: `grpc_server.py` does `(x, y, z) = position` but position can be numpy arrays with >3 elements. Fixed with safe element-by-element assignment via `float(_pos[i])`.
 13. **`GetJointRsp` has no "errmsg" field**: Previous joint position guard tried to set `rsp.errmsg` which doesn't exist in the protobuf schema. Replaced with `print()` warning.
