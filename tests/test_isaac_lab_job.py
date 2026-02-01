@@ -34,7 +34,7 @@ class _FakeRuntimeResult:
 def _valid_env_cfg() -> str:
     return "\n".join(
         [
-            "from omni.isaac.lab import foo",
+            "from isaaclab import foo",
             "class KitchenEnvCfg(ManagerBasedEnvCfg):",
             "    pass",
         ]

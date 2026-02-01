@@ -24,7 +24,7 @@
 # docker login nvcr.io
 # Username: $oauthtoken
 # Password: <your-ngc-api-key>
-ARG ISAAC_SIM_VERSION=4.2.0
+ARG ISAAC_SIM_VERSION=5.1.0
 FROM nvcr.io/nvidia/isaac-sim:${ISAAC_SIM_VERSION} AS base
 
 # =============================================================================

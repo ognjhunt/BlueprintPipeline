@@ -11,12 +11,12 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-import omni.isaac.lab.utils.math as math_utils
-from omni.isaac.lab.envs import ManagerBasedEnv
-from omni.isaac.lab.managers import EventTermCfg, SceneEntityCfg
+import isaaclab.utils.math as math_utils
+from isaaclab.envs import ManagerBasedEnv
+from isaaclab.managers import EventTermCfg, SceneEntityCfg
 
 if TYPE_CHECKING:
-    from omni.isaac.lab.envs import ManagerBasedEnvCfg
+    from isaaclab.envs import ManagerBasedEnvCfg
 
 
 def randomize_object_poses(

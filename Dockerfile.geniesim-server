@@ -8,7 +8,7 @@
 #   docker build -f Dockerfile.geniesim-server -t geniesim-server:latest .
 # =============================================================================
 
-ARG ISAAC_SIM_VERSION=4.5.0
+ARG ISAAC_SIM_VERSION=5.1.0
 FROM nvcr.io/nvidia/isaac-sim:${ISAAC_SIM_VERSION}
 
 ENV ISAAC_SIM_PATH=/isaac-sim

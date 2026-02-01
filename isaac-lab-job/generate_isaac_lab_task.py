@@ -149,7 +149,7 @@ def validate_isaac_lab_env_config(code: str) -> CodeValidationResult:
         result.is_valid = False
 
     # Check for Isaac Lab imports
-    required_imports = ["omni.isaac.lab"]
+    required_imports = ["isaaclab"]
     for req in required_imports:
         if not any(req in imp for imp in found_imports):
             result.warnings.append(f"Missing expected import: {req}")

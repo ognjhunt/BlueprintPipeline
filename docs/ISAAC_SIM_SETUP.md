@@ -14,7 +14,7 @@ This guide covers setting up NVIDIA Isaac Sim for use with BlueprintPipeline's e
 Episode generation **must** run inside an Isaac Sim runtime with Replicator enabled.
 We standardize on the NVIDIA NGC container image below for production runs:
 
-- **Container image**: `nvcr.io/nvidia/isaac-sim:2024.1.0` (Isaac Sim 2024.1.0+)
+- **Container image**: `nvcr.io/nvidia/isaac-sim:5.1.0` (Isaac Sim 5.1.0+)
 - **Required extensions**: `isaacsim.core.api`, `omni.physx`, `omni.replicator.core`
 - **GPU**: NVIDIA RTX/Tesla-class GPU (T4/L4/A10/A100) with **16GB+ VRAM**
 - **Driver/tooling**: NVIDIA driver + NVIDIA Container Toolkit installed
@@ -39,7 +39,7 @@ PROJECT_ROOT=/path/to/BlueprintPipeline docker compose -f docker-compose.isaacsi
 
 ```bash
 # Pull Isaac Sim container (2024.1.0 or later)
-docker pull nvcr.io/nvidia/isaac-sim:2024.1.0
+docker pull nvcr.io/nvidia/isaac-sim:5.1.0
 
 # Run with BlueprintPipeline mounted
 docker run --gpus all -it \
@@ -47,7 +47,7 @@ docker run --gpus all -it \
   -e DISPLAY=$DISPLAY \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
   --network=host \
-  nvcr.io/nvidia/isaac-sim:2024.1.0 \
+  nvcr.io/nvidia/isaac-sim:5.1.0 \
   bash
 
 # Inside container
@@ -69,7 +69,7 @@ docker run --gpus all -it \
   -e DISPLAY=$DISPLAY \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
   --network=host \
-  nvcr.io/nvidia/isaac-sim:2024.1.0 \
+  nvcr.io/nvidia/isaac-sim:5.1.0 \
   bash
 
 # Inside container, launch Isaac Sim
@@ -81,7 +81,7 @@ docker run --gpus all -it \
 For production deployments, build a custom image with BlueprintPipeline baked in:
 
 ```dockerfile
-FROM nvcr.io/nvidia/isaac-sim:2024.1.0
+FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
 # Set working directory
 WORKDIR /workspace

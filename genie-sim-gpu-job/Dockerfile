@@ -1,7 +1,7 @@
 # Genie Sim GPU Execution Job Dockerfile
 # Builds on NVIDIA Isaac Sim with Genie Sim repo installed for GPU-backed local runs.
 
-ARG ISAAC_SIM_VERSION=4.5.0
+ARG ISAAC_SIM_VERSION=5.1.0
 FROM nvcr.io/nvidia/isaac-sim:${ISAAC_SIM_VERSION}
 
 ENV ISAAC_SIM_PATH=/isaac-sim

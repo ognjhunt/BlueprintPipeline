@@ -5,7 +5,7 @@
 # for variation assets identified by replicator-job. The generated images can be
 # processed by downstream jobs to create 3D models.
 
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 # System deps for Pillow image handling
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \

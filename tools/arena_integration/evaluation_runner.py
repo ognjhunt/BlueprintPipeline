@@ -222,7 +222,7 @@ class ArenaEvaluationRunner:
         results_path = output_dir / f"eval_{timestamp.replace(':', '-')}.json"
 
         # Build Docker command if using containerized Isaac Sim
-        docker_image = os.getenv("ISAAC_SIM_DOCKER_IMAGE", "nvcr.io/nvidia/isaac-sim:4.0.0")
+        docker_image = os.getenv("ISAAC_SIM_DOCKER_IMAGE", "nvcr.io/nvidia/isaac-sim:5.1.0")
         use_docker = parse_bool_env(os.getenv("USE_DOCKER_EVALUATION"), default=True)
 
         if use_docker:

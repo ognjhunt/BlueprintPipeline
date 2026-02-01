@@ -1,5 +1,5 @@
-REQUIRED_ISAAC_SIM_VERSION = "2024.1.0+"
-REQUIRED_ISAAC_SIM_CONTAINER = "nvcr.io/nvidia/isaac-sim:2024.1.0"
+REQUIRED_ISAAC_SIM_VERSION = "5.1.0+"
+REQUIRED_ISAAC_SIM_CONTAINER = "nvcr.io/nvidia/isaac-sim:5.1.0"
 REQUIRED_EXTENSIONS = (
     "isaacsim.core.api",
     "omni.physx",

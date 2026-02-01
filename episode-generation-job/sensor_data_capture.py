@@ -1677,7 +1677,7 @@ class MockSensorCapture(IsaacSimSensorCapture):
 ║    /isaac-sim/python.sh your_script.py                                       ║
 ║                                                                              ║
 ║  Or use the Isaac Sim Docker container:                                      ║
-║    docker run --gpus all nvcr.io/nvidia/isaac-sim:4.2.0 python.sh script.py  ║
+║    docker run --gpus all nvcr.io/nvidia/isaac-sim:5.1.0 python.sh script.py  ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
         logger.warning("%s", warning)
@@ -2404,7 +2404,7 @@ def require_isaac_sim_or_fail() -> None:
 ║                                                                              ║
 ║  Or use Docker:                                                              ║
 ║    docker run --gpus all \\                                                  ║
-║      nvcr.io/nvidia/isaac-sim:4.2.0 \\                                       ║
+║      nvcr.io/nvidia/isaac-sim:5.1.0 \\                                       ║
 ║      python.sh /app/your_script.py                                           ║
 ║                                                                              ║
 ║  If you want to test with mock data anyway, set:                             ║

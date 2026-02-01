@@ -271,7 +271,7 @@ class ParallelEvaluator:
     def _check_isaac_lab(self) -> bool:
         """Check if Isaac Lab is available."""
         try:
-            import omni.isaac.lab  # noqa: F401
+            import isaaclab  # noqa: F401
             return True
         except ImportError:
             return False
@@ -377,7 +377,7 @@ class ParallelEvaluator:
         progress_callback: Optional[Callable[[int, int], None]],
     ) -> dict[str, Any]:
         """Run evaluation using Isaac Lab."""
-        from omni.isaac.lab.envs import ManagerBasedRLEnv
+        from isaaclab.envs import ManagerBasedRLEnv
 
         episode_metrics: list[EpisodeMetrics] = []
         errors: list[str] = []

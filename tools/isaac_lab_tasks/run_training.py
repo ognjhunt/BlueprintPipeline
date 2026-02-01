@@ -13,9 +13,9 @@ import importlib
 from typing import Any
 
 import torch
-from omni.isaac.lab.app import AppLauncher
-from omni.isaac.lab.envs import ManagerBasedEnv
-from omni.isaac.lab_tasks.utils import parse_env_cfg
+from isaaclab.app import AppLauncher
+from isaaclab.envs import ManagerBasedEnv
+from isaaclab_tasks.utils import parse_env_cfg
 
 
 def _load_env_cfg(task_package: str, env_cfg_class: str, num_envs: int) -> Any:

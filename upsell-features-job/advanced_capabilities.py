@@ -485,7 +485,7 @@ class CustomRobotOnboarder:
         usd_path = self.robots_dir / f"{spec.robot_id}.usd"
 
         # In production, would use:
-        # from omni.isaac.urdf import _urdf
+        # from isaacsim.asset.importer.urdf import _urdf
         # urdf_interface = _urdf.acquire_urdf_interface()
         # urdf_interface.parse_urdf(str(spec.urdf_path), str(usd_path))
 

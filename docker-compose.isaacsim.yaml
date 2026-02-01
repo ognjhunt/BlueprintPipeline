@@ -69,7 +69,7 @@ services:
       context: .
       dockerfile: episode-generation-job/Dockerfile.isaacsim
       args:
-        ISAAC_SIM_VERSION: "4.2.0"
+        ISAAC_SIM_VERSION: "5.1.0"
     image: blueprint-episode-gen:isaacsim
     container_name: blueprint-episode-gen
 
@@ -292,7 +292,7 @@ services:
       context: .
       dockerfile: dwm-preparation-job/Dockerfile.isaacsim
       args:
-        ISAAC_SIM_VERSION: "4.2.0"
+        ISAAC_SIM_VERSION: "5.1.0"
     image: blueprint-dwm:isaacsim
     container_name: blueprint-dwm
 
@@ -347,7 +347,7 @@ services:
       context: .
       dockerfile: dream2flow-preparation-job/Dockerfile.isaacsim
       args:
-        ISAAC_SIM_VERSION: "4.2.0"
+        ISAAC_SIM_VERSION: "5.1.0"
     image: blueprint-dream2flow:isaacsim
     container_name: blueprint-dream2flow
 

@@ -11,15 +11,15 @@ pygltflib==1.15.0
 # usd-core  # Heavy dependency, may be pre-installed in base image
 
 # PyTorch and CUDA (base for all 3D backends)
-torch==2.5.1
-torchvision==0.20.0
+torch==2.7.0
+torchvision==0.22.0
 
 # HuggingFace for model downloads
 huggingface-hub==0.36.2
 
 # For UltraShape integration (includes Hunyuan for Stage 1)
-diffusers==0.30.0
-transformers==4.37.2
+diffusers==0.33.0
+transformers==4.57.3
 safetensors==0.7.0
 
 # For UltraShape integration

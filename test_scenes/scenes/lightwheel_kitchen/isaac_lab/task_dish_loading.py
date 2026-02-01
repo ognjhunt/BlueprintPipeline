@@ -10,7 +10,7 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-from omni.isaac.lab.envs import ManagerBasedEnv
+from isaaclab.envs import ManagerBasedEnv
 from . import reward_functions
 
 if TYPE_CHECKING:

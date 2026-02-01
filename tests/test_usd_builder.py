@@ -59,7 +59,7 @@ def test_articulation_metadata_written_to_usd(tmp_path) -> None:
     joint_prim = stage.GetPrimAtPath(joint_path)
     assert joint_prim.IsValid()
 
-    drive = usd_physics.DriveAPI.Get(stage, joint_path, "angular")
+    drive = usd_physics.DriveAPI.Get(joint_prim, "angular")
     assert drive.GetStiffnessAttr().Get() == pytest.approx(25.0)
     assert drive.GetMaxForceAttr().Get() == pytest.approx(18.0)
 

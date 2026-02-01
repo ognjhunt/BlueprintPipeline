@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 # System deps for NumPy / OpenCV
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \

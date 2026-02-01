@@ -342,8 +342,8 @@ stage.GetRootLayer().subLayerPaths.append("replicator/placement_regions.usda")
 ### Running with Isaac Lab
 
 ```python
-import omni.isaac.lab as lab
-from omni.isaac.lab.envs import DirectRLEnv
+import isaaclab as lab
+from isaaclab.envs import DirectRLEnv
 
 class MyEnv(DirectRLEnv):
     def __init__(self, cfg):

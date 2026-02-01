@@ -292,11 +292,10 @@ class USDSceneBuilder:
             joint = self.UsdPhysics.RevoluteJoint.Define(stage, joint_path)
             joint.CreateAxisAttr().Set(axis)
 
-        if damping is not None:
-            joint.CreateDampingAttr().Set(float(damping))
-
         joint_prim = joint.GetPrim()
         drive_api = self.UsdPhysics.DriveAPI.Apply(joint_prim, drive_type)
+        if damping is not None:
+            drive_api.CreateDampingAttr().Set(float(damping))
         if stiffness is not None:
             drive_api.CreateStiffnessAttr().Set(float(stiffness))
         if effort_limit is not None:

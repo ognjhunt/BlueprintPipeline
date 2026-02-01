@@ -15,7 +15,7 @@ using the expected paths from `tools/geniesim_adapter/deployment/README.md`:
 
 Build arguments:
 
-- `ISAAC_SIM_VERSION` (default `2024.1.0`) sets the Isaac Sim base image tag.
+- `ISAAC_SIM_VERSION` (default `5.1.0`) sets the Isaac Sim base image tag.
 - `GENIESIM_REPO` (default `https://github.com/AgibotTech/genie_sim.git`) sets the Genie Sim repo.
 - `GENIESIM_REF` (default pinned in `genie-sim-gpu-job/GENIESIM_REF`) sets the Genie Sim ref.
 
@@ -23,7 +23,7 @@ Build arguments:
 # From repo root
 export GENIESIM_REPO=https://github.com/AgibotTech/genie_sim.git
 export GENIESIM_REF=main
-export ISAAC_SIM_VERSION=2024.1.0
+export ISAAC_SIM_VERSION=5.1.0
 
 docker build \
   -f genie-sim-gpu-job/Dockerfile \
@@ -38,7 +38,7 @@ Example override for a newer Isaac Sim base image:
 ```bash
 docker build \
   -f genie-sim-gpu-job/Dockerfile \
-  --build-arg ISAAC_SIM_VERSION=2024.1.1 \
+  --build-arg ISAAC_SIM_VERSION=5.1.0 \
   -t gcr.io/$PROJECT_ID/blueprint-genie-sim:isaacsim .
 ```
 

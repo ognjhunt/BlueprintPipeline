@@ -29,7 +29,7 @@ from models import CameraTrajectory, HandPose, HandTrajectory, RobotAction  # no
 def _isaac_available() -> bool:
     """Check if required Isaac Sim/Lab modules are importable."""
 
-    required_modules = ("omni.isaac.lab", "isaacsim.core.api")
+    required_modules = ("isaaclab", "isaacsim.core.api")
     return all(importlib.util.find_spec(module_name) for module_name in required_modules)
 
 

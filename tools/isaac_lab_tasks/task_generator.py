@@ -561,15 +561,15 @@ from dataclasses import MISSING
 from typing import Literal
 
 import torch
-import omni.isaac.lab.sim as sim_utils
-import omni.isaac.lab.utils.math as math_utils
-from omni.isaac.lab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
-from omni.isaac.lab.envs import ManagerBasedEnvCfg
-from omni.isaac.lab.managers import EventTermCfg, ObservationGroupCfg, ObservationTermCfg
-from omni.isaac.lab.managers import RewardTermCfg, SceneEntityCfg, TerminationTermCfg
-from omni.isaac.lab.scene import InteractiveSceneCfg
-from omni.isaac.lab.sensors import CameraCfg, ContactSensorCfg
-from omni.isaac.lab.utils import configclass
+import isaaclab.sim as sim_utils
+import isaaclab.utils.math as math_utils
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+from isaaclab.envs import ManagerBasedEnvCfg
+from isaaclab.managers import EventTermCfg, ObservationGroupCfg, ObservationTermCfg
+from isaaclab.managers import RewardTermCfg, SceneEntityCfg, TerminationTermCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import CameraCfg, ContactSensorCfg
+from isaaclab.utils import configclass
 from . import reward_functions
 
 
@@ -729,15 +729,15 @@ class ObservationsCfg:
 
         # Robot state observations
         joint_pos = ObservationTermCfg(
-            func="omni.isaac.lab.envs.mdp.joint_pos",
+            func="isaaclab.envs.mdp.joint_pos",
             params={{"asset_cfg": resolve_scene_entity("robot")}},
         )
         joint_vel = ObservationTermCfg(
-            func="omni.isaac.lab.envs.mdp.joint_vel",
+            func="isaaclab.envs.mdp.joint_vel",
             params={{"asset_cfg": resolve_scene_entity("robot")}},
         )
         ee_pos = ObservationTermCfg(
-            func="omni.isaac.lab.envs.mdp.body_pos_w",
+            func="isaaclab.envs.mdp.body_pos_w",
             params={{
                 "asset_cfg": resolve_scene_entity("robot"),
                 "body_name": "{ee_frame}"
@@ -781,7 +781,7 @@ class TerminationsCfg:
     """Termination configuration."""
 
     time_out = TerminationTermCfg(
-        func="omni.isaac.lab.envs.mdp.time_out",
+        func="isaaclab.envs.mdp.time_out",
         time_out=True,
     )
 
@@ -867,7 +867,7 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-from omni.isaac.lab.envs import ManagerBasedEnv
+from isaaclab.envs import ManagerBasedEnv
 from . import reward_functions
 
 if TYPE_CHECKING:
@@ -1081,12 +1081,12 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-import omni.isaac.lab.utils.math as math_utils
-from omni.isaac.lab.envs import ManagerBasedEnv
-from omni.isaac.lab.managers import EventTermCfg, SceneEntityCfg
+import isaaclab.utils.math as math_utils
+from isaaclab.envs import ManagerBasedEnv
+from isaaclab.managers import EventTermCfg, SceneEntityCfg
 
 if TYPE_CHECKING:
-    from omni.isaac.lab.envs import ManagerBasedEnvCfg
+    from isaaclab.envs import ManagerBasedEnvCfg
 
 
 def randomize_object_poses(
@@ -1584,7 +1584,7 @@ __all__ = [
 
         if control_type == "joint_position":
             return f'''    joint_position = {{
-        "class_type": "omni.isaac.lab.envs.mdp.JointPositionActionCfg",
+        "class_type": "isaaclab.envs.mdp.JointPositionActionCfg",
         "asset_name": "robot",
         "joint_names": [".*"],
         "scale": {scale},
@@ -1592,7 +1592,7 @@ __all__ = [
 
         if control_type in ("ee_pose", "ik"):
             return f'''    ee_delta_pose = {{
-        "class_type": "omni.isaac.lab.envs.mdp.EndEffectorPoseActionCfg",
+        "class_type": "isaaclab.envs.mdp.EndEffectorPoseActionCfg",
         "asset_name": "robot",
         "body_name": "{ik_target}",
         "scale": {scale},
@@ -1600,7 +1600,7 @@ __all__ = [
 
         # Default to velocity control
         return f'''    joint_vel = {{
-        "class_type": "omni.isaac.lab.envs.mdp.JointVelocityActionCfg",
+        "class_type": "isaaclab.envs.mdp.JointVelocityActionCfg",
         "asset_name": "robot",
         "joint_names": [".*"],
         "scale": {scale},

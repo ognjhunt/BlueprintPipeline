@@ -81,9 +81,9 @@ The generated environment config follows Isaac Lab's `ManagerBasedEnvCfg` archit
 
 ```python
 # Key imports
-from omni.isaac.lab.envs import ManagerBasedEnvCfg
-from omni.isaac.lab.managers import EventTermCfg, ObservationGroupCfg, RewardTermCfg
-from omni.isaac.lab.scene import InteractiveSceneCfg
+from isaaclab.envs import ManagerBasedEnvCfg
+from isaaclab.managers import EventTermCfg, ObservationGroupCfg, RewardTermCfg
+from isaaclab.scene import InteractiveSceneCfg
 
 # Scene entity mapping (object IDs → USD prim paths)
 SCENE_ENTITY_MAP = {
@@ -508,7 +508,7 @@ The RL Training Service must be able to parse and use these files:
 
 ```python
 # Import structure expected
-from omni.isaac.lab.envs import ManagerBasedEnvCfg
+from isaaclab.envs import ManagerBasedEnvCfg
 
 # Key class to instantiate
 @configclass
@@ -906,7 +906,7 @@ class TrainingEngine:
     def setup(self):
         """Initialize environment, agent, and optimizer."""
         # Import Isaac Lab components
-        from omni.isaac.lab.envs import ManagerBasedEnv
+        from isaaclab.envs import ManagerBasedEnv
 
         # Create environment from loaded config
         env_cfg = self.task_package.env_cfg_class()
@@ -2344,7 +2344,7 @@ python -m rl_training.cli evaluate \
 
 ```dockerfile
 # Dockerfile
-FROM nvcr.io/nvidia/isaac-sim:4.0.0-isaaclab
+FROM nvcr.io/nvidia/isaac-sim:5.1.0-isaaclab
 
 # Install Python dependencies
 COPY requirements.txt /tmp/

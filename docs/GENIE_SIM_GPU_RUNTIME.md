@@ -10,7 +10,7 @@ for running the GPU-capable Genie Sim job image built from `genie-sim-gpu-job/`.
    - Install the NVIDIA Container Toolkit so containers can access GPUs.
 
 2. **Isaac Sim Container Access**
-   - The image is built on `nvcr.io/nvidia/isaac-sim:2024.1.0`.
+   - The image is built on `nvcr.io/nvidia/isaac-sim:5.1.0`.
    - Configure NGC access if you pull from NVIDIA NGC.
 
 3. **GKE (required for `genie-sim-gpu-job`)**

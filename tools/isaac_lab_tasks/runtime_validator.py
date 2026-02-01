@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Check if we're in Isaac Sim
 _ISAAC_SIM_AVAILABLE = False
 try:
-    import omni.isaac.lab
+    import isaaclab
     _ISAAC_SIM_AVAILABLE = True
 except ImportError:
     pass
@@ -378,7 +378,7 @@ class IsaacLabRuntimeValidator:
 
         try:
             import torch
-            from omni.isaac.lab.envs import ManagerBasedEnv
+            from isaaclab.envs import ManagerBasedEnv
 
             package_name = isaac_lab_dir.name
             env_cfg_path = isaac_lab_dir / "env_cfg.py"

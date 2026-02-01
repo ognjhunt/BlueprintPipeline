@@ -11,15 +11,15 @@ from dataclasses import MISSING
 from typing import Literal
 
 import torch
-import omni.isaac.lab.sim as sim_utils
-import omni.isaac.lab.utils.math as math_utils
-from omni.isaac.lab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
-from omni.isaac.lab.envs import ManagerBasedEnvCfg
-from omni.isaac.lab.managers import EventTermCfg, ObservationGroupCfg, ObservationTermCfg
-from omni.isaac.lab.managers import RewardTermCfg, SceneEntityCfg, TerminationTermCfg
-from omni.isaac.lab.scene import InteractiveSceneCfg
-from omni.isaac.lab.sensors import CameraCfg, ContactSensorCfg
-from omni.isaac.lab.utils import configclass
+import isaaclab.sim as sim_utils
+import isaaclab.utils.math as math_utils
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+from isaaclab.envs import ManagerBasedEnvCfg
+from isaaclab.managers import EventTermCfg, ObservationGroupCfg, ObservationTermCfg
+from isaaclab.managers import RewardTermCfg, SceneEntityCfg, TerminationTermCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import CameraCfg, ContactSensorCfg
+from isaaclab.utils import configclass
 from . import reward_functions
 
 
@@ -195,15 +195,15 @@ class ObservationsCfg:
 
         # Robot state observations
         joint_pos = ObservationTermCfg(
-            func="omni.isaac.lab.envs.mdp.joint_pos",
+            func="isaaclab.envs.mdp.joint_pos",
             params={"asset_cfg": resolve_scene_entity("robot")},
         )
         joint_vel = ObservationTermCfg(
-            func="omni.isaac.lab.envs.mdp.joint_vel",
+            func="isaaclab.envs.mdp.joint_vel",
             params={"asset_cfg": resolve_scene_entity("robot")},
         )
         ee_pos = ObservationTermCfg(
-            func="omni.isaac.lab.envs.mdp.body_pos_w",
+            func="isaaclab.envs.mdp.body_pos_w",
             params={
                 "asset_cfg": resolve_scene_entity("robot"),
                 "body_name": "panda_hand"
@@ -233,7 +233,7 @@ class ActionsCfg:
     """Action configuration."""
 
     joint_vel = {
-        "class_type": "omni.isaac.lab.envs.mdp.JointVelocityActionCfg",
+        "class_type": "isaaclab.envs.mdp.JointVelocityActionCfg",
         "asset_name": "robot",
         "joint_names": [".*"],
         "scale": 0.1,
@@ -280,7 +280,7 @@ class TerminationsCfg:
     """Termination configuration."""
 
     time_out = TerminationTermCfg(
-        func="omni.isaac.lab.envs.mdp.time_out",
+        func="isaaclab.envs.mdp.time_out",
         time_out=True,
     )
 

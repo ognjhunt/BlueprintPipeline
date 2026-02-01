@@ -459,7 +459,7 @@ def generate_multi_robot_reward_code(config: MultiRobotConfig) -> str:
 """Multi-robot reward functions."""
 
 import torch
-from omni.isaac.lab.managers import RewardTermCfg
+from isaaclab.managers import RewardTermCfg
 
 
 def collision_avoidance_reward(env) -> torch.Tensor:

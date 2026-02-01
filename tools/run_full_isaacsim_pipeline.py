@@ -62,7 +62,7 @@ def initialize_isaac_sim(headless: bool = True) -> bool:
 
     try:
         # Try to initialize via Isaac Lab's AppLauncher
-        from omni.isaac.lab.app import AppLauncher
+        from isaaclab.app import AppLauncher
 
         # Create launcher with headless config
         launcher = AppLauncher(headless=headless)

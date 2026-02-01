@@ -170,12 +170,12 @@ def _check_isaac_sim_environment() -> Dict[str, Any]:
 
     # Check for Isaac Lab
     try:
-        import omni.isaac.lab
+        import isaaclab
         status["isaac_lab"] = True
         _ISAAC_LAB_AVAILABLE = True
     except ImportError as exc:
         status["isaac_lab_error"] = f"{type(exc).__name__}: {exc}"
-        logger.warning("Isaac Sim import failed for omni.isaac.lab: %s", status["isaac_lab_error"])
+        logger.warning("Isaac Sim import failed for isaaclab: %s", status["isaac_lab_error"])
 
     # Check for USD core (can work outside Isaac Sim)
     try:
@@ -202,7 +202,7 @@ def _check_isaac_sim_environment() -> Dict[str, Any]:
         missing_modules.append("curobo")
         fallback_modes.append("no cuRobo motion planning")
     if not status["isaac_lab"]:
-        missing_modules.append("omni.isaac.lab")
+        missing_modules.append("isaaclab")
         fallback_modes.append("no Isaac Lab extensions")
     if not status["usd_core"]:
         missing_modules.append("pxr")
