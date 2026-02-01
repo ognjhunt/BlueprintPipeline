@@ -1237,24 +1237,29 @@ class GenieSimGRPCClient:
                 lock_timeout,
                 action,
             )
-            # Lightweight recovery: reset the lock, reconnect the channel, and
-            # flag a robot re-init for the next episode. Avoid recursive lock
-            # attempts by only touching transport state here.
-            try:
-                self._grpc_lock = threading.Lock()
-                if self._channel is not None:
-                    try:
-                        self._channel.close()
-                    except Exception:
-                        pass
-                self._channel = None
-                self._stub = None
-                self._joint_stub = None
-                if self._have_grpc:
-                    self.connect()
-                self._needs_robot_reinit = True
-            except Exception as exc:
-                logger.warning("Failed gRPC lock recovery after timeout: %s", exc)
+            # Only perform destructive recovery (channel replace) for long
+            # timeouts that suggest a real deadlock.  Short timeouts (e.g.
+            # observation polling at 1-5s) are expected during trajectory
+            # execution — the execution thread legitimately holds the lock.
+            # Destroying the channel here would kill in-flight trajectory
+            # calls and cascade into circuit breaker trips + restarts.
+            _deadlock_threshold = float(os.getenv("GRPC_DEADLOCK_TIMEOUT_S", "30.0"))
+            if lock_timeout >= _deadlock_threshold:
+                try:
+                    self._grpc_lock = threading.Lock()
+                    if self._channel is not None:
+                        try:
+                            self._channel.close()
+                        except Exception:
+                            pass
+                    self._channel = None
+                    self._stub = None
+                    self._joint_stub = None
+                    if self._have_grpc:
+                        self.connect()
+                    self._needs_robot_reinit = True
+                except Exception as exc:
+                    logger.warning("Failed gRPC lock recovery after timeout: %s", exc)
             return fallback
         try:
             return self._call_grpc_inner(action, func, fallback, success_checker, abort_event)
