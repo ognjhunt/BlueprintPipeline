@@ -3369,6 +3369,7 @@ class GenieSimGRPCClient:
         self,
         trajectory: List[Dict[str, Any]],
         abort_event: Optional[threading.Event] = None,
+        observation_callback: Optional[Callable[[Dict[str, Any], int], None]] = None,
     ) -> GrpcCallResult:
         """
         Execute a trajectory on the robot.
@@ -3378,6 +3379,10 @@ class GenieSimGRPCClient:
         Args:
             trajectory: List of waypoints with positions, velocities, timestamps
             abort_event: Optional event to signal early termination (e.g. task success).
+            observation_callback: Optional callback invoked between waypoints with
+                (waypoint_dict, waypoint_index). Called after each set_joint_position
+                returns and before the inter-waypoint delay, while _grpc_lock is NOT
+                held. Use this to capture observations without lock contention.
 
         Returns:
             GrpcCallResult indicating success.
@@ -3401,7 +3406,7 @@ class GenieSimGRPCClient:
             )
 
         last_timestamp = None
-        for waypoint in trajectory:
+        for _wp_idx, waypoint in enumerate(trajectory):
             if abort_event is not None and abort_event.is_set():
                 logger.info("execute_trajectory: abort_event set, exiting early")
                 break
@@ -3446,6 +3451,15 @@ class GenieSimGRPCClient:
                     available=True,
                     error="gRPC call failed",
                 )
+            # Fire observation callback between waypoints while lock is free.
+            if observation_callback is not None:
+                try:
+                    observation_callback(waypoint, _wp_idx)
+                except Exception as _obs_cb_err:
+                    logger.warning(
+                        "Observation callback failed at waypoint %d: %s",
+                        _wp_idx, _obs_cb_err,
+                    )
             timestamp = waypoint.get("timestamp")
             if timestamp is not None:
                 if last_timestamp is not None:
@@ -5373,10 +5387,42 @@ class GenieSimLocalFramework:
 
             execution_state: Dict[str, Any] = {"success": False, "error": None}
 
+            def _between_waypoints_obs(waypoint: Dict[str, Any], wp_idx: int) -> None:
+                """Capture a lightweight observation between waypoints.
+
+                Called by execute_trajectory after each set_joint_position returns
+                and before the inter-waypoint delay.  The gRPC lock is NOT held
+                at this point, so we can make quick calls.
+                """
+                if abort_event.is_set():
+                    return
+                start_t = collector_state.get("start_time") or time.time()
+                wp_timestamp = waypoint.get("timestamp", 0.0)
+                obs: Dict[str, Any] = {
+                    "planned_timestamp": float(wp_timestamp),
+                    "timestamp": time.time(),
+                    "data_source": "between_waypoints",
+                }
+                # Joint positions are known from the planned waypoint
+                jp = waypoint.get("joint_positions")
+                if jp is not None:
+                    obs["robot_state"] = {"joint_positions": list(jp)}
+                # Try a quick ee_pose call (short timeout to not block)
+                try:
+                    ee_result = self._client.get_ee_pose(lock_timeout=0.5)
+                    if ee_result.available and ee_result.success and ee_result.payload:
+                        obs["ee_pose"] = ee_result.payload
+                except Exception:
+                    pass
+                collector_state["observations"].append(obs)
+                _note_progress(obs)
+
             def _execute_trajectory() -> None:
                 try:
                     execution_result = self._client.execute_trajectory(
-                        timed_trajectory, abort_event=abort_event
+                        timed_trajectory,
+                        abort_event=abort_event,
+                        observation_callback=_between_waypoints_obs,
                     )
                     if not execution_result.available:
                         execution_state["error"] = (
@@ -5709,12 +5755,17 @@ class GenieSimLocalFramework:
                 _save_partial(result["error"])
                 return result
 
-            frames = self._build_frames_from_trajectory(
+            frames, _frame_stats = self._build_frames_from_trajectory(
                 timed_trajectory,
                 aligned_observations,
                 task=task,
                 episode_id=episode_id,
             )
+            _camera_frame_count = _frame_stats["camera_frame_count"]
+            _real_scene_state_count = _frame_stats["real_scene_state_count"]
+            _server_ee_frame_count = _frame_stats["server_ee_frame_count"]
+            _real_velocity_count = _frame_stats["real_velocity_count"]
+            _real_effort_count = _frame_stats["real_effort_count"]
 
             frame_validation = {
                 "enabled": False,
@@ -7192,7 +7243,13 @@ class GenieSimLocalFramework:
                 k: v.tolist() for k, v in _object_poses.items()
             }
 
-        return frames
+        return frames, {
+            "camera_frame_count": _camera_frame_count,
+            "real_scene_state_count": _real_scene_state_count,
+            "server_ee_frame_count": _server_ee_frame_count,
+            "real_velocity_count": _real_velocity_count,
+            "real_effort_count": _real_effort_count,
+        }
 
     def _validate_frames(
         self,
