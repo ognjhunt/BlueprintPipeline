@@ -45,14 +45,22 @@ def patch_file():
     # Pattern 1: self.cameras[camera][0] and self.cameras[camera][1]
     # Replace with .get() that returns a default [1280, 720]
     old1 = "self.cameras[camera][0]"
-    new1 = "self.cameras.get(camera, [1280, 720])[0]"
+    new1 = (
+        "self.cameras.get(camera, "
+        "{\"camera_info\": {\"width\": 1280, \"height\": 720}})"
+        "[\"camera_info\"][\"width\"]"
+    )
     if old1 in content:
         content = content.replace(old1, new1)
         changes += 1
         print("[PATCH] Fixed self.cameras[camera][0] -> .get() with default")
 
     old2 = "self.cameras[camera][1]"
-    new2 = "self.cameras.get(camera, [1280, 720])[1]"
+    new2 = (
+        "self.cameras.get(camera, "
+        "{\"camera_info\": {\"width\": 1280, \"height\": 720}})"
+        "[\"camera_info\"][\"height\"]"
+    )
     if old2 in content:
         content = content.replace(old2, new2)
         changes += 1
@@ -86,9 +94,32 @@ def patch_file():
             f"{body_indent}        _dw, _dh = (int(x) for x in _default_res.split('x'))\n"
             f"{body_indent}    except (ValueError, TypeError):\n"
             f"{body_indent}        _dw, _dh = 1280, 720\n"
+            f"{body_indent}    _default_info = {{\n"
+            f"{body_indent}        \"width\": _dw, \"height\": _dh,\n"
+            f"{body_indent}        \"ppx\": float(_dw) / 2.0, \"ppy\": float(_dh) / 2.0,\n"
+            f"{body_indent}        \"fx\": float(_dw), \"fy\": float(_dh),\n"
+            f"{body_indent}    }}\n"
+            f"{body_indent}    for _cam_key, _cam_val in list(self.cameras.items()):\n"
+            f"{body_indent}        if isinstance(_cam_val, dict):\n"
+            f"{body_indent}            _info = _cam_val.get(\"camera_info\")\n"
+            f"{body_indent}            if not isinstance(_info, dict):\n"
+            f"{body_indent}                _cam_val[\"camera_info\"] = dict(_default_info)\n"
+            f"{body_indent}            _cam_val.setdefault(\"prim_path\", _cam_key)\n"
+            f"{body_indent}            continue\n"
+            f"{body_indent}        if isinstance(_cam_val, (list, tuple)) and len(_cam_val) >= 2:\n"
+            f"{body_indent}            try:\n"
+            f"{body_indent}                _lw, _lh = int(_cam_val[0]), int(_cam_val[1])\n"
+            f"{body_indent}            except (ValueError, TypeError):\n"
+            f"{body_indent}                _lw, _lh = _dw, _dh\n"
+            f"{body_indent}            _info = dict(_default_info)\n"
+            f"{body_indent}            _info.update({{\"width\": _lw, \"height\": _lh}})\n"
+            f"{body_indent}            self.cameras[_cam_key] = {{\"camera_info\": _info, \"prim_path\": _cam_key}}\n"
+            f"{body_indent}            continue\n"
+            f"{body_indent}        if isinstance(_cam_val, str):\n"
+            f"{body_indent}            self.cameras[_cam_key] = {{\"camera_info\": dict(_default_info), \"prim_path\": _cam_val}}\n"
             f"{body_indent}    for _cam in (self.camera_prim_list or []):\n"
             f"{body_indent}        if _cam not in self.cameras:\n"
-            f"{body_indent}            self.cameras[_cam] = [_dw, _dh]\n"
+            f"{body_indent}            self.cameras[_cam] = {{\"camera_info\": dict(_default_info), \"prim_path\": _cam}}\n"
             f'{body_indent}            print(f"[PATCH] Auto-registered camera {{_cam}} with resolution {{_dw}}x{{_dh}}")\n'
         )
 
