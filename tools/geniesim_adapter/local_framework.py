@@ -4170,22 +4170,24 @@ class GenieSimLocalFramework:
             base_pose=params["base_pose"],
             scene_usd=params["scene_usd"],
         )
+        self.log("Post-restart joint health check...")
+        self._post_restart_articulation_health_check()
         self._post_restart_check_pending = True
 
     def _post_restart_articulation_health_check(self) -> None:
         """Log articulation diagnostics after a server restart and re-init."""
         params = getattr(self, "_robot_init_params", None)
         if not params:
-            self.log("Post-restart health check skipped — no robot init params", "WARNING")
+            self.log("Post-restart joint health check skipped — no robot init params", "WARNING")
             return
         expected_joint_count = self._expected_joint_count_for_robot(params.get("robot_cfg_file", ""))
         jp_result = self._client.get_joint_position(lock_timeout=5.0)
         ok, error_message, count = self._validate_joint_payload(jp_result, expected_joint_count)
         if ok:
-            self.log(f"Post-restart articulation health OK ({count} joints)")
+            self.log(f"Post-restart joint health OK ({count} joints)")
         else:
             self.log(
-                f"Post-restart articulation health check failed — {error_message}",
+                f"Post-restart joint health check failed — {error_message}",
                 "WARNING",
             )
 
