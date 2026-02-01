@@ -223,12 +223,30 @@ def patch_file():
         old_joint_12 = "            joint_state.position = joint_positions[joint_name]"
         new_joint_12 = (
             "            _jval = joint_positions[joint_name]\n"
-            "            joint_state.position = float(np.asarray(_jval).flat[0]) if not isinstance(_jval, dict) else 0.0"
+            "            if isinstance(_jval, str):\n"
+            "                if joint_name in {\"error\", \"err\", \"errors\"}:\n"
+            "                    rsp.msg = _jval\n"
+            "                    continue\n"
+            "                joint_state.position = _bp_safe_float(_jval)\n"
+            "            elif isinstance(_jval, dict):\n"
+            "                continue\n"
+            "            else:\n"
+            "                _jscalar = np.asarray(_jval).flat[0] if _jval is not None else 0.0\n"
+            "                joint_state.position = _bp_safe_float(_jscalar)"
         )
         old_joint_16 = "                joint_state.position = joint_positions[joint_name]"
         new_joint_16 = (
             "                _jval = joint_positions[joint_name]\n"
-            "                joint_state.position = float(np.asarray(_jval).flat[0]) if not isinstance(_jval, dict) else 0.0"
+            "                if isinstance(_jval, str):\n"
+            "                    if joint_name in {\"error\", \"err\", \"errors\"}:\n"
+            "                        rsp.msg = _jval\n"
+            "                        continue\n"
+            "                    joint_state.position = _bp_safe_float(_jval)\n"
+            "                elif isinstance(_jval, dict):\n"
+            "                    continue\n"
+            "                else:\n"
+            "                    _jscalar = np.asarray(_jval).flat[0] if _jval is not None else 0.0\n"
+            "                    joint_state.position = _bp_safe_float(_jscalar)"
         )
         if old_joint_16 in content:
             content = content.replace(old_joint_16, new_joint_16)
