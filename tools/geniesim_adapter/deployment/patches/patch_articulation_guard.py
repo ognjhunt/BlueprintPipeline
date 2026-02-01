@@ -61,11 +61,11 @@ def patch_file():
         "        except Exception as exc:\n"
         "            print(f\"[PATCH] get_joint_positions exception: {exc}\")\n"
         "            self._articulation_needs_reinit = True\n"
-        "            return {\"error\": f\"get_joint_positions exception: {exc}\"}\n"
+        "            return {}\n"
         "        if not isinstance(joint_positions, dict):\n"
         "            print(f\"[PATCH] get_joint_positions non-dict: {type(joint_positions)}\")\n"
         "            self._articulation_needs_reinit = True\n"
-        "            return {\"error\": \"get_joint_positions returned non-dict\"}"
+        "            return {}"
     )
     if old in content:
         content = content.replace(old, new, 1)
