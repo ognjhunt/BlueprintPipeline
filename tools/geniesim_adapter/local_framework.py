@@ -1160,7 +1160,8 @@ class GenieSimGRPCClient:
                 # Try a lightweight call
                 future = grpc.channel_ready_future(self._channel)
                 future.result(timeout=5)
-                logger.info("[RESTART] gRPC channel ready after restart")
+                logger.info("[RESTART] gRPC channel ready after restart — waiting 15s for server app warmup")
+                _time.sleep(15)
                 # Re-create stubs on the fresh channel
                 self._stub = None
                 self._joint_stub = None
@@ -3923,20 +3924,36 @@ class GenieSimLocalFramework:
         collection.
         """
         self.log(f"Initializing robot: cfg_file={robot_cfg_file}, scene_usd={scene_usd}")
-        init_result = self._client.init_robot(
-            robot_type=robot_cfg_file,
-            base_pose=base_pose,
-            scene_usd_path=scene_usd,
-        )
-        if not init_result.success:
+        # After docker restart, the server needs time to fully load before
+        # init_robot will succeed. Retry with exponential backoff up to ~5 min.
+        _max_init_attempts = 12
+        _init_backoff = 10.0  # start at 10s, double up to 60s
+        init_result = None
+        for _init_attempt in range(1, _max_init_attempts + 1):
+            init_result = self._client.init_robot(
+                robot_type=robot_cfg_file,
+                base_pose=base_pose,
+                scene_usd_path=scene_usd,
+            )
+            if init_result.success:
+                self.log(f"Robot initialized (attempt {_init_attempt}): {init_result.payload}")
+                break
             self.log(
-                f"init_robot returned: success={init_result.success}, "
-                f"error={init_result.error}, available={init_result.available}",
+                f"init_robot attempt {_init_attempt}/{_max_init_attempts} failed: "
+                f"{init_result.error} — retrying in {_init_backoff:.0f}s",
+                "WARNING",
+            )
+            if _init_attempt < _max_init_attempts:
+                time.sleep(_init_backoff)
+                _init_backoff = min(_init_backoff * 1.5, 60.0)
+        if init_result is None or not init_result.success:
+            self.log(
+                f"init_robot returned: success={getattr(init_result, 'success', None)}, "
+                f"error={getattr(init_result, 'error', None)}, "
+                f"available={getattr(init_result, 'available', None)}",
                 "WARNING",
             )
             # Non-fatal: server may already have robot loaded via --scene arg
-        else:
-            self.log(f"Robot initialized: {init_result.payload}")
 
         # Initialize server-side robot articulation by sending a gripper open
         # command.  The server's CommandController only sets self.robot inside
