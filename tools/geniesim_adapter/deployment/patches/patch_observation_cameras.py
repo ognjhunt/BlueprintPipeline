@@ -16,6 +16,7 @@ Usage (inside Docker build or at runtime):
 The script is idempotent — re-running it on an already-patched file is a no-op.
 """
 import os
+import re
 import sys
 
 GENIESIM_ROOT = os.environ.get("GENIESIM_ROOT", "/opt/geniesim")
@@ -180,25 +181,34 @@ def patch_grpc_server():
         return
 
     # Replace bare camera_info = current_camera["camera_info"] with safe access
-    old = '        camera_info = current_camera["camera_info"]'
-    new = (
-        '        # ' + grpc_marker + '\n'
-        '        _default_ci = {"width": 1280, "height": 720, "ppx": 640.0, "ppy": 360.0, "fx": 1280.0, "fy": 720.0}\n'
-        '        if isinstance(current_camera, dict):\n'
-        '            camera_info = current_camera.get("camera_info", _default_ci)\n'
-        '            if not isinstance(camera_info, dict):\n'
-        '                camera_info = _default_ci\n'
-        '        else:\n'
-        '            camera_info = _default_ci'
+    pattern = re.compile(
+        r'^(?P<indent>[ \t]*)camera_info\s*=\s*current_camera\["camera_info"\]\s*$',
+        re.MULTILINE,
     )
 
-    if old in content:
-        content = content.replace(old, new, 1)
+    def replace_camera_info(match: re.Match) -> str:
+        indent = match.group("indent")
+        return (
+            f"{indent}# {grpc_marker}\n"
+            f'{indent}_default_ci = {{"width": 1280, "height": 720, "ppx": 640.0, "ppy": 360.0, "fx": 1280.0, "fy": 720.0}}\n'
+            f"{indent}if isinstance(current_camera, dict):\n"
+            f'{indent}    camera_info = current_camera.get("camera_info", _default_ci)\n'
+            f"{indent}    if not isinstance(camera_info, dict):\n"
+            f"{indent}        camera_info = _default_ci\n"
+            f"{indent}else:\n"
+            f"{indent}    camera_info = _default_ci"
+        )
+
+    content, replacements = pattern.subn(replace_camera_info, content, count=1)
+    if replacements:
         with open(grpc_server, "w") as f:
             f.write(content)
         print("[PATCH] Patched grpc_server.py get_camera_data camera_info access")
     else:
-        print("[PATCH] Could not find camera_info pattern in grpc_server.py")
+        print(
+            "[PATCH] WARNING: Could not find camera_info assignment pattern in "
+            "grpc_server.py get_camera_data; no changes applied."
+        )
 
 
 if __name__ == "__main__":
