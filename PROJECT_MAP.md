@@ -545,7 +545,7 @@ BlueprintPipeline                    Genie Sim 3.0 (Local)
 
 #### Software Requirements
 
-1. **NVIDIA Isaac Sim 2024.1.0+**
+1. **NVIDIA Isaac Sim 5.1.0+**
    ```bash
    # Installation path must include python.sh
    export ISAAC_SIM_PATH=/path/to/isaac-sim
@@ -707,7 +707,7 @@ python tools/run_local_pipeline.py --scene-dir ./scene --mock-geniesim
 
 | Option | Use Case | Requirements |
 |--------|----------|--------------|
-| Local Python | Development | Python 3.10+ |
+| Local Python | Development | Python 3.11+ |
 | Docker Compose | Local testing | Docker + NVIDIA toolkit |
 | Cloud Run | Production jobs | GCP project |
 | GKE | GPU workloads | GKE cluster + GPU nodes |

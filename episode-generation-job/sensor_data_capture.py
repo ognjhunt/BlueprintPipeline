@@ -19,7 +19,7 @@ DEPLOYMENT ARCHITECTURE:
 ========================
 PRODUCTION (Cloud Run / Docker with GPU):
   - Isaac Sim IS available and IS the expected runtime
-  - Uses Dockerfile.isaacsim (extends NVIDIA Isaac Sim 4.2.0)
+  - Uses Dockerfile.isaacsim (extends NVIDIA Isaac Sim 5.1.0)
   - docker-compose.isaacsim.yaml explicitly sets USE_MOCK_CAPTURE="false"
   - Real physics, real sensor data, production-quality episodes
 

@@ -282,7 +282,7 @@ def test_geniesim_submit_entrypoint_validates_bundle(monkeypatch: pytest.MonkeyP
                 "statistics": {"nodes": 1, "edges": 0, "assets": 1, "tasks": 1},
                 "errors": [], "warnings": [],
             },
-            "geniesim_compatibility": {"version": "3.0.0", "isaac_sim_version": "4.0", "formats": {"scene_graph": "json", "asset_index": "json", "task_config": "json", "scene_config": "yaml"}},
+            "geniesim_compatibility": {"version": "3.0.0", "isaac_sim_version": "5.1", "formats": {"scene_graph": "json", "asset_index": "json", "task_config": "json", "scene_config": "yaml"}},
             "file_inventory": [],
             "checksums": {"files": {}},
         }),

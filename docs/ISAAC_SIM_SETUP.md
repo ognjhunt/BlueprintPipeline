@@ -38,7 +38,7 @@ PROJECT_ROOT=/path/to/BlueprintPipeline docker compose -f docker-compose.isaacsi
 ### Pull and Run Isaac Sim Container
 
 ```bash
-# Pull Isaac Sim container (2024.1.0 or later)
+# Pull Isaac Sim container (5.1.0 or later)
 docker pull nvcr.io/nvidia/isaac-sim:5.1.0
 
 # Run with BlueprintPipeline mounted

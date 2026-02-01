@@ -4,7 +4,7 @@
 # This Dockerfile builds a production-ready container for running episode
 # generation with real physics simulation and sensor capture.
 #
-# Base Image: NVIDIA Isaac Sim 4.2.0 (latest stable as of 2025)
+# Base Image: NVIDIA Isaac Sim 5.1.0
 # GPU Required: Yes (NVIDIA GPU with 8GB+ VRAM recommended)
 #
 # Usage:

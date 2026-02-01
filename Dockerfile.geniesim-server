@@ -48,6 +48,10 @@ RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --upgrade pip \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir \
        "scipy==1.10.1"
 
+# Cache-bust: change this default to force rebuild from this layer onward.
+# Build with: --build-arg CACHE_BUST_SYMLINK=$(date +%s)
+ARG CACHE_BUST_SYMLINK=1
+
 # Fix broken symlinks in Isaac Sim 5.x bundled torch packaging module.
 # The bundled torch has symlinks pointing to omni.isaac.core_archive which
 # was renamed to isaacsim.core.* in 5.x. Copy the real file over the symlink.

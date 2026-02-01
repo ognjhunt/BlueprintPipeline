@@ -6,7 +6,7 @@ requires a GPU-backed Isaac Sim runtime.
 
 ## Requirements
 
-- **Isaac Sim version:** 4.2.0 (matches `Dockerfile.isaacsim`).
+- **Isaac Sim version:** 5.1.0 (matches `Dockerfile.isaacsim`).
 - **GPU:** NVIDIA GPU required.
   - **Minimum:** 8 GB VRAM.
   - **Recommended:** T4, L4, or A100-class GPUs for stable performance.
@@ -39,7 +39,7 @@ export REQUIRE_CAMERA_CALIBRATION=false
 
 ## Lab Runs: Required Runtime + Fail-Fast Behavior
 
-Labs should run episode generation inside an Isaac Sim runtime (4.2.0) with
+Labs should run episode generation inside an Isaac Sim runtime (5.1.0) with
 Replicator enabled. Production toggles (`PIPELINE_ENV=production` plus
 `DATA_QUALITY_LEVEL=production` or `ISAAC_SIM_REQUIRED=true`) trigger fail-fast
 behavior: if Isaac Sim/Replicator aren't available, the run raises immediately

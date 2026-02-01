@@ -21,7 +21,7 @@ DEST_DIR="${1:-/sim-assets/robots}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MANIFEST="${2:-${SCRIPT_DIR}/robot_asset_manifest.txt}"
 
-CDN_BASE="${ISAAC_ASSET_CDN_BASE:-https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5}"
+CDN_BASE="${ISAAC_ASSET_CDN_BASE:-https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1}"
 
 if [ ! -f "${MANIFEST}" ]; then
     echo "[ERROR] Manifest not found: ${MANIFEST}" >&2
@@ -48,14 +48,14 @@ while IFS= read -r line || [ -n "$line" ]; do
     # files land under DEST_SUBDIR directly.
     #
     # The number of path components in CDN_BASE after the host is 3:
-    #   Assets / Isaac / 4.5
+    #   Assets / Isaac / 5.1
     # Plus the components in $line itself. We use -nH (no host dir) and
     # -P to set the output root, then --cut-dirs to strip the CDN prefix.
     #
     # Example: line="Isaac/Robots/Franka"
-    #   URL = .../Assets/Isaac/4.5/Isaac/Robots/Franka/
+    #   URL = .../Assets/Isaac/5.1/Isaac/Robots/Franka/
     #   We want files at DEST_DIR/Isaac/Robots/Franka/...
-    #   CDN path components to cut: "Assets", "Isaac", "4.5" = 3
+    #   CDN path components to cut: "Assets", "Isaac", "5.1" = 3
     if ! wget -q -r -np -nH --cut-dirs=3 \
          -R "index.html*" \
          -P "${DEST_DIR}" \

@@ -93,7 +93,7 @@ def minimal_payloads() -> dict[str, object]:
                 "statistics": {"nodes": 0, "edges": 0, "assets": 0, "tasks": 0},
                 "errors": [], "warnings": [],
             },
-            "geniesim_compatibility": {"version": "3.0.0", "isaac_sim_version": "4.0", "formats": {"scene_graph": "json", "asset_index": "json", "task_config": "json", "scene_config": "yaml"}},
+            "geniesim_compatibility": {"version": "3.0.0", "isaac_sim_version": "5.1", "formats": {"scene_graph": "json", "asset_index": "json", "task_config": "json", "scene_config": "yaml"}},
             "file_inventory": [],
             "checksums": {"files": {}},
         },

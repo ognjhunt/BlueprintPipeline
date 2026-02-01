@@ -408,7 +408,7 @@ loading:
 
 compatibility:
   lerobot_version: ">=0.1.0"
-  isaac_sim_version: ">=4.0.0"
+  isaac_sim_version: ">=5.0.0"
   isaac_lab_arena_version: ">=0.1.0"
 
 metadata:

@@ -5,7 +5,7 @@ Testing the BlueprintPipeline end-to-end using a Lightwheel KitchenRoom SimReady
 
 ## Infrastructure
 - **Client**: Mac (local), runs `tools/run_local_pipeline.py`
-- **Server**: GCP VM `isaac-sim-ubuntu` (zone `us-east1-b`, IP `34.138.160.175`), Docker container `geniesim-server` running Isaac Sim 4.5.0 + Genie Sim gRPC server on port 50051
+- **Server**: GCP VM `isaac-sim-ubuntu` (zone `us-east1-b`, IP `34.138.160.175`), Docker container `geniesim-server` running Isaac Sim 5.1.0 + Genie Sim gRPC server on port 50051
 - **Scene**: `test_scenes/scenes/lightwheel_kitchen/` with SimReady USD assets
 
 ## What's Done (Parts 1-2)

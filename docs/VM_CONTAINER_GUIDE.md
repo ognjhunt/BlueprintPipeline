@@ -235,7 +235,7 @@ python3 tools/run_local_pipeline.py \
 | `ss` command not found in container | Minimal container image | Use `cat /proc/net/tcp6 | grep C383` instead |
 | VM SSH hangs/unresponsive | OOM — server + pipeline consume >64GB RAM | Use g2-standard-32 (128GB); or run pipeline client outside container |
 | `DEADLINE_EXCEEDED` during trajectory | Trajectory execution takes time in simulation | Normal; retry logic handles it. Extend timeout via `GENIESIM_FIRST_CALL_TIMEOUT_S` |
-| cuRobo `'TensorDeviceType' has no attribute 'mesh'` | cuRobo API version mismatch with Isaac Sim 4.5 | Non-fatal — IK fallback trajectory works. Needs cuRobo version pin investigation |
+| cuRobo `'TensorDeviceType' has no attribute 'mesh'` | cuRobo API version mismatch with Isaac Sim 5.1 | Non-fatal — IK fallback trajectory works. Needs cuRobo version pin investigation |
 
 ## Known Server-Side Bugs (Pre-Existing in Genie Sim)
 
@@ -326,7 +326,7 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 
 3. **Camera data intermittent after first observation**: **Mitigation**: `CAMERA_REWARMUP_ON_RESET=1`.
 
-4. **cuRobo API version mismatch**: IK fallback works. **Next step**: Pin cuRobo version for Isaac Sim 4.5.
+4. **cuRobo API version mismatch**: IK fallback works. **Next step**: Pin cuRobo version for Isaac Sim 5.1.
 
 5. **MIN_EPISODE_FRAMES and EE pose failures**: Previously observed with G1 config. May resolve once correct robot config works.
 

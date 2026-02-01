@@ -62,8 +62,8 @@ while true; do
   fi
 
   # Wait for server process to exit
-  wait $_PID || true
-  _exit_code=$?
+  _exit_code=0
+  wait $_PID || _exit_code=$?
 
   echo "[geniesim] $(date '+%Y-%m-%d %H:%M:%S') Server exited with code ${_exit_code}"
 

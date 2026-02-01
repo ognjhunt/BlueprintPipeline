@@ -59,7 +59,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 # 1) Install PyTorch (GPU build) FIRST
 # ---------------------------------------------------------
 RUN pip install --no-cache-dir \
-    torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
     --index-url https://download.pytorch.org/whl/cu124
 
 # Verify CUDA is available
