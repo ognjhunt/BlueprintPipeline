@@ -25,8 +25,12 @@ def load_pins() -> dict[str, str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        name, version = line.split("==", 1)
-        pins[name.lower()] = version
+        if ">=" in line:
+            name, version = line.split(">=", 1)
+            pins[name.lower()] = (version, ">=")
+        else:
+            name, version = line.split("==", 1)
+            pins[name.lower()] = (version, "==")
     return pins
 
 
@@ -51,10 +55,11 @@ def sync_requirements(pins: dict[str, str]) -> None:
                 continue
             name = match.group(1)
             canonical = ALIASES.get(name, name)
-            version = pins.get(canonical.lower())
-            if version is None:
+            pin = pins.get(canonical.lower())
+            if pin is None:
                 raise SystemExit(f"Missing pin for {canonical} in {path}")
-            new_lines.append(f"{canonical}=={version}{marker}")
+            version, op = pin
+            new_lines.append(f"{canonical}{op}{version}{marker}")
         path.write_text("\n".join(new_lines) + "\n")
 
 
