@@ -79,6 +79,9 @@ for f in \
   tools/geniesim_adapter/deployment/patches/patch_stage_diagnostics.py \
   tools/geniesim_adapter/deployment/patches/patch_observation_cameras.py \
   tools/geniesim_adapter/deployment/patches/_apply_safe_float.py \
+  tools/geniesim_adapter/deployment/patches/patch_xforms_safe_rotation.py \
+  tools/geniesim_adapter/deployment/patches/patch_articulation_guard.py \
+  tools/geniesim_adapter/deployment/patches/patch_autoplay.py \
   tools/geniesim_adapter/deployment/bootstrap_geniesim_runtime.sh \
   tools/geniesim_adapter/deployment/start_geniesim_server.sh \
   tools/geniesim_adapter/robot_configs/franka_panda.json \
@@ -123,7 +126,8 @@ sudo docker logs geniesim-server --tail 50
 ```bash
 for p in patch_omnigraph_dedup patch_camera_handler patch_object_pose_handler \
          patch_ee_pose_handler patch_stage_diagnostics patch_observation_cameras \
-         patch_grpc_server _apply_safe_float; do
+         patch_grpc_server _apply_safe_float patch_xforms_safe_rotation \
+         patch_articulation_guard patch_autoplay; do
   sudo docker cp ~/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/${p}.py geniesim-server:/tmp/
   sudo docker exec geniesim-server /isaac-sim/python.sh /tmp/${p}.py
 done

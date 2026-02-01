@@ -45,7 +45,7 @@ def patch_file():
     paused_loop_pattern = re.compile(
         r"(?P<indent>^[ \t]*)if not .*?is_playing\(\):\n"
         r"(?P<body>(?:^[ \t]+.*\n)*?)"
-        r"(?P=indent)continue",
+        r"(?P<indent2>^[ \t]+)continue",
         re.MULTILINE,
     )
 
