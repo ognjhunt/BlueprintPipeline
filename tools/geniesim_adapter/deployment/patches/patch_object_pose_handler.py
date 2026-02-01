@@ -183,6 +183,7 @@ def patch_file():
         if not line_content.endswith(","):
             match = m
             break
+    resolver_injected = False
     if match:
         indent = match.group(2)
         var_name = match.group(3)
@@ -190,10 +191,30 @@ def patch_file():
         resolution_line = f"\n{indent}{var_name} = self._bp_resolve_prim_path({var_name})  # {PATCH_MARKER}"
         patched = patched[:match.end(1)] + resolution_line + patched[match.end(1):]
         print(f"[PATCH] Injected prim path resolution after {var_name} assignment")
+        resolver_injected = True
     else:
         print("[PATCH] WARNING: Could not find prim_path assignment in get_object_pose handler")
-        print("[PATCH] Helper method added but automatic resolution not wired")
-        print("[PATCH] You may need to manually call self._bp_resolve_prim_path(prim_path) in the handler")
+        print("[PATCH] Falling back to wrapping stage.GetPrimAtPath(prim_path) calls")
+        fallback_pattern = re.compile(r"stage\.GetPrimAtPath\(\s*(prim_path)\s*\)")
+        patched, fallback_count = fallback_pattern.subn(
+            rf"stage.GetPrimAtPath(self._bp_resolve_prim_path(\1))  # {PATCH_MARKER}",
+            patched,
+        )
+        if fallback_count:
+            resolver_injected = True
+            print(f"[PATCH] Wrapped {fallback_count} stage.GetPrimAtPath(prim_path) call(s)")
+        else:
+            print("[PATCH] ERROR: No prim_path assignment or stage.GetPrimAtPath(prim_path) call found")
+            print("[PATCH] Cannot wire prim path resolution automatically")
+            sys.exit(1)
+
+    if PATCH_MARKER not in patched:
+        print("[PATCH] ERROR: PATCH_MARKER not found after patching")
+        sys.exit(1)
+
+    if not resolver_injected or re.search(r"self\._bp_resolve_prim_path\(", patched) is None:
+        print("[PATCH] ERROR: No resolver call was inserted into the handler")
+        sys.exit(1)
 
     with open(COMMAND_CONTROLLER, "w") as f:
         f.write(patched)
