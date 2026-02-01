@@ -96,6 +96,17 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                 print(f"[PATCH] Resolved prim path ({label}): {requested_path} -> {best_path}")
                 return best_path
 
+            # Dump stage hierarchy for debugging (first call only)
+            if not getattr(self, '_bp_stage_dumped', False):
+                self._bp_stage_dumped = True
+                all_prims = []
+                for p in stage.Traverse():
+                    all_prims.append(str(p.GetPath()))
+                print(f"[PATCH] DIAGNOSTIC: Full USD stage has {len(all_prims)} prims. First 50:")
+                for pp in all_prims[:50]:
+                    print(f"[PATCH]   {pp}")
+                if len(all_prims) > 50:
+                    print(f"[PATCH]   ... and {len(all_prims) - 50} more")
             print(f"[PATCH] WARNING: Could not resolve prim path {requested_path} in stage")
         except Exception as e:
             print(f"[PATCH] Prim path resolution failed: {e}")
@@ -132,6 +143,26 @@ def patch_file():
     ) + "\n"
 
     patched = content.rstrip() + "\n\n" + indented_helper
+
+    # 1b. Inject diagnostic logging after scene_usd_path assignment
+    # This tells us whether the server's scene_usd_path resolves to a real file
+    scene_path_pattern = re.compile(
+        r"((\s+)(self\.scene_usd_path\s*=\s*os\.path\.join\(self\.sim_assets_root,\s*scene_usd\)))\n",
+        re.MULTILINE,
+    )
+    scene_match = scene_path_pattern.search(patched)
+    if scene_match:
+        indent_s = scene_match.group(2)
+        diag = (
+            f"\n{indent_s}print(f'[PATCH-DIAG] scene_usd_path={{self.scene_usd_path}}, "
+            f"exists={{os.path.exists(self.scene_usd_path)}}, "
+            f"sim_assets_root={{self.sim_assets_root}}, scene_usd={{scene_usd}}')"
+            f"  # {PATCH_MARKER}"
+        )
+        patched = patched[:scene_match.end(1)] + diag + patched[scene_match.end(1):]
+        print("[PATCH] Injected scene_usd_path diagnostic logging")
+    else:
+        print("[PATCH] WARNING: Could not find scene_usd_path assignment for diagnostics")
 
     # 2. Find get_object_pose handling and inject path resolution.
     # Look for patterns like:

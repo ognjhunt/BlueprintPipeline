@@ -305,9 +305,13 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 29. **Task checkpoint/resume on retry**: Completed tasks are saved to `_completed_tasks.json` in the run directory. When the pipeline retries (via `_run_with_retry`), it reuses the same run directory (hash-based naming) and skips already-completed tasks instead of restarting from task 1.
 30. **Health probe bug confirmed fixed**: The inter-task health probe correctly uses `self._client.get_joint_position()` (not `self.get_joint_position()`). No change needed — was already correct in deployed code.
 
+31. **Checkpoint bug fix**: Only checkpoint tasks with ≥1 successful episode. Previously, tasks were checkpointed even when all episodes failed (e.g., reset failure → continue → end of loop), causing retries to skip failed tasks and produce 0 episodes.
+32. **EE pose patch covers `_get_ee_pose` code path**: The gRPC handler calls `self.ui_builder._get_ee_pose(is_right)` (line 1790 of `command_controller.py`), NOT `robot.get_ee_pose()`. Updated regex from `\.get_ee_pose\(` to `\._?get_ee_pose\(` to match both. Also matches ALL occurrences (not just first) and uses unique temp vars per match site.
+33. **Object pose diagnostic logging**: When fuzzy prim path resolution fails, dumps the first 50 prims from the USD stage (once per session). Also logs `scene_usd_path`, whether the file exists, and the `sim_assets_root`/`scene_usd` values used to construct it.
+
 ## Remaining Known Issues
 
-1. **Object poses still all zeros**: The server returns identity poses for ALL objects. The fuzzy prim path matcher (fix 21) resolves paths correctly, but the underlying issue is that the Genie Sim server may not load scene objects from `scene_usd_path` into its simulation stage — it likely only loads the robot. **Next step**: Investigate how the upstream server's `init_robot` loads scene USD. May need a separate `load_scene` or `add_reference` API call, or a server-side patch to `_setup_scene()` in `command_controller.py`.
+1. **Object poses still all zeros**: The server returns identity poses for ALL objects. The server DOES call `add_reference_to_stage(self.scene_usd_path, "/World")` (line 232) to load the scene USD, but objects still return zero poses. Fix 33 adds diagnostic logging to confirm: (a) whether `scene_usd_path` resolves to a real file, (b) what prims actually exist in the USD stage after loading. **Next step**: Run pipeline with new diagnostics, check Docker logs for `[PATCH-DIAG]` and `DIAGNOSTIC: Full USD stage` messages.
 
 2. **Server resource exhaustion on long runs**: After ~4 tasks (~25 min), the Isaac Sim process accumulates GPU/RAM usage and trajectory execution hits DEADLINE_EXCEEDED consistently. The server doesn't crash but becomes unresponsive. **Mitigation**: Use `GENIESIM_RESTART_EVERY_N_TASKS=3` (fix 26). **Next step**: Profile GPU/RAM with `nvidia-smi` and `/proc/meminfo` during a run to confirm resource exhaustion hypothesis.
 

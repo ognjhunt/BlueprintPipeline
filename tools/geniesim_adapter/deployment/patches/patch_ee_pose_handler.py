@@ -78,18 +78,21 @@ def patch_file():
 
     patched = False
 
-    # --- Primary pattern: N-variable unpacking from get_ee_pose ---
+    # --- Primary pattern: N-variable unpacking from get_ee_pose / _get_ee_pose ---
     # Handles: pos, rot = ...get_ee_pose(...)
     #          pos, rot, extra = ...get_ee_pose(...)
-    #          position, orientation = ...get_ee_pose(some_arg)
+    #          position, rotation_matrix = self.ui_builder._get_ee_pose(is_right)
     # Uses .*? with re.DOTALL to cross newlines inside parens.
+    # Note: _?get_ee_pose matches both get_ee_pose AND _get_ee_pose
     pattern = re.compile(
-        r"(\s*)((\w+)(?:\s*,\s*(\w+))+)\s*=\s*(.*?\.get_ee_pose\(.*?\))",
+        r"(\s*)((\w+)(?:\s*,\s*(\w+))+)\s*=\s*(.*?\._?get_ee_pose\(.*?\))",
         re.MULTILINE | re.DOTALL,
     )
 
-    match = pattern.search(content)
-    if match:
+    # Find ALL matches — there may be multiple call sites (robot.get_ee_pose
+    # and self.ui_builder._get_ee_pose are different code paths)
+    matches = list(pattern.finditer(content))
+    for _mi, match in enumerate(matches):
         indent = match.group(1)
         full_vars = match.group(2)  # e.g. "pos, rot" or "pos, rot, extra"
         call = match.group(5)
@@ -100,27 +103,29 @@ def patch_file():
         var1 = var_names[0]
         var2 = var_names[1] if len(var_names) >= 2 else "None"
 
+        # Use unique temp var to avoid collisions when patching multiple sites
+        _tmp = f"_ee_result_{_mi}" if len(matches) > 1 else "_ee_result"
         replacement = (
             f"{indent}# {PATCH_MARKER}\n"
-            f"{indent}_ee_result = {call}\n"
-            f"{indent}if isinstance(_ee_result, (list, tuple)) and len(_ee_result) >= 2:\n"
-            f"{indent}    {var1}, {var2} = _ee_result[0], _ee_result[1]\n"
-            f"{indent}elif isinstance(_ee_result, (list, tuple)) and len(_ee_result) == 1:\n"
-            f"{indent}    {var1}, {var2} = _ee_result[0], None\n"
+            f"{indent}{_tmp} = {call}\n"
+            f"{indent}if isinstance({_tmp}, (list, tuple)) and len({_tmp}) >= 2:\n"
+            f"{indent}    {var1}, {var2} = {_tmp}[0], {_tmp}[1]\n"
+            f"{indent}elif isinstance({_tmp}, (list, tuple)) and len({_tmp}) == 1:\n"
+            f"{indent}    {var1}, {var2} = {_tmp}[0], None\n"
             f"{indent}else:\n"
-            f"{indent}    {var1}, {var2} = _ee_result, None"
+            f"{indent}    {var1}, {var2} = {_tmp}, None"
         )
         # Assign remaining vars to None
         for extra_var in var_names[2:]:
             replacement += f"\n{indent}{extra_var} = None"
 
         content = content.replace(original, replacement)
-        print(f"[PATCH] Fixed ee_pose unpacking: {', '.join(var_names)} = ...get_ee_pose(...)")
+        print(f"[PATCH] Fixed ee_pose unpacking ({_mi+1}/{len(matches)}): {', '.join(var_names)} = ...{call.split('.')[-1][:30]}")
         patched = True
-    else:
-        # Fallback: find any "= ...get_ee_pose(" on a single line and wrap in try/except
+    if not matches:
+        # Fallback: find any "= ..._get_ee_pose(" or "= ...get_ee_pose(" on a single line
         alt_pattern = re.compile(
-            r"([ \t]+)(.*get_ee_pose\([^)]*\).*)",
+            r"([ \t]+)(.*_?get_ee_pose\([^)]*\).*)",
             re.MULTILINE,
         )
         alt_match = alt_pattern.search(content)

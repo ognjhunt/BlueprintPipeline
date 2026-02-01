@@ -4300,6 +4300,7 @@ class GenieSimLocalFramework:
                 # Configure environment for task
                 self._configure_task(task, scene_config)
 
+                _task_episodes_passed = 0
                 for ep_idx in range(episodes_target):
                     if _timeout_exceeded():
                         break
@@ -4357,6 +4358,7 @@ class GenieSimLocalFramework:
 
                         if episode_result.get("success"):
                             passed_episodes += 1
+                            _task_episodes_passed += 1
                             total_frames += episode_result.get("frame_count", 0)
                             quality_scores.append(episode_result.get("quality_score", 0.0))
                         else:
@@ -4433,12 +4435,20 @@ class GenieSimLocalFramework:
                         result.warnings.append(f"Episode {ep_idx} of {task_name} error: {e}")
                         self.log(f"  Episode {ep_idx} error: {e}", "WARNING")
 
-                # Checkpoint: record this task as completed for retry resume
-                _completed_task_names.add(task_name)
-                try:
-                    _checkpoint_path.write_text(json.dumps(sorted(_completed_task_names)))
-                except Exception:
-                    pass
+                # Checkpoint: only record task as completed if at least one episode succeeded.
+                # Without this guard, failed tasks get checkpointed and retries skip them,
+                # producing 0 episodes and burning through all retry attempts.
+                if _task_episodes_passed > 0:
+                    _completed_task_names.add(task_name)
+                    try:
+                        _checkpoint_path.write_text(json.dumps(sorted(_completed_task_names)))
+                    except Exception:
+                        pass
+                else:
+                    self.log(
+                        f"Task {task_name}: no episodes passed — not checkpointing (will retry)",
+                        "WARNING",
+                    )
 
                 if timed_out:
                     break
