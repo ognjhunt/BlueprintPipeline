@@ -4658,13 +4658,31 @@ class GenieSimLocalFramework:
                         "WARNING",
                     )
 
+                # Force restart check — independent of inter-task delay setting.
+                # If the post-episode health probe (or stuck-thread handler) flagged
+                # the server as unresponsive, restart before the next task.
+                if task_idx > 0 and getattr(self, '_force_server_restart', False):
+                    self._force_server_restart = False
+                    self.log(
+                        "Forcing server restart before next task (server was unresponsive)",
+                        "WARNING",
+                    )
+                    if hasattr(self, "_client") and self._client is not None:
+                        self._client._grpc_lock = threading.Lock()
+                    _restarted = self._client._attempt_server_restart()
+                    if not _restarted:
+                        self.log("Docker restart failed; trying stop+start fallback", "WARNING")
+                        self.stop_server()
+                        if not self.start_server(scene_usd_path=scene_usd_path):
+                            result.errors.append("Forced server restart failed")
+                            return result
+                    self._reinit_robot_after_restart()
+                    time.sleep(2.0)  # brief settle
+
                 # Inter-task delay with health probe (skip for first task)
                 if task_idx > 0 and _inter_task_delay > 0:
                     # Proactive server restart to prevent resource exhaustion
-                    _force = getattr(self, '_force_server_restart', False)
-                    if _force:
-                        self._force_server_restart = False
-                    if _force or (_restart_every_n > 0 and task_idx % _restart_every_n == 0):
+                    if _restart_every_n > 0 and task_idx % _restart_every_n == 0:
                         self.log(
                             f"Proactive server restart before task {task_idx + 1} "
                             f"(every {_restart_every_n} tasks)"
@@ -5569,6 +5587,27 @@ class GenieSimLocalFramework:
                         f"{time.time() - _exec_wait_start:.1f}s",
                         "INFO",
                     )
+
+            # After execution thread finishes, verify server is still responsive.
+            # The server can become hung even when the thread joins successfully
+            # (e.g. stuck physics step, DEADLINE_EXCEEDED on all calls).
+            if hasattr(self, '_client') and self._client is not None:
+                try:
+                    _post_ep_probe = self._client.get_joint_position(lock_timeout=5.0)
+                    if not _post_ep_probe.available:
+                        self.log(
+                            "Post-episode health probe failed — server unresponsive, "
+                            "will force restart before next task",
+                            "WARNING",
+                        )
+                        self._force_server_restart = True
+                except Exception as _probe_err:
+                    self.log(
+                        f"Post-episode health probe exception: {_probe_err} — "
+                        "will force restart before next task",
+                        "WARNING",
+                    )
+                    self._force_server_restart = True
 
             # Preserve task_success even if post-execution steps fail (e.g. deadlock)
             if execution_state.get("success"):

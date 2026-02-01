@@ -62,10 +62,7 @@ def patch_file():
         "            print(f\"[PATCH] get_joint_positions exception: {exc}\")\n"
         "            self._articulation_needs_reinit = True\n"
         "            return {}\n"
-        "        if not isinstance(joint_positions, dict):\n"
-        "            print(f\"[PATCH] get_joint_positions non-dict: {type(joint_positions)}\")\n"
-        "            self._articulation_needs_reinit = True\n"
-        "            return {}"
+        "        # numpy array is the expected return type — do NOT check isinstance(dict)"
     )
     if old in content:
         content = content.replace(old, new, 1)
