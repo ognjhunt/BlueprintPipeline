@@ -1168,6 +1168,10 @@ class GenieSimGRPCClient:
                 # Reset circuit breaker
                 if hasattr(self._circuit_breaker, 'reset'):
                     self._circuit_breaker.reset()
+                # Flag that robot needs re-initialisation. The framework's
+                # episode loop checks this flag and calls
+                # _reinit_robot_after_restart() before the next episode.
+                self._needs_robot_reinit = True
                 return True
             except Exception:
                 continue
@@ -3903,6 +3907,86 @@ class GenieSimLocalFramework:
         )
 
     # =========================================================================
+    # Robot initialisation (reusable after server restarts)
+    # =========================================================================
+
+    def _init_robot_on_server(
+        self,
+        robot_cfg_file: str,
+        base_pose: Dict[str, Any],
+        scene_usd: str,
+    ) -> None:
+        """Send init_robot + gripper open + joint warmup to the Genie Sim server.
+
+        This is called during initial setup **and** after every server restart
+        so the server always has a loaded robot before we attempt episode
+        collection.
+        """
+        self.log(f"Initializing robot: cfg_file={robot_cfg_file}, scene_usd={scene_usd}")
+        init_result = self._client.init_robot(
+            robot_type=robot_cfg_file,
+            base_pose=base_pose,
+            scene_usd_path=scene_usd,
+        )
+        if not init_result.success:
+            self.log(
+                f"init_robot returned: success={init_result.success}, "
+                f"error={init_result.error}, available={init_result.available}",
+                "WARNING",
+            )
+            # Non-fatal: server may already have robot loaded via --scene arg
+        else:
+            self.log(f"Robot initialized: {init_result.payload}")
+
+        # Initialize server-side robot articulation by sending a gripper open
+        # command.  The server's CommandController only sets self.robot inside
+        # _set_gripper_state(), so we must trigger it before any recording.
+        grip_result = self._client.set_gripper_state(width=0.08)
+        if grip_result.success:
+            self.log("Server robot articulation initialized via gripper open")
+        else:
+            self.log(
+                f"Gripper init returned: {grip_result.error} (may be non-fatal)",
+                "WARNING",
+            )
+
+        # Warmup: query joint positions to populate real joint names from
+        # the server before any set_joint_position call.  Without this,
+        # _resolve_joint_names() falls back to synthetic "joint_0" names
+        # that don't match the G1 robot's actual joint names, causing
+        # KeyError on the server and indefinite hangs.
+        warmup_jp = self._client.get_joint_position()
+        if warmup_jp.success and self._client._joint_names:
+            self.log(f"Joint names populated: {len(self._client._joint_names)} joints")
+        else:
+            self.log(
+                "Joint name warmup failed — set_joint_position may use synthetic names",
+                "WARNING",
+            )
+
+    def _reinit_robot_after_restart(self) -> None:
+        """Re-run init_robot using the saved parameters from the initial setup.
+
+        Called after ``start_server()`` or ``_attempt_server_restart()`` so the
+        freshly-restarted server has the robot loaded before episode collection
+        continues.
+        """
+        params = getattr(self, "_robot_init_params", None)
+        if not params:
+            self.log(
+                "No saved robot init params — skipping post-restart init_robot "
+                "(robot may not be loaded on server)",
+                "WARNING",
+            )
+            return
+        self.log("Re-initializing robot on restarted server...")
+        self._init_robot_on_server(
+            robot_cfg_file=params["robot_cfg_file"],
+            base_pose=params["base_pose"],
+            scene_usd=params["scene_usd"],
+        )
+
+    # =========================================================================
     # Data Collection
     # =========================================================================
 
@@ -4043,7 +4127,6 @@ class GenieSimLocalFramework:
                 "position": {"x": base_pos[0], "y": base_pos[1], "z": base_pos[2]},
                 "orientation": {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
             }
-            self.log(f"Initializing robot: cfg_file={robot_cfg_file}, base_position={base_pos}")
             scene_usd = (
                 str(scene_usd_path) if scene_usd_path
                 else os.environ.get("GENIESIM_SCENE_USD_PATH", "scenes/empty_scene.usda")
@@ -4061,47 +4144,14 @@ class GenieSimLocalFramework:
                         f"Translating scene USD to container path: {container_path}"
                     )
                     scene_usd = container_path
-            self.log(f"Scene USD for init_robot: {scene_usd}")
-            init_result = self._client.init_robot(
-                robot_type=robot_cfg_file,
-                base_pose=base_pose,
-                scene_usd_path=scene_usd,
-            )
-            if not init_result.success:
-                self.log(
-                    f"init_robot returned: success={init_result.success}, "
-                    f"error={init_result.error}, available={init_result.available}",
-                    "WARNING",
-                )
-                # Non-fatal: server may already have robot loaded via --scene arg
-            else:
-                self.log(f"Robot initialized: {init_result.payload}")
 
-            # Initialize server-side robot articulation by sending a gripper open
-            # command.  The server's CommandController only sets self.robot inside
-            # _set_gripper_state(), so we must trigger it before any recording.
-            grip_result = self._client.set_gripper_state(width=0.08)
-            if grip_result.success:
-                self.log("Server robot articulation initialized via gripper open")
-            else:
-                self.log(
-                    f"Gripper init returned: {grip_result.error} (may be non-fatal)",
-                    "WARNING",
-                )
-
-            # Warmup: query joint positions to populate real joint names from
-            # the server before any set_joint_position call.  Without this,
-            # _resolve_joint_names() falls back to synthetic "joint_0" names
-            # that don't match the G1 robot's actual joint names, causing
-            # KeyError on the server and indefinite hangs.
-            warmup_jp = self._client.get_joint_position()
-            if warmup_jp.success and self._client._joint_names:
-                self.log(f"Joint names populated: {len(self._client._joint_names)} joints")
-            else:
-                self.log(
-                    "Joint name warmup failed — set_joint_position may use synthetic names",
-                    "WARNING",
-                )
+            # Store robot init params so we can re-init after server restarts.
+            self._robot_init_params = {
+                "robot_cfg_file": robot_cfg_file,
+                "base_pose": base_pose,
+                "scene_usd": scene_usd,
+            }
+            self._init_robot_on_server(robot_cfg_file, base_pose, scene_usd)
 
             # Map logical camera names to USD prim paths.
             # Priority: env var > robot config JSON > G1 defaults (legacy).
@@ -4368,14 +4418,8 @@ class GenieSimLocalFramework:
                             if not self.start_server(scene_usd_path=scene_usd_path):
                                 result.errors.append("Proactive server restart failed")
                                 return result
-                        # Re-initialize robot after fresh server start
-                        _reinit = self._client.init_robot(
-                            robot_type=robot_cfg_file,
-                            base_pose=base_pose,
-                            scene_usd_path=scene_usd,
-                        )
-                        if not _reinit.success:
-                            self.log(f"Re-init robot after restart: {_reinit.error}", "WARNING")
+                        # Full re-init: robot + gripper + joint warmup
+                        self._reinit_robot_after_restart()
                         time.sleep(_inter_task_delay)
                     else:
                         self.log(f"Inter-task delay: {_inter_task_delay}s before task {task_idx + 1}")
@@ -4412,6 +4456,12 @@ class GenieSimLocalFramework:
                         total = len(tasks) * episodes_target
                         progress_callback(current, total, f"Task: {task_name}, Episode: {ep_idx + 1}")
 
+                    # Check if circuit-breaker triggered a restart that needs
+                    # robot re-initialisation before we attempt the next episode.
+                    if getattr(self._client, "_needs_robot_reinit", False):
+                        self._client._needs_robot_reinit = False
+                        self._reinit_robot_after_restart()
+
                     try:
                         # Reset environment
                         reset_result = self._client.reset_environment()
@@ -4429,14 +4479,8 @@ class GenieSimLocalFramework:
                                     "Server restart failed after reset failure"
                                 )
                                 return result
-                            # Re-init robot on fresh server
-                            _reinit = self._client.init_robot(
-                                robot_type=robot_cfg_file,
-                                base_pose=base_pose,
-                                scene_usd_path=scene_usd,
-                            )
-                            if not _reinit.success:
-                                self.log(f"Re-init after reset recovery: {_reinit.error}", "WARNING")
+                            # Full re-init: robot + gripper + joint warmup
+                            self._reinit_robot_after_restart()
                             time.sleep(self.config.stall_backoff_s if self.config.stall_backoff_s > 0 else 5)
                             continue  # retry this episode with fresh server
 
@@ -4537,6 +4581,10 @@ class GenieSimLocalFramework:
                                             "Failed to restart Genie Sim server after stall."
                                         )
                                         return result
+                                    # Re-initialize robot on the freshly-restarted
+                                    # server so it's ready for the next episode.
+                                    self._reinit_robot_after_restart()
+                                    self._stall_count = 0
                                     if self.config.stall_backoff_s > 0:
                                         time.sleep(self.config.stall_backoff_s)
                             result.warnings.append(
