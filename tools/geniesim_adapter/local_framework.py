@@ -1237,6 +1237,24 @@ class GenieSimGRPCClient:
                 lock_timeout,
                 action,
             )
+            # Lightweight recovery: reset the lock, reconnect the channel, and
+            # flag a robot re-init for the next episode. Avoid recursive lock
+            # attempts by only touching transport state here.
+            try:
+                self._grpc_lock = threading.Lock()
+                if self._channel is not None:
+                    try:
+                        self._channel.close()
+                    except Exception:
+                        pass
+                self._channel = None
+                self._stub = None
+                self._joint_stub = None
+                if self._have_grpc:
+                    self.connect()
+                self._needs_robot_reinit = True
+            except Exception as exc:
+                logger.warning("Failed gRPC lock recovery after timeout: %s", exc)
             return fallback
         try:
             return self._call_grpc_inner(action, func, fallback, success_checker, abort_event)
