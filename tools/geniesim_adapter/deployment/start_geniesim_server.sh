@@ -15,6 +15,7 @@ GENIESIM_PORT=${GENIESIM_PORT:-50051}
 GENIESIM_HEADLESS=${GENIESIM_HEADLESS:-1}
 GENIESIM_SERVER_LOG=${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
 GENIESIM_MAX_SERVER_RESTARTS=${GENIESIM_MAX_SERVER_RESTARTS:-1}
+GENIESIM_PATCH_CHECK_STRICT=${GENIESIM_PATCH_CHECK_STRICT:-0}
 
 if [ ! -x "${ISAAC_SIM_PATH}/python.sh" ]; then
   echo "[geniesim] ERROR: Isaac Sim not found at ${ISAAC_SIM_PATH}." >&2
@@ -46,6 +47,34 @@ fi
 
 export PYTHONPATH="${REPO_ROOT}/tools/geniesim_adapter:${REPO_ROOT}:${PYTHONPATH:-}"
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+_missing_patches=()
+_check_patch_marker() {
+  local _file_path="$1"
+  local _marker="$2"
+
+  if ! rg --quiet --fixed-strings "${_marker}" "${_file_path}"; then
+    _missing_patches+=("${_marker} (${_file_path})")
+  fi
+}
+
+_check_patch_marker \
+  "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py" \
+  "BlueprintPipeline grpc_camera_info patch"
+_check_patch_marker \
+  "${GENIESIM_ROOT}/source/data_collection/server/command_controller.py" \
+  "BlueprintPipeline observation_cameras patch"
+
+if [ "${#_missing_patches[@]}" -gt 0 ]; then
+  echo "[geniesim] WARNING: Missing expected BlueprintPipeline patch markers:" >&2
+  for _missing in "${_missing_patches[@]}"; do
+    echo "[geniesim] WARNING:   - ${_missing}" >&2
+  done
+  if [ "${GENIESIM_PATCH_CHECK_STRICT}" = "1" ]; then
+    echo "[geniesim] ERROR: Patch marker verification failed; refusing to start." >&2
+    exit 1
+  fi
+fi
 
 _SERVER_ARGS=""
 [ "${GENIESIM_HEADLESS}" = "1" ] && _SERVER_ARGS="${_SERVER_ARGS} --headless"
