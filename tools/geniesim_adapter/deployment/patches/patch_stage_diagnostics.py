@@ -27,6 +27,16 @@ DIAGNOSTICS_CODE = textwrap.dedent("""\
     def _bp_log_stage_contents(self):
         \"\"\"Log all prims in the USD stage for debugging object pose issues.\"\"\"
         try:
+            import time
+            now = time.time()
+            last_ts = getattr(self, "_bp_stage_diag_last_ts", 0.0)
+            if now - last_ts < 60.0:
+                print("[DIAG] Stage diagnostics rate-limited; skipping repeated dump")
+                return
+            if getattr(self, "_bp_stage_diag_done", False):
+                print("[DIAG] Stage diagnostics already logged; skipping")
+                return
+            self._bp_stage_diag_last_ts = now
             import omni.usd
             stage = omni.usd.get_context().get_stage()
             if stage is None:
@@ -54,6 +64,7 @@ DIAGNOSTICS_CODE = textwrap.dedent("""\
             print(f"[DIAG] Top-level Xforms ({len(xform_prims)}): {xform_prims}")
             if mesh_prims:
                 print(f"[DIAG] Top-level Meshes ({len(mesh_prims)}): {mesh_prims[:20]}")
+            self._bp_stage_diag_done = True
         except Exception as e:
             print(f"[DIAG] Stage diagnostics failed: {e}")
     # --- END BlueprintPipeline stage diagnostics patch ---
