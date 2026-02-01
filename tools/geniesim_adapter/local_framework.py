@@ -1186,8 +1186,24 @@ class GenieSimGRPCClient:
         fallback: Any,
         success_checker: Optional[Callable[[Any], bool]] = None,
     ) -> Any:
-        with self._grpc_lock:
+        # Use timeout-based lock acquisition to prevent deadlock when a long-
+        # running gRPC call (e.g. 600s first trajectory) holds the lock and
+        # another thread or the main thread needs to make a call (e.g. health
+        # probe between tasks).  Default lock timeout = gRPC timeout + 10s.
+        lock_timeout = self.timeout + 10.0
+        acquired = self._grpc_lock.acquire(timeout=lock_timeout)
+        if not acquired:
+            logger.warning(
+                "Genie Sim gRPC lock not acquired after %.1fs for %s; "
+                "returning fallback (previous call may still be in-flight)",
+                lock_timeout,
+                action,
+            )
+            return fallback
+        try:
             return self._call_grpc_inner(action, func, fallback, success_checker)
+        finally:
+            self._grpc_lock.release()
 
     def _call_grpc_inner(
         self,
@@ -4984,6 +5000,30 @@ class GenieSimLocalFramework:
                             f"tolerance={end_time_tolerance_s:.2f}s.",
                             "WARNING",
                         )
+
+            # Ensure execution thread has fully terminated before returning,
+            # otherwise it holds _grpc_lock and blocks subsequent gRPC calls
+            # (health probes, reset, next task init).
+            if execution_thread.is_alive():
+                _exec_wait_start = time.time()
+                self.log(
+                    "Waiting for execution thread to finish (holds gRPC lock)...",
+                    "INFO",
+                )
+                execution_thread.join(timeout=30.0)
+                if execution_thread.is_alive():
+                    self.log(
+                        f"Execution thread still alive after "
+                        f"{time.time() - _exec_wait_start:.1f}s — proceeding anyway "
+                        "(gRPC calls may block until in-flight call completes)",
+                        "WARNING",
+                    )
+                else:
+                    self.log(
+                        f"Execution thread finished after "
+                        f"{time.time() - _exec_wait_start:.1f}s",
+                        "INFO",
+                    )
 
             if execution_state.get("error"):
                 result["error"] = execution_state["error"]
