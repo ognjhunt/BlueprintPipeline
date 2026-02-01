@@ -136,6 +136,17 @@ RUN chmod +x /tmp/download_robot_assets.sh \
 # Mark that this is a pre-baked image (used by bootstrap fast-path)
 RUN touch /opt/.geniesim-prebaked
 
+# Ensure torch packaging symlinks are replaced with real files.
+# The earlier conditional fix may not trigger during build (symlink target
+# can exist at build time but be absent at runtime). Force-copy here after
+# all cached layers so rebuilds are cheap.
+RUN TORCH_PKG="${ISAAC_SIM_PATH}/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging" \
+    && REAL_PKG="${ISAAC_SIM_PATH}/kit/python/lib/python3.11/site-packages/packaging" \
+    && for f in _structures.py _manylinux.py _musllinux.py; do \
+         rm -f "${TORCH_PKG}/${f}" 2>/dev/null || true; \
+         cp "${REAL_PKG}/${f}" "${TORCH_PKG}/${f}" 2>/dev/null || true; \
+       done
+
 WORKDIR /workspace/BlueprintPipeline
 
 COPY tools/ /workspace/BlueprintPipeline/tools/
