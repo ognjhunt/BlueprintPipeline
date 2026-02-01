@@ -161,5 +161,46 @@ def patch_file():
     print(f"[PATCH] Successfully patched {COMMAND_CONTROLLER} ({changes} fixes)")
 
 
+def patch_grpc_server():
+    """Patch grpc_server.py to handle missing camera_info in get_camera_data."""
+    grpc_server = os.path.join(
+        GENIESIM_ROOT,
+        "source", "data_collection", "server", "grpc_server.py",
+    )
+    if not os.path.isfile(grpc_server):
+        print(f"[PATCH] grpc_server.py not found at {grpc_server}")
+        return
+
+    with open(grpc_server, "r") as f:
+        content = f.read()
+
+    grpc_marker = "BlueprintPipeline grpc_camera_info patch"
+    if grpc_marker in content:
+        print("[PATCH] grpc_server.py camera_info already patched — skipping")
+        return
+
+    # Replace bare camera_info = current_camera["camera_info"] with safe access
+    old = '        camera_info = current_camera["camera_info"]'
+    new = (
+        '        # ' + grpc_marker + '\n'
+        '        _default_ci = {"width": 1280, "height": 720, "ppx": 640.0, "ppy": 360.0, "fx": 1280.0, "fy": 720.0}\n'
+        '        if isinstance(current_camera, dict):\n'
+        '            camera_info = current_camera.get("camera_info", _default_ci)\n'
+        '            if not isinstance(camera_info, dict):\n'
+        '                camera_info = _default_ci\n'
+        '        else:\n'
+        '            camera_info = _default_ci'
+    )
+
+    if old in content:
+        content = content.replace(old, new, 1)
+        with open(grpc_server, "w") as f:
+            f.write(content)
+        print("[PATCH] Patched grpc_server.py get_camera_data camera_info access")
+    else:
+        print("[PATCH] Could not find camera_info pattern in grpc_server.py")
+
+
 if __name__ == "__main__":
     patch_file()
+    patch_grpc_server()
