@@ -2077,49 +2077,15 @@ class GenieSimGRPCClient:
         object_prims = getattr(self, "_scene_object_prims", [])
         if object_prims and self._channel is not None:
             for prim_path in object_prims:
-                # Check resolved prim cache first
-                if not hasattr(self, "_resolved_prim_cache"):
-                    self._resolved_prim_cache: Dict[str, str] = {}
-                if prim_path in self._resolved_prim_cache:
-                    _candidates = [self._resolved_prim_cache[prim_path]]
-                else:
-                    # The Genie Sim server loads scene objects under
-                    # /World/Scene/obj_{name}, so try that FIRST.
-                    _bare_name = prim_path.rsplit("/", 1)[-1] if "/" in prim_path else prim_path
-                    _candidates = [
-                        f"/World/Scene/obj_{_bare_name}",
-                        f"/World/Scene/{_bare_name}",
-                        prim_path,
-                    ]
-                    if not prim_path.startswith("/World/"):
-                        _candidates.append(f"/World/{prim_path}")
-                    if prim_path.startswith("/World/"):
-                        _bare = prim_path[len("/World/"):]
-                        _candidates.append(f"/{_bare}")
-                        _candidates.append(f"/Root/{_bare}")
-                    if not prim_path.startswith("/"):
-                        _candidates.append(f"/{prim_path}")
-                _found = False
-                for _candidate in _candidates:
-                    if self._abort_event is not None and self._abort_event.is_set():
-                        break
-                    try:
-                        obj_pose = self._get_object_pose_raw(_candidate)
-                        if obj_pose is not None:
-                            scene_objects.append({
-                                "object_id": prim_path,
-                                "pose": obj_pose,
-                            })
-                            _found = True
-                            # Cache successful resolution
-                            if _candidate != prim_path:
-                                self._resolved_prim_cache[prim_path] = _candidate
-                            logger.info(f"[OBS] Got real object pose for {_candidate}: {obj_pose}")
-                            break
-                    except Exception as exc:
-                        logger.debug(f"[OBS] get_object_pose({_candidate}) failed: {exc}")
-                if not _found:
-                    logger.warning(f"[OBS] No object pose for any variant of {prim_path} (tried: {_candidates})")
+                resolved = self._resolve_object_prim(prim_path)
+                if resolved is None:
+                    continue
+                resolved_path, obj_pose = resolved
+                scene_objects.append({
+                    "object_id": prim_path,
+                    "pose": obj_pose,
+                })
+                logger.info(f"[OBS] Got real object pose for {resolved_path}: {obj_pose}")
 
         # --- 4. Camera images ---
         # Requires patched server (see deployment/patches/patch_camera_handler.py).
@@ -2195,7 +2161,58 @@ class GenieSimGRPCClient:
             payload=result,
         )
 
-    def _get_object_pose_raw(self, prim_path: str) -> Optional[Dict[str, Any]]:
+    def _resolve_object_prim_candidates(self, prim_path: str) -> List[str]:
+        """Return candidate prim paths for resolving an object pose."""
+        if not hasattr(self, "_resolved_prim_cache"):
+            self._resolved_prim_cache: Dict[str, str] = {}
+        if prim_path in self._resolved_prim_cache:
+            return [self._resolved_prim_cache[prim_path]]
+
+        # The Genie Sim server loads scene objects under /World/Scene/obj_{name}, so try that FIRST.
+        _bare_name = prim_path.rsplit("/", 1)[-1] if "/" in prim_path else prim_path
+        candidates = [
+            f"/World/Scene/obj_{_bare_name}",
+            f"/World/Scene/{_bare_name}",
+            prim_path,
+        ]
+        if not prim_path.startswith("/World/"):
+            candidates.append(f"/World/{prim_path}")
+        if prim_path.startswith("/World/"):
+            _bare = prim_path[len("/World/"):]
+            candidates.append(f"/{_bare}")
+            candidates.append(f"/Root/{_bare}")
+        if not prim_path.startswith("/"):
+            candidates.append(f"/{prim_path}")
+
+        return list(dict.fromkeys(candidates))
+
+    def _resolve_object_prim(
+        self,
+        prim_path: str,
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Resolve an object prim path to a valid pose."""
+        candidates = self._resolve_object_prim_candidates(prim_path)
+        zero_pose_seen = False
+        for candidate in candidates:
+            if self._abort_event is not None and self._abort_event.is_set():
+                break
+            try:
+                obj_pose, zero_pose = self._get_object_pose_raw(candidate)
+                zero_pose_seen = zero_pose_seen or zero_pose
+                if obj_pose is not None:
+                    if candidate != prim_path:
+                        self._resolved_prim_cache[prim_path] = candidate
+                    return candidate, obj_pose
+            except Exception as exc:
+                logger.debug(f"[OBS] get_object_pose({candidate}) failed: {exc}")
+        if not zero_pose_seen:
+            logger.warning(
+                f"[OBS] Unable to resolve object prim for {prim_path} "
+                f"(tried: {candidates})"
+            )
+        return None
+
+    def _get_object_pose_raw(self, prim_path: str) -> Tuple[Optional[Dict[str, Any]], bool]:
         """Get object pose via SimObjectService.get_object_pose (raw gRPC)."""
         import struct as _struct
         # Build GetObjectPoseReq: field 1 (prim_path, string)
@@ -2219,7 +2236,8 @@ class GenieSimGRPCClient:
                     f"[OBS] get_object_pose({prim_path}): server returned response "
                     f"({len(raw_response)} bytes) but no pose field — prim may not exist in server stage"
                 )
-            elif (
+                return None, False
+            if (
                 pose.get("position", {}).get("x", 0) == 0
                 and pose.get("position", {}).get("y", 0) == 0
                 and pose.get("position", {}).get("z", 0) == 0
@@ -2228,11 +2246,11 @@ class GenieSimGRPCClient:
                     f"[OBS] get_object_pose({prim_path}): returned identity/zero pose — "
                     f"object may not be loaded in simulation (returning None)"
                 )
-                return None
-            return pose
+                return None, True
+            return pose, False
         except Exception as exc:
             logger.warning(f"[OBS] raw get_object_pose({prim_path}) failed: {exc}")
-            return None
+            return None, False
 
     def _get_camera_data_raw(self, cam_prim_path: str) -> Optional[Dict[str, Any]]:
         """Get camera data via CameraService.get_camera_data (raw gRPC)."""
@@ -2791,13 +2809,14 @@ class GenieSimGRPCClient:
                 "get_object_pose",
                 "gRPC channel not initialized",
             )
-        pose = self._get_object_pose_raw(object_id)
-        if pose is None:
+        resolved = self._resolve_object_prim(object_id)
+        if resolved is None:
             return GrpcCallResult(
                 success=False,
                 available=True,
                 error=f"Object pose not available for {object_id}",
             )
+        _, pose = resolved
         return GrpcCallResult(
             success=True,
             available=True,
