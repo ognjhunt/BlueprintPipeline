@@ -18,6 +18,7 @@ Usage:
 Idempotent.
 """
 import os
+import re
 import sys
 
 GENIESIM_ROOT = os.environ.get("GENIESIM_ROOT", "/opt/geniesim")
@@ -41,35 +42,56 @@ def patch_file():
         print("[PATCH] data_collector_server.py autoplay already applied — skipping")
         sys.exit(0)
 
-    # Replace the paused check that just logs with one that auto-plays
-    old = (
-        '    if not ui_builder.my_world.is_playing():\n'
-        '        if step % 100 == 0:\n'
-        '            logger.info("**** simulation paused ****")\n'
-        '        step += 1\n'
-        '        continue'
-    )
-    new = (
-        f'    if not ui_builder.my_world.is_playing():  # {PATCH_MARKER}\n'
-        '        if step % 100 == 0:\n'
-        '            logger.info("**** simulation paused — auto-playing ****")\n'
-        '        try:\n'
-        '            ui_builder.my_world.play()\n'
-        '        except Exception as _play_err:\n'
-        '            if step % 100 == 0:\n'
-        '                logger.warning(f"**** auto-play failed: {_play_err} ****")\n'
-        '        step += 1\n'
-        '        continue'
+    paused_loop_pattern = re.compile(
+        r"(?P<indent>^[ \t]*)if not .*?is_playing\(\):\n"
+        r"(?P<body>(?:^[ \t]+.*\n)*?)"
+        r"(?P=indent)continue",
+        re.MULTILINE,
     )
 
-    if old in content:
-        content = content.replace(old, new, 1)
-        with open(SERVER_SCRIPT, "w") as f:
-            f.write(content)
-        print("[PATCH] Added auto-play to data_collector_server.py main loop")
-    else:
+    paused_match = paused_loop_pattern.search(content)
+    if not paused_match:
         print("[PATCH] Could not find paused check pattern in data_collector_server.py")
-        sys.exit(0)
+        sys.exit(1)
+
+    indent = paused_match.group("indent")
+    new = (
+        f'{indent}if not ui_builder.my_world.is_playing():  # {PATCH_MARKER}\n'
+        f'{indent}    if step % 100 == 0:\n'
+        f'{indent}        logger.info("**** simulation paused — auto-playing ****")\n'
+        f'{indent}    try:\n'
+        f'{indent}        ui_builder.my_world.play()\n'
+        f'{indent}    except Exception as _play_err:\n'
+        f'{indent}        if step % 100 == 0:\n'
+        f'{indent}            logger.warning(f"**** auto-play failed: {{_play_err}} ****")\n'
+        f'{indent}    step += 1\n'
+        f'{indent}    continue'
+    )
+
+    content, replace_count = paused_loop_pattern.subn(new, content, count=1)
+    if replace_count != 1:
+        print("[PATCH] Failed to replace paused check pattern in data_collector_server.py")
+        sys.exit(1)
+
+    startup_pattern = re.compile(r"^(?P<indent>[ \t]*)while\s+True\s*:\n", re.MULTILINE)
+    startup_match = startup_pattern.search(content)
+    if startup_match:
+        startup_indent = startup_match.group("indent")
+        startup_block = (
+            f'{startup_indent}if not ui_builder.my_world.is_playing():  # {PATCH_MARKER} startup\n'
+            f'{startup_indent}    try:\n'
+            f'{startup_indent}        ui_builder.my_world.play()\n'
+            f'{startup_indent}    except Exception as _play_err:\n'
+            f'{startup_indent}        logger.warning(f"**** startup auto-play failed: {{_play_err}} ****")\n'
+        )
+        content = startup_pattern.sub(startup_block + r"\g<0>", content, count=1)
+
+    if PATCH_MARKER not in content:
+        raise RuntimeError("[PATCH] Patch marker missing after update; aborting.")
+
+    with open(SERVER_SCRIPT, "w") as f:
+        f.write(content)
+    print("[PATCH] Added auto-play to data_collector_server.py main loop")
 
 
 if __name__ == "__main__":
