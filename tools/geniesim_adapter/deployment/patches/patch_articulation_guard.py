@@ -39,7 +39,8 @@ def patch_file():
 
     changes = 0
 
-    # Guard _get_joint_positions: return empty dict if articulation is None
+    # Guard _get_joint_positions: return structured error if articulation is None,
+    # and catch exceptions from get_joint_positions.
     old = (
         "    def _get_joint_positions(self):\n"
         "        self._initialize_articulation()\n"
@@ -53,8 +54,18 @@ def patch_file():
         "        articulation = self.ui_builder.articulation\n"
         "        if articulation is None:\n"
         "            print('[PATCH] articulation is None — returning empty joint positions')\n"
+        "            self._articulation_needs_reinit = True\n"
         "            return {}\n"
-        "        joint_positions = articulation.get_joint_positions()"
+        "        try:\n"
+        "            joint_positions = articulation.get_joint_positions()\n"
+        "        except Exception as exc:\n"
+        "            print(f\"[PATCH] get_joint_positions exception: {exc}\")\n"
+        "            self._articulation_needs_reinit = True\n"
+        "            return {\"error\": f\"get_joint_positions exception: {exc}\"}\n"
+        "        if not isinstance(joint_positions, dict):\n"
+        "            print(f\"[PATCH] get_joint_positions non-dict: {type(joint_positions)}\")\n"
+        "            self._articulation_needs_reinit = True\n"
+        "            return {\"error\": \"get_joint_positions returned non-dict\"}"
     )
     if old in content:
         content = content.replace(old, new, 1)

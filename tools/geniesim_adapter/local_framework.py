@@ -3980,6 +3980,31 @@ class GenieSimLocalFramework:
     # Robot initialisation (reusable after server restarts)
     # =========================================================================
 
+    def _expected_joint_count_for_robot(self, robot_cfg_file: str) -> Optional[int]:
+        if not robot_cfg_file:
+            return None
+        if "g1" in robot_cfg_file.lower():
+            return 34
+        return None
+
+    def _validate_joint_payload(
+        self,
+        jp_result: Optional["GrpcCallResult"],
+        expected_count: Optional[int],
+    ) -> Tuple[bool, str, int]:
+        if jp_result is None:
+            return False, "joint position result missing", 0
+        payload = jp_result.payload
+        if isinstance(payload, dict):
+            _err = payload.get("error") or payload.get("msg") or "joint_positions returned dict"
+            return False, f"non-list joint payload: {_err}", 0
+        if not isinstance(payload, (list, tuple)):
+            return False, f"non-list joint payload: {type(payload)}", 0
+        count = len(payload)
+        if expected_count is not None and count < expected_count:
+            return False, f"expected {expected_count} joints, got {count}", count
+        return True, "", count
+
     def _init_robot_on_server(
         self,
         robot_cfg_file: str,
@@ -3993,99 +4018,136 @@ class GenieSimLocalFramework:
         collection.
         """
         self.log(f"Initializing robot: cfg_file={robot_cfg_file}, scene_usd={scene_usd}")
-        # Verify gRPC channel is connected before attempting init_robot.
-        if not self._client.connect():
-            self.log("gRPC channel not ready before init_robot — will retry in loop", "WARNING")
-        # After docker restart, the server needs time to fully load before
-        # init_robot will succeed. Retry with exponential backoff.
-        _max_init_attempts = 5
-        _init_backoff = 5.0  # start at 5s, multiply by 1.5 up to 60s
-        init_result = None
-        for _init_attempt in range(1, _max_init_attempts + 1):
-            init_result = self._client.init_robot(
-                robot_type=robot_cfg_file,
-                base_pose=base_pose,
-                scene_usd_path=scene_usd,
-            )
-            if init_result.success:
-                self.log(f"Robot initialized (attempt {_init_attempt}): {init_result.payload}")
-                break
-            self.log(
-                f"init_robot attempt {_init_attempt}/{_max_init_attempts} failed: "
-                f"{init_result.error} — retrying in {_init_backoff:.0f}s",
-                "WARNING",
-            )
-            if _init_attempt < _max_init_attempts:
-                time.sleep(_init_backoff)
-                _init_backoff = min(_init_backoff * 1.5, 60.0)
-        if init_result is None or not init_result.success:
-            self.log(
-                f"init_robot returned: success={getattr(init_result, 'success', None)}, "
-                f"error={getattr(init_result, 'error', None)}, "
-                f"available={getattr(init_result, 'available', None)}",
-                "WARNING",
-            )
-            # Non-fatal: server may already have robot loaded via --scene arg
+        expected_joint_count = self._expected_joint_count_for_robot(robot_cfg_file)
 
-        # Initialize server-side robot articulation by sending a gripper open
-        # command.  The server's CommandController only sets self.robot inside
-        # _set_gripper_state(), so we must trigger it before any recording.
-        grip_result = self._client.set_gripper_state(width=0.08)
-        if grip_result.success:
-            self.log("Server robot articulation initialized via gripper open")
-        else:
-            self.log(
-                f"Gripper init returned: {grip_result.error} (may be non-fatal)",
-                "WARNING",
-            )
-
-        # Warmup: query joint positions to populate real joint names from
-        # the server before any set_joint_position call.  Without this,
-        # _resolve_joint_names() falls back to synthetic "joint_0" names
-        # that don't match the G1 robot's actual joint names, causing
-        # KeyError on the server and indefinite hangs.
-        warmup_jp = self._client.get_joint_position()
-        if warmup_jp.success and self._client._joint_names:
-            self.log(f"Joint names populated: {len(self._client._joint_names)} joints")
-        else:
-            self.log(
-                "Joint name warmup failed — set_joint_position may use synthetic names",
-                "WARNING",
-            )
-
-        # Wait for the server's articulation to be fully initialized.
-        # After init_robot, the server asynchronously initializes the robot
-        # articulation. If we send trajectory commands before it's ready,
-        # the server returns empty data or crashes. Poll get_joint_position
-        # until we get valid joint data.
-        import time as _warmup_time
-        _max_warmup_s = 30
-        _warmup_start = _warmup_time.time()
-        _warmup_ok = False
-        self.log("Waiting for server articulation to be ready...")
-        while _warmup_time.time() - _warmup_start < _max_warmup_s:
-            try:
-                _jp_result = self._client.get_joint_position()
-                if (
-                    _jp_result is not None
-                    and _jp_result.success
-                    and _jp_result.payload
-                    and len(_jp_result.payload) > 0
-                ):
-                    self.log(
-                        f"Articulation ready: {len(_jp_result.payload)} joints "
-                        f"({_warmup_time.time() - _warmup_start:.1f}s)"
-                    )
-                    _warmup_ok = True
+        def _run_init_sequence(sequence_label: str) -> None:
+            self.log(f"Running init sequence ({sequence_label})")
+            # Verify gRPC channel is connected before attempting init_robot.
+            if not self._client.connect():
+                self.log("gRPC channel not ready before init_robot — will retry in loop", "WARNING")
+            # After docker restart, the server needs time to fully load before
+            # init_robot will succeed. Retry with exponential backoff.
+            _max_init_attempts = 5
+            _init_backoff = 5.0  # start at 5s, multiply by 1.5 up to 60s
+            init_result = None
+            for _init_attempt in range(1, _max_init_attempts + 1):
+                init_result = self._client.init_robot(
+                    robot_type=robot_cfg_file,
+                    base_pose=base_pose,
+                    scene_usd_path=scene_usd,
+                )
+                if init_result.success:
+                    self.log(f"Robot initialized (attempt {_init_attempt}): {init_result.payload}")
                     break
-            except Exception:
-                pass
-            _warmup_time.sleep(2)
-        if not _warmup_ok:
+                self.log(
+                    f"init_robot attempt {_init_attempt}/{_max_init_attempts} failed: "
+                    f"{init_result.error} — retrying in {_init_backoff:.0f}s",
+                    "WARNING",
+                )
+                if _init_attempt < _max_init_attempts:
+                    time.sleep(_init_backoff)
+                    _init_backoff = min(_init_backoff * 1.5, 60.0)
+            if init_result is None or not init_result.success:
+                self.log(
+                    f"init_robot returned: success={getattr(init_result, 'success', None)}, "
+                    f"error={getattr(init_result, 'error', None)}, "
+                    f"available={getattr(init_result, 'available', None)}",
+                    "WARNING",
+                )
+                # Non-fatal: server may already have robot loaded via --scene arg
+
+            # Initialize server-side robot articulation by sending a gripper open
+            # command.  The server's CommandController only sets self.robot inside
+            # _set_gripper_state(), so we must trigger it before any recording.
+            grip_result = self._client.set_gripper_state(width=0.08)
+            if grip_result.success:
+                self.log("Server robot articulation initialized via gripper open")
+            else:
+                self.log(
+                    f"Gripper init returned: {grip_result.error} (may be non-fatal)",
+                    "WARNING",
+                )
+
+            # Warmup: query joint positions to populate real joint names from
+            # the server before any set_joint_position call.  Without this,
+            # _resolve_joint_names() falls back to synthetic "joint_0" names
+            # that don't match the G1 robot's actual joint names, causing
+            # KeyError on the server and indefinite hangs.
+            warmup_jp = self._client.get_joint_position()
+            if warmup_jp.success and self._client._joint_names:
+                self.log(f"Joint names populated: {len(self._client._joint_names)} joints")
+            else:
+                self.log(
+                    "Joint name warmup failed — set_joint_position may use synthetic names",
+                    "WARNING",
+                )
+
+            # Wait for the server's articulation to be fully initialized.
+            # After init_robot, the server asynchronously initializes the robot
+            # articulation. If we send trajectory commands before it's ready,
+            # the server returns empty data or crashes. Poll get_joint_position
+            # until we get valid joint data.
+            import time as _warmup_time
+            _max_warmup_s = 30
+            _warmup_start = _warmup_time.time()
+            _warmup_ok = False
+            self.log("Waiting for server articulation to be ready...")
+            while _warmup_time.time() - _warmup_start < _max_warmup_s:
+                try:
+                    _jp_result = self._client.get_joint_position()
+                    if (
+                        _jp_result is not None
+                        and _jp_result.success
+                        and _jp_result.payload
+                        and len(_jp_result.payload) > 0
+                    ):
+                        self.log(
+                            f"Articulation ready: {len(_jp_result.payload)} joints "
+                            f"({_warmup_time.time() - _warmup_start:.1f}s)"
+                        )
+                        _warmup_ok = True
+                        break
+                except Exception:
+                    pass
+                _warmup_time.sleep(2)
+            if not _warmup_ok:
+                self.log(
+                    f"Articulation not ready after {_max_warmup_s}s — proceeding anyway (may fail)",
+                    "WARNING",
+                )
+
+        def _joint_health_ok(context_label: str) -> bool:
+            jp_result = self._client.get_joint_position(lock_timeout=5.0)
+            ok, error_message, count = self._validate_joint_payload(jp_result, expected_joint_count)
+            if ok:
+                self.log(
+                    f"{context_label}: joint health OK ({count} joints)",
+                )
+                return True
             self.log(
-                f"Articulation not ready after {_max_warmup_s}s — proceeding anyway (may fail)",
+                f"{context_label}: joint health check failed — {error_message}",
                 "WARNING",
             )
+            return False
+
+        _run_init_sequence("initial")
+        if _joint_health_ok("Post-init check"):
+            return
+
+        self.log("Retrying init_robot + gripper + warmup due to joint health failure", "WARNING")
+        _run_init_sequence("retry")
+        if _joint_health_ok("Post-retry check"):
+            return
+
+        self.log(
+            "Joint health still failing after retry — attempting server restart",
+            "WARNING",
+        )
+        if hasattr(self._client, "_attempt_server_restart") and self._client._attempt_server_restart():
+            _run_init_sequence("post-restart")
+            _joint_health_ok("Post-restart check")
+        else:
+            self.log("Server restart attempt not available or failed", "WARNING")
 
     def _reinit_robot_after_restart(self) -> None:
         """Re-run init_robot using the saved parameters from the initial setup.
@@ -4108,6 +4170,24 @@ class GenieSimLocalFramework:
             base_pose=params["base_pose"],
             scene_usd=params["scene_usd"],
         )
+        self._post_restart_check_pending = True
+
+    def _post_restart_articulation_health_check(self) -> None:
+        """Log articulation diagnostics after a server restart and re-init."""
+        params = getattr(self, "_robot_init_params", None)
+        if not params:
+            self.log("Post-restart health check skipped — no robot init params", "WARNING")
+            return
+        expected_joint_count = self._expected_joint_count_for_robot(params.get("robot_cfg_file", ""))
+        jp_result = self._client.get_joint_position(lock_timeout=5.0)
+        ok, error_message, count = self._validate_joint_payload(jp_result, expected_joint_count)
+        if ok:
+            self.log(f"Post-restart articulation health OK ({count} joints)")
+        else:
+            self.log(
+                f"Post-restart articulation health check failed — {error_message}",
+                "WARNING",
+            )
 
     # =========================================================================
     # Data Collection
@@ -4607,6 +4687,10 @@ class GenieSimLocalFramework:
                 self._stall_count = 0
                 _stall_window_size = 5
                 _stall_window: list = []  # recent episode outcomes: True=stall, False=ok
+
+                if getattr(self, "_post_restart_check_pending", False):
+                    self._post_restart_check_pending = False
+                    self._post_restart_articulation_health_check()
 
                 # Configure environment for task
                 self._configure_task(task, scene_config)

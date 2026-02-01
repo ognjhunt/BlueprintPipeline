@@ -208,7 +208,9 @@ def patch_file():
         old_get_jp = "        for joint_name in joint_positions:"
         new_get_jp = (
             "        if not isinstance(joint_positions, dict):\n"
-            "            print(f'[PATCH] get_joint_position got non-dict: {type(joint_positions)}')\n"
+            "            _jp_type = type(joint_positions)\n"
+            "            print(f'[PATCH] get_joint_position got non-dict: {_jp_type}')\n"
+            "            rsp.msg = f\"joint_positions non-dict ({_jp_type})\"\n"
             "            return rsp\n"
             "        for joint_name in joint_positions:"
         )
