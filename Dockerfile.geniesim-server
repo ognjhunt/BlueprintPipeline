@@ -108,6 +108,7 @@ RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/_apply_safe_float.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_xforms_safe_rotation.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_articulation_guard.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_autoplay.py \
     && rm -rf /tmp/patches
 
 # ----- Bake ROS 2 environment for rclpy -----

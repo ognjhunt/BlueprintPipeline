@@ -40,7 +40,8 @@ if [ -d "${PATCHES_DIR}" ]; then
     "${PATCHES_DIR}/patch_grpc_server.py" \
     "${PATCHES_DIR}/_apply_safe_float.py" \
     "${PATCHES_DIR}/patch_xforms_safe_rotation.py" \
-    "${PATCHES_DIR}/patch_articulation_guard.py"; do
+    "${PATCHES_DIR}/patch_articulation_guard.py" \
+    "${PATCHES_DIR}/patch_autoplay.py"; do
     if [ -f "${patch_script}" ]; then
       "${ISAAC_SIM_PATH}/python.sh" "${patch_script}" || echo "[geniesim] WARNING: ${patch_script} failed (non-fatal)"
     fi
