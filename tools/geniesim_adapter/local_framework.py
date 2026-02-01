@@ -1149,6 +1149,12 @@ class GenieSimGRPCClient:
         self._restart_count += 1
         self._last_restart_time = _time.time()
 
+        # Reset client-side concurrency state so we don't reuse a stale lock or
+        # in-flight flags from the pre-restart connection.
+        self._grpc_lock = threading.Lock()
+        self._grpc_unavailable_logged.clear()
+        self._abort_event = None
+
         # Poll for gRPC readiness (up to 90s)
         logger.info("[RESTART] Waiting for gRPC to become available...")
         for _attempt in range(18):  # 18 * 5s = 90s
@@ -1234,6 +1240,9 @@ class GenieSimGRPCClient:
             return fallback
         try:
             return self._call_grpc_inner(action, func, fallback, success_checker, abort_event)
+        except Exception as exc:
+            logger.error("Genie Sim gRPC %s failed before completion: %s", action, exc)
+            return fallback
         finally:
             self._grpc_lock.release()
 
@@ -4516,6 +4525,8 @@ class GenieSimLocalFramework:
                             f"Proactive server restart before task {task_idx + 1} "
                             f"(every {_restart_every_n} tasks)"
                         )
+                        if hasattr(self, "_client") and self._client is not None:
+                            self._client._grpc_lock = threading.Lock()
                         _restarted = self._client._attempt_server_restart()
                         if not _restarted:
                             self.log("Docker restart failed; trying stop+start fallback", "WARNING")
