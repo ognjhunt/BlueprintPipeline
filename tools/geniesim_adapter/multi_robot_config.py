@@ -19,9 +19,12 @@ from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional
 import json
 import logging
+import os
 from pathlib import Path
 
 ROBOT_ASSETS_DIR = Path(__file__).resolve().parent / "robot_assets"
+# Pre-baked Isaac Sim robot USDs (set via Dockerfile / docker-compose).
+_SIM_ASSETS_ROBOTS = Path(os.environ.get("SIM_ASSETS_ROBOTS", "/sim-assets/robots"))
 GENIESIM_ROBOT_CATALOG_PATH = Path(__file__).resolve().parent / "geniesim_robot_catalog.json"
 
 _GENIESIM_ROBOT_CATALOG_CACHE: Optional[Dict[str, Any]] = None
@@ -467,9 +470,17 @@ def get_robot_spec(robot_type: str | RobotType) -> RobotSpec:
 
 
 def resolve_robot_asset_path(asset_path: Optional[str]) -> Optional[Path]:
-    """Resolve a robot asset path relative to the robot asset root."""
+    """Resolve a robot asset path relative to the robot asset root.
+
+    Checks the pre-baked Isaac Sim assets directory (``SIM_ASSETS_ROBOTS``)
+    first, then falls back to the local ``robot_assets/`` directory.
+    """
     if not asset_path:
         return None
+    # Prefer pre-baked assets from the Docker image.
+    prebaked = (_SIM_ASSETS_ROBOTS / asset_path).resolve()
+    if prebaked.exists():
+        return prebaked
     return (ROBOT_ASSETS_DIR / asset_path).resolve()
 
 

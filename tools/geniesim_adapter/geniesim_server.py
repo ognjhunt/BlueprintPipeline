@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -193,6 +194,9 @@ class GenieSimLocalServicer(SimObservationServiceServicer):
 
     def init_robot(self, req: InitRobotReq, context) -> InitRobotRsp:
         del req
+        delay = float(os.getenv("GENIESIM_MOCK_INIT_DELAY_S", "1.0"))
+        if delay > 0:
+            time.sleep(delay)
         return InitRobotRsp(msg="initialized")
 
     def add_camera(self, req: AddCameraReq, context) -> AddCameraRsp:
@@ -251,6 +255,9 @@ class MockJointControlServicer(JointControlServiceServicer):
         return rsp
 
     def set_joint_position(self, request, context):
+        delay = float(os.getenv("GENIESIM_MOCK_WAYPOINT_DELAY_S", "0.05"))
+        if delay > 0:
+            time.sleep(delay)
         return SetJointRsp(errmsg="ok")
 
     def get_ik_status(self, request, context):
@@ -258,6 +265,87 @@ class MockJointControlServicer(JointControlServiceServicer):
 
     def get_ee_pose(self, request, context):
         return GetEEPoseRsp()
+
+
+def _build_mock_object_pose_response() -> bytes:
+    """Build raw protobuf bytes for GetObjectPoseRsp with a non-zero pose.
+
+    Structure: field 2 (SE3RpyPose) containing:
+      field 1 (Vec3 position): x=0.3, y=0.1, z=0.8
+      field 2 (Rpy rotation): rw=1.0, rx=0.0, ry=0.0, rz=0.0
+    """
+    def _double_field(field_num: int, value: float) -> bytes:
+        tag = (field_num << 3) | 1  # wire type 1 = 64-bit
+        return bytes([tag]) + struct.pack("<d", value)
+
+    def _submessage_field(field_num: int, data: bytes) -> bytes:
+        tag = (field_num << 3) | 2  # wire type 2 = length-delimited
+        length = len(data)
+        return bytes([tag, length]) + data
+
+    vec3 = _double_field(1, 0.3) + _double_field(2, 0.1) + _double_field(3, 0.8)
+    rpy = _double_field(1, 1.0) + _double_field(2, 0.0) + _double_field(3, 0.0) + _double_field(4, 0.0)
+    se3_pose = _submessage_field(1, vec3) + _submessage_field(2, rpy)
+    return _submessage_field(2, se3_pose)
+
+
+def _build_mock_camera_data_response(width: int = 64, height: int = 64) -> bytes:
+    """Build raw protobuf bytes for GetCameraDataResponse with synthetic image."""
+    png_data = _make_synthetic_png(width, height)
+
+    def _submessage_field(field_num: int, data: bytes) -> bytes:
+        tag = (field_num << 3) | 2
+        # varint-encode length for potentially large data
+        length = len(data)
+        length_bytes = []
+        while length > 0x7F:
+            length_bytes.append((length & 0x7F) | 0x80)
+            length >>= 7
+        length_bytes.append(length & 0x7F)
+        return bytes([tag]) + bytes(length_bytes) + data
+
+    def _uint32_field(field_num: int, value: int) -> bytes:
+        tag = (field_num << 3) | 0  # wire type 0 = varint
+        return bytes([tag, value & 0x7F])
+
+    # color_info (field 2): width (field 1) + height (field 2)
+    color_info = _uint32_field(1, width) + _uint32_field(2, height)
+    # color_image (field 3): png data
+    # depth_image (field 5): png data
+    return (
+        _submessage_field(2, color_info)
+        + _submessage_field(3, png_data)
+        + _submessage_field(5, png_data)
+    )
+
+
+class _MockRawServiceHandler(grpc.GenericRpcHandler):
+    """Handle raw gRPC calls for services without proto stubs (SimObjectService, etc.)."""
+
+    _OBJECT_POSE_RSP = _build_mock_object_pose_response()
+    _CAMERA_DATA_RSP = _build_mock_camera_data_response()
+
+    def service(self, handler_call_details):
+        method = handler_call_details.method
+        if method == "/aimdk.protocol.SimObjectService/get_object_pose":
+            return grpc.unary_unary_rpc_method_handler(
+                lambda req, ctx: self._OBJECT_POSE_RSP,
+                request_deserializer=lambda x: x,
+                response_serializer=lambda x: x,
+            )
+        if method == "/aimdk.protocol.CameraService/get_camera_data":
+            return grpc.unary_unary_rpc_method_handler(
+                lambda req, ctx: self._CAMERA_DATA_RSP,
+                request_deserializer=lambda x: x,
+                response_serializer=lambda x: x,
+            )
+        if method == "/aimdk.protocol.SimGripperService/set_gripper_state":
+            return grpc.unary_unary_rpc_method_handler(
+                lambda req, ctx: b"\x0a\x02ok",  # field 1 string = "ok"
+                request_deserializer=lambda x: x,
+                response_serializer=lambda x: x,
+            )
+        return None
 
 
 def _parse_port() -> int:
@@ -280,6 +368,7 @@ def main() -> None:
     server = grpc.server(ThreadPoolExecutor(max_workers=8))
     add_SimObservationServiceServicer_to_server(GenieSimLocalServicer(), server)
     add_JointControlServiceServicer_to_server(MockJointControlServicer(), server)
+    server.add_generic_rpc_handlers([_MockRawServiceHandler()])
 
     bind_addr = f"{args.host}:{args.port}"
     credentials = _load_tls_credentials()

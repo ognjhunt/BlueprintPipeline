@@ -90,6 +90,16 @@ RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_grpc_server.py \
     && rm -rf /tmp/patches
 
+# ----- Pre-bake robot USD assets -----
+# Download manipulator + humanoid USD assets from the public Isaac Sim
+# content CDN so they are permanently in the image (no Nucleus needed).
+ENV SIM_ASSETS_ROBOTS=/sim-assets/robots
+COPY scripts/robot_asset_manifest.txt /tmp/robot_asset_manifest.txt
+COPY scripts/download_robot_assets.sh /tmp/download_robot_assets.sh
+RUN chmod +x /tmp/download_robot_assets.sh \
+    && /tmp/download_robot_assets.sh ${SIM_ASSETS_ROBOTS} /tmp/robot_asset_manifest.txt \
+    && rm /tmp/download_robot_assets.sh /tmp/robot_asset_manifest.txt
+
 # Mark that this is a pre-baked image (used by bootstrap fast-path)
 RUN touch /opt/.geniesim-prebaked
 

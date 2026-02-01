@@ -553,7 +553,7 @@ class GenieSimConfig(BaseModel):
     allow_linear_fallback: StrictBool = False
     allow_linear_fallback_in_production: StrictBool = False
     allow_ik_failure_fallback: StrictBool = False
-    stall_timeout_s: StrictFloat = 90.0
+    stall_timeout_s: StrictFloat = 30.0
     max_stalls: StrictInt = 2
     stall_backoff_s: StrictFloat = 5.0
     server_startup_timeout_s: StrictFloat = 120.0
@@ -567,6 +567,7 @@ class GenieSimConfig(BaseModel):
     log_dir: Path = Path("/tmp/geniesim_logs")
     lerobot_export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2
     require_lerobot_v3: StrictBool = False
+    stream_per_task: StrictBool = True
     cleanup_tmp: StrictBool = True
 
     # Robot configuration
@@ -603,6 +604,7 @@ class GenieSimConfig(BaseModel):
             ("fail_on_frame_validation", "GENIESIM_FAIL_ON_FRAME_VALIDATION"),
             ("lerobot_export_format", "LEROBOT_EXPORT_FORMAT"),
             ("require_lerobot_v3", "LEROBOT_REQUIRE_V3"),
+            ("stream_per_task", "GENIESIM_STREAM_PER_TASK"),
             ("cleanup_tmp", "GENIESIM_CLEANUP_TMP"),
         ):
             if env_name in env and env.get(env_name) not in (None, ""):
@@ -948,6 +950,17 @@ def _resolve_log_dir() -> Path:
     return Path("/tmp/geniesim_logs")
 
 
+def _resolve_robot_usd(relative_path: str) -> str:
+    """Return a local filesystem path for a robot USD if it was pre-baked
+    into the Docker image under ``SIM_ASSETS_ROBOTS``; otherwise return the
+    original *relative_path* so that Nucleus handles the download."""
+    root = os.environ.get("SIM_ASSETS_ROBOTS", "/sim-assets/robots")
+    local = os.path.join(root, relative_path)
+    if os.path.exists(local):
+        return local
+    return relative_path
+
+
 def _is_temp_path(path: Path) -> bool:
     try:
         resolved = path.expanduser().resolve()
@@ -1187,7 +1200,7 @@ class GenieSimGRPCClient:
         func: Callable[[], Any],
         fallback: Any,
         success_checker: Optional[Callable[[Any], bool]] = None,
-        abort_event: Optional[_threading.Event] = None,
+        abort_event: Optional[threading.Event] = None,
     ) -> Any:
         # Fast-path: if abort already signalled, skip the call entirely.
         if abort_event is not None and abort_event.is_set():
@@ -1218,7 +1231,7 @@ class GenieSimGRPCClient:
         func: Callable[[], Any],
         fallback: Any,
         success_checker: Optional[Callable[[Any], bool]] = None,
-        abort_event: Optional[_threading.Event] = None,
+        abort_event: Optional[threading.Event] = None,
     ) -> Any:
         if self._circuit_breaker and not self._circuit_breaker.allow_request():
             time_until_retry = self._circuit_breaker.get_time_until_retry()
@@ -4303,8 +4316,8 @@ class GenieSimLocalFramework:
                 except Exception:
                     pass
 
-            _inter_task_delay = float(os.environ.get("GENIESIM_INTER_TASK_DELAY_S", "5"))
-            _restart_every_n = int(os.environ.get("GENIESIM_RESTART_EVERY_N_TASKS", "0"))
+            _inter_task_delay = float(os.environ.get("GENIESIM_INTER_TASK_DELAY_S", "2"))
+            _restart_every_n = int(os.environ.get("GENIESIM_RESTART_EVERY_N_TASKS", "2"))
 
             for task_idx, task in enumerate(tasks):
                 if _timeout_exceeded():
@@ -4319,15 +4332,21 @@ class GenieSimLocalFramework:
                 # Inter-task delay with health probe (skip for first task)
                 if task_idx > 0 and _inter_task_delay > 0:
                     # Proactive server restart to prevent resource exhaustion
-                    if _restart_every_n > 0 and task_idx % _restart_every_n == 0:
+                    _force = getattr(self, '_force_server_restart', False)
+                    if _force:
+                        self._force_server_restart = False
+                    if _force or (_restart_every_n > 0 and task_idx % _restart_every_n == 0):
                         self.log(
                             f"Proactive server restart before task {task_idx + 1} "
                             f"(every {_restart_every_n} tasks)"
                         )
-                        self.stop_server()
-                        if not self.start_server(scene_usd_path=scene_usd_path):
-                            result.errors.append("Proactive server restart failed")
-                            return result
+                        _restarted = self._client._attempt_server_restart()
+                        if not _restarted:
+                            self.log("Docker restart failed; trying stop+start fallback", "WARNING")
+                            self.stop_server()
+                            if not self.start_server(scene_usd_path=scene_usd_path):
+                                result.errors.append("Proactive server restart failed")
+                                return result
                         # Re-initialize robot after fresh server start
                         _reinit = self._client.init_robot(
                             robot_type=robot_cfg_file,
@@ -4507,6 +4526,19 @@ class GenieSimLocalFramework:
                         _checkpoint_path.write_text(json.dumps(sorted(_completed_task_names)))
                     except Exception:
                         pass
+                    # Stream per-task episodes so they're available immediately.
+                    if self.config.stream_per_task:
+                        try:
+                            self._export_task_episodes(
+                                task_name=task_name,
+                                task_idx=task_idx,
+                                run_dir=run_dir,
+                            )
+                        except Exception as exc:
+                            self.log(
+                                f"Per-task export failed for {task_name}: {exc}",
+                                "WARNING",
+                            )
                 else:
                     self.log(
                         f"Task {task_name}: no episodes passed — not checkpointing (will retry)",
@@ -5064,14 +5096,31 @@ class GenieSimLocalFramework:
                     "Waiting for execution thread to finish (holds gRPC lock)...",
                     "INFO",
                 )
-                execution_thread.join(timeout=60.0)
+                execution_thread.join(timeout=30.0)
                 if execution_thread.is_alive():
                     self.log(
                         f"Execution thread still alive after "
-                        f"{time.time() - _exec_wait_start:.1f}s — proceeding anyway "
-                        "(gRPC calls may block until in-flight call completes)",
+                        f"{time.time() - _exec_wait_start:.1f}s — resetting gRPC lock "
+                        "and reconnecting channel to unblock subsequent tasks",
                         "WARNING",
                     )
+                    # The old thread holds _grpc_lock forever (blocked on
+                    # in-flight gRPC call).  Replace the lock so future calls
+                    # are not blocked, and reconnect the channel so the old
+                    # call is abandoned at the transport layer.
+                    self._client._grpc_lock = threading.Lock()
+                    try:
+                        self._client.connect()
+                        self.log("gRPC channel reconnected after stuck thread", "INFO")
+                    except Exception as _reconn_err:
+                        self.log(
+                            f"gRPC reconnect failed: {_reconn_err}",
+                            "WARNING",
+                        )
+                    # Flag that a server restart is needed before the next task
+                    # (the server's internal state is likely corrupted after a
+                    # stuck gRPC call).
+                    self._force_server_restart = True
                 else:
                     self.log(
                         f"Execution thread finished after "
@@ -8602,6 +8651,60 @@ class GenieSimLocalFramework:
                     if isinstance(container, dict) and key in container:
                         return bool(container.get(key))
         return None
+
+    # =========================================================================
+    # Per-task streaming export
+    # =========================================================================
+
+    def _export_task_episodes(
+        self,
+        task_name: str,
+        task_idx: int,
+        run_dir: Path,
+    ) -> None:
+        """Export episodes for a single completed task to LeRobot format.
+
+        Called after each task's checkpoint so results are immediately
+        available on disk (and via gcsfuse) without waiting for all tasks.
+        """
+        # Collect episode JSONs that belong to this task.
+        task_episodes = sorted(run_dir.glob(f"{task_name}_ep*.json"))
+        if not task_episodes:
+            # Fallback: try task_<idx>_ep* pattern
+            task_episodes = sorted(run_dir.glob(f"task_{task_idx}_ep*.json"))
+        if not task_episodes:
+            self.log(f"No episode files found for per-task export: {task_name}")
+            return
+
+        task_output_dir = run_dir / "per_task" / f"task_{task_idx:03d}_{task_name}"
+        task_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Stage only this task's episodes into a temporary recording dir.
+        task_staging = run_dir / f"_task_staging_{task_idx}"
+        task_staging.mkdir(exist_ok=True)
+        for ep in task_episodes:
+            shutil.copy2(ep, task_staging / ep.name)
+
+        try:
+            self.export_to_lerobot(
+                recording_dir=task_staging,
+                output_dir=task_output_dir,
+            )
+            # Write a completion marker so consumers can detect finished tasks.
+            marker = {
+                "task_name": task_name,
+                "task_idx": task_idx,
+                "episodes": len(task_episodes),
+            }
+            (task_output_dir / "_task_complete.json").write_text(
+                json.dumps(marker, indent=2)
+            )
+            self.log(
+                f"Streamed {len(task_episodes)} episodes for task "
+                f"{task_name} → {task_output_dir}"
+            )
+        finally:
+            shutil.rmtree(task_staging, ignore_errors=True)
 
     # =========================================================================
     # Export

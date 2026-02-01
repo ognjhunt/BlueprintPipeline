@@ -1,0 +1,27 @@
+# Robot USD asset directories to download from the Isaac Sim 4.5 Nucleus CDN.
+# Each line is a directory path relative to the CDN root:
+#   https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/
+#
+# The download script fetches the entire directory (USD + meshes + textures).
+# To add a new robot, append its Nucleus-relative directory path and rebuild.
+#
+# ---------- Manipulators (priority subset) ----------
+Isaac/Robots/Franka
+Isaac/Robots/Franka/FR3
+Isaac/Robots/UniversalRobots/ur3e
+Isaac/Robots/UniversalRobots/ur5e
+Isaac/Robots/UniversalRobots/ur10e
+Isaac/Robots/UniversalRobots/ur16e
+Isaac/Robots/Kinova/Gen3
+Isaac/Robots/Kuka/KR210_L150
+#
+# ---------- Humanoids ----------
+Isaac/Robots/1X/Neo
+Isaac/Robots/Agility/Digit
+Isaac/Robots/FourierIntelligence/GR-1
+Isaac/Robots/RobotEra/STAR1
+Isaac/Robots/SanctuaryAI/Phoenix
+Isaac/Robots/Unitree/H1
+Isaac/Robots/Unitree/G1
+Isaac/Robots/XiaoPeng/PX5
+Isaac/Robots/XHumanoid/Tien Kung
