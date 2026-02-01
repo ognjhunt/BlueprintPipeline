@@ -19,6 +19,8 @@ numpy==1.26.4
 ijson==3.2.3
 # Auto-load .env file for API keys (GEMINI_API_KEY, etc.)
 python-dotenv==1.0.1
+# LeRobot parquet export
+pyarrow==14.0.2
 
 # Telemetry (OpenTelemetry) - relaxed pins for Isaac Sim Python compatibility
 opentelemetry-api==1.29.0

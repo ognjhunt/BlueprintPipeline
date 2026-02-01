@@ -5642,25 +5642,48 @@ class GenieSimLocalFramework:
                 except Exception as _pe:
                     self.log(f"Failed to save partial episode: {_pe}", "WARNING")
 
-            if execution_state.get("error"):
+            # Determine if we can still build a full episode despite errors.
+            # If the trajectory executed successfully and we have observations,
+            # non-fatal errors (e.g. transient lock contention) should not
+            # prevent frame building and full episode export.
+            _has_observations = len(collector_state.get("observations", [])) > 0
+            _exec_succeeded = execution_state.get("success", False)
+            _non_fatal_exec_error = (
+                execution_state.get("error")
+                and _exec_succeeded
+                and _has_observations
+            )
+
+            if execution_state.get("error") and not _non_fatal_exec_error:
                 result["error"] = execution_state["error"]
                 _save_partial(result["error"])
                 return result
 
-            if stall_detected:
+            if stall_detected and not (_exec_succeeded and _has_observations):
                 result["error"] = collector_state["error"] or "Episode stalled"
                 _save_partial(result["error"])
                 return result
 
-            if not execution_state.get("success"):
+            if not _exec_succeeded:
                 result["error"] = "Trajectory execution failed"
                 _save_partial(result["error"])
                 return result
 
-            if collector_state["error"]:
+            if collector_state["error"] and not _has_observations:
                 result["error"] = collector_state["error"]
                 _save_partial(result["error"])
                 return result
+
+            # Carry forward non-fatal warnings into result metadata
+            if _non_fatal_exec_error:
+                result["execution_warning"] = execution_state["error"]
+                self.log(
+                    f"Non-fatal execution error (proceeding with {len(collector_state['observations'])} "
+                    f"observations): {execution_state['error']}",
+                    "WARNING",
+                )
+            if collector_state["error"] and _has_observations:
+                result["collector_warning"] = collector_state["error"]
 
             aligned_observations = self._align_observations_to_trajectory(
                 timed_trajectory,
@@ -5713,16 +5736,44 @@ class GenieSimLocalFramework:
                         return result
                     self.log(message, "WARNING")
 
-            # Stop recording
-            stop_result = self._client.stop_recording()
-            if not stop_result.available:
+            # Attempt a lightweight reset before stop_recording to unstick the
+            # server's physics loop.  This is a mitigation for the known issue
+            # where the single-threaded server main loop hangs after trajectory
+            # execution (stuck physics step / blocked gRPC handler).
+            try:
+                _reset_result = self._client.reset_environment()
+                if not _reset_result.available:
+                    self.log(
+                        f"Pre-stop reset unavailable (non-fatal): {_reset_result.error}",
+                        "WARNING",
+                    )
+            except Exception as _reset_err:
                 self.log(
-                    f"Stop recording unavailable: {stop_result.error}",
+                    f"Pre-stop reset exception (non-fatal): {_reset_err}",
                     "WARNING",
                 )
-            elif not stop_result.success:
+
+            # Stop recording — non-fatal; client-side observation data is
+            # already collected so a failed stop_recording should not prevent
+            # full episode export.
+            recording_stopped_cleanly = False
+            try:
+                stop_result = self._client.stop_recording()
+                if not stop_result.available:
+                    self.log(
+                        f"Stop recording unavailable: {stop_result.error}",
+                        "WARNING",
+                    )
+                elif not stop_result.success:
+                    self.log(
+                        stop_result.error or "Stop recording failed.",
+                        "WARNING",
+                    )
+                else:
+                    recording_stopped_cleanly = True
+            except Exception as _stop_err:
                 self.log(
-                    stop_result.error or "Stop recording failed.",
+                    f"Stop recording exception (non-fatal): {_stop_err}",
                     "WARNING",
                 )
             recording_stopped = True
@@ -6178,6 +6229,9 @@ class GenieSimLocalFramework:
                     "collision_source": collision_source,
                     "scene_description": llm_metadata.get("scene_description"),
                     "success_criteria": llm_metadata.get("success_criteria"),
+                    "recording_stopped_cleanly": recording_stopped_cleanly,
+                    "execution_warning": result.get("execution_warning"),
+                    "collector_warning": result.get("collector_warning"),
                     "stall_info": result["stall_info"],
                     "frame_validation": frame_validation,
                     "phase_descriptions": {
