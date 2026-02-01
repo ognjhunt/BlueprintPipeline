@@ -3993,6 +3993,18 @@ class GenieSimLocalFramework:
                 "WARNING",
             )
 
+        # Ensure the simulation timeline is in PLAYING state.
+        # After init_robot or a Docker restart, Isaac Sim's timeline may be
+        # PAUSED, causing all subsequent gRPC calls to block indefinitely.
+        # The server's reset handler calls timeline.play() internally.
+        self.log("Sending reset to ensure simulation timeline is playing...")
+        _reset_result = self._client.reset(reset_robot=True, reset_objects=True)
+        if not _reset_result.success:
+            self.log(
+                f"Post-init reset returned: {_reset_result.error} (timeline may be paused)",
+                "WARNING",
+            )
+
     def _reinit_robot_after_restart(self) -> None:
         """Re-run init_robot using the saved parameters from the initial setup.
 
@@ -4427,7 +4439,7 @@ class GenieSimLocalFramework:
                     pass
 
             _inter_task_delay = float(os.environ.get("GENIESIM_INTER_TASK_DELAY_S", "2"))
-            _restart_every_n = int(os.environ.get("GENIESIM_RESTART_EVERY_N_TASKS", "5"))
+            _restart_every_n = int(os.environ.get("GENIESIM_RESTART_EVERY_N_TASKS", "0"))
 
             for task_idx, task in enumerate(tasks):
                 if _timeout_exceeded():
@@ -5029,15 +5041,26 @@ class GenieSimLocalFramework:
                         collector_state["mode"] = "polling"
                         _collect_polling()
                         return
+                    _consecutive_failures = 0
+                    _max_consecutive_failures = int(os.getenv("OBS_MAX_CONSECUTIVE_FAILURES", "3"))
                     for response in stream_result.payload:
                         if abort_event.is_set():
                             break
                         if not response.get("success", False):
-                            collector_state["error"] = (
-                                response.get("error")
-                                or "Observation stream returned unsuccessful response."
+                            _consecutive_failures += 1
+                            _err = response.get("error") or "unsuccessful response"
+                            logger.warning(
+                                "[OBS-STREAM] Frame failure %d/%d: %s",
+                                _consecutive_failures, _max_consecutive_failures, _err,
                             )
-                            break
+                            if _consecutive_failures >= _max_consecutive_failures:
+                                collector_state["error"] = (
+                                    f"Observation stream: {_consecutive_failures} consecutive "
+                                    f"failures, last: {_err}"
+                                )
+                                break
+                            continue
+                        _consecutive_failures = 0
                         obs_frame = response
                         collector_state["observations"].append(obs_frame)
                         _note_progress(obs_frame)
@@ -5069,16 +5092,37 @@ class GenieSimLocalFramework:
                             time.sleep(sleep_for)
                         obs_result = self._client.get_observation()
                         if not obs_result.available:
-                            collector_state["error"] = (
-                                f"Timed observation polling unavailable: {obs_result.error}"
+                            _poll_consecutive_failures = getattr(_collect_polling, '_consec', 0) + 1
+                            _collect_polling._consec = _poll_consecutive_failures
+                            _max_poll_failures = int(os.getenv("OBS_MAX_CONSECUTIVE_FAILURES", "3"))
+                            logger.warning(
+                                "[OBS-POLL] Frame unavailable %d/%d: %s",
+                                _poll_consecutive_failures, _max_poll_failures, obs_result.error,
                             )
-                            break
+                            if _poll_consecutive_failures >= _max_poll_failures:
+                                collector_state["error"] = (
+                                    f"Timed observation polling: {_poll_consecutive_failures} "
+                                    f"consecutive failures, last: {obs_result.error}"
+                                )
+                                break
+                            continue
                         if not obs_result.success:
-                            collector_state["error"] = (
-                                obs_result.error
-                                or "Timed observation polling returned unsuccessful response."
+                            _poll_consecutive_failures = getattr(_collect_polling, '_consec', 0) + 1
+                            _collect_polling._consec = _poll_consecutive_failures
+                            _max_poll_failures = int(os.getenv("OBS_MAX_CONSECUTIVE_FAILURES", "3"))
+                            logger.warning(
+                                "[OBS-POLL] Frame failure %d/%d: %s",
+                                _poll_consecutive_failures, _max_poll_failures,
+                                obs_result.error or "unsuccessful",
                             )
-                            break
+                            if _poll_consecutive_failures >= _max_poll_failures:
+                                collector_state["error"] = (
+                                    obs_result.error
+                                    or "Timed observation polling returned unsuccessful response."
+                                )
+                                break
+                            continue
+                        _collect_polling._consec = 0
                         obs_frame = obs_result.payload or {}
                         obs_frame["planned_timestamp"] = planned_timestamp
                         collector_state["observations"].append(obs_frame)
@@ -5329,20 +5373,45 @@ class GenieSimLocalFramework:
             if execution_state.get("success"):
                 result["task_success"] = True
 
+            # Helper: save partial episode data for diagnostics when early-returning
+            def _save_partial(error_msg: str) -> None:
+                try:
+                    partial_path = output_dir / f"{episode_id}.partial.json"
+                    partial_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(partial_path, "w") as _pf:
+                        json.dump({
+                            "episode_id": episode_id,
+                            "task_name": task.get("task_name", "unknown"),
+                            "error": error_msg,
+                            "task_success": result.get("task_success"),
+                            "observation_count": len(collector_state.get("observations", [])),
+                            "execution_success": execution_state.get("success"),
+                            "execution_error": execution_state.get("error"),
+                            "collector_error": collector_state.get("error"),
+                            "stall_detected": stall_detected if 'stall_detected' in dir() else None,
+                        }, _pf, indent=2, default=str)
+                    self.log(f"Saved partial episode data to {partial_path}")
+                except Exception as _pe:
+                    self.log(f"Failed to save partial episode: {_pe}", "WARNING")
+
             if execution_state.get("error"):
                 result["error"] = execution_state["error"]
+                _save_partial(result["error"])
                 return result
 
             if stall_detected:
                 result["error"] = collector_state["error"] or "Episode stalled"
+                _save_partial(result["error"])
                 return result
 
             if not execution_state.get("success"):
                 result["error"] = "Trajectory execution failed"
+                _save_partial(result["error"])
                 return result
 
             if collector_state["error"]:
                 result["error"] = collector_state["error"]
+                _save_partial(result["error"])
                 return result
 
             aligned_observations = self._align_observations_to_trajectory(
@@ -5351,6 +5420,7 @@ class GenieSimLocalFramework:
             )
             if aligned_observations is None:
                 result["error"] = "Failed to align observations with trajectory."
+                _save_partial(result["error"])
                 return result
 
             # Minimum frame count guard
@@ -5360,6 +5430,7 @@ class GenieSimLocalFramework:
                     f"Too few observations ({len(aligned_observations)}) for episode; "
                     f"minimum is {min_episode_frames}."
                 )
+                _save_partial(result["error"])
                 return result
 
             frames = self._build_frames_from_trajectory(
