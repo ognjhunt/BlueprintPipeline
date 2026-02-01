@@ -82,11 +82,11 @@ def patch_file():
     # Handles: pos, rot = ...get_ee_pose(...)
     #          pos, rot, extra = ...get_ee_pose(...)
     #          position, rotation_matrix = self.ui_builder._get_ee_pose(is_right)
-    # Uses .*? with re.DOTALL to cross newlines inside parens.
+    # Single-line only (no DOTALL) to avoid matching across lines.
     # Note: _?get_ee_pose matches both get_ee_pose AND _get_ee_pose
     pattern = re.compile(
-        r"(\s*)((\w+)(?:\s*,\s*(\w+))+)\s*=\s*(.*?\._?get_ee_pose\(.*?\))",
-        re.MULTILINE | re.DOTALL,
+        r"^([ \t]*)((\w[\w.]*\w)(?:\s*,\s*(\w[\w.]*\w))+)\s*=\s*([^\n]*\._?get_ee_pose\([^\n]*\))",
+        re.MULTILINE,
     )
 
     # Find ALL matches — there may be multiple call sites (robot.get_ee_pose
