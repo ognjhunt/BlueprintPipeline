@@ -19,7 +19,7 @@ This module provides distributed tracing capabilities to track requests across s
 pip install -r tools/tracing/requirements.txt
 
 # Or install minimal set
-pip install opentelemetry-api==1.20.0 opentelemetry-sdk==1.20.0
+pip install opentelemetry-api==1.29.0 opentelemetry-sdk==1.29.0
 ```
 
 Pinned versions for all job requirements live in `tools/requirements-pins.txt`. To refresh
@@ -93,7 +93,7 @@ init_tracing(service_name="my-service", enabled=True)
 
 ```bash
 # Install
-pip install opentelemetry-exporter-gcp-trace==1.5.0
+pip install opentelemetry-exporter-gcp-trace==1.8.0
 
 # Configure
 export GCP_PROJECT_ID=your-project-id
@@ -108,7 +108,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/credentials.json
 
 ```bash
 # Install
-pip install opentelemetry-exporter-otlp==1.20.0
+pip install opentelemetry-exporter-otlp==1.29.0
 
 # Configure
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317
@@ -118,7 +118,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317
 
 ```bash
 # Install
-pip install opentelemetry-exporter-jaeger==1.20.0
+pip install opentelemetry-exporter-jaeger==1.29.0
 
 # Run Jaeger (Docker)
 docker run -d --name jaeger \

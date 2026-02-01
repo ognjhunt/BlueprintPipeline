@@ -15,7 +15,7 @@ opentelemetry-exporter-otlp==1.29.0
 opentelemetry-exporter-otlp-proto-grpc==1.29.0
 
 # Jaeger (for local development / on-prem)
-# opentelemetry-exporter-jaeger>=1.20.0
+# opentelemetry-exporter-jaeger>=1.29.0
 
 # Optional: Automatic instrumentation
 # opentelemetry-instrumentation>=0.41b0

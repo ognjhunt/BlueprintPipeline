@@ -21,6 +21,7 @@ services:
       dockerfile: Dockerfile.geniesim-server
     image: ${GENIESIM_SERVER_IMAGE:-geniesim-server:latest}
     container_name: geniesim-server
+    restart: unless-stopped
     environment:
       ACCEPT_EULA: "Y"
       PRIVACY_CONSENT: "Y"

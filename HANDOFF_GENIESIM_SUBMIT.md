@@ -1,10 +1,13 @@
 # Genie Sim Submit - Handoff Document
 
 ## What We're Doing
-Testing the BlueprintPipeline end-to-end using a Lightwheel KitchenRoom SimReady scene, bypassing Phase 1 (3D-RE-GEN). The pipeline has multiple steps; we're stuck on **Part 3: genie-sim-submit** which runs robot data collection via a remote Genie Sim server.
+Testing the BlueprintPipeline end-to-end using a Lightwheel KitchenRoom SimReady scene, bypassing Phase 1 (3D-RE-GEN). The pipeline runs robot data collection via a Genie Sim gRPC server on a GCP VM.
+
+## Current Status (2026-02-01)
+Pipeline achieved **task_success=True** using the G1 robot config (`G1_omnipicker_fixed.json`). Pipeline advances through multiple tasks with IK fallback trajectories, server auto-restart, and task checkpointing. Franka robot config crashes the server during init (see Known Issues #6 in `docs/VM_CONTAINER_GUIDE.md`). See that guide for the full operational runbook.
 
 ## Infrastructure
-- **Client**: Mac (local), runs `tools/run_local_pipeline.py`
+- **Client**: VM (SSH in), runs `tools/run_local_pipeline.py`
 - **Server**: GCP VM `isaac-sim-ubuntu` (zone `us-east1-b`, IP `34.138.160.175`), Docker container `geniesim-server` running Isaac Sim 5.1.0 + Genie Sim gRPC server on port 50051
 - **Scene**: `test_scenes/scenes/lightwheel_kitchen/` with SimReady USD assets
 
@@ -12,13 +15,12 @@ Testing the BlueprintPipeline end-to-end using a Lightwheel KitchenRoom SimReady
 1. **Scene setup** - Lightwheel kitchen scene configured with manifest, objects at z=-2.3 to -2.5
 2. **genie-sim-export** - PASSED. Generated `geniesim/task_config.json` with 4 tasks (2 pick_place, 1 organize, 1 interact). Robot at base_position [0.5, 0.5, -2.3], workspace_bounds [[-0.5,-0.5,-2.8],[1.5,1.5,-1.8]]
 
-## What's Blocked (Part 3: genie-sim-submit)
+## Previously Blocked (Part 3: genie-sim-submit) — RESOLVED
 
-### The Problem
-When the pipeline calls `reset()` or `init_robot()` gRPC RPCs, the server's `CommandController` crashes because:
-1. **`SIM_ASSETS` env var was not set** - The server reads `os.environ.get("SIM_ASSETS")` (line 68 of `command_controller.py`) and gets `None`
-2. **No robot USD assets** - `init_robot()` needs robot USD files pointed to by `SIM_ASSETS`
-3. **Server only ships with G1/G2 robot configs** - No Franka config exists on the server
+The following issues were resolved:
+1. **`SIM_ASSETS` env var** — Set in `docker-compose.geniesim-server.yaml`
+2. **Robot USD assets** — Pre-baked into Docker image via `download_robot_assets.sh`
+3. **Robot configs** — G1 config works; Franka crashes server (open issue)
 
 ### Code Changes Already Made
 

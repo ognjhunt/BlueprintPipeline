@@ -13,17 +13,61 @@ Quick reference for getting the BlueprintPipeline running on the GCP VM with Gen
 | User home | `/home/nijelhunt1` |
 | Repo path | `~/BlueprintPipeline` |
 
-## Quick Start (from scratch)
+## Quick Start
+
+### If the VM is already running
+
+SSH in and run the pipeline directly:
+
+```bash
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b
+
+# On the VM:
+cd ~/BlueprintPipeline
+bash scripts/vm-start.sh   # checks container is up, polls gRPC until ready
+
+export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
+export SKIP_QUALITY_GATES=1
+export GENIESIM_FIRST_CALL_TIMEOUT_S=300
+export GENIESIM_RESTART_EVERY_N_TASKS=3
+export CAMERA_REWARMUP_ON_RESET=1
+python3 tools/run_local_pipeline.py \
+  --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
+  --steps simready,usd,replicator,isaac-lab,genie-sim-export,genie-sim-submit,genie-sim-import \
+  --use-geniesim --fail-fast
+```
+
+### Cold start (VM was stopped)
 
 ```bash
 # 1. Start VM
 gcloud compute instances start isaac-sim-ubuntu --zone=us-east1-b
 
-# 2. Wait for SSH (VM needs ~30s after boot)
-sleep 30
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="echo ready"
+# 2. Wait ~30s for SSH, then connect
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b
 
-# 3. Sync code changes (only modified files - full rsync is too slow)
+# 3. The container auto-starts with the VM (restart: unless-stopped).
+#    Just wait for the gRPC server to become ready:
+cd ~/BlueprintPipeline
+bash scripts/vm-start.sh
+
+# 4. Run pipeline (same exports as above)
+export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
+export SKIP_QUALITY_GATES=1
+export GENIESIM_FIRST_CALL_TIMEOUT_S=300
+export GENIESIM_RESTART_EVERY_N_TASKS=3
+export CAMERA_REWARMUP_ON_RESET=1
+python3 tools/run_local_pipeline.py \
+  --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
+  --steps simready,usd,replicator,isaac-lab,genie-sim-export,genie-sim-submit,genie-sim-import \
+  --use-geniesim --fail-fast
+```
+
+### Syncing code changes from local machine
+
+Only sync modified files (full rsync is too slow — repo is ~22GB with cached Docker images):
+
+```bash
 for f in \
   tools/run_local_pipeline.py \
   tools/geniesim_adapter/local_framework.py \
@@ -41,118 +85,90 @@ for f in \
   tools/geniesim_adapter/deployment/start_geniesim_server.sh \
   tools/geniesim_adapter/robot_configs/franka_panda.json \
   tools/geniesim_adapter/robot_configs/ur10.json \
+  scripts/vm-start.sh \
   Dockerfile.geniesim-server \
+  docker-compose.geniesim-server.yaml \
   genie-sim-local-job/requirements.txt \
   .env; do
   gcloud compute scp --zone=us-east1-b \
-    "/Users/nijelhunt_1/workspace/BlueprintPipeline/$f" \
-    "isaac-sim-ubuntu:~/BlueprintPipeline/$f" 2>/dev/null
+    "$f" "isaac-sim-ubuntu:~/BlueprintPipeline/$f" 2>/dev/null
 done
+```
 
-# 4. Start container (if not running)
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
-  sudo docker start geniesim-server 2>/dev/null || \
-  (cd ~/BlueprintPipeline && \
-   sudo -E docker-compose -f docker-compose.geniesim-server.yaml up -d)
-"
+### Rebuilding the Docker image (one-time, after Dockerfile changes)
 
-# 5. Wait for gRPC server (~45s after container start)
-sleep 45
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
-  sudo docker exec geniesim-server bash -c \
-    'cat /proc/net/tcp6 | grep C383 && echo SERVER_READY || echo NOT_READY'
-"
-
-# 6. Run pipeline
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
-  cd ~/BlueprintPipeline &&
-  export PYTHONPATH=~/BlueprintPipeline:\$PYTHONPATH &&
-  export SKIP_QUALITY_GATES=1 &&
-  export GENIESIM_FIRST_CALL_TIMEOUT_S=300 &&
-  export GENIESIM_RESTART_EVERY_N_TASKS=3 &&
-  export CAMERA_REWARMUP_ON_RESET=1 &&
-  python3 tools/run_local_pipeline.py \
-    --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
-    --steps simready,usd,replicator,isaac-lab,genie-sim-export,genie-sim-submit,genie-sim-import \
-    --use-geniesim \
-    --fail-fast
-"
+```bash
+# On the VM — takes 30-45 min (cuRobo compilation from source)
+cd ~/BlueprintPipeline
+sudo docker compose -f docker-compose.geniesim-server.yaml build
+sudo docker compose -f docker-compose.geniesim-server.yaml up -d
 ```
 
 ## Common Operations
 
 ### Check container status
 ```bash
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="sudo docker ps -a"
+sudo docker ps -a
 ```
 
 ### Check gRPC port (50051 = 0xC383)
 ```bash
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
-  sudo docker exec geniesim-server bash -c 'cat /proc/net/tcp6 | grep C383'
-"
+sudo docker exec geniesim-server bash -c 'cat /proc/net/tcp6 | grep C383'
 ```
 
 ### View server logs
 ```bash
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="sudo docker logs geniesim-server --tail 50"
+sudo docker logs geniesim-server --tail 50
 ```
 
 ### Apply patches at runtime (no rebuild)
 ```bash
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
-  for p in patch_omnigraph_dedup patch_camera_handler patch_object_pose_handler \
-           patch_ee_pose_handler patch_stage_diagnostics patch_observation_cameras \
-           patch_grpc_server _apply_safe_float; do
-    sudo docker cp ~/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/\${p}.py geniesim-server:/tmp/
-    sudo docker exec geniesim-server /isaac-sim/python.sh /tmp/\${p}.py
-  done
-  sudo docker restart geniesim-server
-"
+for p in patch_omnigraph_dedup patch_camera_handler patch_object_pose_handler \
+         patch_ee_pose_handler patch_stage_diagnostics patch_observation_cameras \
+         patch_grpc_server _apply_safe_float; do
+  sudo docker cp ~/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/${p}.py geniesim-server:/tmp/
+  sudo docker exec geniesim-server /isaac-sim/python.sh /tmp/${p}.py
+done
+sudo docker restart geniesim-server
 ```
 
 ### Fix grpc_server.py set literal bugs (runtime)
 ```bash
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
-  sudo docker exec geniesim-server sed -i 's/data={\"reset\", Reset}/data={\"reset\": Reset}/' /opt/geniesim/source/data_collection/server/grpc_server.py
-  sudo docker exec geniesim-server sed -i 's/data={\"detach\", detach}/data={\"detach\": detach}/' /opt/geniesim/source/data_collection/server/grpc_server.py
-  sudo docker restart geniesim-server
-"
+sudo docker exec geniesim-server sed -i 's/data={"reset", Reset}/data={"reset": Reset}/' /opt/geniesim/source/data_collection/server/grpc_server.py
+sudo docker exec geniesim-server sed -i 's/data={"detach", detach}/data={"detach": detach}/' /opt/geniesim/source/data_collection/server/grpc_server.py
+sudo docker restart geniesim-server
 ```
 
 ### Full Docker rebuild (bakes all patches permanently)
 ```bash
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
-  cd ~/BlueprintPipeline &&
-  sudo docker build -f Dockerfile.geniesim-server -t geniesim-server:latest .
-"
-# Takes 30-45 min (cuRobo compilation)
+# On the VM (takes 30-45 min due to cuRobo compilation):
+cd ~/BlueprintPipeline
+sudo docker compose -f docker-compose.geniesim-server.yaml build
+sudo docker compose -f docker-compose.geniesim-server.yaml up -d
 ```
 
 ### Run pipeline in background (for long runs)
 ```bash
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
-  cd ~/BlueprintPipeline &&
-  export PYTHONPATH=~/BlueprintPipeline:\$PYTHONPATH &&
-  export SKIP_QUALITY_GATES=1 &&
-  nohup python3 tools/run_local_pipeline.py \
-    --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
-    --steps genie-sim-export,genie-sim-submit,genie-sim-import \
-    --use-geniesim --fail-fast \
-    > /tmp/pipeline_run.log 2>&1 &
-  echo PID: \$!
-"
+cd ~/BlueprintPipeline
+export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
+export SKIP_QUALITY_GATES=1
+nohup python3 tools/run_local_pipeline.py \
+  --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
+  --steps genie-sim-export,genie-sim-submit,genie-sim-import \
+  --use-geniesim --fail-fast \
+  > /tmp/pipeline_run.log 2>&1 &
+echo PID: $!
 # Monitor: tail -f /tmp/pipeline_run.log
 ```
 
-### Stop VM (saves costs)
+### Stop VM (saves costs — run from local machine)
 ```bash
 gcloud compute instances stop isaac-sim-ubuntu --zone=us-east1-b
 ```
 
 ## Testing with Different Robots
 
-The pipeline supports multiple robot embodiments. Currently tested: **Franka Panda**.
+The pipeline supports multiple robot embodiments. Currently working: **G1 humanoid** (via `G1_omnipicker_fixed.json`). Franka Panda crashes the server during init (see Remaining Known Issues #6).
 Robot configs live in `tools/geniesim_adapter/robot_configs/` (one JSON per robot).
 
 ### Switching robot type
@@ -183,7 +199,7 @@ python3 tools/run_local_pipeline.py \
 
 | Robot | DOFs | Gripper | Config JSON | Tested |
 |-------|------|---------|-------------|--------|
-| Franka Panda | 7 | parallel jaw | `franka_panda.json` | Yes |
+| Franka Panda | 7 | parallel jaw | `franka_panda.json` | Server crashes on init (issue #6) |
 | UR10 | 6 | none (tool0) | `ur10.json` | No |
 | UR5e | 6 | parallel jaw | — | No |
 | UR10e | 6 | parallel jaw | — | No |
@@ -341,24 +357,22 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 For testing, you can run the pipeline client directly inside the container (requires g2-standard-32 for memory):
 
 ```bash
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
-  sudo docker exec -d geniesim-server bash -c '
-    export GENIESIM_ROOT=/opt/geniesim
-    export ISAAC_SIM_PATH=/isaac-sim
-    export OMNI_KIT_ALLOW_ROOT=1
-    export PYTHONUNBUFFERED=1
-    export PYTHONPATH=/workspace/BlueprintPipeline/tools/geniesim_adapter:/workspace/BlueprintPipeline:\${PYTHONPATH:-}
-    export GENIESIM_SKIP_ROS_RECORDING=1
-    export ROBOT_TYPES=franka
-    /isaac-sim/python.sh -m tools.geniesim_adapter.local_framework run \
-      --scene /workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/merged_scene_manifest.json \
-      --task-config /workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/task_config.json \
-      --robot franka \
-      --episodes 1 \
-      > /tmp/pipeline_test.log 2>&1
-  '
-"
-# Monitor: gcloud compute ssh ... --command="sudo docker exec geniesim-server tail -f /tmp/pipeline_test.log"
+sudo docker exec -d geniesim-server bash -c '
+  export GENIESIM_ROOT=/opt/geniesim
+  export ISAAC_SIM_PATH=/isaac-sim
+  export OMNI_KIT_ALLOW_ROOT=1
+  export PYTHONUNBUFFERED=1
+  export PYTHONPATH=/workspace/BlueprintPipeline/tools/geniesim_adapter:/workspace/BlueprintPipeline:${PYTHONPATH:-}
+  export GENIESIM_SKIP_ROS_RECORDING=1
+  export ROBOT_TYPES=franka
+  /isaac-sim/python.sh -m tools.geniesim_adapter.local_framework run \
+    --scene /workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/merged_scene_manifest.json \
+    --task-config /workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/task_config.json \
+    --robot franka \
+    --episodes 1 \
+    > /tmp/pipeline_test.log 2>&1
+'
+# Monitor: sudo docker exec geniesim-server tail -f /tmp/pipeline_test.log
 ```
 
 **Important**: Filter log noise with `grep -v "CUROBO_TORCH_COMPILE\|simulation paused"` — cuRobo emits hundreds of env var warnings.
