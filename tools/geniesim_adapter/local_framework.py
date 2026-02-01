@@ -94,7 +94,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 from pydantic import (
@@ -2083,11 +2083,17 @@ class GenieSimGRPCClient:
         # --- 3. Real object poses via SimObjectService ---
         scene_objects = []
         # Use the task_config object prims if available
-        object_prims = getattr(self, "_scene_object_prims", [])
+        object_prims = list(getattr(self, "_scene_object_prims", []))
+        if getattr(self, "_resolved_any_object_pose", False):
+            object_prims.extend(getattr(self, "_scene_variation_object_prims", []))
         if object_prims and self._channel is not None:
             for prim_path in object_prims:
                 resolved = self._resolve_object_prim(prim_path)
                 if resolved is None:
+                    if prim_path in getattr(self, "_scene_variation_object_prims", []):
+                        if not hasattr(self, "_unresolved_variation_objects"):
+                            self._unresolved_variation_objects: Set[str] = set()
+                        self._unresolved_variation_objects.add(prim_path)
                     continue
                 resolved_path, obj_pose = resolved
                 scene_objects.append({
@@ -2095,6 +2101,19 @@ class GenieSimGRPCClient:
                     "pose": obj_pose,
                 })
                 logger.info(f"[OBS] Got real object pose for {resolved_path}: {obj_pose}")
+                if prim_path in getattr(self, "_scene_variation_object_prims", []):
+                    if hasattr(self, "_unresolved_variation_objects"):
+                        self._unresolved_variation_objects.discard(prim_path)
+
+        if hasattr(self, "_unresolved_variation_objects") and self._unresolved_variation_objects:
+            if not hasattr(self, "_variation_warning_logged"):
+                logger.warning(
+                    "[OBS] Unresolved variation objects (deferred or missing): %s. "
+                    "Enable stage diagnostics with tools/geniesim_adapter/deployment/patches/"
+                    "patch_stage_diagnostics.py to verify loaded prims.",
+                    sorted(self._unresolved_variation_objects),
+                )
+                self._variation_warning_logged = True
 
         # --- 4. Camera images ---
         # Requires patched server (see deployment/patches/patch_camera_handler.py).
@@ -2200,20 +2219,32 @@ class GenieSimGRPCClient:
         prim_path: str,
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
         """Resolve an object prim path to a valid pose."""
+        if not hasattr(self, "_missing_object_prims"):
+            self._missing_object_prims: Set[str] = set()
+        if prim_path in self._missing_object_prims:
+            return None
         candidates = self._resolve_object_prim_candidates(prim_path)
         zero_pose_seen = False
+        attempted = 0
+        zero_pose_attempts = 0
         for candidate in candidates:
             if self._abort_event is not None and self._abort_event.is_set():
                 break
             try:
                 obj_pose, zero_pose = self._get_object_pose_raw(candidate)
+                attempted += 1
                 zero_pose_seen = zero_pose_seen or zero_pose
+                if zero_pose:
+                    zero_pose_attempts += 1
                 if obj_pose is not None:
                     if candidate != prim_path:
                         self._resolved_prim_cache[prim_path] = candidate
+                    self._resolved_any_object_pose = True
                     return candidate, obj_pose
             except Exception as exc:
                 logger.debug(f"[OBS] get_object_pose({candidate}) failed: {exc}")
+        if attempted and zero_pose_attempts == attempted:
+            self._missing_object_prims.add(prim_path)
         if not zero_pose_seen:
             logger.warning(
                 f"[OBS] Unable to resolve object prim for {prim_path} "
@@ -4287,16 +4318,20 @@ class GenieSimLocalFramework:
             # Populate scene object prim paths for real object pose queries.
             # Derive USD prim paths from scene_graph nodes or task_config objects.
             _scene_obj_prims: List[str] = []
+            _scene_variation_prims: List[str] = []
             _sg_nodes = (scene_config or {}).get("nodes", [])
             if not _sg_nodes:
                 _sg_nodes = task_config.get("nodes", [])
             for _node in _sg_nodes:
                 _asset_id = _node.get("asset_id", "")
                 _usd_path = _node.get("usd_path", "")
+                _variation_flag = _asset_id.lower().startswith("variation_")
                 # Derive USD stage prim path from asset file name
                 # e.g. ".../obj_Pot057/Pot057.usd" → "/World/Pot057"
                 if _usd_path:
                     _stem = Path(_usd_path).stem  # "Pot057"
+                    if _stem.lower().startswith("variation_"):
+                        _variation_flag = True
                     _prim = f"/World/{_stem}"
                 elif _asset_id:
                     # Strip scene prefix: "lightwheel_kitchen_obj_Pot057" → "Pot057"
@@ -4304,7 +4339,10 @@ class GenieSimLocalFramework:
                     _prim = f"/World/{_parts[-1]}" if len(_parts) > 1 else f"/World/{_asset_id}"
                 else:
                     continue
-                _scene_obj_prims.append(_prim)
+                if _variation_flag:
+                    _scene_variation_prims.append(_prim)
+                else:
+                    _scene_obj_prims.append(_prim)
             # Also add objects from task_config's suggested_tasks
             for _t in task_config.get("suggested_tasks", []):
                 _target = _t.get("target_object", "")
@@ -4319,10 +4357,16 @@ class GenieSimLocalFramework:
                     if _prim not in _scene_obj_prims:
                         _scene_obj_prims.append(_prim)
             self._client._scene_object_prims = _scene_obj_prims
+            self._client._scene_variation_object_prims = _scene_variation_prims
             if _scene_obj_prims:
                 self.log(f"Scene object prims for real pose queries: {_scene_obj_prims}")
             else:
                 self.log("No scene object prims found — object poses will be synthetic", "WARNING")
+            if _scene_variation_prims:
+                self.log(
+                    "Deferring variation prims until first successful pose lookup: "
+                    f"{_scene_variation_prims}"
+                )
 
             # Build real object properties from scene_graph nodes, replacing
             # hardcoded lookup tables (_OBJECT_SIZES, _OBJECT_MASSES, etc.).
