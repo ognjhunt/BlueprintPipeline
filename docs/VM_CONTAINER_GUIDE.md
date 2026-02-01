@@ -47,6 +47,7 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b
 
 # 3. The container auto-starts with the VM (restart: unless-stopped).
 #    Just wait for the gRPC server to become ready:
+#    (If you ever run the container manually, pass `-e SIM_ASSETS=/sim-assets`.)
 cd ~/BlueprintPipeline
 bash scripts/vm-start.sh
 
