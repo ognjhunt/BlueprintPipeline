@@ -1113,8 +1113,8 @@ class GenieSimGRPCClient:
         import time as _time
         import subprocess as _sp
 
-        max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "3"))
-        cooldown_s = 300  # 5 minutes between restarts
+        max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "10"))
+        cooldown_s = 60  # 1 minute between restarts
 
         if not hasattr(self, "_restart_count"):
             self._restart_count = 0
@@ -5117,10 +5117,16 @@ class GenieSimLocalFramework:
                             f"gRPC reconnect failed: {_reconn_err}",
                             "WARNING",
                         )
-                    # Flag that a server restart is needed before the next task
-                    # (the server's internal state is likely corrupted after a
-                    # stuck gRPC call).
-                    self._force_server_restart = True
+                    # Server is likely corrupted after stuck gRPC call.
+                    # Restart Docker container immediately so subsequent calls
+                    # (reset, stop_recording, next task) work.
+                    self.log("Restarting Docker container after stuck thread...", "WARNING")
+                    _restart_ok = self._client._attempt_server_restart()
+                    if _restart_ok:
+                        self.log("Server restarted successfully after deadlock", "INFO")
+                    else:
+                        self.log("Server restart failed after deadlock", "ERROR")
+                        self._force_server_restart = True
                 else:
                     self.log(
                         f"Execution thread finished after "
