@@ -97,7 +97,7 @@ gcloud scheduler jobs resume scene-generation-daily \
 | `ARCHETYPES` | No | - | Comma-separated list of specific archetypes |
 | `DRY_RUN` | No | false | Skip actual generation |
 | `FIRESTORE_PROJECT` | No | default | GCP project for Firestore |
-| `GEMINI_PRO_MODEL` | No | `gemini-3-pro-preview` | Prompt diversification model ID |
+| `GEMINI_PRO_MODEL` | No | `gemini-3-flash-preview` | Prompt diversification model ID |
 | `GEMINI_IMAGE_MODEL` | No | `gemini-3-pro-image-preview` | Primary image generation model ID |
 | `GEMINI_IMAGE_MODEL_FALLBACK` | No | `gemini-2.0-flash-image-generation` | Fallback GA image model ID |
 
@@ -108,7 +108,7 @@ Scenes are stored under `gs://blueprint-8c1ca.appspot.com/scenes/{SCENE_ID}` whe
 Supported model IDs for this job:
 
 ### Prompt Diversification (text)
-- `gemini-3-pro-preview` (default)
+- `gemini-3-flash-preview` (default)
 
 ### Image Generation
 - `gemini-3-pro-image-preview` (default primary)

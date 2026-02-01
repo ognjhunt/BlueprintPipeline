@@ -425,7 +425,7 @@ class HealthChecksConfig:
 class ModelConfig:
     """LLM model configuration."""
     model_name: str
-    default_model: str = "gemini-3-pro-preview"
+    default_model: str = "gemini-3-flash-preview"
     alternatives: List[str] = field(default_factory=list)
     timeout_seconds: int = 30
 
@@ -435,20 +435,20 @@ class ModelsConfig:
     """Complete models configuration."""
     placement_engine: ModelConfig = field(default_factory=lambda: ModelConfig(
         model_name="placement_engine",
-        default_model="gemini-3-pro-preview",
-        alternatives=["gemini-3-pro", "gpt-4", "claude-3-opus"],
+        default_model="gemini-3-flash-preview",
+        alternatives=["gemini-3-flash", "gpt-4", "claude-3-opus"],
         timeout_seconds=30
     ))
     physics_validator: ModelConfig = field(default_factory=lambda: ModelConfig(
         model_name="physics_validator",
-        default_model="gemini-3-pro-preview",
-        alternatives=["gemini-3-pro", "gpt-4", "claude-3-opus"],
+        default_model="gemini-3-flash-preview",
+        alternatives=["gemini-3-flash", "gpt-4", "claude-3-opus"],
         timeout_seconds=30
     ))
     intelligent_region_detector: ModelConfig = field(default_factory=lambda: ModelConfig(
         model_name="intelligent_region_detector",
-        default_model="gemini-3-pro-preview",
-        alternatives=["gemini-3-pro", "gpt-4", "claude-3-opus"],
+        default_model="gemini-3-flash-preview",
+        alternatives=["gemini-3-flash", "gpt-4", "claude-3-opus"],
         timeout_seconds=30
     ))
 
@@ -1166,19 +1166,19 @@ class ConfigLoader:
         models = ModelsConfig(
             placement_engine=ModelConfig(
                 model_name="placement_engine",
-                default_model=models_cfg.get("placement_engine", {}).get("default_model", "gemini-3-pro-preview"),
+                default_model=models_cfg.get("placement_engine", {}).get("default_model", "gemini-3-flash-preview"),
                 alternatives=models_cfg.get("placement_engine", {}).get("alternatives", []),
                 timeout_seconds=models_cfg.get("placement_engine", {}).get("timeout_seconds", 30),
             ),
             physics_validator=ModelConfig(
                 model_name="physics_validator",
-                default_model=models_cfg.get("physics_validator", {}).get("default_model", "gemini-3-pro-preview"),
+                default_model=models_cfg.get("physics_validator", {}).get("default_model", "gemini-3-flash-preview"),
                 alternatives=models_cfg.get("physics_validator", {}).get("alternatives", []),
                 timeout_seconds=models_cfg.get("physics_validator", {}).get("timeout_seconds", 30),
             ),
             intelligent_region_detector=ModelConfig(
                 model_name="intelligent_region_detector",
-                default_model=models_cfg.get("intelligent_region_detector", {}).get("default_model", "gemini-3-pro-preview"),
+                default_model=models_cfg.get("intelligent_region_detector", {}).get("default_model", "gemini-3-flash-preview"),
                 alternatives=models_cfg.get("intelligent_region_detector", {}).get("alternatives", []),
                 timeout_seconds=models_cfg.get("intelligent_region_detector", {}).get("timeout_seconds", 30),
             ),

@@ -1161,6 +1161,10 @@ class GenieSimGRPCClient:
                 future = grpc.channel_ready_future(self._channel)
                 future.result(timeout=5)
                 logger.info("[RESTART] gRPC channel ready after restart")
+                # Re-create stubs on the fresh channel
+                self._stub = None
+                self._joint_stub = None
+                self.connect()
                 # Reset circuit breaker
                 if hasattr(self._circuit_breaker, 'reset'):
                     self._circuit_breaker.reset()
@@ -4216,14 +4220,31 @@ class GenieSimLocalFramework:
                             _text = _resp.text.strip()
                             _start = _text.find("{")
                             _end = _text.rfind("}") + 1
+                            import json as _json_mod
                             if _start >= 0 and _end > _start:
-                                import json as _json_mod
                                 _est = _json_mod.loads(_text[_start:_end])
+                                # Handle {"value": [w, d, h]} wrapper
+                                if isinstance(_est, dict) and "value" in _est and isinstance(_est["value"], list) and len(_est["value"]) >= 3:
+                                    _v = _est["value"]
+                                    _est = {"width": _v[0], "depth": _v[1], "height": _v[2]}
                                 _size = [
                                     max(float(_est.get("width", 0.1)), 0.01),
                                     max(float(_est.get("depth", 0.1)), 0.01),
                                     max(float(_est.get("height", 0.1)), 0.01),
                                 ]
+                            else:
+                                # Gemini may return a bare list [w, d, h]
+                                _lst_start = _text.find("[")
+                                _lst_end = _text.rfind("]") + 1
+                                if _lst_start >= 0 and _lst_end > _lst_start:
+                                    _arr = _json_mod.loads(_text[_lst_start:_lst_end])
+                                    if isinstance(_arr, list) and len(_arr) >= 3:
+                                        _est = {"width": _arr[0], "depth": _arr[1], "height": _arr[2]}
+                                        _size = [
+                                            max(float(_arr[0]), 0.01),
+                                            max(float(_arr[1]), 0.01),
+                                            max(float(_arr[2]), 0.01),
+                                        ]
                                 if _mass is None and "mass_kg" in _est:
                                     _mass = float(_est["mass_kg"])
                                 _dim_source = "gemini_estimated"
@@ -4443,6 +4464,15 @@ class GenieSimLocalFramework:
                             _task_episodes_passed += 1
                             total_frames += episode_result.get("frame_count", 0)
                             quality_scores.append(episode_result.get("quality_score", 0.0))
+                        elif episode_result.get("task_success") and not episode_result.get("success"):
+                            # Task succeeded but data capture failed (e.g. server deadlock).
+                            # Count for checkpoint so we move on to next task.
+                            _task_episodes_passed += 1
+                            self.log(
+                                f"Episode {ep_idx} had task_success but data capture failed — "
+                                "counting for checkpoint",
+                                "WARNING",
+                            )
                         else:
                             stall_info = episode_result.get("stall_info") or {}
                             if stall_info.get("stall_detected"):
@@ -5110,6 +5140,17 @@ class GenieSimLocalFramework:
                     # call is abandoned at the transport layer.
                     self._client._grpc_lock = threading.Lock()
                     try:
+                        # Close the old channel and null stubs so connect()
+                        # creates a fresh channel + stubs instead of reusing
+                        # the closed ones.
+                        try:
+                            if self._client._channel is not None:
+                                self._client._channel.close()
+                        except Exception:
+                            pass
+                        self._client._channel = None
+                        self._client._stub = None
+                        self._client._joint_stub = None
                         self._client.connect()
                         self.log("gRPC channel reconnected after stuck thread", "INFO")
                     except Exception as _reconn_err:
@@ -5133,6 +5174,10 @@ class GenieSimLocalFramework:
                         f"{time.time() - _exec_wait_start:.1f}s",
                         "INFO",
                     )
+
+            # Preserve task_success even if post-execution steps fail (e.g. deadlock)
+            if execution_state.get("success"):
+                result["task_success"] = True
 
             if execution_state.get("error"):
                 result["error"] = execution_state["error"]

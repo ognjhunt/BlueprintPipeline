@@ -627,12 +627,17 @@ def analyze_scene_with_gemini(
     print("[REPLICATOR] Calling Gemini for scene analysis...")
 
     response = client.models.generate_content(
-        model="gemini-3-pro-preview",
+        model="gemini-3-flash-preview",
         contents=[prompt],
         config=types.GenerateContentConfig(
             temperature=0.3,
             max_output_tokens=16000,
             response_mime_type="application/json",
+            thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+            tools=[
+                types.Tool(url_context=types.UrlContext()),
+                types.Tool(googleSearch=types.GoogleSearch()),
+            ],
         ),
     )
 

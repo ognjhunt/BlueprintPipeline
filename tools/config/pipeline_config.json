@@ -219,21 +219,21 @@
   },
   "models": {
     "placement_engine": {
-      "default_model": "gemini-3-pro-preview",
+      "default_model": "gemini-3-flash-preview",
       "description": "Default LLM model for placement engine",
-      "alternatives": ["gemini-3-pro", "gpt-4", "claude-3-opus"],
+      "alternatives": ["gemini-3-flash", "gpt-4", "claude-3-opus"],
       "timeout_seconds": 30
     },
     "physics_validator": {
-      "default_model": "gemini-3-pro-preview",
+      "default_model": "gemini-3-flash-preview",
       "description": "Default LLM model for physics validation",
-      "alternatives": ["gemini-3-pro", "gpt-4", "claude-3-opus"],
+      "alternatives": ["gemini-3-flash", "gpt-4", "claude-3-opus"],
       "timeout_seconds": 30
     },
     "intelligent_region_detector": {
-      "default_model": "gemini-3-pro-preview",
+      "default_model": "gemini-3-flash-preview",
       "description": "Default LLM model for region detection",
-      "alternatives": ["gemini-3-pro", "gpt-4", "claude-3-opus"],
+      "alternatives": ["gemini-3-flash", "gpt-4", "claude-3-opus"],
       "timeout_seconds": 30
     },
     "description": "LLM model configurations for smart placement pipeline"

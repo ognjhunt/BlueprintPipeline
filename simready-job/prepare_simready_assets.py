@@ -1203,27 +1203,25 @@ def call_gemini_for_dimensions(
     prompt = make_dimension_estimation_prompt(obj, has_multiple_views=len(images) > 1)
 
     try:
-        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-pro-preview")
+        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-flash-preview")
         if model_name.startswith("gemini-1") or model_name.startswith("gemini-2"):
             logger.warning(
-                "[SIMREADY] Overriding legacy Gemini model '%s' with gemini-3-pro-preview.",
+                "[SIMREADY] Overriding legacy Gemini model '%s' with gemini-3-flash-preview.",
                 model_name,
             )
-            model_name = "gemini-3-pro-preview"
+            model_name = "gemini-3-flash-preview"
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
         }
 
-        # Enable grounding for Gemini 3.x models
-        grounding_enabled = (
-            _get_env_value("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
-        )
-        if model_name.startswith("gemini-3") and grounding_enabled:
-            if hasattr(types, "GroundingConfig") and hasattr(types, "GoogleSearch"):
-                cfg_kwargs["grounding"] = types.GroundingConfig(
-                    google_search=types.GoogleSearch()
-                )
+        # Enable thinking, grounding, and URL context for Gemini 3.x models
+        if model_name.startswith("gemini-3"):
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="HIGH")
+            cfg_kwargs["tools"] = [
+                types.Tool(url_context=types.UrlContext()),
+                types.Tool(googleSearch=types.GoogleSearch()),
+            ]
 
         try:
             config = types.GenerateContentConfig(**cfg_kwargs)
@@ -1310,31 +1308,19 @@ def call_gemini_for_object(
     prompt = make_gemini_prompt(oid, obj, bounds, base_cfg, has_image=reference_image is not None)
 
     try:
-        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-pro-preview")
+        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-flash-preview")
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
         }
 
-        # Enable grounding for Gemini 3.x models (default: enabled)
-        grounding_enabled = (
-            _get_env_value("GEMINI_GROUNDING_ENABLED", "true").lower() in {"1", "true", "yes"}
-        )
-        if model_name.startswith("gemini-3") and grounding_enabled:
-            if hasattr(types, "GroundingConfig") and hasattr(types, "GoogleSearch"):
-                cfg_kwargs["grounding"] = types.GroundingConfig(
-                    google_search=types.GoogleSearch()
-                )
-
-        # Only use thinking_config when the SDK exposes it
-        if hasattr(types, "ThinkingConfig"):
-            ThinkingConfig = getattr(types, "ThinkingConfig")
-            ThinkingLevel = getattr(types, "ThinkingLevel", None)
-
-            if model_name.startswith("gemini-3") and ThinkingLevel is not None:
-                cfg_kwargs["thinking_config"] = ThinkingConfig(
-                    thinking_level=getattr(ThinkingLevel, "HIGH", "HIGH")
-                )
+        # Enable thinking, grounding, and URL context for Gemini 3.x models
+        if model_name.startswith("gemini-3"):
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="HIGH")
+            cfg_kwargs["tools"] = [
+                types.Tool(url_context=types.UrlContext()),
+                types.Tool(googleSearch=types.GoogleSearch()),
+            ]
 
         try:
             config = types.GenerateContentConfig(**cfg_kwargs)

@@ -91,7 +91,7 @@ class RecipeCompiler:
             up_axis=config.up_axis,
         )
         self._joint_cache: dict[str, dict[str, Any]] = {}
-        articulation_model = os.getenv("ARTICULATION_GEMINI_MODEL", "gemini-3-pro-preview")
+        articulation_model = os.getenv("ARTICULATION_GEMINI_MODEL", "gemini-3-flash-preview")
         joint_client = GeminiClient(model_name=articulation_model)
         self.joint_client: Optional[GeminiClient] = joint_client if getattr(joint_client, "api_key", None) else None
 

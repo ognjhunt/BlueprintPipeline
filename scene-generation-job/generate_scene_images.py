@@ -21,7 +21,7 @@ Environment Variables:
     SCENES_PER_RUN: Number of scenes to generate (default: 10)
     DRY_RUN: If "true", skip actual generation (for testing)
     FIRESTORE_PROJECT: GCP project for Firestore (optional, uses default)
-    GEMINI_PRO_MODEL: Override prompt diversification model (default: gemini-3-pro-preview)
+    GEMINI_PRO_MODEL: Override prompt diversification model (default: gemini-3-flash-preview)
     GEMINI_IMAGE_MODEL: Override image generation model (default: gemini-3-pro-image-preview)
     GEMINI_IMAGE_MODEL_FALLBACK: Fallback GA image model (default: gemini-2.0-flash-image-generation)
 """
@@ -73,7 +73,7 @@ GCS_ROOT = Path("/mnt/gcs")
 LOGGER = logging.getLogger("scene-generation-job")
 
 # Gemini models (defaults, can be overridden via environment variables)
-DEFAULT_GEMINI_PRO_MODEL = "gemini-3-pro-preview"  # For prompt diversification
+DEFAULT_GEMINI_PRO_MODEL = "gemini-3-flash-preview"  # For prompt diversification
 DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"  # For image generation (Nano Banana Pro)
 DEFAULT_GEMINI_IMAGE_FALLBACK_MODEL = "gemini-2.0-flash-image-generation"  # Stable GA fallback
 
@@ -737,6 +737,11 @@ Return ONLY the JSON, no additional text."""
                     temperature=0.9,  # Higher for diversity
                     max_output_tokens=2000,
                     response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+                    tools=[
+                        types.Tool(url_context=types.UrlContext()),
+                        types.Tool(googleSearch=types.GoogleSearch()),
+                    ],
                 ),
             )
 

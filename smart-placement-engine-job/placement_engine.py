@@ -196,7 +196,7 @@ class SmartPlacementEngine:
                     "[PLACEMENT-ENGINE] Failed to load pipeline config for default model; using fallback.",
                     exc_info=True,
                 )
-        return "gemini-3-pro-preview"
+        return "gemini-3-flash-preview"
 
     def __init__(
         self,
@@ -818,7 +818,11 @@ Focus on:
             ]
 
             config = types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+                thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+                tools=[
+                    types.Tool(url_context=types.UrlContext()),
+                    types.Tool(googleSearch=types.GoogleSearch()),
+                ],
             )
 
             response_text = ""

@@ -112,7 +112,7 @@ class IntelligentRegionDetector:
                 )
                 if resolve_production_mode():
                     raise
-        return "gemini-3-pro-preview"
+        return "gemini-3-flash-preview"
 
     def __init__(
         self,
@@ -485,14 +485,15 @@ Focus on visual details that may not be in the manifest:
         )
 
         # Configure generation
-        tools = []
-        if self.enable_web_search:
-            tools.append(types.Tool(googleSearch=types.GoogleSearch()))
+        tools = [
+            types.Tool(url_context=types.UrlContext()),
+            types.Tool(googleSearch=types.GoogleSearch()),
+        ]
 
         config = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
             response_mime_type="application/json",
-            tools=tools if tools else None,
+            tools=tools,
         )
 
         # Generate response
@@ -560,6 +561,10 @@ Focus on visual details that may not be in the manifest:
         config = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
             response_mime_type="application/json",
+            tools=[
+                types.Tool(url_context=types.UrlContext()),
+                types.Tool(googleSearch=types.GoogleSearch()),
+            ],
         )
 
         # Generate response with image
@@ -650,8 +655,12 @@ Return a JSON array with enhanced region data in the same format.
 """
 
         config = types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_level="MEDIUM"),
+            thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
             response_mime_type="application/json",
+            tools=[
+                types.Tool(url_context=types.UrlContext()),
+                types.Tool(googleSearch=types.GoogleSearch()),
+            ],
         )
 
         contents = [

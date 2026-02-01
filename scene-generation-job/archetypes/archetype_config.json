@@ -556,7 +556,7 @@
   },
   "generation_settings": {
     "image_model": "gemini-3-pro-image-preview",
-    "prompt_model": "gemini-3-pro-preview",
+    "prompt_model": "gemini-3-flash-preview",
     "default_aspect_ratio": "16:9",
     "default_image_size": "2K",
     "grounding_enabled": true,

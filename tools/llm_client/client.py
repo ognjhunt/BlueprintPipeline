@@ -16,7 +16,7 @@ Environment Variables:
     LLM_MAX_RETRIES: Number of retries (default: 3)
 
     # Model overrides (optional)
-    GEMINI_MODEL: Override default Gemini model (default: gemini-3-pro-preview)
+    GEMINI_MODEL: Override default Gemini model (default: gemini-3-flash-preview)
     ANTHROPIC_MODEL: Override default Anthropic model (default: claude-sonnet-4-5-20250929)
     OPENAI_MODEL: Override default OpenAI model (default: gpt-5.1)
 """
@@ -639,7 +639,7 @@ class GeminiClient(LLMClient):
 
     @property
     def default_model(self) -> str:
-        return os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+        return os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
     @property
     def default_image_model(self) -> str:
@@ -716,8 +716,15 @@ class GeminiClient(LLMClient):
         if json_output:
             config_kwargs["response_mime_type"] = "application/json"
 
-        # Add web search grounding
-        if use_web_search:
+        # Enable thinking, grounding, and URL context for Gemini 3.x models
+        if self.model.startswith("gemini-3"):
+            config_kwargs["thinking_config"] = self._types.ThinkingConfig(thinking_level="HIGH")
+            tools = [
+                self._types.Tool(url_context=self._types.UrlContext()),
+                self._types.Tool(googleSearch=self._types.GoogleSearch()),
+            ]
+            config_kwargs["tools"] = tools
+        elif use_web_search:
             if hasattr(self._types, "Tool") and hasattr(self._types, "GoogleSearch"):
                 config_kwargs["tools"] = [
                     self._types.Tool(googleSearch=self._types.GoogleSearch())

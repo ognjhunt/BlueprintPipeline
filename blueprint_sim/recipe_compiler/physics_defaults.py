@@ -26,7 +26,7 @@ class PhysicsDefaults:
         model_name: Optional[str] = None,
         temperature: float = 0.1,
     ) -> None:
-        model = model_name or os.getenv("PHYSICS_GEMINI_MODEL", "gemini-3-pro-preview")
+        model = model_name or os.getenv("PHYSICS_GEMINI_MODEL", "gemini-3-flash-preview")
         client = gemini_client or GeminiClient(model_name=model)
         self.client: Optional[GeminiClient] = client if getattr(client, "api_key", None) else None
         self.temperature = temperature

@@ -24,7 +24,7 @@ Supported environment variables (read by `LLMClient` helpers):
 - `LLM_FALLBACK_ENABLED`: `true | false` (default: `true`)
 - `LLM_MAX_RETRIES`: retries before surfacing failure (default: `3`)
 - Model overrides:
-  - `GEMINI_MODEL` (default `gemini-3-pro-preview`)
+  - `GEMINI_MODEL` (default `gemini-3-flash-preview`)
   - `ANTHROPIC_MODEL` (default `claude-sonnet-4-5-20250929`)
   - `OPENAI_MODEL` (default `gpt-5.1`)【F:tools/llm_client/client.py†L10-L43】
 

@@ -255,11 +255,11 @@ class PhysicsValidator:
             try:
                 config = load_pipeline_config(validate=False)
                 model_config = config.models.get_model("physics_validator")
-                self.model = model_config.default_model if model_config else "gemini-3-pro-preview"
+                self.model = model_config.default_model if model_config else "gemini-3-flash-preview"
             except Exception:
-                self.model = "gemini-3-pro-preview"
+                self.model = "gemini-3-flash-preview"
         else:
-            self.model = "gemini-3-pro-preview"
+            self.model = "gemini-3-flash-preview"
 
     def _get_client(self) -> Optional["genai.Client"]:
         """Get or create the Gemini client."""
@@ -719,7 +719,11 @@ Provide 2-3 sentences with:
             ]
 
             config = types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+                thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+                tools=[
+                    types.Tool(url_context=types.UrlContext()),
+                    types.Tool(googleSearch=types.GoogleSearch()),
+                ],
             )
 
             response_text = ""

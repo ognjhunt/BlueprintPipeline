@@ -344,9 +344,14 @@ def detect_affordances_llm(
     try:
         prompt = _make_affordance_prompt(obj)
 
-        model_name = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+        model_name = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
+            thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+            tools=[
+                types.Tool(url_context=types.UrlContext()),
+                types.Tool(googleSearch=types.GoogleSearch()),
+            ],
         )
 
         response = client.models.generate_content(
