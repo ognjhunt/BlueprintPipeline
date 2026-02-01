@@ -1262,7 +1262,10 @@ class GenieSimGRPCClient:
             logger.error("Genie Sim gRPC %s failed before completion: %s", action, exc)
             return fallback
         finally:
-            self._grpc_lock.release()
+            try:
+                self._grpc_lock.release()
+            except RuntimeError:
+                pass  # Lock was replaced by another thread
 
     def _call_grpc_inner(
         self,
@@ -2053,7 +2056,7 @@ class GenieSimGRPCClient:
             error=f"Unsupported command for Genie Sim gRPC transport: {command.name}",
         )
 
-    def get_observation(self) -> GrpcCallResult:
+    def get_observation(self, lock_timeout: Optional[float] = None) -> GrpcCallResult:
         """
         Get current observation from simulation.
 
@@ -2079,7 +2082,7 @@ class GenieSimGRPCClient:
         joint_velocities = []
         joint_efforts = []
         try:
-            jp_result = self.get_joint_position()
+            jp_result = self.get_joint_position(lock_timeout=lock_timeout)
             if jp_result.success and jp_result.payload is not None:
                 joint_positions = list(jp_result.payload)
                 joint_names = list(self._joint_names) if self._joint_names else []
@@ -2092,7 +2095,7 @@ class GenieSimGRPCClient:
         # --- 2. Real EE pose ---
         ee_pose = {}
         try:
-            ee_result = self.get_ee_pose(ee_link_name="right")
+            ee_result = self.get_ee_pose(ee_link_name="right", lock_timeout=lock_timeout)
             if ee_result.success and ee_result.payload is not None:
                 ee_pose = ee_result.payload
         except Exception as exc:
@@ -2725,7 +2728,7 @@ class GenieSimGRPCClient:
             payload=joint_positions,
         )
 
-    def get_ee_pose(self, ee_link_name: str = "") -> GrpcCallResult:
+    def get_ee_pose(self, ee_link_name: str = "", lock_timeout: Optional[float] = None) -> GrpcCallResult:
         """
         Get current end-effector pose.
 
@@ -2759,6 +2762,7 @@ class GenieSimGRPCClient:
             _request,
             None,
             success_checker=lambda resp: bool(resp.prim_path) or resp.ee_pose is not None,
+            lock_timeout=lock_timeout,
         )
         if response is None:
             return GrpcCallResult(
@@ -5261,7 +5265,7 @@ class GenieSimLocalFramework:
                         _collect_polling()
                         return
                     _consecutive_failures = 0
-                    _max_consecutive_failures = int(os.getenv("OBS_MAX_CONSECUTIVE_FAILURES", "3"))
+                    _max_consecutive_failures = int(os.getenv("OBS_MAX_CONSECUTIVE_FAILURES", "100"))
                     for response in stream_result.payload:
                         if abort_event.is_set():
                             break
@@ -5309,11 +5313,11 @@ class GenieSimLocalFramework:
                         sleep_for = target_time - time.time()
                         if sleep_for > 0:
                             time.sleep(sleep_for)
-                        obs_result = self._client.get_observation()
+                        obs_result = self._client.get_observation(lock_timeout=1.0)
                         if not obs_result.available:
                             _poll_consecutive_failures = getattr(_collect_polling, '_consec', 0) + 1
                             _collect_polling._consec = _poll_consecutive_failures
-                            _max_poll_failures = int(os.getenv("OBS_MAX_CONSECUTIVE_FAILURES", "3"))
+                            _max_poll_failures = int(os.getenv("OBS_MAX_CONSECUTIVE_FAILURES", "100"))
                             logger.warning(
                                 "[OBS-POLL] Frame unavailable %d/%d: %s",
                                 _poll_consecutive_failures, _max_poll_failures, obs_result.error,
@@ -5328,7 +5332,7 @@ class GenieSimLocalFramework:
                         if not obs_result.success:
                             _poll_consecutive_failures = getattr(_collect_polling, '_consec', 0) + 1
                             _collect_polling._consec = _poll_consecutive_failures
-                            _max_poll_failures = int(os.getenv("OBS_MAX_CONSECUTIVE_FAILURES", "3"))
+                            _max_poll_failures = int(os.getenv("OBS_MAX_CONSECUTIVE_FAILURES", "100"))
                             logger.warning(
                                 "[OBS-POLL] Frame failure %d/%d: %s",
                                 _poll_consecutive_failures, _max_poll_failures,
