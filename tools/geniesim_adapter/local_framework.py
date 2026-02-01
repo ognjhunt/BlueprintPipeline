@@ -1440,6 +1440,7 @@ class GenieSimGRPCClient:
         include_joint: bool = True,
         include_pose: bool = False,
         timeout: Optional[float] = None,
+        lock_timeout: Optional[float] = None,
     ) -> GrpcCallResult:
         """
         Request a minimal observation payload for readiness checks.
@@ -1454,7 +1455,7 @@ class GenieSimGRPCClient:
         joint_names = []
         if include_joint:
             try:
-                jp_result = self.get_joint_position()
+                jp_result = self.get_joint_position(lock_timeout=lock_timeout)
                 if jp_result.success and jp_result.payload is not None:
                     joint_positions = list(jp_result.payload)
                     joint_names = list(self._joint_names) if self._joint_names else []
@@ -3189,7 +3190,8 @@ class GenieSimGRPCClient:
         """
         obs = getattr(self, "_latest_observation", None)
         if obs is None or not obs.get("success"):
-            obs_result = self.get_observation()
+            obs_lock_timeout = float(os.getenv("OBS_LOCK_TIMEOUT_S", "1.0"))
+            obs_result = self.get_observation(lock_timeout=obs_lock_timeout)
             if not obs_result.available or not obs_result.success:
                 return None
             obs = obs_result.payload or {}
@@ -5186,8 +5188,10 @@ class GenieSimLocalFramework:
                 return result
             recording_started = True
 
+            obs_lock_timeout = float(os.getenv("OBS_LOCK_TIMEOUT_S", "1.0"))
+
             # Get initial observation
-            obs_result = self._client.get_observation()
+            obs_result = self._client.get_observation(lock_timeout=obs_lock_timeout)
             if not obs_result.available:
                 result["error"] = f"Observation unavailable: {obs_result.error}"
                 return result
@@ -5313,7 +5317,7 @@ class GenieSimLocalFramework:
                         sleep_for = target_time - time.time()
                         if sleep_for > 0:
                             time.sleep(sleep_for)
-                        obs_result = self._client.get_observation(lock_timeout=1.0)
+                        obs_result = self._client.get_observation(lock_timeout=obs_lock_timeout)
                         if not obs_result.available:
                             _poll_consecutive_failures = getattr(_collect_polling, '_consec', 0) + 1
                             _collect_polling._consec = _poll_consecutive_failures
