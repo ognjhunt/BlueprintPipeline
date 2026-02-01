@@ -2034,6 +2034,10 @@ class GenieSimGRPCClient:
                         _candidates.append(f"/Root/{_bare}")
                     if not prim_path.startswith("/"):
                         _candidates.append(f"/{prim_path}")
+                    # Try /World/Scene/ prefix (common in Genie Sim server stages)
+                    _bare_name = prim_path.rsplit("/", 1)[-1] if "/" in prim_path else prim_path
+                    _candidates.append(f"/World/Scene/obj_{_bare_name}")
+                    _candidates.append(f"/World/Scene/{_bare_name}")
                 _found = False
                 for _candidate in _candidates:
                     try:
@@ -3965,7 +3969,7 @@ class GenieSimLocalFramework:
             #   {GENIESIM_ROOT}/source/data_collection/config/robot_cfg/{robot_cfg_file}
             # Override via GENIESIM_ROBOT_CFG_FILE env var if needed.
             _ROBOT_CFG_MAP = {
-                "franka": "G1_omnipicker_fixed.json",
+                "franka": "franka_panda.json",
                 "g1": "G1_omnipicker_fixed.json",
                 "g1_dual": "G1_omnipicker_fixed_dual.json",
                 "g2": "G2_omnipicker_fixed_dual.json",
@@ -5006,11 +5010,13 @@ class GenieSimLocalFramework:
             # (health probes, reset, next task init).
             if execution_thread.is_alive():
                 _exec_wait_start = time.time()
+                # Signal the execution thread to stop before waiting
+                abort_event.set()
                 self.log(
                     "Waiting for execution thread to finish (holds gRPC lock)...",
                     "INFO",
                 )
-                execution_thread.join(timeout=30.0)
+                execution_thread.join(timeout=60.0)
                 if execution_thread.is_alive():
                     self.log(
                         f"Execution thread still alive after "

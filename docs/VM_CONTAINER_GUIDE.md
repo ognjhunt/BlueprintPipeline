@@ -68,6 +68,9 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
   cd ~/BlueprintPipeline &&
   export PYTHONPATH=~/BlueprintPipeline:\$PYTHONPATH &&
   export SKIP_QUALITY_GATES=1 &&
+  export GENIESIM_FIRST_CALL_TIMEOUT_S=300 &&
+  export GENIESIM_RESTART_EVERY_N_TASKS=3 &&
+  export CAMERA_REWARMUP_ON_RESET=1 &&
   python3 tools/run_local_pipeline.py \
     --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
     --steps simready,usd,replicator,isaac-lab,genie-sim-export,genie-sim-submit,genie-sim-import \
@@ -309,15 +312,21 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 32. **EE pose patch covers `_get_ee_pose` code path**: The gRPC handler calls `self.ui_builder._get_ee_pose(is_right)` (line 1790 of `command_controller.py`), NOT `robot.get_ee_pose()`. Updated regex from `\.get_ee_pose\(` to `\._?get_ee_pose\(` to match both. Also matches ALL occurrences (not just first) and uses unique temp vars per match site.
 33. **Object pose diagnostic logging**: When fuzzy prim path resolution fails, dumps the first 50 prims from the USD stage (once per session). Also logs `scene_usd_path`, whether the file exists, and the `sim_assets_root`/`scene_usd` values used to construct it.
 
+34. **CRITICAL: Franka robot config was mapped to G1 humanoid**: `_ROBOT_CFG_MAP["franka"]` pointed to `G1_omnipicker_fixed.json` (80+ DOF humanoid, 10+ min init) instead of `franka_panda.json` (7 DOF, ~30s init). This caused all Franka runs to use the wrong robot, leading to slow init, wrong joint names, and EE pose failures. Fixed to map to `franka_panda.json`.
+35. **Object path candidates expanded**: Added `/World/Scene/obj_{name}` and `/World/Scene/{name}` as candidate prim paths for object pose queries, matching the server's scene graph prefix convention.
+36. **Execution thread abort before join**: `abort_event.set()` is now called before the execution thread join (was missing), and join timeout increased from 30s to 60s. Ensures the trajectory loop exits promptly instead of blocking on an in-flight gRPC call.
+
 ## Remaining Known Issues
 
-1. **Object poses still all zeros**: The server returns identity poses for ALL objects. The server DOES call `add_reference_to_stage(self.scene_usd_path, "/World")` (line 232) to load the scene USD, but objects still return zero poses. Fix 33 adds diagnostic logging to confirm: (a) whether `scene_usd_path` resolves to a real file, (b) what prims actually exist in the USD stage after loading. **Next step**: Run pipeline with new diagnostics, check Docker logs for `[PATCH-DIAG]` and `DIAGNOSTIC: Full USD stage` messages.
+1. **Object poses still all zeros**: The server returns identity poses for ALL objects. Fix 33 adds diagnostic logging; fix 35 adds `/World/Scene/obj_{name}` path candidates. **Next step**: Run pipeline with Franka config (fix 34) and check Docker logs for `[PATCH-DIAG]` messages. The expanded path candidates may resolve this if objects are under `/World/Scene/`.
 
-2. **Server resource exhaustion on long runs**: After ~4 tasks (~25 min), the Isaac Sim process accumulates GPU/RAM usage and trajectory execution hits DEADLINE_EXCEEDED consistently. The server doesn't crash but becomes unresponsive. **Mitigation**: Use `GENIESIM_RESTART_EVERY_N_TASKS=3` (fix 26). **Next step**: Profile GPU/RAM with `nvidia-smi` and `/proc/meminfo` during a run to confirm resource exhaustion hypothesis.
+2. **Server resource exhaustion on long runs**: After ~4 tasks (~25 min), GPU/RAM accumulates and trajectory execution hits DEADLINE_EXCEEDED. **Mitigation**: Use `GENIESIM_RESTART_EVERY_N_TASKS=3` (fix 26). **Next step**: Profile GPU/RAM with `nvidia-smi` during a run.
 
-3. **Camera data intermittent after first observation**: First observation includes camera frames, subsequent ones may not. Likely caused by Replicator render pipeline going stale after trajectory reset. **Mitigation**: Set `CAMERA_REWARMUP_ON_RESET=1` (fix 28). **Next step**: Verify whether `rep.orchestrator.step()` needs to be called after physics resets to re-sync the render pipeline.
+3. **Camera data intermittent after first observation**: **Mitigation**: Set `CAMERA_REWARMUP_ON_RESET=1` (fix 28). **Next step**: Verify with Franka config — previous runs used G1 which may have contributed.
 
-4. **cuRobo API version mismatch**: cuRobo planner fails with `'TensorDeviceType' object has no attribute 'mesh'` (Isaac Sim 4.5 vs cuRobo version mismatch). IK fallback trajectory works as alternative. **Next step**: Pin cuRobo version compatible with Isaac Sim 4.5 in Dockerfile.
+4. **cuRobo API version mismatch**: IK fallback works. **Next step**: Pin cuRobo version compatible with Isaac Sim 4.5 in Dockerfile.
+
+5. **MIN_EPISODE_FRAMES and EE pose failures**: Previously observed with G1 config. **Likely resolved** by fix 34 (Franka config). With Franka's faster init (~30s vs 10+ min), more observations should be collected and the standard EE pose path should work. Verify on next run.
 
 ## Running Pipeline Client Inside Container
 
