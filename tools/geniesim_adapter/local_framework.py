@@ -1114,7 +1114,7 @@ class GenieSimGRPCClient:
         import subprocess as _sp
 
         max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "10"))
-        cooldown_s = 60  # 1 minute between restarts
+        cooldown_s = int(os.environ.get("GENIESIM_RESTART_COOLDOWN_S", "30"))
 
         if not hasattr(self, "_restart_count"):
             self._restart_count = 0
@@ -1210,6 +1210,7 @@ class GenieSimGRPCClient:
         fallback: Any,
         success_checker: Optional[Callable[[Any], bool]] = None,
         abort_event: Optional[threading.Event] = None,
+        lock_timeout: Optional[float] = None,
     ) -> Any:
         # Fast-path: if abort already signalled, skip the call entirely.
         if abort_event is not None and abort_event.is_set():
@@ -1219,7 +1220,9 @@ class GenieSimGRPCClient:
         # running gRPC call (e.g. 600s first trajectory) holds the lock and
         # another thread or the main thread needs to make a call (e.g. health
         # probe between tasks).  Default lock timeout = gRPC timeout + 10s.
-        lock_timeout = self.timeout + 10.0
+        # Callers can pass a shorter lock_timeout for lightweight probes.
+        if lock_timeout is None:
+            lock_timeout = self.timeout + 10.0
         acquired = self._grpc_lock.acquire(timeout=lock_timeout)
         if not acquired:
             logger.warning(
@@ -2588,11 +2591,16 @@ class GenieSimGRPCClient:
             payload={"msg": response.errmsg},
         )
 
-    def get_joint_position(self) -> GrpcCallResult:
+    def get_joint_position(self, lock_timeout: Optional[float] = None) -> GrpcCallResult:
         """
         Get current joint positions.
 
         Uses real gRPC get_joint_position call.
+
+        Args:
+            lock_timeout: Optional override for gRPC lock acquisition timeout.
+                Use a short value (e.g. 5.0) for health probes to avoid blocking
+                behind long-running calls.
 
         Returns:
             GrpcCallResult with payload list of joint positions.
@@ -2617,6 +2625,7 @@ class GenieSimGRPCClient:
             _request,
             None,
             success_checker=lambda resp: bool(resp.states),
+            lock_timeout=lock_timeout,
         )
         if response is None:
             return GrpcCallResult(
@@ -4390,12 +4399,22 @@ class GenieSimLocalFramework:
             run_dir = self.config.recording_dir / f"run_{_run_hash}"
             run_dir.mkdir(parents=True, exist_ok=True)
 
-            # Load checkpoint of previously completed tasks (for retry resume)
+            # Load checkpoint of previously completed tasks (for retry resume).
+            # Format v2: {"tasks": [...], "episode_counts": {"task": N}}
+            # Legacy format: ["task1", "task2"]  (list of names)
             _checkpoint_path = run_dir / "_completed_tasks.json"
             _completed_task_names: set = set()
+            _checkpoint_episode_counts: dict = {}
             if _checkpoint_path.exists():
                 try:
-                    _completed_task_names = set(json.loads(_checkpoint_path.read_text()))
+                    _raw = json.loads(_checkpoint_path.read_text())
+                    if isinstance(_raw, dict):
+                        # v2 format
+                        _completed_task_names = set(_raw.get("tasks", []))
+                        _checkpoint_episode_counts = _raw.get("episode_counts", {})
+                    elif isinstance(_raw, list):
+                        # legacy format
+                        _completed_task_names = set(_raw)
                     if _completed_task_names:
                         self.log(
                             f"Resuming: {len(_completed_task_names)} tasks already completed, "
@@ -4405,17 +4424,29 @@ class GenieSimLocalFramework:
                     pass
 
             _inter_task_delay = float(os.environ.get("GENIESIM_INTER_TASK_DELAY_S", "2"))
-            _restart_every_n = int(os.environ.get("GENIESIM_RESTART_EVERY_N_TASKS", "2"))
+            _restart_every_n = int(os.environ.get("GENIESIM_RESTART_EVERY_N_TASKS", "5"))
 
             for task_idx, task in enumerate(tasks):
                 if _timeout_exceeded():
                     break
 
-                # Skip tasks already completed in a previous run (checkpoint resume)
+                # Skip tasks already completed in a previous run (checkpoint resume).
+                # v2 checkpoint: skip if enough episodes were already collected.
                 _task_name_for_ckpt = task.get("task_name", f"task_{task_idx}")
-                if _task_name_for_ckpt in _completed_task_names:
-                    self.log(f"Skipping already-completed task {task_idx + 1}/{len(tasks)}: {_task_name_for_ckpt}")
+                _prev_episodes = _checkpoint_episode_counts.get(_task_name_for_ckpt, 0)
+                if _task_name_for_ckpt in _completed_task_names and _prev_episodes >= episodes_target:
+                    self.log(
+                        f"Skipping already-completed task {task_idx + 1}/{len(tasks)}: "
+                        f"{_task_name_for_ckpt} ({_prev_episodes} episodes)"
+                    )
                     continue
+                elif _task_name_for_ckpt in _completed_task_names:
+                    # Legacy checkpoint or partial — re-run to fill gap
+                    self.log(
+                        f"Task {_task_name_for_ckpt} was checkpointed with {_prev_episodes}/{episodes_target} "
+                        "episodes — re-running to collect remaining",
+                        "WARNING",
+                    )
 
                 # Inter-task delay with health probe (skip for first task)
                 if task_idx > 0 and _inter_task_delay > 0:
@@ -4442,10 +4473,11 @@ class GenieSimLocalFramework:
                         self.log(f"Inter-task delay: {_inter_task_delay}s before task {task_idx + 1}")
                         import time as _delay_time
                         _delay_time.sleep(_inter_task_delay)
-                        # Lightweight health probe via gRPC client
+                        # Lightweight health probe via gRPC client (short lock
+                        # timeout so we don't block 70s behind a stuck call)
                         try:
                             if hasattr(self, '_client') and self._client is not None:
-                                _probe = self._client.get_joint_position()
+                                _probe = self._client.get_joint_position(lock_timeout=5.0)
                                 if not _probe.available:
                                     self.log("Health probe: server unavailable — attempting restart", "WARNING")
                                     if hasattr(self._client, '_attempt_server_restart'):
@@ -4458,8 +4490,11 @@ class GenieSimLocalFramework:
                     task["task_name"] = task_name
                 self.log(f"\nTask {task_idx + 1}/{len(tasks)}: {task_name}")
 
-                # Reset per-task stall budget so earlier stalls don't penalize later tasks
+                # Sliding window stall tracking: restart when >40% of recent
+                # episodes stalled, rather than a simple cumulative counter.
                 self._stall_count = 0
+                _stall_window_size = 5
+                _stall_window: list = []  # recent episode outcomes: True=stall, False=ok
 
                 # Configure environment for task
                 self._configure_task(task, scene_config)
@@ -4501,6 +4536,26 @@ class GenieSimLocalFramework:
                             time.sleep(self.config.stall_backoff_s if self.config.stall_backoff_s > 0 else 5)
                             continue  # retry this episode with fresh server
 
+                        # Skip episode if circuit breaker is open — gRPC calls
+                        # would return fallback data, producing garbage episodes.
+                        if (
+                            hasattr(self._client, "_circuit_breaker")
+                            and self._client._circuit_breaker
+                            and self._client._circuit_breaker.is_open
+                        ):
+                            self.log(
+                                f"Circuit breaker OPEN before episode {ep_idx} of "
+                                f"{task_name} — skipping to avoid garbage data",
+                                "ERROR",
+                            )
+                            result.warnings.append(
+                                f"Episode {ep_idx} of {task_name} skipped: circuit breaker open"
+                            )
+                            # Attempt server restart to recover
+                            self._client._attempt_server_restart()
+                            self._reinit_robot_after_restart()
+                            continue
+
                         # Generate and execute trajectory
                         episode_result = self._run_single_episode(
                             task=task,
@@ -4525,6 +4580,9 @@ class GenieSimLocalFramework:
                             _task_episodes_passed += 1
                             total_frames += episode_result.get("frame_count", 0)
                             quality_scores.append(episode_result.get("quality_score", 0.0))
+                            _stall_window.append(False)
+                            if len(_stall_window) > _stall_window_size:
+                                _stall_window.pop(0)
                         elif episode_result.get("task_success") and not episode_result.get("success"):
                             # Task succeeded but data capture failed (e.g. server deadlock).
                             # Count for checkpoint so we move on to next task.
@@ -4535,8 +4593,13 @@ class GenieSimLocalFramework:
                                 "WARNING",
                             )
                         else:
+                            _stall_window.append(False)  # non-stall failure
+                            if len(_stall_window) > _stall_window_size:
+                                _stall_window.pop(0)
                             stall_info = episode_result.get("stall_info") or {}
                             if stall_info.get("stall_detected"):
+                                # Overwrite the False we just appended
+                                _stall_window[-1] = True
                                 self._stall_count += 1
                                 stall_reason = stall_info.get("stall_reason", StallReason.UNKNOWN)
 
@@ -4557,10 +4620,18 @@ class GenieSimLocalFramework:
                                     },
                                 )
 
+                                # Sliding window: restart if >40% of recent episodes stalled
+                                _stall_rate = sum(_stall_window) / len(_stall_window) if _stall_window else 0
+                                _should_restart = (
+                                    self._stall_count > self.config.max_stalls
+                                    or (len(_stall_window) >= 3 and _stall_rate > 0.4)
+                                )
+
                                 stall_message = (
                                     f"Episode {ep_idx} of {task_name} stalled after "
                                     f"{stall_info.get('last_progress_age_s', 0.0):.1f}s "
                                     f"(stall {self._stall_count}/{self.config.max_stalls}, "
+                                    f"window_rate={_stall_rate:.0%}, "
                                     f"reason={stall_reason})"
                                 )
                                 result.warnings.append(stall_message)
@@ -4572,11 +4643,12 @@ class GenieSimLocalFramework:
                                     f"observations={stall_info.get('observations_collected', 0)}, "
                                     f"progress_age={stall_info.get('last_progress_age_s', 0.0):.1f}s, "
                                     f"trajectory_end={stall_info.get('trajectory_end_timestamp')}, "
-                                    f"last_obs={stall_info.get('last_observation_timestamp')}",
+                                    f"last_obs={stall_info.get('last_observation_timestamp')}, "
+                                    f"window_rate={_stall_rate:.0%}",
                                     "WARNING",
                                 )
 
-                                if self._stall_count > self.config.max_stalls:
+                                if _should_restart:
                                     # Log stall summary before server restart
                                     if result.stall_statistics:
                                         summary = result.stall_statistics.get_summary()
@@ -4602,6 +4674,7 @@ class GenieSimLocalFramework:
                                     # server so it's ready for the next episode.
                                     self._reinit_robot_after_restart()
                                     self._stall_count = 0
+                                    _stall_window.clear()
                                     if self.config.stall_backoff_s > 0:
                                         time.sleep(self.config.stall_backoff_s)
                             result.warnings.append(
@@ -4617,10 +4690,19 @@ class GenieSimLocalFramework:
                 # producing 0 episodes and burning through all retry attempts.
                 if _task_episodes_passed > 0:
                     _completed_task_names.add(task_name)
+                    _checkpoint_episode_counts[task_name] = (
+                        _checkpoint_episode_counts.get(task_name, 0) + _task_episodes_passed
+                    )
                     try:
-                        _checkpoint_path.write_text(json.dumps(sorted(_completed_task_names)))
-                    except Exception:
-                        pass
+                        _checkpoint_path.write_text(json.dumps({
+                            "tasks": sorted(_completed_task_names),
+                            "episode_counts": _checkpoint_episode_counts,
+                        }))
+                    except Exception as _ckpt_err:
+                        self.log(
+                            f"Failed to write checkpoint to {_checkpoint_path}: {_ckpt_err}",
+                            "WARNING",
+                        )
                     # Stream per-task episodes so they're available immediately.
                     if self.config.stream_per_task:
                         try:

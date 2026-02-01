@@ -11,6 +11,7 @@ Sources:
 
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -105,29 +106,51 @@ class DimensionEstimator:
         if not llm:
             return None
 
-        try:
-            prompt = (
-                f"Estimate the typical bounding box dimensions [width, depth, height] "
-                f"in meters for a '{identifier}' object commonly found in indoor environments. "
-                f"Return ONLY a JSON object: {{\"dimensions\": [0.2, 0.2, 0.1]}}"
-            )
-            response = llm.generate(prompt, json_output=True, temperature=0.3)
-            data = response.parse_json()
-            if isinstance(data, dict) and "dimensions" in data:
-                dims = data["dimensions"]
-                if isinstance(dims, (list, tuple)) and len(dims) >= 3:
-                    result = [float(d) for d in dims[:3]]
-                    if all(0.001 < d < 10.0 for d in result):
-                        self._cache[cache_key] = result
-                        logger.info(
-                            "GEMINI_DIMENSIONS: Estimated %s for '%s'",
-                            result, identifier,
-                        )
-                        return list(result)
-        except Exception as exc:
-            logger.debug("Gemini dimension estimation failed for '%s': %s", identifier, exc)
+        prompt = (
+            f"Estimate the typical bounding box dimensions [width, depth, height] "
+            f"in meters for a '{identifier}' object commonly found in indoor environments. "
+            f"Return ONLY a JSON object: {{\"dimensions\": [0.2, 0.2, 0.1]}}"
+        )
 
-        return None
+        _rate_limit_backoffs = [30, 60, 120]
+        _attempt = 0
+        while True:
+            try:
+                response = llm.generate(prompt, json_output=True, temperature=0.3)
+                data = response.parse_json()
+                if isinstance(data, dict) and "dimensions" in data:
+                    dims = data["dimensions"]
+                    if isinstance(dims, (list, tuple)) and len(dims) >= 3:
+                        result = [float(d) for d in dims[:3]]
+                        if all(0.001 < d < 10.0 for d in result):
+                            self._cache[cache_key] = result
+                            logger.info(
+                                "GEMINI_DIMENSIONS: Estimated %s for '%s'",
+                                result, identifier,
+                            )
+                            return list(result)
+                # Parsed but invalid — no retry needed
+                return None
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                is_rate_limit = any(
+                    k in exc_str for k in ("429", "quota", "resource_exhausted", "rate")
+                )
+                if is_rate_limit and _attempt < len(_rate_limit_backoffs):
+                    wait = _rate_limit_backoffs[_attempt]
+                    logger.warning(
+                        "GEMINI_RATE_LIMIT: Hit quota for '%s' — "
+                        "retry %d/%d in %ds: %s",
+                        identifier, _attempt + 1, len(_rate_limit_backoffs), wait, exc,
+                    )
+                    time.sleep(wait)
+                    _attempt += 1
+                    continue
+                logger.debug(
+                    "Gemini dimension estimation failed for '%s': %s",
+                    identifier, exc,
+                )
+                return None
 
 
 _estimator: Optional[DimensionEstimator] = None
