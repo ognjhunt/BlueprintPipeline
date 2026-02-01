@@ -312,21 +312,29 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 32. **EE pose patch covers `_get_ee_pose` code path**: The gRPC handler calls `self.ui_builder._get_ee_pose(is_right)` (line 1790 of `command_controller.py`), NOT `robot.get_ee_pose()`. Updated regex from `\.get_ee_pose\(` to `\._?get_ee_pose\(` to match both. Also matches ALL occurrences (not just first) and uses unique temp vars per match site.
 33. **Object pose diagnostic logging**: When fuzzy prim path resolution fails, dumps the first 50 prims from the USD stage (once per session). Also logs `scene_usd_path`, whether the file exists, and the `sim_assets_root`/`scene_usd` values used to construct it.
 
-34. **CRITICAL: Franka robot config was mapped to G1 humanoid**: `_ROBOT_CFG_MAP["franka"]` pointed to `G1_omnipicker_fixed.json` (80+ DOF humanoid, 10+ min init) instead of `franka_panda.json` (7 DOF, ~30s init). This caused all Franka runs to use the wrong robot, leading to slow init, wrong joint names, and EE pose failures. Fixed to map to `franka_panda.json`.
+34. **CRITICAL: Franka robot config was mapped to G1 humanoid**: `_ROBOT_CFG_MAP["franka"]` pointed to `G1_omnipicker_fixed.json` (80+ DOF humanoid, 10+ min init) instead of `franka_panda.json` (7 DOF, ~30s init). Fixed to map to `franka_panda.json`.
 35. **Object path candidates expanded**: Added `/World/Scene/obj_{name}` and `/World/Scene/{name}` as candidate prim paths for object pose queries, matching the server's scene graph prefix convention.
 36. **Execution thread abort before join**: `abort_event.set()` is now called before the execution thread join (was missing), and join timeout increased from 30s to 60s. Ensures the trajectory loop exits promptly instead of blocking on an in-flight gRPC call.
+37. **franka_panda.json missing from server**: The Genie Sim server only ships G1/G2 configs in `/opt/geniesim/source/data_collection/config/robot_cfg/`. Copied `franka_panda.json` to the server container. **Must be re-copied after `docker rm + create` (not needed after `docker restart`).** Added to sync/patch workflow.
+38. **Server crashes during init_robot with franka_panda.json**: Even with the config file present, the server crashes (GOAWAY/ping_timeout) during `init_robot`. The `init_robot` call DEADLINE_EXCEEDED after 300-600s, then the server process dies. The server restart loop brings it back but the same pattern repeats. **Root cause unknown** — the server may not fully support loading a Franka robot via `franka_panda.json` (it ships with G1 configs only). See issue 6 below.
 
 ## Remaining Known Issues
 
-1. **Object poses still all zeros**: The server returns identity poses for ALL objects. Fix 33 adds diagnostic logging; fix 35 adds `/World/Scene/obj_{name}` path candidates. **Next step**: Run pipeline with Franka config (fix 34) and check Docker logs for `[PATCH-DIAG]` messages. The expanded path candidates may resolve this if objects are under `/World/Scene/`.
+1. **Object poses still all zeros**: Fix 33 adds diagnostic logging; fix 35 adds `/World/Scene/obj_{name}` path candidates. **Next step**: Check Docker logs for `[PATCH-DIAG]` messages once init_robot succeeds.
 
-2. **Server resource exhaustion on long runs**: After ~4 tasks (~25 min), GPU/RAM accumulates and trajectory execution hits DEADLINE_EXCEEDED. **Mitigation**: Use `GENIESIM_RESTART_EVERY_N_TASKS=3` (fix 26). **Next step**: Profile GPU/RAM with `nvidia-smi` during a run.
+2. **Server resource exhaustion on long runs**: **Mitigation**: `GENIESIM_RESTART_EVERY_N_TASKS=3`. **Next step**: Profile GPU/RAM with `nvidia-smi`.
 
-3. **Camera data intermittent after first observation**: **Mitigation**: Set `CAMERA_REWARMUP_ON_RESET=1` (fix 28). **Next step**: Verify with Franka config — previous runs used G1 which may have contributed.
+3. **Camera data intermittent after first observation**: **Mitigation**: `CAMERA_REWARMUP_ON_RESET=1`.
 
-4. **cuRobo API version mismatch**: IK fallback works. **Next step**: Pin cuRobo version compatible with Isaac Sim 4.5 in Dockerfile.
+4. **cuRobo API version mismatch**: IK fallback works. **Next step**: Pin cuRobo version for Isaac Sim 4.5.
 
-5. **MIN_EPISODE_FRAMES and EE pose failures**: Previously observed with G1 config. **Likely resolved** by fix 34 (Franka config). With Franka's faster init (~30s vs 10+ min), more observations should be collected and the standard EE pose path should work. Verify on next run.
+5. **MIN_EPISODE_FRAMES and EE pose failures**: Previously observed with G1 config. May resolve once correct robot config works.
+
+6. **CRITICAL: Server crashes during init_robot with franka_panda.json**: The Genie Sim server only ships G1/G2 robot configs. When `franka_panda.json` is provided, the server attempts to load the Franka USD (`robot/franka/franka.usd`) and crashes during initialization (GOAWAY after 300-600s DEADLINE_EXCEEDED). **Tested twice with same result.** The previous working runs (task_success=True) used `G1_omnipicker_fixed.json`. **Options for next run:**
+   - **Option A**: Revert `_ROBOT_CFG_MAP["franka"]` back to `G1_omnipicker_fixed.json` and accept slow G1 init (~10 min). The pipeline DID achieve task_success=True with G1 before.
+   - **Option B**: Investigate why the server crashes with Franka. Check if `robot/franka/franka.usd` exists in the server container. Check server logs during init for the actual error. The Franka USD may not be bundled in the Docker image.
+   - **Option C**: Build a custom Franka config that uses the G1 server internals but maps to Franka-compatible joint names. This is complex and not recommended.
+   - **Recommended**: Try Option B first (check if Franka USD exists), fall back to Option A if not fixable quickly.
 
 ## Running Pipeline Client Inside Container
 

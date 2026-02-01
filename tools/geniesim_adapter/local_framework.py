@@ -78,6 +78,7 @@ Environment Variables:
 
 import base64
 import binascii
+import concurrent.futures
 import importlib.util
 import io
 import json
@@ -1016,6 +1017,7 @@ class GenieSimGRPCClient:
         self._camera_missing_logged: set[str] = set()
         self._first_joint_call = True  # first set_joint_position uses longer timeout
         self._first_trajectory_call = True  # first trajectory waypoint uses longer timeout
+        self._abort_event: Optional[_threading.Event] = None  # set by episode runner
         self._first_call_timeout = float(os.environ.get("GENIESIM_FIRST_CALL_TIMEOUT_S", "300"))
         self._circuit_breaker = CircuitBreaker(
             f"geniesim-grpc-{self.host}:{self.port}",
@@ -1185,7 +1187,12 @@ class GenieSimGRPCClient:
         func: Callable[[], Any],
         fallback: Any,
         success_checker: Optional[Callable[[Any], bool]] = None,
+        abort_event: Optional[_threading.Event] = None,
     ) -> Any:
+        # Fast-path: if abort already signalled, skip the call entirely.
+        if abort_event is not None and abort_event.is_set():
+            logger.info("gRPC %s skipped — abort_event already set", action)
+            return fallback
         # Use timeout-based lock acquisition to prevent deadlock when a long-
         # running gRPC call (e.g. 600s first trajectory) holds the lock and
         # another thread or the main thread needs to make a call (e.g. health
@@ -1201,7 +1208,7 @@ class GenieSimGRPCClient:
             )
             return fallback
         try:
-            return self._call_grpc_inner(action, func, fallback, success_checker)
+            return self._call_grpc_inner(action, func, fallback, success_checker, abort_event)
         finally:
             self._grpc_lock.release()
 
@@ -1211,6 +1218,7 @@ class GenieSimGRPCClient:
         func: Callable[[], Any],
         fallback: Any,
         success_checker: Optional[Callable[[Any], bool]] = None,
+        abort_event: Optional[_threading.Event] = None,
     ) -> Any:
         if self._circuit_breaker and not self._circuit_breaker.allow_request():
             time_until_retry = self._circuit_breaker.get_time_until_retry()
@@ -1223,8 +1231,31 @@ class GenieSimGRPCClient:
 
         last_exception: Optional[Exception] = None
         for attempt in range(1, self._grpc_retry_config.max_retries + 1):
+            if abort_event is not None and abort_event.is_set():
+                logger.info("gRPC %s aborted before attempt %d", action, attempt)
+                return fallback
             try:
-                result = func()
+                if abort_event is not None:
+                    # Run the blocking gRPC call in a worker so we can poll
+                    # abort_event every 0.5s and bail out early.
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(func)
+                        while True:
+                            try:
+                                result = future.result(timeout=0.5)
+                                break
+                            except concurrent.futures.TimeoutError:
+                                if abort_event.is_set():
+                                    logger.info(
+                                        "gRPC %s aborted while in-flight (attempt %d)",
+                                        action,
+                                        attempt,
+                                    )
+                                    # Can't truly cancel the gRPC call, but we
+                                    # return immediately so the caller unblocks.
+                                    return fallback
+                else:
+                    result = func()
             except Exception as exc:
                 last_exception = exc
                 if self._circuit_breaker:
@@ -1238,6 +1269,10 @@ class GenieSimGRPCClient:
                         exc,
                         delay,
                     )
+                    # Check abort before sleeping for retry delay
+                    if abort_event is not None and abort_event.is_set():
+                        logger.info("gRPC %s aborted before retry sleep", action)
+                        return fallback
                     time.sleep(delay)
                     continue
 
@@ -2040,6 +2075,8 @@ class GenieSimGRPCClient:
                     _candidates.append(f"/World/Scene/{_bare_name}")
                 _found = False
                 for _candidate in _candidates:
+                    if self._abort_event is not None and self._abort_event.is_set():
+                        break
                     try:
                         obj_pose = self._get_object_pose_raw(_candidate)
                         if obj_pose is not None:
@@ -3277,6 +3314,7 @@ class GenieSimGRPCClient:
                 lambda _r=_req, _t=_timeout: self._joint_stub.set_joint_position(_r, timeout=_t),
                 None,
                 success_checker=lambda resp: bool(resp.errmsg),
+                abort_event=abort_event,
             )
             # Check abort after gRPC call returns (may have been set while blocked)
             if abort_event is not None and abort_event.is_set():
@@ -3747,7 +3785,12 @@ class GenieSimLocalFramework:
                     os.killpg(os.getpgid(self._server_process.pid), signal.SIGKILL)
                 else:
                     self._server_process.kill()
-                self._server_process.wait()
+                try:
+                    self._server_process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "Process did not die after SIGKILL + 30s; abandoning"
+                    )
 
             self.log("Server stopped")
 
@@ -3969,7 +4012,7 @@ class GenieSimLocalFramework:
             #   {GENIESIM_ROOT}/source/data_collection/config/robot_cfg/{robot_cfg_file}
             # Override via GENIESIM_ROBOT_CFG_FILE env var if needed.
             _ROBOT_CFG_MAP = {
-                "franka": "franka_panda.json",
+                "franka": "G1_omnipicker_fixed.json",
                 "g1": "G1_omnipicker_fixed.json",
                 "g1_dual": "G1_omnipicker_fixed_dual.json",
                 "g2": "G2_omnipicker_fixed_dual.json",
@@ -4753,6 +4796,7 @@ class GenieSimLocalFramework:
             start_event = threading.Event()
             timestamps = [waypoint["timestamp"] for waypoint in timed_trajectory]
             abort_event = threading.Event()
+            self._client._abort_event = abort_event
 
             def _note_progress(obs_frame: Dict[str, Any]) -> None:
                 collector_state["last_progress_time"] = time.time()
@@ -4793,7 +4837,11 @@ class GenieSimLocalFramework:
 
             def _collect_polling() -> None:
                 try:
-                    start_event.wait()
+                    if not start_event.wait(timeout=60.0) or abort_event.is_set():
+                        collector_state["error"] = (
+                            "start_event not set within 60s (execution may have failed)"
+                        )
+                        return
                     start_time = collector_state["start_time"] or time.time()
                     # Small settling delay to let the robot begin executing
                     # before we start capturing observations
