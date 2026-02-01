@@ -29,7 +29,6 @@ bash scripts/vm-start.sh   # checks container is up, polls gRPC until ready
 export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
 export SKIP_QUALITY_GATES=1
 export GENIESIM_FIRST_CALL_TIMEOUT_S=300
-export GENIESIM_RESTART_EVERY_N_TASKS=3
 export CAMERA_REWARMUP_ON_RESET=1
 python3 tools/run_local_pipeline.py \
   --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
@@ -55,7 +54,6 @@ bash scripts/vm-start.sh
 export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
 export SKIP_QUALITY_GATES=1
 export GENIESIM_FIRST_CALL_TIMEOUT_S=300
-export GENIESIM_RESTART_EVERY_N_TASKS=3
 export CAMERA_REWARMUP_ON_RESET=1
 python3 tools/run_local_pipeline.py \
   --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
@@ -334,6 +332,14 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 37. **franka_panda.json missing from server**: The Genie Sim server only ships G1/G2 configs in `/opt/geniesim/source/data_collection/config/robot_cfg/`. Copied `franka_panda.json` to the server container. **Must be re-copied after `docker rm + create` (not needed after `docker restart`).** Added to sync/patch workflow.
 38. **Server crashes during init_robot with franka_panda.json**: Even with the config file present, the server crashes (GOAWAY/ping_timeout) during `init_robot`. The `init_robot` call DEADLINE_EXCEEDED after 300-600s, then the server process dies. The server restart loop brings it back but the same pattern repeats. **Root cause unknown** — the server may not fully support loading a Franka robot via `franka_panda.json` (it ships with G1 configs only). See issue 6 below.
 
+### Recent Fixes (2026-02-01)
+
+39. **Simulation paused deadlock fix**: Added `reset()` call after `_init_robot_on_server()` to ensure the simulation timeline is PLAYING, not PAUSED. This was the root cause of the paused deadlock during mid-run restarts.
+40. **Proactive restarts disabled**: `GENIESIM_RESTART_EVERY_N_TASKS` default changed from `5` to `0`. Mid-run Docker restarts were causing the paused deadlock — disabling them eliminates the trigger.
+41. **Observation collector resilience**: Both streaming and polling observation collectors now tolerate up to 3 consecutive frame failures before aborting (previously failed on the first bad frame).
+42. **Partial episode data**: Failed episodes now save diagnostic `.partial.json` files so you can always inspect what data was collected before the failure.
+43. **xforms patch cache fix**: Added `ARG CACHE_BUST_PATCHES` to Dockerfile to ensure both `Rotation.from_matrix()` patch sites are applied (verified count=2).
+
 ## Remaining Known Issues
 
 1. **Object poses still all zeros**: Fix 33 adds diagnostic logging; fix 35 adds `/World/Scene/obj_{name}` path candidates. **Next step**: Check Docker logs for `[PATCH-DIAG]` messages once init_robot succeeds.
@@ -424,5 +430,5 @@ Full list: `regen3d, scale, interactive, simready, usd, inventory-enrichment, re
 | `GENIESIM_INTER_TASK_DELAY_S` | Delay in seconds between tasks with health probe (default: `5`) | Export before pipeline run |
 | `GENIESIM_MAX_SERVER_RESTARTS` | Max server-side process restarts in startup script (default: `3`) | Dockerfile / export |
 | `GENIESIM_RESTART_CMD` | Command to restart server container (default: `sudo docker restart geniesim-server`) | Export before pipeline run |
-| `GENIESIM_RESTART_EVERY_N_TASKS` | Proactive server restart every N tasks to prevent resource exhaustion (default: `0` = disabled) | Export before pipeline run |
+| `GENIESIM_RESTART_EVERY_N_TASKS` | Proactive server restart every N tasks (default: `0` = disabled; was `5`, changed to `0` to avoid mid-run Docker restarts causing paused deadlock) | Export before pipeline run |
 | `CAMERA_REWARMUP_ON_RESET` | Re-run camera warmup frames on every capture (default: `0` = disabled) | Dockerfile / export |

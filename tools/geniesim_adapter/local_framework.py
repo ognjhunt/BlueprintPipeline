@@ -2083,21 +2083,22 @@ class GenieSimGRPCClient:
                 if prim_path in self._resolved_prim_cache:
                     _candidates = [self._resolved_prim_cache[prim_path]]
                 else:
-                    # Try the prim path as-is and with common prefixes
-                    _candidates = [prim_path]
+                    # The Genie Sim server loads scene objects under
+                    # /World/Scene/obj_{name}, so try that FIRST.
+                    _bare_name = prim_path.rsplit("/", 1)[-1] if "/" in prim_path else prim_path
+                    _candidates = [
+                        f"/World/Scene/obj_{_bare_name}",
+                        f"/World/Scene/{_bare_name}",
+                        prim_path,
+                    ]
                     if not prim_path.startswith("/World/"):
                         _candidates.append(f"/World/{prim_path}")
                     if prim_path.startswith("/World/"):
-                        # Strip /World/ prefix and try bare name
                         _bare = prim_path[len("/World/"):]
                         _candidates.append(f"/{_bare}")
                         _candidates.append(f"/Root/{_bare}")
                     if not prim_path.startswith("/"):
                         _candidates.append(f"/{prim_path}")
-                    # Try /World/Scene/ prefix (common in Genie Sim server stages)
-                    _bare_name = prim_path.rsplit("/", 1)[-1] if "/" in prim_path else prim_path
-                    _candidates.append(f"/World/Scene/obj_{_bare_name}")
-                    _candidates.append(f"/World/Scene/{_bare_name}")
                 _found = False
                 for _candidate in _candidates:
                     if self._abort_event is not None and self._abort_event.is_set():
@@ -3993,15 +3994,37 @@ class GenieSimLocalFramework:
                 "WARNING",
             )
 
-        # Ensure the simulation timeline is in PLAYING state.
-        # After init_robot or a Docker restart, Isaac Sim's timeline may be
-        # PAUSED, causing all subsequent gRPC calls to block indefinitely.
-        # The server's reset handler calls timeline.play() internally.
-        self.log("Sending reset to ensure simulation timeline is playing...")
-        _reset_result = self._client.reset(reset_robot=True, reset_objects=True)
-        if not _reset_result.success:
+        # Wait for the server's articulation to be fully initialized.
+        # After init_robot, the server asynchronously initializes the robot
+        # articulation. If we send trajectory commands before it's ready,
+        # the server returns empty data or crashes. Poll get_joint_position
+        # until we get valid joint data.
+        import time as _warmup_time
+        _max_warmup_s = 30
+        _warmup_start = _warmup_time.time()
+        _warmup_ok = False
+        self.log("Waiting for server articulation to be ready...")
+        while _warmup_time.time() - _warmup_start < _max_warmup_s:
+            try:
+                _jp_result = self._client.get_joint_position()
+                if (
+                    _jp_result is not None
+                    and _jp_result.success
+                    and _jp_result.payload
+                    and len(_jp_result.payload) > 0
+                ):
+                    self.log(
+                        f"Articulation ready: {len(_jp_result.payload)} joints "
+                        f"({_warmup_time.time() - _warmup_start:.1f}s)"
+                    )
+                    _warmup_ok = True
+                    break
+            except Exception:
+                pass
+            _warmup_time.sleep(2)
+        if not _warmup_ok:
             self.log(
-                f"Post-init reset returned: {_reset_result.error} (timeline may be paused)",
+                f"Articulation not ready after {_max_warmup_s}s — proceeding anyway (may fail)",
                 "WARNING",
             )
 
