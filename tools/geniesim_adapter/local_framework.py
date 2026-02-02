@@ -1026,6 +1026,7 @@ class GenieSimGRPCClient:
         # Populated after init_robot from the robot config's camera dict.
         self._camera_prim_map: Dict[str, str] = {}
         self._joint_names: List[str] = []
+        self._latest_joint_positions: List[float] = []
         self._grpc_unavailable_logged: set[str] = set()
         self._camera_missing_logged: set[str] = set()
         self._first_joint_call = True  # first set_joint_position uses longer timeout
@@ -2062,7 +2063,11 @@ class GenieSimGRPCClient:
             error=f"Unsupported command for Genie Sim gRPC transport: {command.name}",
         )
 
-    def get_observation(self, lock_timeout: Optional[float] = None) -> GrpcCallResult:
+    def get_observation(
+        self,
+        lock_timeout: Optional[float] = None,
+        fallback_joint_positions: Optional[Sequence[float]] = None,
+    ) -> GrpcCallResult:
         """
         Get current observation from simulation.
 
@@ -2083,10 +2088,11 @@ class GenieSimGRPCClient:
         import base64 as _b64
 
         # --- 1. Real joint positions, velocities, and efforts ---
-        joint_positions = []
+        joint_positions: List[float] = []
         joint_names = []
         joint_velocities = []
         joint_efforts = []
+        used_joint_cache = False
         try:
             jp_result = self.get_joint_position(lock_timeout=lock_timeout)
             if jp_result.success and jp_result.payload is not None:
@@ -2095,8 +2101,31 @@ class GenieSimGRPCClient:
                 # get_joint_position() now also stores velocities and efforts
                 joint_velocities = getattr(self, "_latest_joint_velocities", [])
                 joint_efforts = getattr(self, "_latest_joint_efforts", [])
+            else:
+                fallback_positions = (
+                    list(fallback_joint_positions)
+                    if fallback_joint_positions is not None
+                    else list(getattr(self, "_latest_joint_positions", []))
+                )
+                if fallback_positions:
+                    joint_positions = fallback_positions
+                    joint_names = list(self._joint_names) if self._joint_names else []
+                    joint_velocities = getattr(self, "_latest_joint_velocities", [])
+                    joint_efforts = getattr(self, "_latest_joint_efforts", [])
+                    used_joint_cache = True
         except Exception as exc:
             logger.warning(f"[OBS] get_joint_position failed: {exc}")
+            fallback_positions = (
+                list(fallback_joint_positions)
+                if fallback_joint_positions is not None
+                else list(getattr(self, "_latest_joint_positions", []))
+            )
+            if fallback_positions:
+                joint_positions = fallback_positions
+                joint_names = list(self._joint_names) if self._joint_names else []
+                joint_velocities = getattr(self, "_latest_joint_velocities", [])
+                joint_efforts = getattr(self, "_latest_joint_efforts", [])
+                used_joint_cache = True
 
         # --- 2. Real EE pose ---
         ee_pose = {}
@@ -2180,7 +2209,7 @@ class GenieSimGRPCClient:
 
         data_sources = []
         if joint_positions:
-            data_sources.append("joints")
+            data_sources.append("joints_cached" if used_joint_cache else "joints")
         if ee_pose:
             data_sources.append("ee_pose")
         if scene_objects:
@@ -2671,6 +2700,7 @@ class GenieSimGRPCClient:
                 available=True,
                 error="gRPC call failed",
             )
+        self._latest_joint_positions = list(positions)
         return GrpcCallResult(
             success=True,
             available=True,
@@ -2726,6 +2756,7 @@ class GenieSimGRPCClient:
         if joint_names:
             self._joint_names = joint_names
         # Store velocities and efforts for use in observation composition
+        self._latest_joint_positions = joint_positions
         self._latest_joint_velocities = joint_velocities
         self._latest_joint_efforts = joint_efforts
         return GrpcCallResult(
@@ -3451,6 +3482,7 @@ class GenieSimGRPCClient:
                     available=True,
                     error="gRPC call failed",
                 )
+            self._latest_joint_positions = list(joint_positions)
             # Fire observation callback between waypoints while lock is free.
             if observation_callback is not None:
                 try:
@@ -5423,11 +5455,17 @@ class GenieSimLocalFramework:
                 # Attempt a full observation (lock is FREE between waypoints).
                 # This captures ee_pose, object poses, and camera data.
                 try:
-                    full_obs = self._client.get_observation(lock_timeout=2.0)
+                    full_obs = self._client.get_observation(
+                        lock_timeout=2.0,
+                        fallback_joint_positions=jp,
+                    )
                     if full_obs.available and full_obs.success and full_obs.payload:
-                        obs_data = full_obs.payload.get("observation", {})
-                        if obs_data:
-                            obs.update(obs_data)
+                        obs.update(full_obs.payload)
+                        obs["planned_timestamp"] = float(wp_timestamp)
+                        obs["timestamp"] = time.time()
+                        obs["data_source"] = "between_waypoints"
+                    else:
+                        obs["data_source"] = "between_waypoints_fallback"
                 except Exception:
                     # Fallback: try just ee_pose
                     try:
@@ -5436,6 +5474,7 @@ class GenieSimLocalFramework:
                             obs["ee_pose"] = ee_result.payload
                     except Exception:
                         pass
+                    obs["data_source"] = "between_waypoints_fallback"
                 collector_state["observations"].append(obs)
                 _note_progress(obs)
 
