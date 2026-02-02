@@ -6406,6 +6406,18 @@ class GenieSimLocalFramework:
             _contact_force_cache = _frame_stats["contact_force_cache"]
             _object_property_provenance = _frame_stats.get("object_property_provenance", {})
             _ee_static_fallback_used = _frame_stats.get("ee_static_fallback_used", False)
+            _scene_state_invalid = _real_scene_state_count == 0 and len(frames) > 0
+            _scene_state_invalid_error = (
+                f"Scene state entirely synthetic: real_scene_state_frames=0/{len(frames)}"
+                if _scene_state_invalid
+                else None
+            )
+
+            if _scene_state_invalid:
+                for _frame in frames:
+                    _obs = _frame.get("observation")
+                    if isinstance(_obs, dict):
+                        _obs["scene_state_provenance"] = "INVALID_synthetic"
 
             if _scene_state_missing_after_frame0 and getattr(self.config, "environment", "") == "production":
                 missing_frames = ", ".join(str(idx) for idx in _scene_state_missing_frame_indices)
@@ -7187,9 +7199,8 @@ class GenieSimLocalFramework:
             # Gate: scene state must not be entirely synthetic
             if _real_scene_state_count == 0 and len(frames) > 0:
                 quality_score = 0.0
-                _validity_errors.append(
-                    f"Scene state entirely synthetic: real_scene_state_frames=0/{len(frames)}"
-                )
+                if _scene_state_invalid_error and _scene_state_invalid_error not in _validity_errors:
+                    _validity_errors.append(_scene_state_invalid_error)
                 self.log(
                     "[VALIDITY_GATE] quality_score forced to 0.0: scene_state entirely synthetic",
                     "WARNING",
@@ -7277,7 +7288,11 @@ class GenieSimLocalFramework:
                         "scene_state": (
                             "physx_server"
                             if _real_scene_state_count > 0
-                            else ("synthetic_fallback" if _scene_state_fallback_frames > 0 else "synthetic_from_task_config")
+                            else (
+                                "INVALID_synthetic"
+                                if _scene_state_invalid
+                                else ("synthetic_fallback" if _scene_state_fallback_frames > 0 else "synthetic_from_task_config")
+                            )
                         ),
                         "task_success": llm_metadata.get("task_success_source", "geometric_goal_region_v2"),
                         "quality_score": "weighted_composite_v2",
