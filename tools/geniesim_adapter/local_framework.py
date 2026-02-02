@@ -341,6 +341,123 @@ _ROBOT_METADATA_FALLBACK = {
     "g1_right_arm": _G1_RIGHT_METADATA,
     "g1_left_arm": _G1_LEFT_METADATA,
 }
+_FRANKA_TYPES = {"franka", "franka_panda", "panda"}
+
+
+def _matches_side_token(name: str, *, side: str) -> bool:
+    name = name.lower()
+    if side == "left":
+        prefixes = ("left", "l_", "l-", "l.")
+    else:
+        prefixes = ("right", "r_", "r-", "r.")
+    return name.startswith(prefixes) or any(f"_{p}" in name for p in prefixes) or any(f"/{p}" in name for p in prefixes)
+
+
+def _infer_joint_indices_by_side(
+    joint_names: Sequence[str],
+    *,
+    side: str,
+    keywords: Sequence[str],
+) -> List[int]:
+    indices: List[int] = []
+    for idx, name in enumerate(joint_names):
+        lname = name.lower()
+        if not _matches_side_token(lname, side=side):
+            continue
+        if any(keyword in lname for keyword in keywords):
+            indices.append(idx)
+    return indices
+
+
+def _resolve_robot_joint_groups(
+    robot_type: str,
+    *,
+    joint_names: Sequence[str],
+    num_joints: int,
+) -> Dict[str, Any]:
+    robot_key = (robot_type or "").lower()
+    meta = ROBOT_ARM_INDICES.get(robot_key, {})
+    left_arm = list(meta.get("left_arm_indices", []))
+    right_arm = list(meta.get("right_arm_indices", []))
+    left_gripper = list(meta.get("left_gripper_indices", []))
+    right_gripper = list(meta.get("right_gripper_indices", []))
+
+    if joint_names:
+        arm_keywords = ("shoulder", "elbow", "wrist", "arm", "forearm")
+        grip_keywords = ("gripper", "finger", "hand", "jaw", "pinch")
+        inferred_left_arm = _infer_joint_indices_by_side(
+            joint_names,
+            side="left",
+            keywords=arm_keywords,
+        )
+        inferred_right_arm = _infer_joint_indices_by_side(
+            joint_names,
+            side="right",
+            keywords=arm_keywords,
+        )
+        inferred_left_gripper = _infer_joint_indices_by_side(
+            joint_names,
+            side="left",
+            keywords=grip_keywords,
+        )
+        inferred_right_gripper = _infer_joint_indices_by_side(
+            joint_names,
+            side="right",
+            keywords=grip_keywords,
+        )
+        if inferred_left_arm:
+            left_arm = inferred_left_arm
+        if inferred_right_arm:
+            right_arm = inferred_right_arm
+        if inferred_left_gripper:
+            left_gripper = inferred_left_gripper
+        if inferred_right_gripper:
+            right_gripper = inferred_right_gripper
+
+    primary_side = meta.get("primary_arm") or ("right" if robot_key.startswith("g1") else "left")
+    primary_arm = right_arm if primary_side == "right" else left_arm
+    primary_gripper = right_gripper if primary_side == "right" else left_gripper
+
+    if not primary_arm:
+        primary_arm = list(range(min(7, num_joints)))
+    if not primary_gripper and num_joints > len(primary_arm):
+        primary_gripper = list(range(len(primary_arm), num_joints))
+
+    gripper_limits = meta.get("gripper_limits")
+    if gripper_limits is None:
+        gripper_limits = _ROBOT_METADATA_FALLBACK.get(robot_key, {}).get("gripper_limits", (0.0, 1.0))
+
+    gripper_max_aperture = meta.get("gripper_max_aperture")
+    if gripper_max_aperture is None:
+        gripper_max_aperture = _ROBOT_METADATA_FALLBACK.get(robot_key, {}).get("gripper_max_aperture")
+    if gripper_max_aperture is None and gripper_limits:
+        gripper_max_aperture = max(0.0, float(gripper_limits[1] - gripper_limits[0]))
+
+    gripper_max_force = meta.get("gripper_max_force")
+    if gripper_max_force is None:
+        gripper_max_force = _ROBOT_METADATA_FALLBACK.get(robot_key, {}).get("gripper_max_force")
+    if gripper_max_force is None:
+        gripper_max_force = 40.0 if robot_key in _FRANKA_TYPES else 25.0
+
+    return {
+        "primary_arm_indices": primary_arm,
+        "left_arm_indices": left_arm,
+        "right_arm_indices": right_arm,
+        "primary_gripper_indices": primary_gripper,
+        "left_gripper_indices": left_gripper,
+        "right_gripper_indices": right_gripper,
+        "gripper_limits": gripper_limits,
+        "gripper_max_aperture": gripper_max_aperture,
+        "gripper_max_force": gripper_max_force,
+    }
+
+
+def _resolve_robot_config(robot_type: str) -> Any:
+    robot_key = (robot_type or "").lower()
+    robot_config = ROBOT_CONFIGS.get(robot_type) or ROBOT_CONFIGS.get(robot_key)
+    if robot_config is None and (robot_key in _FRANKA_TYPES or not robot_key):
+        robot_config = ROBOT_CONFIGS.get("franka")
+    return robot_config
 
 
 def _normalize_robot_name(robot_type: str) -> str:
@@ -6387,7 +6504,6 @@ class GenieSimLocalFramework:
             robot_type = getattr(self.config, "robot_type", "unknown")
             joint_names = list(self._client._joint_names) if hasattr(self._client, "_joint_names") and self._client._joint_names else []
             num_joints = len(frames[0]["action"]) if frames else 0
-            arm_dof = min(7, num_joints)
             rc = ROBOT_CONFIGS.get(robot_type)
             # Lightweight metadata fallback when trajectory_solver import fails
             _meta_fb = _ROBOT_METADATA_FALLBACK.get(robot_type, {}) if rc is None else {}
@@ -6401,16 +6517,32 @@ class GenieSimLocalFramework:
                 joint_names = list(_meta_fb["joint_names"])
                 if _meta_fb.get("gripper_joint_names"):
                     joint_names = joint_names + list(_meta_fb["gripper_joint_names"])
+            joint_groups = _resolve_robot_joint_groups(
+                robot_type,
+                joint_names=joint_names,
+                num_joints=num_joints,
+            )
+            arm_indices = joint_groups["primary_arm_indices"]
+            gripper_indices = joint_groups["primary_gripper_indices"]
+            arm_dof = len(arm_indices)
+            gripper_dof = len(gripper_indices)
             robot_metadata = {
                 "robot_type": robot_type,
                 "num_joints": num_joints,
                 "arm_dof": arm_dof,
-                "gripper_dof": max(0, num_joints - arm_dof),
+                "gripper_dof": gripper_dof,
                 "joint_names": joint_names if joint_names else [f"joint_{i}" for i in range(num_joints)],
                 "joint_limits_lower": rc.joint_limits_lower.tolist() if rc is not None and hasattr(rc, "joint_limits_lower") else _meta_fb.get("joint_limits_lower"),
                 "joint_limits_upper": rc.joint_limits_upper.tolist() if rc is not None and hasattr(rc, "joint_limits_upper") else _meta_fb.get("joint_limits_upper"),
                 "gripper_joint_names": list(rc.gripper_joint_names) if rc is not None and hasattr(rc, "gripper_joint_names") else _meta_fb.get("gripper_joint_names", []),
                 "gripper_limits": list(rc.gripper_limits) if rc is not None and hasattr(rc, "gripper_limits") else list(_meta_fb["gripper_limits"]) if _meta_fb.get("gripper_limits") else None,
+                "arm_indices": arm_indices,
+                "left_arm_indices": joint_groups["left_arm_indices"],
+                "right_arm_indices": joint_groups["right_arm_indices"],
+                "gripper_indices": gripper_indices,
+                "left_gripper_indices": joint_groups["left_gripper_indices"],
+                "right_gripper_indices": joint_groups["right_gripper_indices"],
+                "gripper_max_aperture": joint_groups["gripper_max_aperture"],
                 "default_joint_positions": rc.default_joint_positions.tolist() if rc is not None and hasattr(rc, "default_joint_positions") else _meta_fb.get("default_joint_positions"),
                 "action_space": "joint_delta",
                 "action_abs_space": "joint_position",
@@ -6677,8 +6809,8 @@ class GenieSimLocalFramework:
     ) -> List[Dict[str, Any]]:
         # Attempt to set up FK for end-effector pose computation
         fk_solver = None
-        robot_config = ROBOT_CONFIGS.get(
-            getattr(self.config, "robot_type", ""), None
+        robot_config = _resolve_robot_config(
+            getattr(self.config, "robot_type", "")
         )
         if robot_config is not None and IK_PLANNING_AVAILABLE:
             try:
@@ -6688,8 +6820,16 @@ class GenieSimLocalFramework:
             except Exception:
                 pass
 
-        # Determine gripper joint indices (joints beyond the arm DOFs)
-        arm_dof = min(7, len(trajectory[0]["joint_positions"])) if trajectory else 7
+        joint_names = list(self._client._joint_names) if hasattr(self._client, "_joint_names") and self._client._joint_names else []
+        num_joints = len(trajectory[0]["joint_positions"]) if trajectory else (len(joint_names) if joint_names else 7)
+        joint_groups = _resolve_robot_joint_groups(
+            getattr(self.config, "robot_type", ""),
+            joint_names=joint_names,
+            num_joints=num_joints,
+        )
+        arm_indices = joint_groups["primary_arm_indices"]
+        gripper_indices = joint_groups["primary_gripper_indices"]
+        arm_dof = len(arm_indices)
 
         # Forward-propagate joint positions: when observations return zeros
         # (mock/skip-server-recording mode), use the trajectory waypoints as
@@ -6697,7 +6837,7 @@ class GenieSimLocalFramework:
         # (small values, not equal to action_abs).
         current_joint_state = np.array(
             trajectory[0]["joint_positions"], dtype=float
-        ) if trajectory else np.zeros(7)
+        ) if trajectory else np.zeros(num_joints)
 
         # --- Object tracking state for dynamic scene updates (Improvement A) ---
         _attached_object_id: Optional[str] = None
@@ -6723,8 +6863,8 @@ class GenieSimLocalFramework:
         _lift_phase_started = False
 
         # --- Grasp physics constants (Improvement J) ---
-        _GRIPPER_MAX_APERTURE = 0.08  # meters (Franka gripper max opening)
-        _GRIPPER_MAX_FORCE = 40.0     # Newtons
+        _GRIPPER_MAX_APERTURE = joint_groups["gripper_max_aperture"]
+        _GRIPPER_MAX_FORCE = joint_groups["gripper_max_force"]
 
         # Last-resort hardcoded fallback tables — only used when scene_graph
         # properties AND Gemini estimation are both unavailable.
@@ -7078,13 +7218,21 @@ class GenieSimLocalFramework:
             # Fallback: local FK
             if not _used_server_ee:
                 try:
-                    if fk_solver is not None:
-                        ee_pos, ee_quat = fk_solver._forward_kinematics(waypoint_joints[:arm_dof])
+                    fk_joint_positions = None
+                    if robot_config is not None and joint_names and hasattr(robot_config, "joint_names"):
+                        config_names = list(robot_config.joint_names)
+                        if config_names and all(name in joint_names for name in config_names):
+                            indices = [joint_names.index(name) for name in config_names]
+                            fk_joint_positions = waypoint_joints[indices]
+                    if fk_joint_positions is None and arm_indices:
+                        fk_joint_positions = waypoint_joints[arm_indices]
+                    if fk_solver is not None and fk_joint_positions is not None:
+                        ee_pos, ee_quat = fk_solver._forward_kinematics(fk_joint_positions)
                         _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
                         frame_data["ee_pos"] = _ee
-                        frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, 'tolist') else ee_quat
-                    else:
-                        ee_pos, ee_quat = _franka_fk(waypoint_joints[:arm_dof])
+                        frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, "tolist") else ee_quat
+                    elif getattr(self.config, "robot_type", "").lower() in _FRANKA_TYPES and fk_joint_positions is not None:
+                        ee_pos, ee_quat = _franka_fk(fk_joint_positions)
                         _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
                         frame_data["ee_pos"] = _ee
                         frame_data["ee_quat"] = ee_quat
@@ -7126,16 +7274,13 @@ class GenieSimLocalFramework:
                 frame_data["ee_rot6d"] = [round(v, 8) for v in _rot6d]
 
             # Explicit gripper command: infer from gripper joint positions
-            # Normalize by gripper range (e.g. Franka: [0.0, 0.04])
+            # Normalize by gripper range (robot-specific limits).
             gripper_openness = 1.0
-            if len(waypoint_joints) > arm_dof:
-                gripper_joints = waypoint_joints[arm_dof:]
-                _g_fb = _ROBOT_METADATA_FALLBACK.get(
-                    getattr(self.config, "robot_type", "franka"), {}
-                )
-                _g_lims = _g_fb.get("gripper_limits", (0.0, 1.0))
+            if gripper_indices:
+                gripper_joints = [waypoint_joints[idx] for idx in gripper_indices if idx < len(waypoint_joints)]
+                _g_lims = joint_groups["gripper_limits"]
                 _g_range = float(_g_lims[1] - _g_lims[0]) if _g_lims[1] > _g_lims[0] else 1.0
-                gripper_mean = float(np.mean(np.abs(gripper_joints)))
+                gripper_mean = float(np.mean(np.abs(gripper_joints))) if gripper_joints else 0.0
                 gripper_openness = min(1.0, gripper_mean / _g_range) if _g_range > 0 else 0.0
                 frame_data["gripper_command"] = "open" if gripper_openness > 0.5 else "closed"
                 frame_data["gripper_openness"] = round(gripper_openness, 3)
@@ -7270,14 +7415,23 @@ class GenieSimLocalFramework:
                 _real_efforts = robot_state.get("joint_efforts", [])
                 _has_real_efforts = (
                     _real_efforts
-                    and len(_real_efforts) > arm_dof
                     and any(abs(e) > 1e-6 for e in _real_efforts)
                 )
                 if _has_real_efforts:
                     # Real PhysX joint torques available
-                    _gripper_efforts = _real_efforts[arm_dof:]  # gripper joint efforts
+                    if gripper_indices:
+                        _gripper_efforts = [
+                            _real_efforts[idx] for idx in gripper_indices if idx < len(_real_efforts)
+                        ]
+                    else:
+                        _gripper_efforts = _real_efforts[arm_dof:]  # gripper joint efforts
                     _grip_force_real = sum(abs(e) for e in _gripper_efforts)
-                    _arm_efforts = _real_efforts[:arm_dof]
+                    if arm_indices:
+                        _arm_efforts = [
+                            _real_efforts[idx] for idx in arm_indices if idx < len(_real_efforts)
+                        ]
+                    else:
+                        _arm_efforts = _real_efforts[:arm_dof]
                     frame_data["contact_forces"] = {
                         "grip_force_N": round(_grip_force_real, 4),
                         "arm_torques_Nm": [round(e, 4) for e in _arm_efforts],
@@ -7302,10 +7456,11 @@ class GenieSimLocalFramework:
                     if _gemini_force is None and _gemini_cf_client:
                         try:
                             _obj_width_cf = _get_obj_prop(_obj_type, "graspable_width", 0.06)
+                            _robot_label = getattr(self.config, "robot_type", "robot")
                             _cf_prompt = (
-                                f"A Franka Panda parallel-jaw gripper (max aperture 80mm, max force 40N) "
-                                f"is at {_openness_bucket*100:.0f}% openness grasping a {_obj_type} "
-                                f"(mass={_mass:.2f}kg, width={_obj_width_cf:.3f}m). "
+                                f"A {_robot_label} gripper (max aperture {_GRIPPER_MAX_APERTURE*1000:.0f}mm, "
+                                f"max force {_GRIPPER_MAX_FORCE:.0f}N) is at {_openness_bucket*100:.0f}% openness "
+                                f"grasping a {_obj_type} (mass={_mass:.2f}kg, width={_obj_width_cf:.3f}m). "
                                 f"Estimate the grip force in Newtons and whether the grasp is stable. "
                                 f'Respond with ONLY JSON: {{"grip_force_N": <float>, "stable": <bool>}}'
                             )
@@ -7427,9 +7582,13 @@ class GenieSimLocalFramework:
 
             frames.append(frame_data)
 
-        # Franka Panda velocity limits (rad/s) for 7 arm joints + 2 gripper
-        _FRANKA_VEL_LIMITS = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61, 0.2, 0.2])
-        _FRANKA_ACC_LIMITS = np.array([15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0, 10.0, 10.0])
+        robot_type = getattr(self.config, "robot_type", "").lower()
+        # Velocity/acceleration limits (robot-specific when available).
+        _VEL_LIMITS = None
+        _ACC_LIMITS = None
+        if robot_type in _FRANKA_TYPES:
+            _VEL_LIMITS = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61, 0.2, 0.2])
+            _ACC_LIMITS = np.array([15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0, 10.0, 10.0])
 
         # Second pass: compute joint velocities, accelerations, and EE velocities
         # Prefer real PhysX velocities from server; fall back to finite difference.
@@ -7462,12 +7621,13 @@ class GenieSimLocalFramework:
                     _used_real_velocities = True
                     _jv_clamped = np.array(_real_vel, dtype=float)
                     # Still clamp to safety limits
-                    if _jv_clamped.size <= len(_FRANKA_VEL_LIMITS):
-                        _vel_lim = _FRANKA_VEL_LIMITS[:_jv_clamped.size]
-                    else:
-                        _vel_lim = np.full(_jv_clamped.size, _FRANKA_VEL_LIMITS[-1])
-                        _vel_lim[:len(_FRANKA_VEL_LIMITS)] = _FRANKA_VEL_LIMITS
-                    _jv_clamped = np.clip(_jv_clamped, -_vel_lim, _vel_lim)
+                    if _VEL_LIMITS is not None:
+                        if _jv_clamped.size <= len(_VEL_LIMITS):
+                            _vel_lim = _VEL_LIMITS[:_jv_clamped.size]
+                        else:
+                            _vel_lim = np.full(_jv_clamped.size, _VEL_LIMITS[-1])
+                            _vel_lim[:len(_VEL_LIMITS)] = _VEL_LIMITS
+                        _jv_clamped = np.clip(_jv_clamped, -_vel_lim, _vel_lim)
                     obs_rs["joint_velocities"] = _jv_clamped.tolist()
                 elif dt > 0:
                     jp_curr = np.array(obs_rs.get("joint_positions", []), dtype=float)
@@ -7482,14 +7642,17 @@ class GenieSimLocalFramework:
                             import random as _rng_mod
                             _vn_rng = _rng_mod.Random(hash((episode_id, i, "vel")) & 0xFFFFFFFF)
                             _jv = _jv + np.array([_vn_rng.gauss(0, _jv_noise_std) for _ in range(_jv.size)])
-                        # Clamp to Franka velocity limits (Fix 4)
-                        if _jv.size <= len(_FRANKA_VEL_LIMITS):
-                            _vel_lim = _FRANKA_VEL_LIMITS[:_jv.size]
+                        # Clamp to velocity limits when known.
+                        if _VEL_LIMITS is not None:
+                            if _jv.size <= len(_VEL_LIMITS):
+                                _vel_lim = _VEL_LIMITS[:_jv.size]
+                            else:
+                                # Pad with last limit value for extra joints
+                                _vel_lim = np.full(_jv.size, _VEL_LIMITS[-1])
+                                _vel_lim[:len(_VEL_LIMITS)] = _VEL_LIMITS
+                            _jv_clamped = np.clip(_jv, -_vel_lim, _vel_lim)
                         else:
-                            # Pad with last limit value for extra joints
-                            _vel_lim = np.full(_jv.size, _FRANKA_VEL_LIMITS[-1])
-                            _vel_lim[:len(_FRANKA_VEL_LIMITS)] = _FRANKA_VEL_LIMITS
-                        _jv_clamped = np.clip(_jv, -_vel_lim, _vel_lim)
+                            _jv_clamped = _jv
                         if not np.allclose(_jv, _jv_clamped, atol=0.01):
                             logger.debug("Frame %d: joint velocity clamped (max exceeded)", i)
                         obs_rs["joint_velocities"] = _jv_clamped.tolist()
@@ -7501,12 +7664,13 @@ class GenieSimLocalFramework:
                         )
                         if _prev_jv.shape == _jv_clamped.shape and _prev_jv.size > 0:
                             _ja = (_jv_clamped - _prev_jv) / dt
-                            if _ja.size <= len(_FRANKA_ACC_LIMITS):
-                                _acc_lim = _FRANKA_ACC_LIMITS[:_ja.size]
-                            else:
-                                _acc_lim = np.full(_ja.size, _FRANKA_ACC_LIMITS[-1])
-                                _acc_lim[:len(_FRANKA_ACC_LIMITS)] = _FRANKA_ACC_LIMITS
-                            _ja = np.clip(_ja, -_acc_lim, _acc_lim)
+                            if _ACC_LIMITS is not None:
+                                if _ja.size <= len(_ACC_LIMITS):
+                                    _acc_lim = _ACC_LIMITS[:_ja.size]
+                                else:
+                                    _acc_lim = np.full(_ja.size, _ACC_LIMITS[-1])
+                                    _acc_lim[:len(_ACC_LIMITS)] = _ACC_LIMITS
+                                _ja = np.clip(_ja, -_acc_lim, _acc_lim)
                             obs_rs["joint_accelerations"] = _ja.tolist()
                         else:
                             obs_rs["joint_accelerations"] = [0.0] * _jv_clamped.size
@@ -7966,7 +8130,7 @@ class GenieSimLocalFramework:
         self,
         trajectory: List[Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], int]:
-        robot_config = ROBOT_CONFIGS.get(self.config.robot_type, ROBOT_CONFIGS.get("franka"))
+        robot_config = _resolve_robot_config(self.config.robot_type)
         if robot_config is None:
             return trajectory, 0
 
@@ -8259,7 +8423,7 @@ class GenieSimLocalFramework:
             self.log("  ❌ IK utilities unavailable; cannot build IK fallback trajectory.", "ERROR")
             return None
 
-        robot_config = ROBOT_CONFIGS.get(self.config.robot_type, ROBOT_CONFIGS.get("franka"))
+        robot_config = _resolve_robot_config(self.config.robot_type)
         if robot_config is None:
             self.log(f"  ❌ No robot config for type '{self.config.robot_type}'", "ERROR")
             return None
@@ -8369,7 +8533,7 @@ class GenieSimLocalFramework:
         if obstacles is None:
             obstacles = self._get_scene_obstacles(task, initial_obs)
 
-        robot_config = ROBOT_CONFIGS.get(self.config.robot_type, ROBOT_CONFIGS.get("franka"))
+        robot_config = _resolve_robot_config(self.config.robot_type)
         if robot_config is None:
             self.log(
                 f"  ⚠️  No robot config for type '{self.config.robot_type}'; "
@@ -8604,7 +8768,10 @@ class GenieSimLocalFramework:
             _prev_q = np.array([initial_joints[idx] for idx in arm_joint_indices], dtype=float)
             _all_solved = True
             for _pname, _cart in _cart_targets:
-                _ik_result = _franka_numerical_ik(_cart, initial_guess=_prev_q)
+                if getattr(self.config, "robot_type", "").lower() in _FRANKA_TYPES:
+                    _ik_result = _franka_numerical_ik(_cart, initial_guess=_prev_q)
+                else:
+                    _ik_result = None
                 if _ik_result is not None:
                     ik_phase_joints.append(_ik_result)
                     _prev_q = _ik_result
@@ -8677,8 +8844,8 @@ class GenieSimLocalFramework:
                 target = np.clip(target, lower, upper)
                 phase_targets.append(target)
 
-        # Gripper joint values per phase (Franka finger joints: 0.04 = open, 0.0 = closed)
-        _grip_lims = _ROBOT_METADATA_FALLBACK.get(self.config.robot_type, {}).get("gripper_limits", (0.0, 0.04))
+        # Gripper joint values per phase (robot-specific limits)
+        _grip_lims = joint_groups["gripper_limits"] or (0.0, 0.04)
         _grip_open_val = float(_grip_lims[1]) if _grip_lims else 0.04
         _grip_closed_val = float(_grip_lims[0]) if _grip_lims else 0.0
         # Map phase to gripper target: approach=open, grasp=closed, lift/transport=closed, place=open
@@ -9511,19 +9678,24 @@ class GenieSimLocalFramework:
         # feedback is unavailable so object poses are always identical.
         _skip_recording = os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", "")
         if frames and not _skip_recording:
-            _init_poses = frames[0].get("_initial_object_poses", {})
-            _final_poses = frames[-1].get("_final_object_poses", {})
-            if _init_poses and _final_poses:
-                _any_moved = False
-                for _oid, _ip in _init_poses.items():
-                    _fp = _final_poses.get(_oid)
-                    if _fp is not None:
-                        if np.linalg.norm(np.array(_fp) - np.array(_ip)) > 0.01:
-                            _any_moved = True
-                            break
-                if not _any_moved:
-                    scene_state_penalty = 0.20
-                    logger.warning("Quality penalty: scene_state is static (no object moved >1cm)")
+            _has_real_scene_state = any(
+                (frame.get("observation", {}) or {}).get("data_source") == "real_composed"
+                for frame in frames
+            )
+            if _has_real_scene_state:
+                _init_poses = frames[0].get("_initial_object_poses", {})
+                _final_poses = frames[-1].get("_final_object_poses", {})
+                if _init_poses and _final_poses:
+                    _any_moved = False
+                    for _oid, _ip in _init_poses.items():
+                        _fp = _final_poses.get(_oid)
+                        if _fp is not None:
+                            if np.linalg.norm(np.array(_fp) - np.array(_ip)) > 0.01:
+                                _any_moved = True
+                                break
+                    if not _any_moved:
+                        scene_state_penalty = 0.20
+                        logger.warning("Quality penalty: scene_state is static (no object moved >1cm)")
 
         # Penalty: EE never approaches target object
         if target_object_id and frames:
@@ -9559,7 +9731,7 @@ class GenieSimLocalFramework:
                     "(target=%s not found in scene_state or ee_pos missing)",
                     target_object_id,
                 )
-            if _min_dist > 0.20:
+            elif _min_dist > 0.20:
                 ee_approach_penalty = 0.15
                 logger.warning(
                     "Quality penalty: EE never approaches target (min_dist=%.3f m)",
@@ -9604,18 +9776,22 @@ class GenieSimLocalFramework:
             _gate_penalty += 0.05
             logger.warning("Quality gate: %d frames with non-unit quaternions", _quat_bad)
 
-        # Gate: joint velocities within Franka limits
+        # Gate: joint velocities within robot-specific limits (when known)
         _vel_exceeded = 0
-        _vel_lim = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])
-        for _fr in frames:
-            _jv = (_fr.get("observation", {}).get("robot_state", {})
-                   .get("joint_velocities", []))
-            if _jv and len(_jv) >= 7:
-                if np.any(np.abs(_jv[:7]) > _vel_lim * 1.05):
-                    _vel_exceeded += 1
-        if _vel_exceeded > 0:
-            _gate_penalty += 0.05
-            logger.warning("Quality gate: %d frames exceed Franka velocity limits", _vel_exceeded)
+        robot_type = getattr(self.config, "robot_type", "").lower()
+        _vel_lim = None
+        if robot_type in _FRANKA_TYPES:
+            _vel_lim = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])
+        if _vel_lim is not None:
+            for _fr in frames:
+                _jv = (_fr.get("observation", {}).get("robot_state", {})
+                       .get("joint_velocities", []))
+                if _jv and len(_jv) >= len(_vel_lim):
+                    if np.any(np.abs(_jv[:len(_vel_lim)]) > _vel_lim * 1.05):
+                        _vel_exceeded += 1
+            if _vel_exceeded > 0:
+                _gate_penalty += 0.05
+                logger.warning("Quality gate: %d frames exceed velocity limits", _vel_exceeded)
 
         # Gate: grasp implies grip, open implies no grip
         _grasp_consistency_fails = 0
