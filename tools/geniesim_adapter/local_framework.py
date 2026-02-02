@@ -7308,6 +7308,24 @@ class GenieSimLocalFramework:
             )
             if use_propagated:
                 robot_state["joint_positions"] = current_joint_state.tolist()
+                # Also update the full-body joint_state if present, injecting
+                # arm joint values at the correct indices so the 34-DOF array
+                # reflects the current trajectory state rather than staying frozen.
+                _js = robot_state.get("joint_state")
+                if isinstance(_js, dict) and _js.get("positions"):
+                    _full_pos = list(_js["positions"])
+                    if arm_indices and len(_full_pos) > max(arm_indices):
+                        for _ai, _val in zip(arm_indices, current_joint_state.tolist()):
+                            _full_pos[_ai] = _val
+                    # Also inject gripper joint values from waypoint gripper_aperture
+                    _wp_ga = waypoint.get("gripper_aperture")
+                    if _wp_ga is not None and gripper_indices:
+                        _g_max = joint_groups.get("gripper_max_aperture", 0.04)
+                        _g_val = float(_wp_ga) * _g_max
+                        for _gi in gripper_indices:
+                            if _gi < len(_full_pos):
+                                _full_pos[_gi] = _g_val
+                    _js["positions"] = _full_pos
 
             obs_joints = np.array(robot_state["joint_positions"], dtype=float)
 
@@ -7452,7 +7470,8 @@ class GenieSimLocalFramework:
                                 frame_data["ee_quat"] = list(_seq)
                         _used_server_ee = True
 
-            # Fallback: local FK
+            # Fallback: local FK — always compute from joint positions so
+            # ee_pos updates every frame even when server returns static values.
             if not _used_server_ee:
                 try:
                     fk_joint_positions = None
@@ -7462,7 +7481,16 @@ class GenieSimLocalFramework:
                             indices = [joint_names.index(name) for name in config_names]
                             fk_joint_positions = waypoint_joints[indices]
                     if fk_joint_positions is None and arm_indices:
-                        fk_joint_positions = waypoint_joints[arm_indices]
+                        # If waypoint is arm-only (e.g. 7-DOF Franka) and arm_indices
+                        # point beyond its length, use waypoint_joints directly as
+                        # they already represent the arm joint positions.
+                        if max(arm_indices) < len(waypoint_joints):
+                            fk_joint_positions = waypoint_joints[arm_indices]
+                        elif len(waypoint_joints) == arm_dof:
+                            fk_joint_positions = waypoint_joints
+                    # Last resort: if waypoint length matches expected arm DOF, use directly
+                    if fk_joint_positions is None and len(waypoint_joints) == arm_dof:
+                        fk_joint_positions = waypoint_joints
                     if fk_solver is not None and fk_joint_positions is not None:
                         ee_pos, ee_quat = fk_solver._forward_kinematics(fk_joint_positions)
                         _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
@@ -7510,21 +7538,42 @@ class GenieSimLocalFramework:
                 ]
                 frame_data["ee_rot6d"] = [round(v, 8) for v in _rot6d]
 
-            # Explicit gripper command: infer from gripper joint positions
-            # Normalize by gripper range (robot-specific limits).
-            gripper_openness = 1.0
-            if gripper_indices:
+            # Explicit gripper command: prefer gripper_aperture from waypoint
+            # (trajectory planner sets this per-phase), fall back to inferring
+            # from gripper joint positions when available.
+            _wp_gripper_aperture = waypoint.get("gripper_aperture")
+            if _wp_gripper_aperture is not None:
+                gripper_openness = float(_wp_gripper_aperture)
+            elif gripper_indices:
                 gripper_joints = [waypoint_joints[idx] for idx in gripper_indices if idx < len(waypoint_joints)]
                 _g_lims = joint_groups["gripper_limits"]
                 _g_range = float(_g_lims[1] - _g_lims[0]) if _g_lims[1] > _g_lims[0] else 1.0
                 gripper_mean = float(np.mean(np.abs(gripper_joints))) if gripper_joints else 0.0
                 gripper_openness = min(1.0, gripper_mean / _g_range) if _g_range > 0 else 0.0
-                frame_data["gripper_command"] = "open" if gripper_openness > 0.5 else "closed"
-                frame_data["gripper_openness"] = round(gripper_openness, 3)
+            else:
+                gripper_openness = 1.0
+            frame_data["gripper_command"] = "open" if gripper_openness > 0.5 else "closed"
+            frame_data["gripper_openness"] = round(gripper_openness, 3)
 
             # --- Improvement G: Per-frame phase labels ---
+            # Prefer explicit phase from trajectory waypoint when available
+            _wp_phase = waypoint.get("phase")
             _current_phase = "approach"
-            if frame_data.get("gripper_command") == "closed" and not _grasp_detected:
+            if _wp_phase and isinstance(_wp_phase, str) and _wp_phase in (
+                "home", "approach", "pre_grasp", "grasp", "lift", "transport",
+                "pre_place", "place", "release", "retract",
+                "articulate_approach", "articulate_grasp", "articulate_motion",
+            ):
+                _current_phase = _wp_phase
+                # Keep tracking state consistent with explicit phase
+                if _wp_phase in ("grasp", "lift", "transport"):
+                    _grasp_detected = True
+                if _wp_phase in ("place", "release", "retract"):
+                    _grasp_detected = True
+                    _release_detected = True
+                if _wp_phase in ("lift", "transport"):
+                    _lift_phase_started = True
+            elif frame_data.get("gripper_command") == "closed" and not _grasp_detected:
                 _grasp_detected = True
                 _current_phase = "grasp"
             elif _grasp_detected and not _release_detected:
@@ -8155,11 +8204,25 @@ class GenieSimLocalFramework:
         task: Dict[str, Any],
     ) -> None:
         setattr(self._client, "_latest_observation", obs)
+        _any_camera = False
         for camera_id in ["wrist", "overhead", "side"]:
             try:
                 camera_data = self._client.get_camera_data(camera_id)
                 if camera_data is not None:
                     obs.setdefault("camera_frames", {})[camera_id] = camera_data
+                    _any_camera = True
+                else:
+                    # Ensure camera_frames entry exists even when data is null
+                    # so downstream code can detect the camera was expected.
+                    obs.setdefault("camera_frames", {})[camera_id] = {
+                        "camera_id": camera_id,
+                        "rgb": None,
+                        "depth": None,
+                        "width": 1280,
+                        "height": 720,
+                        "encoding": "",
+                        "timestamp": None,
+                    }
             except Exception:
                 logger.warning(
                     "Camera capture failed (camera_id=%s, episode_id=%s, task_name=%s, task_id=%s).",
@@ -8169,6 +8232,14 @@ class GenieSimLocalFramework:
                     task.get("task_id"),
                     exc_info=True,
                 )
+        if not _any_camera and not getattr(self, "_camera_warning_logged", False):
+            logger.warning(
+                "NO_CAMERA_DATA: No camera images available from server for episode %s. "
+                "Camera frames will be null. Ensure Isaac Sim camera rendering is enabled "
+                "or check server camera_observation pipeline.",
+                episode_id,
+            )
+            self._camera_warning_logged = True
 
     def _generate_trajectory(
         self,
