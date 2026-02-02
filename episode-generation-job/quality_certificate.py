@@ -607,6 +607,7 @@ class QualityCertificateGenerator:
         frame_count: int = 0,
         camera_count: int = 0,
         partial_camera_coverage: bool = False,
+        ee_coverage_ratio: float = 1.0,
         episode_data_hash: Optional[str] = None,
     ) -> QualityCertificate:
         """
@@ -624,6 +625,7 @@ class QualityCertificateGenerator:
             validation_passed: Whether validation passed
             frame_count: Number of frames
             camera_count: Number of cameras
+            ee_coverage_ratio: Fraction of frames with EE pose data
             episode_data_hash: SHA256 hash of episode data
 
         Returns:
@@ -648,6 +650,7 @@ class QualityCertificateGenerator:
             frame_count=frame_count,
             camera_count=camera_count,
             partial_camera_coverage=partial_camera_coverage,
+            ee_coverage_ratio=ee_coverage_ratio,
             data_hash=episode_data_hash,
         )
 
