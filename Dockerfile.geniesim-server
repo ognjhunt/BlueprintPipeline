@@ -81,7 +81,8 @@ ENV PATH=${CUDA_HOME}/bin:${PATH}
 # TORCH_CUDA_ARCH_LIST is required because no GPU is visible during docker build.
 # 7.0=V100, 7.5=T4/RTX20xx, 8.0=A100, 8.6=RTX30xx/A40, 8.9=L4/RTX40xx, 9.0=H100
 ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
-RUN git clone --depth 1 https://github.com/NVlabs/curobo.git /opt/curobo \
+ARG CUROBO_REF=v0.7.2
+RUN git clone --depth 1 --branch ${CUROBO_REF} https://github.com/NVlabs/curobo.git /opt/curobo \
     && cd /opt/curobo \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install -e . --no-build-isolation \
     && cd /

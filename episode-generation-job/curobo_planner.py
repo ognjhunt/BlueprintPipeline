@@ -240,7 +240,8 @@ class CuRoboMotionPlanner:
         # Create motion generator configuration
         motion_gen_config = MotionGenConfig.load_from_robot_config(
             robot_cfg_file,
-            self.tensor_args,
+            tensor_args=self.tensor_args,
+            world_cfg=WorldConfig(),
             trajopt_tsteps=32,  # Trajectory optimization time steps
             interpolation_dt=self.interpolation_dt,
         )
