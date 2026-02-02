@@ -7177,6 +7177,24 @@ class GenieSimLocalFramework:
                 _f.pop("_initial_object_poses", None)
                 _f.pop("_final_object_poses", None)
 
+            # VLM-based quality audit (gated by ENABLE_VLM_QUALITY_AUDIT=1)
+            vlm_audit = self._audit_episode_with_vlm(frames, task, quality_score)
+            if vlm_audit and not vlm_audit.get("skipped"):
+                # Use blended score if VLM audit succeeded
+                quality_score = vlm_audit.get("blended_quality_score", quality_score)
+                validation_passed = quality_score >= min_quality
+
+            # Sim-to-real gap assessment (gated by ENABLE_SIM2REAL_ASSESSMENT=1)
+            sim2real = self._assess_sim_to_real_gap(frames)
+
+            # Failure diagnosis (gated by ENABLE_LLM_FAILURE_DIAGNOSIS=1)
+            failure_diagnosis = self._diagnose_failure_with_llm(
+                validity_errors=_validity_errors if "_validity_errors" in dir() else [],
+                frames=frames,
+                quality_score=quality_score,
+                task=task,
+            )
+
             with open(episode_path, "w") as f:
                 json.dump({
                     "episode_id": episode_id,
@@ -7282,25 +7300,11 @@ class GenieSimLocalFramework:
                         "release": "Opening gripper to release object",
                         "retract": "Retracting gripper after placement",
                     },
+                    "vlm_audit": vlm_audit,
+                    "sim_to_real_assessment": sim2real,
+                    "failure_diagnosis": failure_diagnosis,
+                    "language_annotations": llm_metadata.get("language_annotations"),
                 }, f, default=_json_default)
-
-            # VLM-based quality audit (gated by ENABLE_VLM_QUALITY_AUDIT=1)
-            vlm_audit = self._audit_episode_with_vlm(frames, task, quality_score)
-            if vlm_audit and not vlm_audit.get("skipped"):
-                # Use blended score if VLM audit succeeded
-                quality_score = vlm_audit.get("blended_quality_score", quality_score)
-                validation_passed = quality_score >= min_quality
-
-            # Sim-to-real gap assessment (gated by ENABLE_SIM2REAL_ASSESSMENT=1)
-            sim2real = self._assess_sim_to_real_gap(frames)
-
-            # Failure diagnosis (gated by ENABLE_LLM_FAILURE_DIAGNOSIS=1)
-            failure_diagnosis = self._diagnose_failure_with_llm(
-                validity_errors=_validity_errors if "_validity_errors" in dir() else [],
-                frames=frames,
-                quality_score=quality_score,
-                task=task,
-            )
 
             result["success"] = True
             result["frame_count"] = len(frames)
