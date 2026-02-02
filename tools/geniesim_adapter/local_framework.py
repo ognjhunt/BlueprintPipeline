@@ -154,6 +154,8 @@ try:
         AttachReq,
         AttachRsp,
         CameraRequest,
+        ContactReportReq,
+        ContactReportRsp,
         DetachReq,
         DetachRsp,
         ExitReq,
@@ -202,6 +204,8 @@ except ImportError:
         "AttachReq",
         "AttachRsp",
         "CameraRequest",
+        "ContactReportReq",
+        "ContactReportRsp",
         "DetachReq",
         "DetachRsp",
         "ExitReq",
@@ -2530,6 +2534,62 @@ class GenieSimGRPCClient:
             available=True,
             payload=result,
         )
+
+    def get_contact_report(
+        self,
+        *,
+        include_points: bool = False,
+        lock_timeout: Optional[float] = None,
+    ) -> GrpcCallResult:
+        """Fetch physics contact data from the server, if supported."""
+        if not self._have_grpc:
+            return self._grpc_unavailable("get_contact_report", "gRPC not available")
+        if self._stub is None:
+            return self._grpc_unavailable("get_contact_report", "gRPC channel not initialized")
+        if not hasattr(self._stub, "get_contact_report"):
+            return self._grpc_unavailable("get_contact_report", "RPC not supported by server")
+        request = ContactReportReq(include_points=include_points)
+
+        def _request() -> ContactReportRsp:
+            return self._stub.get_contact_report(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "get_contact_report",
+            _request,
+            None,
+            success_checker=lambda resp: resp is not None,
+            lock_timeout=lock_timeout,
+        )
+        if response is None:
+            return GrpcCallResult(success=False, available=True, error="gRPC call failed")
+
+        contacts = []
+        max_penetration = float(getattr(response, "max_penetration_depth", 0.0) or 0.0)
+        total_force = float(getattr(response, "total_normal_force", 0.0) or 0.0)
+        use_contact_sum = total_force == 0.0
+        for contact in response.contacts:
+            penetration_depth = float(contact.penetration_depth)
+            normal_force = float(contact.normal_force)
+            contacts.append({
+                "body_a": contact.body_a,
+                "body_b": contact.body_b,
+                "normal_force_N": normal_force,
+                "penetration_depth": penetration_depth,
+                "position": list(contact.position) if contact.position else [],
+                "normal": list(contact.normal) if contact.normal else [],
+            })
+            if penetration_depth > max_penetration:
+                max_penetration = penetration_depth
+            if use_contact_sum:
+                total_force += normal_force
+
+        payload = {
+            "contacts": contacts,
+            "contact_count": len(contacts),
+            "total_normal_force": total_force,
+            "max_penetration_depth": max_penetration,
+        }
+        return GrpcCallResult(success=True, available=True, payload=payload)
 
     def _resolve_object_prim_candidates(self, prim_path: str) -> List[str]:
         """Return candidate prim paths for resolving an object pose."""
@@ -7797,6 +7857,8 @@ class GenieSimLocalFramework:
         _ee_static_window = 5
         _ee_static_std = 1e-4
         _is_production = getattr(self.config, "environment", "") == "production"
+        _collision_source_hint = (self._last_planning_report.get("collision_source") or "").lower()
+        _contact_query_warned = False
 
         # --- Trajectory time parameterization (realism fix) ---
         # Expand sparse waypoints into dense 30Hz frames with velocity-limited timing.
@@ -8183,6 +8245,8 @@ class GenieSimLocalFramework:
             _rs_eff = robot_state.get("joint_efforts", [])
             if _rs_eff and any(abs(e) > 1e-6 for e in _rs_eff):
                 _real_effort_count += 1
+            _real_efforts = _rs_eff if _rs_eff is not None else []
+            _has_real_efforts = bool(_real_efforts and any(abs(e) > 1e-6 for e in _real_efforts))
 
             # Fix 6: Quaternion normalization, hemisphere continuity, and 6D rotation
             if frame_data.get("ee_quat"):
@@ -8321,11 +8385,6 @@ class GenieSimLocalFramework:
                             break
 
                 # Contact force estimation: prefer real joint efforts from PhysX
-                _real_efforts = robot_state.get("joint_efforts", [])
-                _has_real_efforts = (
-                    _real_efforts
-                    and any(abs(e) > 1e-6 for e in _real_efforts)
-                )
                 if _has_real_efforts:
                     # Real PhysX joint torques available
                     if gripper_indices:
@@ -8374,16 +8433,8 @@ class GenieSimLocalFramework:
 
             # Add provenance to contact forces (for PhysX real data path)
             if "contact_forces" in frame_data and "provenance" not in frame_data["contact_forces"]:
-                _real_efforts = robot_state.get("joint_efforts", [])
-                _has_real = _real_efforts and any(abs(e) > 1e-6 for e in _real_efforts)
-                frame_data["contact_forces"]["provenance"] = "physx_joint_effort" if _has_real else "heuristic_grasp_model_v1"
-                frame_data["contact_forces"]["confidence"] = 0.9 if _has_real else 0.2
-
-            # Record collision provenance per frame for quality gate inspection
-            frame_data["collision_provenance"] = (
-                "physx_joint_effort" if robot_state.get("joint_efforts") and any(abs(e) > 1e-6 for e in robot_state.get("joint_efforts", []))
-                else "joint_limits_only"
-            )
+                frame_data["contact_forces"]["provenance"] = "physx_joint_effort" if _has_real_efforts else "heuristic_grasp_model_v1"
+                frame_data["contact_forces"]["confidence"] = 0.9 if _has_real_efforts else 0.2
 
             # Detect release: gripper opens while holding object
             if frame_data.get("gripper_command") == "open" and _attached_object_id is not None:
@@ -8405,6 +8456,38 @@ class GenieSimLocalFramework:
                     "provenance": "heuristic_grasp_model_v1",
                     "confidence": 0.1,
                 }
+
+            # Query physics contact report when collision data is limited.
+            collision_provenance = None
+            _should_query_contacts = _collision_source_hint == "joint_limits_only" or not _has_real_efforts
+            if _should_query_contacts:
+                contact_result = self._client.get_contact_report(
+                    include_points=False,
+                    lock_timeout=1.0,
+                )
+                if contact_result.available and contact_result.success and contact_result.payload is not None:
+                    payload = contact_result.payload
+                    frame_data["penetration_depth"] = payload.get("max_penetration_depth")
+                    contact_forces = {
+                        "total_normal_force_N": round(float(payload.get("total_normal_force", 0.0)), 4),
+                        "contact_count": int(payload.get("contact_count", 0)),
+                        "provenance": "physx_contact_query",
+                        "confidence": 0.7,
+                    }
+                    if not _has_real_efforts:
+                        frame_data["contact_forces"] = contact_forces
+                    collision_provenance = "physx_contact_query"
+                else:
+                    if _collision_source_hint == "joint_limits_only" and not _contact_query_warned:
+                        logger.warning(
+                            "Contact report unavailable; using joint-limits-only collision heuristic."
+                        )
+                        _contact_query_warned = True
+                    collision_provenance = "joint_limits_only"
+
+            if collision_provenance is None:
+                collision_provenance = "physx_joint_effort" if _has_real_efforts else "joint_limits_only"
+            frame_data["collision_provenance"] = collision_provenance
 
             # Update ALL tracked object poses in scene_state (not just attached)
             if obs.get("scene_state") and _object_poses:
