@@ -1437,6 +1437,13 @@ class EpisodeGenerator:
             if episode.sensor_data is not None:
                 warnings = getattr(episode.sensor_data, "camera_capture_warnings", [])
 
+                rgb_errors = episode.sensor_data.validate_rgb_frames()
+                depth_errors = episode.sensor_data.validate_depth_frames()
+                if rgb_errors:
+                    warnings.extend(rgb_errors)
+                if depth_errors:
+                    warnings.extend(depth_errors)
+
                 # Check if any frames actually have RGB data
                 _frame_data_list = getattr(episode.sensor_data, "frames", [])
                 _rgb_frame_count = 0
@@ -2647,6 +2654,13 @@ class EpisodeGenerator:
 
         frame_count = episode.sensor_data.num_frames if episode.sensor_data else 0
         camera_count = len(episode.sensor_data.camera_ids) if episode.sensor_data else 0
+        partial_camera_coverage = False
+        if episode.sensor_data:
+            camera_errors = (
+                episode.sensor_data.validate_rgb_frames()
+                + episode.sensor_data.validate_depth_frames()
+            )
+            partial_camera_coverage = any("missing" in error for error in camera_errors)
         visual_metrics = VisualQualityMetrics(
             target_visibility_ratio=1.0 if episode.sensor_data and episode.sensor_data.has_rgb else 0.0,
             viewpoint_diversity=min(1.0, camera_count / 3.0) if camera_count else 0.0,
@@ -2681,6 +2695,7 @@ class EpisodeGenerator:
             validation_passed=episode.is_valid,
             frame_count=frame_count,
             camera_count=camera_count,
+            partial_camera_coverage=partial_camera_coverage,
             episode_data_hash=episode_hash,
         )
 

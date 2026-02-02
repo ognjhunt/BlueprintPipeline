@@ -734,6 +734,8 @@ class EpisodeSensorData:
     # Capture diagnostics
     camera_capture_warnings: List[str] = field(default_factory=list)
     camera_error_counts: Dict[str, int] = field(default_factory=dict)
+    camera_missing_rgb_counts: Dict[str, int] = field(default_factory=dict)
+    camera_missing_depth_counts: Dict[str, int] = field(default_factory=dict)
 
     @property
     def num_frames(self) -> int:
@@ -753,9 +755,62 @@ class EpisodeSensorData:
 
     @property
     def camera_ids(self) -> List[str]:
+        if self.config.cameras:
+            return [camera.camera_id for camera in self.config.cameras]
         if len(self.frames) == 0:
             return []
         return list(self.frames[0].rgb_images.keys())
+
+    def _required_camera_ids(self, *, require_rgb: bool = False, require_depth: bool = False) -> List[str]:
+        required = []
+        camera_by_id = {camera.camera_id: camera for camera in self.config.cameras}
+        for camera_id in self.camera_ids:
+            camera = camera_by_id.get(camera_id)
+            if camera is None:
+                continue
+            if require_rgb and camera.capture_rgb:
+                required.append(camera_id)
+            if require_depth and camera.capture_depth:
+                required.append(camera_id)
+        return required
+
+    def validate_rgb_frames(self) -> List[str]:
+        """
+        Validate RGB frames across the episode.
+
+        Returns:
+            List of per-frame validation error messages.
+        """
+        errors = []
+        required_cameras = set(self._required_camera_ids(require_rgb=True))
+
+        for frame in self.frames:
+            for error in frame.validate_rgb_frames():
+                errors.append(f"Frame {frame.frame_index}: {error}")
+            for camera_id in required_cameras:
+                if camera_id not in frame.rgb_images:
+                    errors.append(f"Frame {frame.frame_index}: {camera_id} RGB missing")
+
+        return errors
+
+    def validate_depth_frames(self) -> List[str]:
+        """
+        Validate depth frames across the episode.
+
+        Returns:
+            List of per-frame validation error messages.
+        """
+        errors = []
+        required_cameras = set(self._required_camera_ids(require_depth=True))
+
+        for frame in self.frames:
+            for error in frame.validate_depth_frames():
+                errors.append(f"Frame {frame.frame_index}: {error}")
+            for camera_id in required_cameras:
+                if camera_id not in frame.depth_maps:
+                    errors.append(f"Frame {frame.frame_index}: {camera_id} depth missing")
+
+        return errors
 
     def validate_all_frames(self) -> List[str]:
         """
@@ -768,13 +823,11 @@ class EpisodeSensorData:
         """
         all_errors = []
 
-        for frame in self.frames:
-            frame_errors = []
-            frame_errors.extend(frame.validate_rgb_frames())
-            frame_errors.extend(frame.validate_depth_frames())
-            frame_errors.extend(frame.validate_segmentation_frames())
+        all_errors.extend(self.validate_rgb_frames())
+        all_errors.extend(self.validate_depth_frames())
 
-            # Prefix with frame number
+        for frame in self.frames:
+            frame_errors = frame.validate_segmentation_frames()
             for error in frame_errors:
                 all_errors.append(f"Frame {frame.frame_index}: {error}")
 
@@ -819,6 +872,8 @@ class IsaacSimSensorCapture:
         self._annotators: Dict[str, Dict[str, Any]] = {}
         self._writer = None
         self._camera_error_counts: Dict[str, int] = {}
+        self._camera_missing_rgb_counts: Dict[str, int] = {}
+        self._camera_missing_depth_counts: Dict[str, int] = {}
 
         # Isaac Sim module references
         self._rep = None
@@ -1066,10 +1121,27 @@ class IsaacSimSensorCapture:
                     if normals_data is not None:
                         frame_data.normals[camera_id] = normals_data["data"]
 
+                if "rgb" in annotators and camera_id not in frame_data.rgb_images:
+                    self._camera_missing_rgb_counts[camera_id] = (
+                        self._camera_missing_rgb_counts.get(camera_id, 0) + 1
+                    )
+                if "depth" in annotators and camera_id not in frame_data.depth_maps:
+                    self._camera_missing_depth_counts[camera_id] = (
+                        self._camera_missing_depth_counts.get(camera_id, 0) + 1
+                    )
+
             except Exception as e:
                 import traceback
                 failed_cameras.append(camera_id)
                 self._camera_error_counts[camera_id] = self._camera_error_counts.get(camera_id, 0) + 1
+                if "rgb" in annotators:
+                    self._camera_missing_rgb_counts[camera_id] = (
+                        self._camera_missing_rgb_counts.get(camera_id, 0) + 1
+                    )
+                if "depth" in annotators:
+                    self._camera_missing_depth_counts[camera_id] = (
+                        self._camera_missing_depth_counts.get(camera_id, 0) + 1
+                    )
                 error_payload = {
                     "event": "camera_capture_error",
                     "camera_id": camera_id,
@@ -1658,6 +1730,12 @@ class IsaacSimSensorCapture:
         self._camera_error_counts = {
             cam.camera_id: 0 for cam in self.config.cameras
         }
+        self._camera_missing_rgb_counts = {
+            cam.camera_id: 0 for cam in self.config.cameras
+        }
+        self._camera_missing_depth_counts = {
+            cam.camera_id: 0 for cam in self.config.cameras
+        }
 
         self.log(f"Capturing sensor data for episode {episode_id}")
 
@@ -1678,6 +1756,8 @@ class IsaacSimSensorCapture:
                         "WARNING",
                     )
         episode_data.camera_error_counts = dict(self._camera_error_counts)
+        episode_data.camera_missing_rgb_counts = dict(self._camera_missing_rgb_counts)
+        episode_data.camera_missing_depth_counts = dict(self._camera_missing_depth_counts)
 
         # Collect semantic label mapping
         if self.config.include_semantic_labels and scene_objects:
