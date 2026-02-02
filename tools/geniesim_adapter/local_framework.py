@@ -6353,6 +6353,7 @@ class GenieSimLocalFramework:
             _real_effort_count = _frame_stats["real_effort_count"]
             _contact_force_cache = _frame_stats["contact_force_cache"]
             _object_property_provenance = _frame_stats.get("object_property_provenance", {})
+            _ee_static_fallback_used = _frame_stats.get("ee_static_fallback_used", False)
 
             if _scene_state_missing_after_frame0 and getattr(self.config, "environment", "") == "production":
                 missing_frames = ", ".join(str(idx) for idx in _scene_state_missing_frame_indices)
@@ -7942,7 +7943,7 @@ class GenieSimLocalFramework:
 
             if _used_server_ee:
                 _server_ee_frame_count += 1
-            if obs.get("scene_state", {}).get("objects") and obs.get("data_source") == "real_composed":
+            if obs.get("scene_state", {}).get("objects") and obs.get("data_source") in ("real_composed", "between_waypoints"):
                 _real_scene_state_count += 1
             if obs.get("camera_frames"):
                 _camera_frame_count += 1
@@ -8412,6 +8413,7 @@ class GenieSimLocalFramework:
             "contact_force_cache": _contact_force_cache,
             "object_property_provenance": _object_property_provenance,
             "missing_phase_frames": _missing_phase_frames,
+            "ee_static_fallback_used": _ee_static_fallback_used,
         }
 
     def _validate_frames(
@@ -10752,7 +10754,7 @@ Scene objects: {scene_summary}
         _skip_recording = os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", "")
         if frames and not _skip_recording:
             _has_real_scene_state = any(
-                (frame.get("observation", {}) or {}).get("data_source") == "real_composed"
+                (frame.get("observation", {}) or {}).get("data_source") in ("real_composed", "between_waypoints")
                 for frame in frames
             )
             if _has_real_scene_state:
