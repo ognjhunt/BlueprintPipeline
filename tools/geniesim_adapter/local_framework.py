@@ -343,6 +343,10 @@ _ROBOT_METADATA_FALLBACK = {
 }
 _FRANKA_TYPES = {"franka", "franka_panda", "panda"}
 
+ROBOT_ARM_INDICES: Dict[str, Dict[str, Any]] = {
+    "g1": {"primary_arm": "right"},
+}
+
 
 def _matches_side_token(name: str, *, side: str) -> bool:
     name = name.lower()
@@ -8598,7 +8602,8 @@ Scene objects: {scene_summary}
             _wp_llm = _create_wp_llm()
             resp = _wp_llm.generate(prompt=prompt, json_output=True, disable_tools=True, temperature=0.2)
             import json as _json_mod
-            parsed = _json_mod.loads(resp) if isinstance(resp, str) else resp
+            resp_text = resp.text if hasattr(resp, "text") else resp
+            parsed = _json_mod.loads(resp_text) if isinstance(resp_text, str) else resp_text
             raw_wps = parsed.get("waypoints", [])
             if not raw_wps or len(raw_wps) < 3:
                 self.log(f"  ⚠️  LLM returned {len(raw_wps)} waypoints (need ≥3); falling back", "WARNING")
