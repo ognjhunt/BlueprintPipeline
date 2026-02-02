@@ -1547,11 +1547,24 @@ class GenieSimGRPCClient:
                     # abort_event every 0.5s and bail out early.
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                         future = pool.submit(func)
+                        wait_started = time.monotonic()
+                        wait_log_interval = 30.0
+                        next_wait_log = wait_started + wait_log_interval
                         while True:
                             try:
                                 result = future.result(timeout=0.5)
                                 break
                             except concurrent.futures.TimeoutError:
+                                now = time.monotonic()
+                                if now >= next_wait_log:
+                                    elapsed = now - wait_started
+                                    logger.info(
+                                        "gRPC %s still waiting (attempt %d, %.1fs elapsed)",
+                                        action,
+                                        attempt,
+                                        elapsed,
+                                    )
+                                    next_wait_log = now + wait_log_interval
                                 if abort_event.is_set():
                                     logger.info(
                                         "gRPC %s aborted while in-flight (attempt %d)",
