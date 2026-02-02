@@ -554,6 +554,7 @@ class SimulationValidator:
         motion_plan: MotionPlan,
         scene_objects: List[Dict[str, Any]],
         task_success_checker: Optional[Callable] = None,
+        camera_data_present: Optional[bool] = None,
     ) -> ValidationResult:
         """
         Validate an episode trajectory.
@@ -606,6 +607,9 @@ class SimulationValidator:
             result = self._validate_heuristic(
                 trajectory, motion_plan, scene_objects, result, task_success_checker
             )
+
+        if camera_data_present is not None:
+            result.metrics.camera_data_present = camera_data_present
 
         # Compute quality score
         result.metrics.compute_overall_score()
@@ -1461,6 +1465,7 @@ class SimulationValidator:
                     elif _gp <= 0.02 and _saw_open:  # closed after open
                         _saw_close = True
             _gripper_transition = _saw_open and _saw_close and _saw_reopen
+            result.metrics.gripper_transition_present = _gripper_transition
 
             # Check for EE displacement (robot actually moved)
             _ee_displaced = False
