@@ -2617,6 +2617,17 @@ class EpisodeGenerator:
 
         return updated
 
+    @staticmethod
+    def _has_rgb_frames(sensor_data: Optional[Any]) -> bool:
+        if sensor_data is None:
+            return False
+        frames = getattr(sensor_data, "frames", [])
+        for frame in frames:
+            rgb_images = getattr(frame, "rgb_images", None)
+            if rgb_images:
+                return True
+        return False
+
     def _validate_episodes(
         self,
         episodes: List[GeneratedEpisode],
@@ -2654,10 +2665,12 @@ class EpisodeGenerator:
                 return episode
 
             try:
+                camera_data_present = self._has_rgb_frames(episode.sensor_data)
                 result = self.validator.validate(
                     trajectory=episode.trajectory,
                     motion_plan=episode.motion_plan,
                     scene_objects=objects,
+                    camera_data_present=camera_data_present,
                 )
 
                 episode.validation_result = result
