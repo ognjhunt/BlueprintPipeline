@@ -373,6 +373,7 @@ class QualityCertificate:
     frame_count: int = 0
     camera_count: int = 0
     partial_camera_coverage: bool = False
+    ee_coverage_ratio: float = 1.0  # Fraction of frames with valid EE pose
 
     def compute_overall_quality_score(self) -> float:
         """
@@ -417,6 +418,27 @@ class QualityCertificate:
         if self.camera_count == 0:
             overall = 0.0
             logger.warning("Quality score forced to 0.0: camera_count=0")
+
+        # Hard-cap: insufficient EE pose coverage → 0.0
+        _ee_coverage = getattr(self, "ee_coverage_ratio", None)
+        if _ee_coverage is not None and _ee_coverage < 0.9:
+            overall = 0.0
+            logger.warning(
+                "Quality score forced to 0.0: ee_coverage_ratio=%.2f (< 0.9)",
+                _ee_coverage,
+            )
+
+        # Hard-cap: entirely synthetic scene state → 0.0
+        if self.provenance_metrics and self.provenance_metrics.channel_provenance:
+            _ss_realness = self.provenance_metrics.channel_provenance.get(
+                "scene_state", {}
+            ).get("mean_realness", 1.0)
+            if _ss_realness < 0.5:
+                overall = 0.0
+                logger.warning(
+                    "Quality score forced to 0.0: scene_state mean_realness=%.2f (< 0.5)",
+                    _ss_realness,
+                )
 
         self.overall_quality_score = overall
         return overall

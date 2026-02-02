@@ -2634,33 +2634,39 @@ class GenieSimGRPCClient:
             logger.warning(f"[OBS] raw get_object_pose({prim_path}) failed: {exc}")
             return None, False
 
-    def _get_camera_data_raw(self, cam_prim_path: str) -> Optional[Dict[str, Any]]:
+    def _get_camera_data_raw(self, cam_prim_path: str, max_retries: int = 3) -> Optional[Dict[str, Any]]:
         """Get camera data via CameraService.get_camera_data (raw gRPC)."""
         # Build GetCameraDataRequest: field 1 (serial_no=cam_prim_path, string)
         prim_bytes = cam_prim_path.encode("utf-8")
         payload = b"\x0a" + self._encode_varint(len(prim_bytes)) + prim_bytes
 
         method = "/aimdk.protocol.CameraService/get_camera_data"
-        try:
-            call = self._channel.unary_unary(
-                method,
-                request_serializer=lambda x: x,
-                response_deserializer=lambda x: x,
-            )
-            raw_response = call(payload, timeout=self.timeout)
-            return self._parse_camera_data_response(raw_response)
-        except Exception as exc:
-            if not getattr(self, "_camera_grpc_error_logged", False):
+        for attempt in range(max_retries):
+            try:
+                call = self._channel.unary_unary(
+                    method,
+                    request_serializer=lambda x: x,
+                    response_deserializer=lambda x: x,
+                )
+                raw_response = call(payload, timeout=self.timeout)
+                result = self._parse_camera_data_response(raw_response)
+                if result is not None:
+                    return result
                 logger.warning(
-                    "[OBS] raw get_camera_data failed for %s: %s. "
+                    "[OBS] Camera data parse returned None for %s (attempt %d/%d)",
+                    cam_prim_path, attempt + 1, max_retries,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[OBS] raw get_camera_data failed for %s (attempt %d/%d): %s. "
                     "Ensure the camera prim exists in the USD stage and "
                     "the CameraService patch is applied.",
-                    cam_prim_path, exc,
+                    cam_prim_path, attempt + 1, max_retries, exc,
                 )
-                self._camera_grpc_error_logged = True
-            else:
-                logger.debug(f"[OBS] raw get_camera_data failed: {exc}")
-            return None
+            if attempt < max_retries - 1:
+                import time as _time_mod
+                _time_mod.sleep(0.1 * (attempt + 1))
+        return None
 
     @staticmethod
     def _encode_varint(value: int) -> bytes:
@@ -3211,7 +3217,8 @@ class GenieSimGRPCClient:
         #   field 1 (gripper_command, string): tag=0x0a, len-delimited
         #   field 2 (is_right, bool): tag=0x10, varint
         #   field 3 (opened_width, double): tag=0x19, 64-bit
-        gripper_command = "open"
+        # Determine command from width: closed < 0.02m threshold < open
+        gripper_command = "close" if width < 0.02 else "open"
         cmd_bytes = gripper_command.encode("utf-8")
         payload = (
             b"\x0a" + bytes([len(cmd_bytes)]) + cmd_bytes  # field 1
@@ -3227,7 +3234,12 @@ class GenieSimGRPCClient:
                 response_deserializer=lambda x: x,
             )
             raw_response = call(payload, timeout=self.timeout)
-            logger.info("[GRIPPER] set_gripper_state(open) succeeded")
+            logger.info("[GRIPPER] set_gripper_state(%s, width=%.4f) succeeded", gripper_command, width)
+            self._last_gripper_state = {
+                "command": gripper_command,
+                "width": width,
+                "force": force,
+            }
             return GrpcCallResult(success=True, available=True)
         except Exception as exc:
             logger.warning(f"[GRIPPER] set_gripper_state failed: {exc}")
@@ -3657,6 +3669,8 @@ class GenieSimGRPCClient:
         images = camera_observation.get("images") if camera_observation else None
 
         if not images:
+            # Clear stale cache so get_observation() fetches fresh data
+            self._latest_observation = {}
             # No cached images — fetch a fresh observation from the server.
             # This handles the case where _latest_observation has an empty
             # camera_observation ({"images": []}) from a prior call that
@@ -7158,6 +7172,29 @@ class GenieSimLocalFramework:
                 quality_score = 0.0
                 self.log("[VALIDITY_GATE] quality_score forced to 0.0: camera_count=0", "WARNING")
 
+            # Gate: EE pose must exist in most frames
+            if _server_ee_frame_count <= 1 and len(frames) > 1:
+                quality_score = 0.0
+                _validity_errors.append(
+                    f"EE pose missing: server_ee_frames={_server_ee_frame_count}/{len(frames)}"
+                )
+                self.log(
+                    f"[VALIDITY_GATE] quality_score forced to 0.0: "
+                    f"server_ee_frames={_server_ee_frame_count}/{len(frames)}",
+                    "WARNING",
+                )
+
+            # Gate: scene state must not be entirely synthetic
+            if _real_scene_state_count == 0 and len(frames) > 0:
+                quality_score = 0.0
+                _validity_errors.append(
+                    f"Scene state entirely synthetic: real_scene_state_frames=0/{len(frames)}"
+                )
+                self.log(
+                    "[VALIDITY_GATE] quality_score forced to 0.0: scene_state entirely synthetic",
+                    "WARNING",
+                )
+
             # Reject episode if validity errors found
             if _validity_errors:
                 _gate_msg = (
@@ -7745,6 +7782,78 @@ class GenieSimLocalFramework:
         _ee_static_window = 5
         _ee_static_std = 1e-4
         _is_production = getattr(self.config, "environment", "") == "production"
+
+        # --- Trajectory time parameterization (realism fix) ---
+        # Expand sparse waypoints into dense 30Hz frames with velocity-limited timing.
+        _TARGET_FPS = int(os.getenv("GENIESIM_TARGET_FPS", "30"))
+        _MIN_EPISODE_DURATION = float(os.getenv("GENIESIM_MIN_EPISODE_DURATION_S", "2.0"))
+        # Franka Panda joint velocity limits (rad/s) for 7-DOF arm
+        _FRANKA_VEL_LIMITS = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])
+        _vel_lim = _FRANKA_VEL_LIMITS[:arm_dof] if arm_dof <= 7 else np.full(arm_dof, 2.175)
+
+        if len(trajectory) >= 2:
+            # Compute minimum dt per segment from joint velocity limits
+            _segment_dts: List[float] = [0.0]  # first waypoint at t=0
+            for _i in range(1, len(trajectory)):
+                _jp_curr = np.array(trajectory[_i]["joint_positions"][:arm_dof], dtype=float)
+                _jp_prev = np.array(trajectory[_i - 1]["joint_positions"][:arm_dof], dtype=float)
+                _delta = np.abs(_jp_curr - _jp_prev)
+                _max_ratio = np.max(_delta / _vel_lim) if np.any(_delta > 1e-8) else (1.0 / _TARGET_FPS)
+                _segment_dts.append(max(_max_ratio, 1.0 / _TARGET_FPS))
+
+            _total_time = sum(_segment_dts[1:])
+            if _total_time < _MIN_EPISODE_DURATION:
+                _scale = _MIN_EPISODE_DURATION / _total_time
+                _segment_dts = [_segment_dts[0]] + [dt * _scale for dt in _segment_dts[1:]]
+                _total_time = _MIN_EPISODE_DURATION
+
+            # Build cumulative timestamps for waypoints
+            _wp_times = [0.0]
+            for _dt in _segment_dts[1:]:
+                _wp_times.append(_wp_times[-1] + _dt)
+
+            # Interpolate to dense frames at _TARGET_FPS
+            _dense_dt = 1.0 / _TARGET_FPS
+            _num_dense_frames = max(int(_total_time * _TARGET_FPS), len(trajectory))
+            _dense_trajectory: List[Dict[str, Any]] = []
+            _dense_observations: List[Dict[str, Any]] = []
+            _wp_idx = 0
+
+            for _fi in range(_num_dense_frames):
+                _t = _fi * _dense_dt
+                # Find bounding waypoints
+                while _wp_idx < len(_wp_times) - 2 and _wp_times[_wp_idx + 1] < _t:
+                    _wp_idx += 1
+                _wp_idx = min(_wp_idx, len(_wp_times) - 2)
+
+                _t0 = _wp_times[_wp_idx]
+                _t1 = _wp_times[_wp_idx + 1]
+                _alpha = (_t - _t0) / (_t1 - _t0) if abs(_t1 - _t0) > 1e-9 else 0.0
+                _alpha = max(0.0, min(1.0, _alpha))
+
+                _jp0 = np.array(trajectory[_wp_idx]["joint_positions"], dtype=float)
+                _jp1 = np.array(trajectory[_wp_idx + 1]["joint_positions"], dtype=float)
+                _jp_interp = ((1.0 - _alpha) * _jp0 + _alpha * _jp1).tolist()
+
+                _new_wp = dict(trajectory[_wp_idx])
+                _new_wp["joint_positions"] = _jp_interp
+                _new_wp["timestamp"] = _t
+                _new_wp["data_source"] = "between_waypoints"
+                _dense_trajectory.append(_new_wp)
+
+                # Pick closest observation
+                _obs_idx = min(_wp_idx, len(observations) - 1)
+                if _wp_idx + 1 < len(observations) and _alpha > 0.5:
+                    _obs_idx = _wp_idx + 1
+                _dense_observations.append(observations[_obs_idx] if _obs_idx < len(observations) else {})
+
+            trajectory = _dense_trajectory
+            observations = _dense_observations
+            logger.info(
+                "[TIME_PARAM] Expanded trajectory: %d waypoints -> %d frames (%.2fs at %dHz)",
+                len(_segment_dts), len(trajectory), _total_time, _TARGET_FPS,
+            )
+
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
             # observations may reuse the same dict for multiple frames).
@@ -8047,7 +8156,11 @@ class GenieSimLocalFramework:
                 _server_ee_frame_count += 1
             if obs.get("scene_state", {}).get("objects") and obs.get("data_source") in ("real_composed", "between_waypoints"):
                 _real_scene_state_count += 1
-            if obs.get("camera_frames"):
+            _cf = obs.get("camera_frames", {})
+            if _cf and any(
+                v.get("rgb") is not None
+                for v in (_cf.values() if isinstance(_cf, dict) else [])
+            ):
                 _camera_frame_count += 1
             _rs_vel = robot_state.get("joint_velocities", [])
             if _rs_vel and any(abs(v) > 1e-10 for v in _rs_vel):
@@ -8250,6 +8363,12 @@ class GenieSimLocalFramework:
                 _has_real = _real_efforts and any(abs(e) > 1e-6 for e in _real_efforts)
                 frame_data["contact_forces"]["provenance"] = "physx_joint_effort" if _has_real else "heuristic_grasp_model_v1"
                 frame_data["contact_forces"]["confidence"] = 0.9 if _has_real else 0.2
+
+            # Record collision provenance per frame for quality gate inspection
+            frame_data["collision_provenance"] = (
+                "physx_joint_effort" if robot_state.get("joint_efforts") and any(abs(e) > 1e-6 for e in robot_state.get("joint_efforts", []))
+                else "joint_limits_only"
+            )
 
             # Detect release: gripper opens while holding object
             if frame_data.get("gripper_command") == "open" and _attached_object_id is not None:
@@ -8705,17 +8824,10 @@ class GenieSimLocalFramework:
                     obs.setdefault("camera_frames", {})[camera_id] = camera_data
                     _any_camera = True
                 else:
-                    # Ensure camera_frames entry exists even when data is null
-                    # so downstream code can detect the camera was expected.
-                    obs.setdefault("camera_frames", {})[camera_id] = {
-                        "camera_id": camera_id,
-                        "rgb": None,
-                        "depth": None,
-                        "width": 1280,
-                        "height": 720,
-                        "encoding": "",
-                        "timestamp": None,
-                    }
+                    logger.debug(
+                        "Camera %s returned no data for episode %s, skipping placeholder",
+                        camera_id, episode_id,
+                    )
             except Exception:
                 logger.warning(
                     "Camera capture failed (camera_id=%s, episode_id=%s, task_name=%s, task_id=%s).",
@@ -10864,11 +10976,8 @@ Scene objects: {scene_summary}
         task_obs_schema = task.get("observation_schema") or {}
         required_keys = task_obs_schema.get("required_keys") or task.get("required_observation_keys")
         if not required_keys:
-            # Use relaxed schema when camera data is unavailable
-            if os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
-                required_keys = PROPRIOCEPTION_ONLY_OBSERVATION_SCHEMA["required_keys"]
-            else:
-                required_keys = DEFAULT_OBSERVATION_SCHEMA["required_keys"]
+            # Always require full observation schema including camera data
+            required_keys = DEFAULT_OBSERVATION_SCHEMA["required_keys"]
 
         task_action_bounds = task.get("action_bounds") or task.get("joint_limits") or {}
         lower_bounds = (
@@ -11210,15 +11319,29 @@ Scene objects: {scene_summary}
                 utilization_penalty,
             )
 
-        # Base score uses original weights for backward compatibility;
-        # smoothness and collision are additive bonuses (up to +0.05 each).
+        # Camera and EE completeness: fraction of frames with actual data
+        _cam_complete_count = 0
+        _ee_complete_count = 0
+        for _fr in frames:
+            _cf = _fr.get("observation", {}).get("camera_frames", {})
+            if _cf and any(v.get("rgb") is not None for v in (_cf.values() if isinstance(_cf, dict) else [])):
+                _cam_complete_count += 1
+            if _fr.get("ee_pos") is not None:
+                _ee_complete_count += 1
+        camera_completeness = _cam_complete_count / max(total_frames, 1)
+        ee_completeness = _ee_complete_count / max(total_frames, 1)
+
+        # Weighted score with camera and EE completeness terms.
+        # These ensure episodes without images or EE pose cannot score high.
         weighted_score = (
-            0.30 * data_completeness_score
-            + 0.25 * action_validity_score
-            + 0.15 * action_diversity_score
+            0.20 * data_completeness_score
+            + 0.15 * action_validity_score
+            + 0.10 * action_diversity_score
             + 0.10 * obs_diversity_score
             + 0.15 * success_score
             + 0.05 * frame_count_score
+            + 0.15 * camera_completeness
+            + 0.10 * ee_completeness
         )
         # Bonus for smooth trajectories and collision-free episodes
         smoothness_bonus = 0.05 * smoothness_score

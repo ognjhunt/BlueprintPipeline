@@ -203,6 +203,10 @@ class QualityMetrics:
     jerk_integral: float = 0.0  # Lower is smoother
     velocity_smoothness: float = 1.0  # 0-1, higher is smoother
 
+    # Data completeness
+    camera_data_present: bool = False
+    gripper_transition_present: bool = False
+
     # Overall score (0-1)
     overall_score: float = 0.0
 
@@ -229,6 +233,8 @@ class QualityMetrics:
             "path_length": self.path_length,
             "jerk_integral": self.jerk_integral,
             "velocity_smoothness": self.velocity_smoothness,
+            "camera_data_present": self.camera_data_present,
+            "gripper_transition_present": self.gripper_transition_present,
             "overall_score": self.overall_score,
         }
 
@@ -260,6 +266,14 @@ class QualityMetrics:
 
         # Smoothness bonus (5%)
         score += 0.05 * self.velocity_smoothness
+
+        # Camera data penalty: no images means incomplete demonstration
+        if not self.camera_data_present:
+            score *= 0.0
+
+        # Gripper transition penalty for pick/place tasks
+        if not self.gripper_transition_present:
+            score *= 0.5
 
         self.overall_score = min(1.0, score)
         return self.overall_score
