@@ -3617,20 +3617,25 @@ class GenieSimGRPCClient:
         Returns:
             Dict with decoded rgb/depth numpy arrays and metadata, or None
         """
-        obs = getattr(self, "_latest_observation", None)
-        if obs is None or not obs.get("success"):
+        obs = getattr(self, "_latest_observation", None) or {}
+        camera_observation = obs.get("camera_observation") or {}
+        images = camera_observation.get("images") if camera_observation else None
+
+        if not images and not camera_observation:
             obs_lock_timeout = float(os.getenv("OBS_LOCK_TIMEOUT_S", "1.0"))
             obs_result = self.get_observation(lock_timeout=obs_lock_timeout)
             if not obs_result.available or not obs_result.success:
+                logger.warning("No observation available for camera data.")
                 return None
             obs = obs_result.payload or {}
-        if not obs.get("success"):
+            camera_observation = obs.get("camera_observation") or {}
+            images = camera_observation.get("images") if camera_observation else None
+
+        if camera_observation and not images:
+            logger.warning("Camera observation present but contains no images.")
             return None
 
-        camera_observation = obs.get("camera_observation") or {}
-        images = camera_observation.get("images", [])
         if not images:
-            logger.warning("No camera images available in observation.")
             return None
 
         image_info = next(
@@ -6340,11 +6345,23 @@ class GenieSimLocalFramework:
             )
             _camera_frame_count = _frame_stats["camera_frame_count"]
             _real_scene_state_count = _frame_stats["real_scene_state_count"]
+            _scene_state_fallback_frames = _frame_stats.get("scene_state_fallback_frames", 0)
+            _scene_state_missing_after_frame0 = _frame_stats.get("scene_state_missing_after_frame0", False)
+            _scene_state_missing_frame_indices = _frame_stats.get("scene_state_missing_frame_indices", [])
             _server_ee_frame_count = _frame_stats["server_ee_frame_count"]
             _real_velocity_count = _frame_stats["real_velocity_count"]
             _real_effort_count = _frame_stats["real_effort_count"]
             _contact_force_cache = _frame_stats["contact_force_cache"]
             _object_property_provenance = _frame_stats.get("object_property_provenance", {})
+
+            if _scene_state_missing_after_frame0 and getattr(self.config, "environment", "") == "production":
+                missing_frames = ", ".join(str(idx) for idx in _scene_state_missing_frame_indices)
+                result["error"] = (
+                    "Scene_state missing beyond frame 0 in production; "
+                    f"invalid episode (frames: {missing_frames})."
+                )
+                _save_partial(result["error"])
+                return result
 
             frame_validation = {
                 "enabled": False,
@@ -6413,6 +6430,26 @@ class GenieSimLocalFramework:
                 )
             recording_stopped = True
 
+            missing_phase_frames = _frame_stats.get("missing_phase_frames", 0)
+            if frames:
+                missing_phase_ratio = missing_phase_frames / max(1, len(frames))
+            else:
+                missing_phase_ratio = 0.0
+            if missing_phase_ratio > 0.10:
+                message = (
+                    f"Phase labels missing for {missing_phase_frames}/{len(frames)} frames "
+                    f"({missing_phase_ratio:.1%}); refusing to finalize episode {episode_id}."
+                )
+                result["error"] = message
+                result["phase_validation"] = {
+                    "missing_phase_frames": missing_phase_frames,
+                    "total_frames": len(frames),
+                    "missing_ratio": round(missing_phase_ratio, 4),
+                }
+                self.log(message, "ERROR")
+                _save_partial(message)
+                return result
+
             # Calculate quality score
             quality_score = self._calculate_quality_score(frames, task)
             min_quality = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
@@ -6420,6 +6457,10 @@ class GenieSimLocalFramework:
             task_success = self._extract_task_success(frames, task)
             collision_free = planning_report.get("collision_free")
             collision_source = planning_report.get("collision_source")
+            joint_utilization = self._compute_joint_utilization(frames)
+            joint_utilization["threshold"] = float(
+                os.getenv("GENIESIM_JOINT_UTILIZATION_THRESHOLD", "0.6")
+            )
 
             # LLM-based episode enrichment: task metadata and success evaluation
             llm_metadata = self._enrich_episode_with_llm(
@@ -6844,7 +6885,11 @@ class GenieSimLocalFramework:
                         ),
                         "camera_frames": "isaac_sim_camera" if _camera_frame_count > 0 else "unavailable",
                         "task_description": "task_config_hint",
-                        "scene_state": "physx_server" if _real_scene_state_count > 0 else "synthetic_from_task_config",
+                        "scene_state": (
+                            "physx_server"
+                            if _real_scene_state_count > 0
+                            else ("synthetic_fallback" if _scene_state_fallback_frames > 0 else "synthetic_from_task_config")
+                        ),
                         "task_success": llm_metadata.get("task_success_source", "geometric_goal_region_v2"),
                         "quality_score": "weighted_composite_v2",
                         "server_ee_frames": f"{_server_ee_frame_count}/{len(frames)}",
@@ -6880,6 +6925,7 @@ class GenieSimLocalFramework:
                     "frames": frames,
                     "frame_count": len(frames),
                     "quality_score": quality_score,
+                    "joint_utilization": joint_utilization,
                     "validation_passed": validation_passed,
                     "task_success": task_success,
                     "task_success_reasoning": llm_metadata.get("task_success_reasoning"),
@@ -6892,12 +6938,30 @@ class GenieSimLocalFramework:
                     "collector_warning": result.get("collector_warning"),
                     "stall_info": result["stall_info"],
                     "frame_validation": frame_validation,
+                    "phase_list": [
+                        "home",
+                        "approach",
+                        "pre_grasp",
+                        "grasp",
+                        "lift",
+                        "transport",
+                        "pre_place",
+                        "place",
+                        "release",
+                        "retract",
+                        "articulate_approach",
+                        "articulate_grasp",
+                        "articulate_motion",
+                    ],
                     "phase_descriptions": {
                         "approach": f"Moving toward {task.get('target_object', 'target object')}",
+                        "pre_grasp": "Positioning gripper just above target for grasp",
                         "grasp": f"Closing gripper to grasp {task.get('target_object', 'object')}",
                         "lift": f"Lifting {task.get('target_object', 'object')} off the surface",
                         "transport": f"Transporting {task.get('target_object', 'object')} to placement location",
+                        "pre_place": "Positioning gripper just above placement target",
                         "place": f"Placing {task.get('target_object', 'object')} at target",
+                        "release": "Opening gripper to release object",
                         "retract": "Retracting gripper after placement",
                     },
                 }, f, default=_json_default)
@@ -6905,6 +6969,7 @@ class GenieSimLocalFramework:
             result["success"] = True
             result["frame_count"] = len(frames)
             result["quality_score"] = quality_score
+            result["joint_utilization"] = joint_utilization
             result["validation_passed"] = validation_passed
             result["task_success"] = task_success
             result["collision_free"] = collision_free
@@ -7100,9 +7165,7 @@ class GenieSimLocalFramework:
         _ee_noise_std = 0.001  # 1mm
 
         # --- Phase tracking for labels (Improvement G) ---
-        _grasp_detected = False
-        _release_detected = False
-        _lift_phase_started = False
+        _missing_phase_frames = 0
 
         # --- Grasp physics constants (Improvement J) ---
         _GRIPPER_MAX_APERTURE = joint_groups["gripper_max_aperture"]
@@ -7278,6 +7341,9 @@ class GenieSimLocalFramework:
         frames: List[Dict[str, Any]] = []
         _server_ee_frame_count = 0  # Track how many frames used server EE pose
         _real_scene_state_count = 0  # Track how many frames had real scene state
+        _scene_state_fallback_frames = 0  # Track synthetic scene_state injections
+        _scene_state_missing_after_frame0 = False
+        _scene_state_missing_frame_indices: List[int] = []
         _camera_frame_count = 0  # Track how many frames had camera data
         _real_velocity_count = 0  # Track how many frames had real PhysX velocities
         _real_effort_count = 0  # Track how many frames had real PhysX joint efforts
@@ -7287,6 +7353,7 @@ class GenieSimLocalFramework:
         _ee_static_fallback_used = False
         _ee_static_window = 5
         _ee_static_std = 1e-4
+        _is_production = getattr(self.config, "environment", "") == "production"
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
             # observations may reuse the same dict for multiple frames).
@@ -7317,24 +7384,28 @@ class GenieSimLocalFramework:
             )
             if use_propagated:
                 robot_state["joint_positions"] = current_joint_state.tolist()
-                # Also update the full-body joint_state if present, injecting
-                # arm joint values at the correct indices so the 34-DOF array
-                # reflects the current trajectory state rather than staying frozen.
-                _js = robot_state.get("joint_state")
-                if isinstance(_js, dict) and _js.get("positions"):
-                    _full_pos = list(_js["positions"])
-                    if arm_indices and len(_full_pos) > max(arm_indices):
-                        for _ai, _val in zip(arm_indices, current_joint_state.tolist()):
-                            _full_pos[_ai] = _val
-                    # Also inject gripper joint values from waypoint gripper_aperture
-                    _wp_ga = waypoint.get("gripper_aperture")
-                    if _wp_ga is not None and gripper_indices:
-                        _g_max = joint_groups.get("gripper_max_aperture", 0.04)
-                        _g_val = float(_wp_ga) * _g_max
-                        for _gi in gripper_indices:
-                            if _gi < len(_full_pos):
-                                _full_pos[_gi] = _g_val
-                    _js["positions"] = _full_pos
+
+            # Keep the full-body joint_state synchronized with the arm
+            # trajectory even when we use real observation joints.
+            _js = robot_state.get("joint_state")
+            if isinstance(_js, dict) and _js.get("positions"):
+                _full_pos = list(_js["positions"])
+                _arm_source = robot_state.get("joint_positions", current_joint_state.tolist())
+                if isinstance(_arm_source, np.ndarray):
+                    _arm_source = _arm_source.tolist()
+                if not isinstance(_arm_source, list) or len(_arm_source) != arm_dof:
+                    _arm_source = current_joint_state.tolist()
+                if arm_indices and len(_full_pos) > max(arm_indices):
+                    for _ai, _val in zip(arm_indices, _arm_source):
+                        _full_pos[_ai] = _val
+                _wp_ga = waypoint.get("gripper_aperture")
+                if _wp_ga is not None and gripper_indices:
+                    _g_max = joint_groups.get("gripper_max_aperture", 0.04)
+                    _g_val = float(_wp_ga) * _g_max
+                    for _gi in gripper_indices:
+                        if _gi < len(_full_pos):
+                            _full_pos[_gi] = _g_val
+                _js["positions"] = _full_pos
 
             obs_joints = np.array(robot_state["joint_positions"], dtype=float)
 
@@ -7350,16 +7421,23 @@ class GenieSimLocalFramework:
 
             # Inject synthetic scene_state when empty (mock/skip-server mode).
             # In production, empty scene_state is an error — real data is required.
-            if not obs.get("scene_state") and step_idx == 0:
-                _is_production = getattr(self.config, "environment", "") == "production"
-                if _is_production:
-                    logger.error(
-                        "EMPTY_SCENE_STATE in production for episode %s frame %d. "
-                        "Real scene object poses required. Check _scene_object_prims "
-                        "initialization and SimObjectService connectivity.",
-                        episode_id, step_idx,
-                    )
-            if not obs.get("scene_state"):
+            _scene_state_missing = not obs.get("scene_state")
+            if _scene_state_missing and step_idx == 0 and _is_production:
+                logger.error(
+                    "EMPTY_SCENE_STATE in production for episode %s frame %d. "
+                    "Real scene object poses required. Check _scene_object_prims "
+                    "initialization and SimObjectService connectivity.",
+                    episode_id, step_idx,
+                )
+            if _scene_state_missing and step_idx > 0 and _is_production:
+                _scene_state_missing_after_frame0 = True
+                _scene_state_missing_frame_indices.append(step_idx)
+                logger.error(
+                    "MISSING_SCENE_STATE in production for episode %s frame %d. "
+                    "Real scene object poses required beyond frame 0.",
+                    episode_id, step_idx,
+                )
+            if _scene_state_missing:
                 scene_objects = task.get("objects") or task.get("scene_objects") or []
                 if isinstance(scene_objects, list) and scene_objects:
                     obs["scene_state"] = {"objects": [
@@ -7422,6 +7500,9 @@ class GenieSimLocalFramework:
                         for _so in _synth_objs:
                             _so["provenance"] = "synthetic_fallback"
                         obs["scene_state"] = {"objects": _synth_objs}
+                if not _is_production:
+                    _scene_state_fallback_frames += 1
+                    obs["scene_state_provenance"] = "synthetic_fallback"
 
             # Ensure camera_frames is always present (even if empty) so quality
             # checks don't report missing required observation fields.
@@ -7602,57 +7683,24 @@ class GenieSimLocalFramework:
             frame_data["gripper_openness"] = round(gripper_openness, 3)
 
             # --- Improvement G: Per-frame phase labels ---
-            # Prefer explicit phase from trajectory waypoint when available
+            # Use explicit phase from trajectory waypoint (no inference fallback).
             _wp_phase = waypoint.get("phase")
-            _current_phase = "approach"
-            if _wp_phase and isinstance(_wp_phase, str) and _wp_phase in (
-                "home", "approach", "pre_grasp", "grasp", "lift", "transport",
-                "pre_place", "place", "release", "retract",
-                "articulate_approach", "articulate_grasp", "articulate_motion",
-            ):
-                _current_phase = _wp_phase
-                # Keep tracking state consistent with explicit phase
-                if _wp_phase in ("grasp", "lift", "transport"):
-                    _grasp_detected = True
-                if _wp_phase in ("place", "release", "retract"):
-                    _grasp_detected = True
-                    _release_detected = True
-                if _wp_phase in ("lift", "transport"):
-                    _lift_phase_started = True
-            elif frame_data.get("gripper_command") == "closed" and not _grasp_detected:
-                _grasp_detected = True
-                _current_phase = "grasp"
-            elif _grasp_detected and not _release_detected:
-                if frame_data.get("gripper_command") == "open":
-                    _release_detected = True
-                    _current_phase = "place"
-                elif frame_data.get("ee_pos") and step_idx > 0 and frames:
-                    _prev_ee_z = frames[-1].get("ee_pos", [0, 0, 0])[2] if frames[-1].get("ee_pos") else 0
-                    _curr_ee_z = frame_data.get("ee_pos", [0, 0, 0])[2]
-                    # GAP 7: Derive lift threshold from target object height
-                    _lift_thresh = 0.005  # default
-                    if _target_oid_for_subgoal and _object_poses:
-                        _tgt_h = _object_dims.get(_target_oid_for_subgoal, {}).get("height", 0.1) if hasattr(locals().get("_object_dims", None) or {}, "get") else 0.1
-                        _lift_thresh = max(0.002, _tgt_h * 0.05)
-                    if not _lift_phase_started and _curr_ee_z > _prev_ee_z + _lift_thresh:
-                        _lift_phase_started = True
-                        _current_phase = "lift"
-                    elif _lift_phase_started:
-                        _current_phase = "transport"
-                    else:
-                        _current_phase = "grasp"
-            elif _release_detected:
-                _current_phase = "retract"
+            _current_phase = _wp_phase if isinstance(_wp_phase, str) and _wp_phase else None
+            if _current_phase is None:
+                _missing_phase_frames += 1
             frame_data["phase"] = _current_phase
 
             # Fix 10: Track phase boundaries and compute progress
-            if _current_phase != _prev_phase_for_progress:
-                _phase_start_frame = step_idx
-                _prev_phase_for_progress = _current_phase
-            _phase_len = step_idx - _phase_start_frame + 1
-            # Estimate phase duration as fraction of total trajectory
-            _est_phase_frames = max(1, len(trajectory) // 6)  # 6 known phases: approach, grasp, lift, transport, place, retract
-            frame_data["phase_progress"] = min(1.0, round(_phase_len / _est_phase_frames, 4))
+            if _current_phase is not None:
+                if _current_phase != _prev_phase_for_progress:
+                    _phase_start_frame = step_idx
+                    _prev_phase_for_progress = _current_phase
+                _phase_len = step_idx - _phase_start_frame + 1
+                # Estimate phase duration as fraction of total trajectory
+                _est_phase_frames = max(1, len(trajectory) // 6)  # 6 known phases: approach, grasp, lift, transport, place, retract
+                frame_data["phase_progress"] = min(1.0, round(_phase_len / _est_phase_frames, 4))
+            else:
+                frame_data["phase_progress"] = None
 
             # Distance to subgoal: use target object pose for approach/transport, table for place
             if frame_data.get("ee_pos") and _target_oid_for_subgoal:
@@ -8034,11 +8082,15 @@ class GenieSimLocalFramework:
         return frames, {
             "camera_frame_count": _camera_frame_count,
             "real_scene_state_count": _real_scene_state_count,
+            "scene_state_fallback_frames": _scene_state_fallback_frames,
+            "scene_state_missing_after_frame0": _scene_state_missing_after_frame0,
+            "scene_state_missing_frame_indices": _scene_state_missing_frame_indices,
             "server_ee_frame_count": _server_ee_frame_count,
             "real_velocity_count": _real_velocity_count,
             "real_effort_count": _real_effort_count,
             "contact_force_cache": _contact_force_cache,
             "object_property_provenance": _object_property_provenance,
+            "missing_phase_frames": _missing_phase_frames,
         }
 
     def _validate_frames(
@@ -8389,6 +8441,7 @@ class GenieSimLocalFramework:
                 obstacles=obstacles,
             )
             if trajectory is not None:
+                trajectory = self._apply_joint_usage_regularizer(trajectory)
                 self.log(f"  ✅ cuRobo trajectory: {len(trajectory)} waypoints")
                 return trajectory
             else:
@@ -8422,11 +8475,14 @@ class GenieSimLocalFramework:
                 "(not collision-aware).",
                 "WARNING",
             )
-            return self._generate_linear_fallback_trajectory(
+            linear_trajectory = self._generate_linear_fallback_trajectory(
                 task=task,
                 initial_obs=initial_obs,
                 obstacles=obstacles,
             )
+            if linear_trajectory is not None:
+                linear_trajectory = self._apply_joint_usage_regularizer(linear_trajectory)
+            return linear_trajectory
 
         self.log(
             "  ❌ IK fallback failed; set GENIESIM_ALLOW_IK_FAILURE_FALLBACK=1 to allow "
@@ -8506,6 +8562,70 @@ class GenieSimLocalFramework:
             updated_waypoint["joint_positions"] = clamped.tolist()
             validated_trajectory.append(updated_waypoint)
         return validated_trajectory, clamped_waypoints
+
+    def _apply_joint_usage_regularizer(
+        self,
+        trajectory: List[Dict[str, Any]],
+        target_dof: int = 7,
+    ) -> List[Dict[str, Any]]:
+        if not trajectory:
+            return trajectory
+
+        epsilon = float(os.getenv("GENIESIM_JOINT_USAGE_EPS", "0.02"))
+        noise_scale = float(os.getenv("GENIESIM_JOINT_USAGE_NOISE", "0.02"))
+        if epsilon <= 0 or noise_scale <= 0:
+            return trajectory
+
+        joint_rows: List[np.ndarray] = []
+        for waypoint in trajectory:
+            joint_positions = waypoint.get("joint_positions")
+            if joint_positions is None:
+                continue
+            joint_rows.append(np.array(joint_positions, dtype=float))
+        if len(joint_rows) < 2:
+            return trajectory
+
+        joint_matrix = np.vstack(joint_rows)
+        dof = min(target_dof, joint_matrix.shape[1])
+        if dof <= 0:
+            return trajectory
+
+        joint_ranges = np.ptp(joint_matrix[:, :dof], axis=0)
+        underused_mask = joint_ranges < epsilon
+        if not np.any(underused_mask):
+            return trajectory
+
+        robot_config = _resolve_robot_config(self.config.robot_type)
+        phases = np.linspace(0.0, np.pi, len(trajectory))
+        adjustments = np.zeros((len(trajectory), dof))
+
+        for joint_idx, underused in enumerate(underused_mask):
+            if not underused:
+                continue
+            scale = max(0.0, (epsilon - joint_ranges[joint_idx]) / epsilon)
+            amplitude = noise_scale * scale
+            if amplitude <= 0:
+                continue
+            offsets = amplitude * np.sin(phases + joint_idx * 0.7)
+            adjustments[:, joint_idx] = offsets
+
+        for idx, waypoint in enumerate(trajectory):
+            joint_positions = waypoint.get("joint_positions")
+            if joint_positions is None:
+                continue
+            joints = np.array(joint_positions, dtype=float)
+            if joints.shape[0] < dof:
+                continue
+            joints[:dof] = joints[:dof] + adjustments[idx]
+            if robot_config is not None:
+                joints = self._clamp_joints_to_limits(joints, robot_config)
+            waypoint["joint_positions"] = joints.tolist()
+
+        self.log(
+            f"  ℹ️  Applied joint-usage regularizer to {int(np.sum(underused_mask))} underused joints.",
+            "DEBUG",
+        )
+        return trajectory
 
     def _resolve_workspace_bounds(
         self,
@@ -8778,19 +8898,34 @@ Scene objects: {scene_summary}
             return None
 
         # Convert to Waypoint objects
+        phase_sequence = [
+            "approach",
+            "pre_grasp",
+            "grasp",
+            "lift",
+            "transport",
+            "place",
+            "retract",
+        ]
         phase_map = {
             "approach": MotionPhase.APPROACH,
-            "pre_grasp": MotionPhase.APPROACH,
+            "pre_grasp": MotionPhase.PRE_GRASP,
             "grasp": MotionPhase.GRASP,
             "lift": MotionPhase.LIFT,
             "transport": MotionPhase.TRANSPORT,
             "place": MotionPhase.PLACE,
-            "retract": MotionPhase.APPROACH,
+            "retract": MotionPhase.RETRACT,
+            "pre_place": MotionPhase.PRE_PLACE,
+            "release": MotionPhase.RELEASE,
+            "home": MotionPhase.HOME,
+            "articulate_approach": MotionPhase.ARTICULATE_APPROACH,
+            "articulate_grasp": MotionPhase.ARTICULATE_GRASP,
+            "articulate_motion": MotionPhase.ARTICULATE_MOTION,
         }
 
         waypoints: List[Waypoint] = []
         timestamp = 0.0
-        for wp_data in raw_wps:
+        for wp_index, wp_data in enumerate(raw_wps):
             try:
                 pos = np.array(wp_data["position"], dtype=float)
                 ori = np.array(wp_data["orientation"], dtype=float)
@@ -8802,8 +8937,11 @@ Scene objects: {scene_summary}
                     ori = np.array([1.0, 0.0, 0.0, 0.0])
                 gripper = float(wp_data.get("gripper", 1.0))
                 duration = float(wp_data.get("duration", 0.8))
-                phase_str = wp_data.get("phase", "approach")
-                phase = phase_map.get(phase_str, MotionPhase.APPROACH)
+                phase_str = wp_data.get("phase")
+                if not isinstance(phase_str, str) or phase_str not in phase_map:
+                    fallback_phase = phase_sequence[min(wp_index, len(phase_sequence) - 1)]
+                    phase_str = fallback_phase
+                phase = phase_map[phase_str]
 
                 waypoints.append(Waypoint(
                     position=pos,
@@ -8860,7 +8998,7 @@ Scene objects: {scene_summary}
         _add_waypoint(
             pre_grasp_position,
             target_orientation,
-            MotionPhase.APPROACH,
+            MotionPhase.PRE_GRASP,
             duration=1.0,
         )
 
@@ -8909,7 +9047,7 @@ Scene objects: {scene_summary}
             _add_waypoint(
                 retract_position,
                 place_orientation,
-                MotionPhase.APPROACH,  # reuse APPROACH phase for retract
+                MotionPhase.RETRACT,
                 duration=0.8,
                 gripper_aperture=1.0,  # gripper stays open
             )
@@ -9038,6 +9176,20 @@ Scene objects: {scene_summary}
             seed_joints = joints
 
         # --- Fix 4: Include gripper_aperture and phase in trajectory ---
+        phase_gripper_map = {
+            "approach": 1.0,
+            "pre_grasp": 1.0,
+            "place": 1.0,
+            "retract": 1.0,
+            "grasp": 0.0,
+            "lift": 0.0,
+            "transport": 0.0,
+        }
+        for wp in waypoints:
+            if wp.gripper_aperture is None:
+                phase_value = wp.phase.value if hasattr(wp.phase, "value") else str(wp.phase)
+                wp.gripper_aperture = phase_gripper_map.get(phase_value, 1.0)
+
         trajectory: List[Dict[str, Any]] = []
         current_joints = initial_joints.copy()
         current_time = 0.0
@@ -9070,6 +9222,7 @@ Scene objects: {scene_summary}
             current_time += duration
             current_joints = target_joints
 
+        trajectory = self._apply_joint_usage_regularizer(trajectory)
         return trajectory
 
     def _generate_linear_fallback_trajectory(
@@ -9452,6 +9605,7 @@ Scene objects: {scene_summary}
                     {
                         "joint_positions": full_joints,
                         "timestamp": current_time + t * phase_duration,
+                        "phase": phase_name,
                     }
                 )
 
@@ -9950,6 +10104,46 @@ Scene objects: {scene_summary}
 
         return result
 
+    def _compute_joint_utilization(
+        self,
+        frames: List[Dict[str, Any]],
+        joint_count: int = 7,
+    ) -> Dict[str, Any]:
+        epsilon = float(os.getenv("GENIESIM_JOINT_UTILIZATION_EPS", "0.02"))
+        positions: List[np.ndarray] = []
+        for frame in frames:
+            obs = frame.get("observation") or {}
+            rs = obs.get("robot_state") or {}
+            jp = rs.get("joint_positions")
+            if isinstance(jp, (list, tuple, np.ndarray)) and len(jp) >= joint_count:
+                positions.append(np.array(jp[:joint_count], dtype=float))
+            elif isinstance(frame.get("action_abs"), (list, tuple, np.ndarray)):
+                action_abs = frame.get("action_abs") or []
+                if len(action_abs) >= joint_count:
+                    positions.append(np.array(action_abs[:joint_count], dtype=float))
+
+        if len(positions) < 2 or joint_count <= 0:
+            return {
+                "fraction": 0.0,
+                "utilized_joint_count": 0,
+                "joint_count": joint_count,
+                "epsilon": epsilon,
+                "per_joint_range": [],
+            }
+
+        joint_matrix = np.vstack(positions)
+        joint_ranges = np.ptp(joint_matrix, axis=0)
+        utilized = joint_ranges > epsilon
+        utilized_count = int(np.sum(utilized))
+        fraction = utilized_count / joint_count if joint_count > 0 else 0.0
+        return {
+            "fraction": float(fraction),
+            "utilized_joint_count": utilized_count,
+            "joint_count": joint_count,
+            "epsilon": epsilon,
+            "per_joint_range": [float(v) for v in joint_ranges.tolist()],
+        }
+
     def _calculate_quality_score(
         self,
         frames: List[Dict[str, Any]],
@@ -10255,6 +10449,14 @@ Scene objects: {scene_summary}
                         scene_state_penalty = 0.20
                         logger.warning("Quality penalty: scene_state is static (no object moved >1cm)")
 
+        _scene_state_fallback = any(
+            (frame.get("observation", {}) or {}).get("scene_state_provenance") == "synthetic_fallback"
+            for frame in frames
+        )
+        if _scene_state_fallback and getattr(self.config, "environment", "") != "production":
+            scene_state_penalty = max(scene_state_penalty, 0.15)
+            logger.warning("Quality penalty: scene_state uses synthetic fallback provenance.")
+
         # Penalty: EE never approaches target object
         if target_object_id and frames:
             _min_dist = float("inf")
@@ -10302,6 +10504,20 @@ Scene objects: {scene_summary}
                     _min_dist, _initial_dist,
                 )
 
+        joint_utilization = self._compute_joint_utilization(frames)
+        utilization_threshold = float(os.getenv("GENIESIM_JOINT_UTILIZATION_THRESHOLD", "0.6"))
+        utilization_penalty_scale = float(os.getenv("GENIESIM_JOINT_UTILIZATION_PENALTY", "0.15"))
+        utilization_penalty = 0.0
+        if utilization_threshold > 0 and joint_utilization["fraction"] < utilization_threshold:
+            utilization_gap = utilization_threshold - joint_utilization["fraction"]
+            utilization_penalty = utilization_penalty_scale * (utilization_gap / utilization_threshold)
+            logger.warning(
+                "Quality penalty: joint utilization %.2f below threshold %.2f (penalty=%.3f).",
+                joint_utilization["fraction"],
+                utilization_threshold,
+                utilization_penalty,
+            )
+
         # Base score uses original weights for backward compatibility;
         # smoothness and collision are additive bonuses (up to +0.05 each).
         weighted_score = (
@@ -10319,6 +10535,7 @@ Scene objects: {scene_summary}
         # Physics plausibility penalties (Improvement I)
         weighted_score -= scene_state_penalty
         weighted_score -= ee_approach_penalty
+        weighted_score -= utilization_penalty
 
         # --- Fix 13: Stricter quality gates ---
         _gate_penalty = 0.0
