@@ -372,6 +372,7 @@ class QualityCertificate:
     data_hash: Optional[str] = None  # SHA256 of episode data
     frame_count: int = 0
     camera_count: int = 0
+    partial_camera_coverage: bool = False
 
     def compute_overall_quality_score(self) -> float:
         """
@@ -583,6 +584,7 @@ class QualityCertificateGenerator:
         validation_passed: bool = True,
         frame_count: int = 0,
         camera_count: int = 0,
+        partial_camera_coverage: bool = False,
         episode_data_hash: Optional[str] = None,
     ) -> QualityCertificate:
         """
@@ -623,6 +625,7 @@ class QualityCertificateGenerator:
             validation_passed=validation_passed,
             frame_count=frame_count,
             camera_count=camera_count,
+            partial_camera_coverage=partial_camera_coverage,
             data_hash=episode_data_hash,
         )
 
@@ -699,6 +702,11 @@ class QualityCertificateGenerator:
 
         if cert.overall_quality_score < 0.5:
             cert.add_warning(f"Low quality score: {cert.overall_quality_score:.2f}")
+
+        if cert.partial_camera_coverage:
+            cert.add_warning(
+                "Partial camera coverage detected - some frames are missing required modalities"
+            )
 
         if not cert.validation_passed:
             cert.add_error("Episode failed validation checks")

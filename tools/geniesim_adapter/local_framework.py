@@ -6874,6 +6874,45 @@ class GenieSimLocalFramework:
                     f"All {len(frames)} frames have null camera RGB. "
                     "Set REQUIRE_CAMERA_DATA=false to allow export without cameras."
                 )
+            if _require_cameras and not os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", ""):
+                required_cameras: List[str] = []
+                for key in ("required_cameras", "required_camera_ids", "camera_ids"):
+                    value = task.get(key)
+                    if value:
+                        required_cameras = value
+                        break
+                if not required_cameras:
+                    camera_config = task.get("camera_config") or {}
+                    for key in ("required_camera_ids", "camera_ids"):
+                        value = camera_config.get(key)
+                        if value:
+                            required_cameras = value
+                            break
+                if isinstance(required_cameras, str):
+                    required_cameras = [required_cameras]
+                required_cameras = [str(camera_id) for camera_id in required_cameras]
+                for _frame_idx, _frame in enumerate(frames):
+                    camera_frames = _frame.get("observation", {}).get("camera_frames") or {}
+                    if required_cameras and not camera_frames:
+                        _validity_errors.append(
+                            f"Frame {_frame_idx} missing camera_frames for required cameras {required_cameras}."
+                        )
+                        continue
+                    for camera_id in required_cameras:
+                        camera_data = camera_frames.get(camera_id)
+                        if camera_data is None:
+                            _validity_errors.append(
+                                f"Frame {_frame_idx} missing camera frame for camera '{camera_id}'."
+                            )
+                            continue
+                        if camera_data.get("rgb") is None:
+                            _validity_errors.append(
+                                f"Frame {_frame_idx} camera '{camera_id}' missing rgb data."
+                            )
+                        if camera_data.get("depth") is None:
+                            _validity_errors.append(
+                                f"Frame {_frame_idx} camera '{camera_id}' missing depth data."
+                            )
 
             # 2. Scene state: reject if >10% of frames use synthetic fallback
             if frames:
