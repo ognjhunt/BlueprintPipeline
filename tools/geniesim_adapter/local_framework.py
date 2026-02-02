@@ -7313,24 +7313,28 @@ class GenieSimLocalFramework:
             )
             if use_propagated:
                 robot_state["joint_positions"] = current_joint_state.tolist()
-                # Also update the full-body joint_state if present, injecting
-                # arm joint values at the correct indices so the 34-DOF array
-                # reflects the current trajectory state rather than staying frozen.
-                _js = robot_state.get("joint_state")
-                if isinstance(_js, dict) and _js.get("positions"):
-                    _full_pos = list(_js["positions"])
-                    if arm_indices and len(_full_pos) > max(arm_indices):
-                        for _ai, _val in zip(arm_indices, current_joint_state.tolist()):
-                            _full_pos[_ai] = _val
-                    # Also inject gripper joint values from waypoint gripper_aperture
-                    _wp_ga = waypoint.get("gripper_aperture")
-                    if _wp_ga is not None and gripper_indices:
-                        _g_max = joint_groups.get("gripper_max_aperture", 0.04)
-                        _g_val = float(_wp_ga) * _g_max
-                        for _gi in gripper_indices:
-                            if _gi < len(_full_pos):
-                                _full_pos[_gi] = _g_val
-                    _js["positions"] = _full_pos
+
+            # Keep the full-body joint_state synchronized with the arm
+            # trajectory even when we use real observation joints.
+            _js = robot_state.get("joint_state")
+            if isinstance(_js, dict) and _js.get("positions"):
+                _full_pos = list(_js["positions"])
+                _arm_source = robot_state.get("joint_positions", current_joint_state.tolist())
+                if isinstance(_arm_source, np.ndarray):
+                    _arm_source = _arm_source.tolist()
+                if not isinstance(_arm_source, list) or len(_arm_source) != arm_dof:
+                    _arm_source = current_joint_state.tolist()
+                if arm_indices and len(_full_pos) > max(arm_indices):
+                    for _ai, _val in zip(arm_indices, _arm_source):
+                        _full_pos[_ai] = _val
+                _wp_ga = waypoint.get("gripper_aperture")
+                if _wp_ga is not None and gripper_indices:
+                    _g_max = joint_groups.get("gripper_max_aperture", 0.04)
+                    _g_val = float(_wp_ga) * _g_max
+                    for _gi in gripper_indices:
+                        if _gi < len(_full_pos):
+                            _full_pos[_gi] = _g_val
+                _js["positions"] = _full_pos
 
             obs_joints = np.array(robot_state["joint_positions"], dtype=float)
 
