@@ -6413,6 +6413,26 @@ class GenieSimLocalFramework:
                 )
             recording_stopped = True
 
+            missing_phase_frames = _frame_stats.get("missing_phase_frames", 0)
+            if frames:
+                missing_phase_ratio = missing_phase_frames / max(1, len(frames))
+            else:
+                missing_phase_ratio = 0.0
+            if missing_phase_ratio > 0.10:
+                message = (
+                    f"Phase labels missing for {missing_phase_frames}/{len(frames)} frames "
+                    f"({missing_phase_ratio:.1%}); refusing to finalize episode {episode_id}."
+                )
+                result["error"] = message
+                result["phase_validation"] = {
+                    "missing_phase_frames": missing_phase_frames,
+                    "total_frames": len(frames),
+                    "missing_ratio": round(missing_phase_ratio, 4),
+                }
+                self.log(message, "ERROR")
+                _save_partial(message)
+                return result
+
             # Calculate quality score
             quality_score = self._calculate_quality_score(frames, task)
             min_quality = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
@@ -6887,12 +6907,30 @@ class GenieSimLocalFramework:
                     "collector_warning": result.get("collector_warning"),
                     "stall_info": result["stall_info"],
                     "frame_validation": frame_validation,
+                    "phase_list": [
+                        "home",
+                        "approach",
+                        "pre_grasp",
+                        "grasp",
+                        "lift",
+                        "transport",
+                        "pre_place",
+                        "place",
+                        "release",
+                        "retract",
+                        "articulate_approach",
+                        "articulate_grasp",
+                        "articulate_motion",
+                    ],
                     "phase_descriptions": {
                         "approach": f"Moving toward {task.get('target_object', 'target object')}",
+                        "pre_grasp": "Positioning gripper just above target for grasp",
                         "grasp": f"Closing gripper to grasp {task.get('target_object', 'object')}",
                         "lift": f"Lifting {task.get('target_object', 'object')} off the surface",
                         "transport": f"Transporting {task.get('target_object', 'object')} to placement location",
+                        "pre_place": "Positioning gripper just above placement target",
                         "place": f"Placing {task.get('target_object', 'object')} at target",
+                        "release": "Opening gripper to release object",
                         "retract": "Retracting gripper after placement",
                     },
                 }, f, default=_json_default)
@@ -7095,9 +7133,7 @@ class GenieSimLocalFramework:
         _ee_noise_std = 0.001  # 1mm
 
         # --- Phase tracking for labels (Improvement G) ---
-        _grasp_detected = False
-        _release_detected = False
-        _lift_phase_started = False
+        _missing_phase_frames = 0
 
         # --- Grasp physics constants (Improvement J) ---
         _GRIPPER_MAX_APERTURE = joint_groups["gripper_max_aperture"]
@@ -7556,57 +7592,24 @@ class GenieSimLocalFramework:
             frame_data["gripper_openness"] = round(gripper_openness, 3)
 
             # --- Improvement G: Per-frame phase labels ---
-            # Prefer explicit phase from trajectory waypoint when available
+            # Use explicit phase from trajectory waypoint (no inference fallback).
             _wp_phase = waypoint.get("phase")
-            _current_phase = "approach"
-            if _wp_phase and isinstance(_wp_phase, str) and _wp_phase in (
-                "home", "approach", "pre_grasp", "grasp", "lift", "transport",
-                "pre_place", "place", "release", "retract",
-                "articulate_approach", "articulate_grasp", "articulate_motion",
-            ):
-                _current_phase = _wp_phase
-                # Keep tracking state consistent with explicit phase
-                if _wp_phase in ("grasp", "lift", "transport"):
-                    _grasp_detected = True
-                if _wp_phase in ("place", "release", "retract"):
-                    _grasp_detected = True
-                    _release_detected = True
-                if _wp_phase in ("lift", "transport"):
-                    _lift_phase_started = True
-            elif frame_data.get("gripper_command") == "closed" and not _grasp_detected:
-                _grasp_detected = True
-                _current_phase = "grasp"
-            elif _grasp_detected and not _release_detected:
-                if frame_data.get("gripper_command") == "open":
-                    _release_detected = True
-                    _current_phase = "place"
-                elif frame_data.get("ee_pos") and step_idx > 0 and frames:
-                    _prev_ee_z = frames[-1].get("ee_pos", [0, 0, 0])[2] if frames[-1].get("ee_pos") else 0
-                    _curr_ee_z = frame_data.get("ee_pos", [0, 0, 0])[2]
-                    # GAP 7: Derive lift threshold from target object height
-                    _lift_thresh = 0.005  # default
-                    if _target_oid_for_subgoal and _object_poses:
-                        _tgt_h = _object_dims.get(_target_oid_for_subgoal, {}).get("height", 0.1) if hasattr(locals().get("_object_dims", None) or {}, "get") else 0.1
-                        _lift_thresh = max(0.002, _tgt_h * 0.05)
-                    if not _lift_phase_started and _curr_ee_z > _prev_ee_z + _lift_thresh:
-                        _lift_phase_started = True
-                        _current_phase = "lift"
-                    elif _lift_phase_started:
-                        _current_phase = "transport"
-                    else:
-                        _current_phase = "grasp"
-            elif _release_detected:
-                _current_phase = "retract"
+            _current_phase = _wp_phase if isinstance(_wp_phase, str) and _wp_phase else None
+            if _current_phase is None:
+                _missing_phase_frames += 1
             frame_data["phase"] = _current_phase
 
             # Fix 10: Track phase boundaries and compute progress
-            if _current_phase != _prev_phase_for_progress:
-                _phase_start_frame = step_idx
-                _prev_phase_for_progress = _current_phase
-            _phase_len = step_idx - _phase_start_frame + 1
-            # Estimate phase duration as fraction of total trajectory
-            _est_phase_frames = max(1, len(trajectory) // 6)  # 6 known phases: approach, grasp, lift, transport, place, retract
-            frame_data["phase_progress"] = min(1.0, round(_phase_len / _est_phase_frames, 4))
+            if _current_phase is not None:
+                if _current_phase != _prev_phase_for_progress:
+                    _phase_start_frame = step_idx
+                    _prev_phase_for_progress = _current_phase
+                _phase_len = step_idx - _phase_start_frame + 1
+                # Estimate phase duration as fraction of total trajectory
+                _est_phase_frames = max(1, len(trajectory) // 6)  # 6 known phases: approach, grasp, lift, transport, place, retract
+                frame_data["phase_progress"] = min(1.0, round(_phase_len / _est_phase_frames, 4))
+            else:
+                frame_data["phase_progress"] = None
 
             # Distance to subgoal: use target object pose for approach/transport, table for place
             if frame_data.get("ee_pos") and _target_oid_for_subgoal:
@@ -7993,6 +7996,7 @@ class GenieSimLocalFramework:
             "real_effort_count": _real_effort_count,
             "contact_force_cache": _contact_force_cache,
             "object_property_provenance": _object_property_provenance,
+            "missing_phase_frames": _missing_phase_frames,
         }
 
     def _validate_frames(
@@ -8732,19 +8736,34 @@ Scene objects: {scene_summary}
             return None
 
         # Convert to Waypoint objects
+        phase_sequence = [
+            "approach",
+            "pre_grasp",
+            "grasp",
+            "lift",
+            "transport",
+            "place",
+            "retract",
+        ]
         phase_map = {
             "approach": MotionPhase.APPROACH,
-            "pre_grasp": MotionPhase.APPROACH,
+            "pre_grasp": MotionPhase.PRE_GRASP,
             "grasp": MotionPhase.GRASP,
             "lift": MotionPhase.LIFT,
             "transport": MotionPhase.TRANSPORT,
             "place": MotionPhase.PLACE,
-            "retract": MotionPhase.APPROACH,
+            "retract": MotionPhase.RETRACT,
+            "pre_place": MotionPhase.PRE_PLACE,
+            "release": MotionPhase.RELEASE,
+            "home": MotionPhase.HOME,
+            "articulate_approach": MotionPhase.ARTICULATE_APPROACH,
+            "articulate_grasp": MotionPhase.ARTICULATE_GRASP,
+            "articulate_motion": MotionPhase.ARTICULATE_MOTION,
         }
 
         waypoints: List[Waypoint] = []
         timestamp = 0.0
-        for wp_data in raw_wps:
+        for wp_index, wp_data in enumerate(raw_wps):
             try:
                 pos = np.array(wp_data["position"], dtype=float)
                 ori = np.array(wp_data["orientation"], dtype=float)
@@ -8756,8 +8775,11 @@ Scene objects: {scene_summary}
                     ori = np.array([1.0, 0.0, 0.0, 0.0])
                 gripper = float(wp_data.get("gripper", 1.0))
                 duration = float(wp_data.get("duration", 0.8))
-                phase_str = wp_data.get("phase", "approach")
-                phase = phase_map.get(phase_str, MotionPhase.APPROACH)
+                phase_str = wp_data.get("phase")
+                if not isinstance(phase_str, str) or phase_str not in phase_map:
+                    fallback_phase = phase_sequence[min(wp_index, len(phase_sequence) - 1)]
+                    phase_str = fallback_phase
+                phase = phase_map[phase_str]
 
                 waypoints.append(Waypoint(
                     position=pos,
@@ -8814,7 +8836,7 @@ Scene objects: {scene_summary}
         _add_waypoint(
             pre_grasp_position,
             target_orientation,
-            MotionPhase.APPROACH,
+            MotionPhase.PRE_GRASP,
             duration=1.0,
         )
 
@@ -8863,7 +8885,7 @@ Scene objects: {scene_summary}
             _add_waypoint(
                 retract_position,
                 place_orientation,
-                MotionPhase.APPROACH,  # reuse APPROACH phase for retract
+                MotionPhase.RETRACT,
                 duration=0.8,
                 gripper_aperture=1.0,  # gripper stays open
             )
@@ -9406,6 +9428,7 @@ Scene objects: {scene_summary}
                     {
                         "joint_positions": full_joints,
                         "timestamp": current_time + t * phase_duration,
+                        "phase": phase_name,
                     }
                 )
 
