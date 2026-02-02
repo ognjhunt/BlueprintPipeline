@@ -247,6 +247,22 @@ message GetCheckerStatusReq {
 message GetCheckerStatusRsp {
     string msg = 1;
 }
+message ContactPoint {
+    string body_a = 1;
+    string body_b = 2;
+    float normal_force = 3;
+    float penetration_depth = 4;
+    repeated float position = 5;
+    repeated float normal = 6;
+}
+message ContactReportReq {
+    bool include_points = 1;
+}
+message ContactReportRsp {
+    repeated ContactPoint contacts = 1;
+    float total_normal_force = 2;
+    float max_penetration_depth = 3;
+}
 service SimObservationService {
     rpc get_observation(GetObservationReq) returns(GetObservationRsp);
     rpc reset(ResetReq) returns(ResetRsp);
@@ -266,4 +282,5 @@ service SimObservationService {
     rpc store_current_state(StoreCurrentStateReq) returns(StoreCurrentStateRsp);
     rpc playback(PlaybackReq) returns(PlaybackRsp);
     rpc get_checker_status(GetCheckerStatusReq) returns(GetCheckerStatusRsp);
+    rpc get_contact_report(ContactReportReq) returns(ContactReportRsp);
 }

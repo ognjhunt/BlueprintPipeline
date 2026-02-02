@@ -27,6 +27,8 @@ from tools.geniesim_adapter.geniesim_grpc_pb2 import (
     DetachRsp,
     ExitReq,
     ExitRsp,
+    ContactReportReq,
+    ContactReportRsp,
     GetCheckerStatusReq,
     GetCheckerStatusRsp,
     GetObservationReq,
@@ -242,6 +244,10 @@ class GenieSimLocalServicer(SimObservationServiceServicer):
     def get_checker_status(self, req: GetCheckerStatusReq, context) -> GetCheckerStatusRsp:
         checker = req.checker or "status"
         return GetCheckerStatusRsp(msg=f"{checker}: ok")
+
+    def get_contact_report(self, req: ContactReportReq, context) -> ContactReportRsp:
+        del req
+        return ContactReportRsp(total_normal_force=0.0, max_penetration_depth=0.0)
 
 
 class MockJointControlServicer(JointControlServiceServicer):
