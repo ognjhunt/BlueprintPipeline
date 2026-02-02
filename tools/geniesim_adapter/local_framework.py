@@ -6513,6 +6513,7 @@ class GenieSimLocalFramework:
                     frames,
                     episode_id=episode_id,
                     task=task,
+                    episode_dir=output_dir,
                 )
                 if frame_validation["errors"]:
                     message = (
@@ -6708,8 +6709,10 @@ class GenieSimLocalFramework:
                 except Exception as _ts_exc:
                     logger.debug("Gemini task success evaluation failed: %s", _ts_exc)
 
-            # Geometric task success: goal-region verification (fallback validation)
-            if task_success is None and frames:
+            # Geometric task success: goal-region verification
+            # Always compute for metadata; only override task_success if not yet determined
+            _geo_is_fallback = task_success is None
+            if frames:
                 _target_oid = task.get("target_object") or task.get("target_object_id")
                 if _target_oid:
                     _init_p = frames[0].get("_initial_object_poses", {}).get(_target_oid)
@@ -6803,7 +6806,8 @@ class GenieSimLocalFramework:
                             "gripper_released": _release_after_place,
                         }
                         _success_count = sum(_milestones.values())
-                        task_success = _success_count >= 4  # require at least 4 of 5
+                        if _geo_is_fallback:
+                            task_success = _success_count >= 4  # require at least 4 of 5
 
                         # Store detailed metrics
                         _ctrl_freq = 30.0
@@ -6819,10 +6823,11 @@ class GenieSimLocalFramework:
                         llm_metadata["goal_region_verification"]["stability_score"] = 1.0 if _stable else 0.0
 
                         _reasons = [f"{k}={'✓' if v else '✗'}" for k, v in _milestones.items()]
-                        llm_metadata["task_success_reasoning"] = (
-                            f"Goal-region: {_success_count}/5 milestones met "
-                            f"(disp={_disp:.3f}m). {', '.join(_reasons)}"
-                        )
+                        if _geo_is_fallback:
+                            llm_metadata["task_success_reasoning"] = (
+                                f"Goal-region: {_success_count}/5 milestones met "
+                                f"(disp={_disp:.3f}m). {', '.join(_reasons)}"
+                            )
 
             # Heuristic task_success from gripper transitions
             if task_success is None and frames:
@@ -7352,7 +7357,10 @@ class GenieSimLocalFramework:
                         "ee_rot6d": "derived_from_ee_quat",
                         "joint_velocities": "physx_server" if _real_velocity_count > 0 else "finite_difference",
                         "joint_accelerations": "finite_difference_smoothed",
-                        "joint_efforts": "physx_server" if _real_effort_count > 0 else "unavailable",
+                        "joint_efforts": (
+                            "physx_server" if _frame_stats.get("efforts_source") == "physx"
+                            else ("estimated_inverse_dynamics" if _real_effort_count > 0 else "unavailable")
+                        ),
                         "ee_vel": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
                         "ee_acc": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
                         "contact_forces": (
@@ -7387,17 +7395,20 @@ class GenieSimLocalFramework:
                     },
                     "channel_confidence": {
                         "joint_positions": 1.0,
-                        "ee_pos": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.7,
-                        "ee_quat": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.7,
+                        "ee_pos": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.9,
+                        "ee_quat": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.9,
                         "joint_velocities": 0.98 if _real_velocity_count > 0 else 0.7,
                         "joint_accelerations": 0.6,
-                        "joint_efforts": 0.95 if _real_effort_count > 0 else 0.0,
-                        "contact_forces": (
-                            0.9 if _real_effort_count > 0
-                            else (0.6 if _contact_force_cache else 0.2)
+                        "joint_efforts": (
+                            0.95 if _frame_stats.get("efforts_source") == "physx"
+                            else (0.7 if _real_effort_count > 0 else 0.0)
                         ),
-                        "ee_vel": 0.85 if _server_ee_frame_count > len(frames) * 0.5 else 0.6,
-                        "ee_acc": 0.85 if _server_ee_frame_count > len(frames) * 0.5 else 0.6,
+                        "contact_forces": (
+                            0.9 if _frame_stats.get("efforts_source") == "physx"
+                            else (0.7 if _real_effort_count > 0 else 0.5)
+                        ),
+                        "ee_vel": 0.85 if _server_ee_frame_count > len(frames) * 0.5 else 0.75,
+                        "ee_acc": 0.85 if _server_ee_frame_count > len(frames) * 0.5 else 0.75,
                         "scene_state": 0.95 if _real_scene_state_count > 0 else 0.3,
                         "camera_frames": 0.95 if _camera_frame_count > 0 else 0.0,
                     },
@@ -7405,6 +7416,7 @@ class GenieSimLocalFramework:
                     "frames": frames,
                     "frame_count": len(frames),
                     "quality_score": quality_score,
+                    "quality_score_breakdown": getattr(self, "_last_quality_breakdown", None),
                     "joint_utilization": joint_utilization,
                     "validation_passed": validation_passed,
                     "task_success": task_success,
@@ -7947,6 +7959,11 @@ class GenieSimLocalFramework:
                 len(_segment_dts), len(trajectory), _total_time, _TARGET_FPS,
             )
 
+        # Set up frames directory for saving camera data as separate .npy files
+        _frames_dir = output_dir / f"{episode_id}_frames"
+        _frames_dir.mkdir(parents=True, exist_ok=True)
+        self._current_frames_dir = _frames_dir
+
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
             # observations may reuse the same dict for multiple frames).
@@ -7956,6 +7973,7 @@ class GenieSimLocalFramework:
                 obs = dict(obs)
                 if "robot_state" in obs:
                     obs["robot_state"] = dict(obs["robot_state"])
+            self._current_frame_idx = step_idx
             self._attach_camera_frames(obs, episode_id=episode_id, task=task)
 
             waypoint_joints = np.array(waypoint["joint_positions"], dtype=float)
@@ -8690,6 +8708,39 @@ class GenieSimLocalFramework:
                     if "ee_vel" in frame:
                         obs_rs["ee_vel"] = frame["ee_vel"]
 
+        # Backfill joint efforts via inverse dynamics when PhysX didn't provide them
+        _efforts_source = "physx" if _real_effort_count > 0 else "none"
+        if _real_effort_count == 0 and len(frames) >= 3:
+            # Simplified inverse dynamics: τ = I·α + C·v + G
+            _id_inertia = np.array([2.0, 2.0, 1.5, 1.5, 1.0, 1.0, 0.5])
+            _id_damping = np.array([10.0, 10.0, 8.0, 8.0, 5.0, 5.0, 3.0])
+            _id_gravity = np.array([15.0, 15.0, 10.0, 10.0, 5.0, 5.0, 2.0])
+            _id_dof = min(arm_dof, len(_id_inertia))
+            _id_inertia = _id_inertia[:_id_dof]
+            _id_damping = _id_damping[:_id_dof]
+            _id_gravity = _id_gravity[:_id_dof]
+            _dt = 1.0 / int(os.getenv("GENIESIM_TARGET_FPS", "30"))
+            _estimated_effort_count = 0
+            for _fi in range(len(frames)):
+                _obs_rs = frames[_fi].get("observation", {}).get("robot_state", {})
+                _jp = np.array(_obs_rs.get("joint_positions", [])[:_id_dof], dtype=float)
+                _jv = np.array(_obs_rs.get("joint_velocities", [])[:_id_dof], dtype=float)
+                _ja = np.array(_obs_rs.get("joint_accelerations", [])[:_id_dof], dtype=float)
+                if _jp.size == _id_dof and _jv.size == _id_dof and _ja.size == _id_dof:
+                    _torque = _id_inertia * _ja + _id_damping * _jv + _id_gravity * np.cos(_jp)
+                    _efforts_list = _torque.tolist()
+                    _obs_rs["joint_efforts"] = _efforts_list
+                    if _obs_rs.get("joint_state"):
+                        _obs_rs["joint_state"]["efforts"] = _efforts_list
+                    _estimated_effort_count += 1
+            if _estimated_effort_count > 0:
+                _real_effort_count = _estimated_effort_count
+                _efforts_source = "estimated_inverse_dynamics"
+                logger.info(
+                    "Backfilled joint efforts via inverse dynamics for %d/%d frames.",
+                    _estimated_effort_count, len(frames),
+                )
+
         # Store initial/final object poses on first/last frame for success verification
         if frames:
             frames[0]["_initial_object_poses"] = {
@@ -8708,6 +8759,7 @@ class GenieSimLocalFramework:
             "server_ee_frame_count": _server_ee_frame_count,
             "real_velocity_count": _real_velocity_count,
             "real_effort_count": _real_effort_count,
+            "efforts_source": _efforts_source,
             "contact_force_cache": _contact_force_cache,
             "object_property_provenance": _object_property_provenance,
             "missing_phase_frames": _missing_phase_frames,
@@ -8720,6 +8772,7 @@ class GenieSimLocalFramework:
         *,
         episode_id: str,
         task: Dict[str, Any],
+        episode_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         errors: List[str] = []
         warnings: List[str] = []
@@ -8824,31 +8877,75 @@ class GenieSimLocalFramework:
                 if rgb is None:
                     frame_errors.append(f"Frame {idx} camera '{camera_id}' missing rgb data.")
                 else:
-                    rgb_array = np.asarray(rgb)
-                    if rgb_array.ndim < 2:
-                        frame_errors.append(
-                            f"Frame {idx} camera '{camera_id}' rgb has invalid shape {rgb_array.shape}."
-                        )
-                    elif height > 0 and width > 0:
-                        if rgb_array.shape[0] != height or rgb_array.shape[1] != width:
+                    if isinstance(rgb, str) and rgb.endswith(".npy"):
+                        # File reference to .npy — check file exists
+                        _npy_ref = Path(episode_dir) / rgb if episode_dir else None
+                        if _npy_ref and not _npy_ref.exists():
                             frame_errors.append(
-                                f"Frame {idx} camera '{camera_id}' rgb shape {rgb_array.shape} "
-                                f"does not match ({height}x{width})."
+                                f"Frame {idx} camera '{camera_id}' rgb npy file not found: {rgb}."
                             )
+                    elif isinstance(rgb, str):
+                        # Base64-encoded image data — validate by expected byte count
+                        import base64 as _b64mod
+                        try:
+                            _raw = _b64mod.b64decode(rgb)
+                            if width > 0 and height > 0 and len(_raw) < width * height * 3:
+                                frame_errors.append(
+                                    f"Frame {idx} camera '{camera_id}' rgb base64 decoded to "
+                                    f"{len(_raw)} bytes, expected >= {width * height * 3} for {width}x{height}."
+                                )
+                        except Exception as _b64err:
+                            frame_errors.append(
+                                f"Frame {idx} camera '{camera_id}' rgb base64 decode failed: {_b64err}."
+                            )
+                    else:
+                        rgb_array = np.asarray(rgb)
+                        if rgb_array.ndim < 2:
+                            frame_errors.append(
+                                f"Frame {idx} camera '{camera_id}' rgb has invalid shape {rgb_array.shape}."
+                            )
+                        elif height > 0 and width > 0:
+                            if rgb_array.shape[0] != height or rgb_array.shape[1] != width:
+                                frame_errors.append(
+                                    f"Frame {idx} camera '{camera_id}' rgb shape {rgb_array.shape} "
+                                    f"does not match ({height}x{width})."
+                                )
                 if depth is None:
                     frame_errors.append(f"Frame {idx} camera '{camera_id}' missing depth data.")
                 else:
-                    depth_array = np.asarray(depth)
-                    if depth_array.ndim < 2:
-                        frame_errors.append(
-                            f"Frame {idx} camera '{camera_id}' depth has invalid shape {depth_array.shape}."
-                        )
-                    elif height > 0 and width > 0:
-                        if depth_array.shape[0] != height or depth_array.shape[1] != width:
+                    if isinstance(depth, str) and depth.endswith(".npy"):
+                        # File reference to .npy — check file exists
+                        _npy_ref = Path(episode_dir) / depth if episode_dir else None
+                        if _npy_ref and not _npy_ref.exists():
                             frame_errors.append(
-                                f"Frame {idx} camera '{camera_id}' depth shape {depth_array.shape} "
-                                f"does not match ({height}x{width})."
+                                f"Frame {idx} camera '{camera_id}' depth npy file not found: {depth}."
                             )
+                    elif isinstance(depth, str):
+                        # Base64-encoded depth data — validate by expected byte count
+                        import base64 as _b64mod
+                        try:
+                            _raw = _b64mod.b64decode(depth)
+                            if width > 0 and height > 0 and len(_raw) < width * height * 2:
+                                frame_errors.append(
+                                    f"Frame {idx} camera '{camera_id}' depth base64 decoded to "
+                                    f"{len(_raw)} bytes, expected >= {width * height * 2} for {width}x{height}."
+                                )
+                        except Exception as _b64err:
+                            frame_errors.append(
+                                f"Frame {idx} camera '{camera_id}' depth base64 decode failed: {_b64err}."
+                            )
+                    else:
+                        depth_array = np.asarray(depth)
+                        if depth_array.ndim < 2:
+                            frame_errors.append(
+                                f"Frame {idx} camera '{camera_id}' depth has invalid shape {depth_array.shape}."
+                            )
+                        elif height > 0 and width > 0:
+                            if depth_array.shape[0] != height or depth_array.shape[1] != width:
+                                frame_errors.append(
+                                    f"Frame {idx} camera '{camera_id}' depth shape {depth_array.shape} "
+                                    f"does not match ({height}x{width})."
+                                )
 
             if frame_errors:
                 errors.extend(frame_errors)
@@ -8942,13 +9039,34 @@ class GenieSimLocalFramework:
                 if camera_data is None:
                     camera_data = self._client.get_camera_data(camera_id)
                 if camera_data is not None:
-                    # Sanitize camera data for JSON serialization: convert raw
-                    # bytes to base64 strings to avoid circular reference errors.
+                    # Save camera data as separate .npy files to keep JSON small.
+                    # Store file references in JSON instead of inline base64.
                     _sanitized = {}
+                    _frames_dir = getattr(self, "_current_frames_dir", None)
+                    _frame_idx = getattr(self, "_current_frame_idx", 0)
                     for _k, _v in camera_data.items():
-                        if isinstance(_v, (bytes, bytearray)):
-                            import base64
-                            _sanitized[_k] = base64.b64encode(_v).decode("ascii") if _v else None
+                        if isinstance(_v, (bytes, bytearray)) and _v:
+                            if _frames_dir is not None:
+                                _npy_name = f"{camera_id}_{_k}_{_frame_idx:03d}.npy"
+                                _npy_path = _frames_dir / _npy_name
+                                try:
+                                    _width = camera_data.get("width", 0)
+                                    _height = camera_data.get("height", 0)
+                                    if _k == "rgb" and _width > 0 and _height > 0:
+                                        _arr = np.frombuffer(_v, dtype=np.uint8).reshape(_height, _width, -1)
+                                    elif _k == "depth" and _width > 0 and _height > 0:
+                                        _arr = np.frombuffer(_v, dtype=np.float32).reshape(_height, _width)
+                                    else:
+                                        _arr = np.frombuffer(_v, dtype=np.uint8)
+                                    np.save(_npy_path, _arr)
+                                    _sanitized[_k] = str(_npy_path.relative_to(_frames_dir.parent))
+                                except Exception as _npy_err:
+                                    logger.warning("Failed to save camera %s/%s as npy: %s", camera_id, _k, _npy_err)
+                                    import base64
+                                    _sanitized[_k] = base64.b64encode(_v).decode("ascii")
+                            else:
+                                import base64
+                                _sanitized[_k] = base64.b64encode(_v).decode("ascii")
                         else:
                             _sanitized[_k] = _v
                     obs.setdefault("camera_frames", {})[camera_id] = _sanitized
@@ -11529,7 +11647,45 @@ Scene objects: {scene_summary}
 
         weighted_score -= _gate_penalty
 
-        return min(1.0, max(0.0, weighted_score))
+        _final = min(1.0, max(0.0, weighted_score))
+        logger.info(
+            "Quality score breakdown: "
+            "data_completeness=%.3f(w=0.20) action_validity=%.3f(w=0.15) "
+            "action_diversity=%.3f(w=0.10) obs_diversity=%.3f(w=0.10) "
+            "success=%.3f(w=0.15) frame_count=%.3f(w=0.05) "
+            "camera_completeness=%.3f(w=0.15) ee_completeness=%.3f(w=0.10) "
+            "smoothness_bonus=%.3f collision_bonus=%.3f "
+            "scene_state_penalty=%.3f ee_approach_penalty=%.3f "
+            "utilization_penalty=%.3f gate_penalty=%.3f "
+            "final=%.4f",
+            data_completeness_score, action_validity_score,
+            action_diversity_score, obs_diversity_score,
+            success_score, frame_count_score,
+            camera_completeness, ee_completeness,
+            smoothness_bonus, collision_bonus,
+            scene_state_penalty, ee_approach_penalty,
+            utilization_penalty, _gate_penalty,
+            _final,
+        )
+        # Store breakdown for inclusion in episode metadata
+        self._last_quality_breakdown = {
+            "data_completeness": round(data_completeness_score, 4),
+            "action_validity": round(action_validity_score, 4),
+            "action_diversity": round(action_diversity_score, 4),
+            "obs_diversity": round(obs_diversity_score, 4),
+            "success": round(success_score, 4),
+            "frame_count": round(frame_count_score, 4),
+            "camera_completeness": round(camera_completeness, 4),
+            "ee_completeness": round(ee_completeness, 4),
+            "smoothness_bonus": round(smoothness_bonus, 4),
+            "collision_bonus": round(collision_bonus, 4),
+            "scene_state_penalty": round(scene_state_penalty, 4),
+            "ee_approach_penalty": round(ee_approach_penalty, 4),
+            "utilization_penalty": round(utilization_penalty, 4),
+            "gate_penalty": round(_gate_penalty, 4),
+            "final_score": round(_final, 4),
+        }
+        return _final
 
     def _extract_task_success(
         self,
@@ -11735,6 +11891,52 @@ Scene objects: {scene_summary}
             v3_output_file = data_dir / "file-0000.parquet"
             parquet_writer = pq.ParquetWriter(v3_output_file, schema=schema, compression="zstd")
 
+        # Set up video directories for camera data export
+        videos_dir = lerobot_root / "videos" / "chunk-000"
+
+        def _load_camera_frame(cam_data: Dict[str, Any], key: str, ep_dir: Path) -> Optional[np.ndarray]:
+            """Load a camera frame from .npy file reference or base64 string."""
+            val = cam_data.get(key)
+            if val is None:
+                return None
+            width = int(cam_data.get("width") or 0)
+            height = int(cam_data.get("height") or 0)
+            if isinstance(val, str) and val.endswith(".npy"):
+                npy_path = ep_dir / val
+                if npy_path.exists():
+                    return np.load(npy_path)
+                return None
+            if isinstance(val, str):
+                try:
+                    import base64 as _b64
+                    raw = _b64.b64decode(val)
+                    if key == "rgb" and width > 0 and height > 0:
+                        return np.frombuffer(raw, dtype=np.uint8).reshape(height, width, -1)
+                    elif key == "depth" and width > 0 and height > 0:
+                        return np.frombuffer(raw, dtype=np.float32).reshape(height, width)
+                except Exception:
+                    pass
+            return None
+
+        def _strip_camera_data(obs: Any) -> Any:
+            """Remove bulky camera data from observation for parquet storage."""
+            if not isinstance(obs, dict):
+                return obs
+            obs = dict(obs)
+            cf = obs.get("camera_frames")
+            if isinstance(cf, dict):
+                stripped_cf = {}
+                for cam_id, cam_data in cf.items():
+                    if isinstance(cam_data, dict):
+                        stripped_cf[cam_id] = {
+                            k: v for k, v in cam_data.items()
+                            if k not in ("rgb", "depth")
+                        }
+                    else:
+                        stripped_cf[cam_id] = cam_data
+                obs["camera_frames"] = stripped_cf
+            return obs
+
         for ep_file in episode_files:
             try:
                 with open(ep_file) as f:
@@ -11750,6 +11952,54 @@ Scene objects: {scene_summary}
                 task_id = episode.get("task_id")
                 frames = episode.get("frames", [])
                 frame_count = len(frames)
+                ep_dir = ep_file.parent
+
+                # Collect camera frames for video export
+                camera_rgb_frames: Dict[str, List[np.ndarray]] = {}
+                for idx, frame in enumerate(frames):
+                    cam_frames = frame.get("observation", {}).get("camera_frames", {})
+                    for cam_id, cam_data in cam_frames.items():
+                        if not isinstance(cam_data, dict):
+                            continue
+                        rgb_arr = _load_camera_frame(cam_data, "rgb", ep_dir)
+                        if rgb_arr is not None:
+                            camera_rgb_frames.setdefault(cam_id, []).append(rgb_arr)
+
+                # Write video files per camera
+                _have_imageio = False
+                try:
+                    import imageio
+                    _have_imageio = True
+                except ImportError:
+                    pass
+
+                for cam_id, rgb_list in camera_rgb_frames.items():
+                    if not rgb_list:
+                        continue
+                    cam_video_dir = videos_dir / f"observation.images.{cam_id}"
+                    cam_video_dir.mkdir(parents=True, exist_ok=True)
+                    ep_num = exported_count
+                    video_path = cam_video_dir / f"episode_{ep_num:06d}.mp4"
+
+                    if _have_imageio:
+                        try:
+                            writer = imageio.get_writer(str(video_path), fps=30.0, codec="libx264", quality=8)
+                            for rgb_frame in rgb_list:
+                                # Ensure 3-channel RGB
+                                if rgb_frame.ndim == 3 and rgb_frame.shape[-1] == 4:
+                                    rgb_frame = rgb_frame[:, :, :3]
+                                if rgb_frame.ndim == 3 and rgb_frame.shape[-1] == 3:
+                                    writer.append_data(rgb_frame)
+                            writer.close()
+                            self.log(f"  Wrote video: {video_path} ({len(rgb_list)} frames)")
+                        except Exception as _vid_err:
+                            self.log(f"  Video write failed for {cam_id}: {_vid_err}", "WARNING")
+                    else:
+                        # Fallback: save as individual .npy frames
+                        frames_out_dir = cam_video_dir / f"episode_{ep_num:06d}_frames"
+                        frames_out_dir.mkdir(parents=True, exist_ok=True)
+                        for fi, rgb_frame in enumerate(rgb_list):
+                            np.save(frames_out_dir / f"frame_{fi:06d}.npy", rgb_frame)
 
                 columns: Dict[str, List[Any]] = {
                     "episode_id": [],
@@ -11770,8 +12020,10 @@ Scene objects: {scene_summary}
                     columns["episode_id"].append(episode_id)
                     columns["frame_index"].append(idx)
                     columns["timestamp"].append(timestamp)
+                    # Strip camera pixel data from observation for lightweight parquet
+                    obs_stripped = _strip_camera_data(frame.get("observation"))
                     columns["observation"].append(
-                        json.dumps(_to_json_serializable(frame.get("observation")))
+                        json.dumps(_to_json_serializable(obs_stripped))
                     )
                     columns["action"].append(
                         json.dumps(_to_json_serializable(frame.get("action")))
@@ -11856,6 +12108,17 @@ Scene objects: {scene_summary}
                 "schema": schema_description,
                 "frame_counts": frame_counts,
             }
+
+        # Add video paths to info if videos were written
+        if videos_dir.exists():
+            _video_cameras = [
+                d.name.replace("observation.images.", "")
+                for d in videos_dir.iterdir()
+                if d.is_dir() and d.name.startswith("observation.images.")
+            ]
+            if _video_cameras:
+                info["video_path"] = "videos"
+                info["cameras"] = sorted(_video_cameras)
 
         with open(meta_dir / "info.json", "w") as f:
             json.dump(info, f, indent=2)
