@@ -6340,11 +6340,23 @@ class GenieSimLocalFramework:
             )
             _camera_frame_count = _frame_stats["camera_frame_count"]
             _real_scene_state_count = _frame_stats["real_scene_state_count"]
+            _scene_state_fallback_frames = _frame_stats.get("scene_state_fallback_frames", 0)
+            _scene_state_missing_after_frame0 = _frame_stats.get("scene_state_missing_after_frame0", False)
+            _scene_state_missing_frame_indices = _frame_stats.get("scene_state_missing_frame_indices", [])
             _server_ee_frame_count = _frame_stats["server_ee_frame_count"]
             _real_velocity_count = _frame_stats["real_velocity_count"]
             _real_effort_count = _frame_stats["real_effort_count"]
             _contact_force_cache = _frame_stats["contact_force_cache"]
             _object_property_provenance = _frame_stats.get("object_property_provenance", {})
+
+            if _scene_state_missing_after_frame0 and getattr(self.config, "environment", "") == "production":
+                missing_frames = ", ".join(str(idx) for idx in _scene_state_missing_frame_indices)
+                result["error"] = (
+                    "Scene_state missing beyond frame 0 in production; "
+                    f"invalid episode (frames: {missing_frames})."
+                )
+                _save_partial(result["error"])
+                return result
 
             frame_validation = {
                 "enabled": False,
@@ -6844,7 +6856,11 @@ class GenieSimLocalFramework:
                         ),
                         "camera_frames": "isaac_sim_camera" if _camera_frame_count > 0 else "unavailable",
                         "task_description": "task_config_hint",
-                        "scene_state": "physx_server" if _real_scene_state_count > 0 else "synthetic_from_task_config",
+                        "scene_state": (
+                            "physx_server"
+                            if _real_scene_state_count > 0
+                            else ("synthetic_fallback" if _scene_state_fallback_frames > 0 else "synthetic_from_task_config")
+                        ),
                         "task_success": llm_metadata.get("task_success_source", "geometric_goal_region_v2"),
                         "quality_score": "weighted_composite_v2",
                         "server_ee_frames": f"{_server_ee_frame_count}/{len(frames)}",
@@ -7273,11 +7289,15 @@ class GenieSimLocalFramework:
         frames: List[Dict[str, Any]] = []
         _server_ee_frame_count = 0  # Track how many frames used server EE pose
         _real_scene_state_count = 0  # Track how many frames had real scene state
+        _scene_state_fallback_frames = 0  # Track synthetic scene_state injections
+        _scene_state_missing_after_frame0 = False
+        _scene_state_missing_frame_indices: List[int] = []
         _camera_frame_count = 0  # Track how many frames had camera data
         _real_velocity_count = 0  # Track how many frames had real PhysX velocities
         _real_effort_count = 0  # Track how many frames had real PhysX joint efforts
         _contact_force_cache: Dict[str, Dict] = {}  # cache Gemini contact force estimates
         self._prev_server_ee_pos = None  # Reset for each episode
+        _is_production = getattr(self.config, "environment", "") == "production"
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
             # observations may reuse the same dict for multiple frames).
@@ -7341,16 +7361,23 @@ class GenieSimLocalFramework:
 
             # Inject synthetic scene_state when empty (mock/skip-server mode).
             # In production, empty scene_state is an error — real data is required.
-            if not obs.get("scene_state") and step_idx == 0:
-                _is_production = getattr(self.config, "environment", "") == "production"
-                if _is_production:
-                    logger.error(
-                        "EMPTY_SCENE_STATE in production for episode %s frame %d. "
-                        "Real scene object poses required. Check _scene_object_prims "
-                        "initialization and SimObjectService connectivity.",
-                        episode_id, step_idx,
-                    )
-            if not obs.get("scene_state"):
+            _scene_state_missing = not obs.get("scene_state")
+            if _scene_state_missing and step_idx == 0 and _is_production:
+                logger.error(
+                    "EMPTY_SCENE_STATE in production for episode %s frame %d. "
+                    "Real scene object poses required. Check _scene_object_prims "
+                    "initialization and SimObjectService connectivity.",
+                    episode_id, step_idx,
+                )
+            if _scene_state_missing and step_idx > 0 and _is_production:
+                _scene_state_missing_after_frame0 = True
+                _scene_state_missing_frame_indices.append(step_idx)
+                logger.error(
+                    "MISSING_SCENE_STATE in production for episode %s frame %d. "
+                    "Real scene object poses required beyond frame 0.",
+                    episode_id, step_idx,
+                )
+            if _scene_state_missing:
                 scene_objects = task.get("objects") or task.get("scene_objects") or []
                 if isinstance(scene_objects, list) and scene_objects:
                     obs["scene_state"] = {"objects": [
@@ -7413,6 +7440,9 @@ class GenieSimLocalFramework:
                         for _so in _synth_objs:
                             _so["provenance"] = "synthetic_fallback"
                         obs["scene_state"] = {"objects": _synth_objs}
+                if not _is_production:
+                    _scene_state_fallback_frames += 1
+                    obs["scene_state_provenance"] = "synthetic_fallback"
 
             # Ensure camera_frames is always present (even if empty) so quality
             # checks don't report missing required observation fields.
@@ -7988,6 +8018,9 @@ class GenieSimLocalFramework:
         return frames, {
             "camera_frame_count": _camera_frame_count,
             "real_scene_state_count": _real_scene_state_count,
+            "scene_state_fallback_frames": _scene_state_fallback_frames,
+            "scene_state_missing_after_frame0": _scene_state_missing_after_frame0,
+            "scene_state_missing_frame_indices": _scene_state_missing_frame_indices,
             "server_ee_frame_count": _server_ee_frame_count,
             "real_velocity_count": _real_velocity_count,
             "real_effort_count": _real_effort_count,
@@ -10208,6 +10241,14 @@ Scene objects: {scene_summary}
                     if not _any_moved:
                         scene_state_penalty = 0.20
                         logger.warning("Quality penalty: scene_state is static (no object moved >1cm)")
+
+        _scene_state_fallback = any(
+            (frame.get("observation", {}) or {}).get("scene_state_provenance") == "synthetic_fallback"
+            for frame in frames
+        )
+        if _scene_state_fallback and getattr(self.config, "environment", "") != "production":
+            scene_state_penalty = max(scene_state_penalty, 0.15)
+            logger.warning("Quality penalty: scene_state uses synthetic fallback provenance.")
 
         # Penalty: EE never approaches target object
         if target_object_id and frames:
