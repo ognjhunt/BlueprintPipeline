@@ -5879,6 +5879,7 @@ class GenieSimLocalFramework:
             _real_velocity_count = _frame_stats["real_velocity_count"]
             _real_effort_count = _frame_stats["real_effort_count"]
             _contact_force_cache = _frame_stats["contact_force_cache"]
+            _object_property_provenance = _frame_stats.get("object_property_provenance", {})
 
             frame_validation = {
                 "enabled": False,
@@ -7430,6 +7431,7 @@ class GenieSimLocalFramework:
             "real_velocity_count": _real_velocity_count,
             "real_effort_count": _real_effort_count,
             "contact_force_cache": _contact_force_cache,
+            "object_property_provenance": _object_property_provenance,
         }
 
     def _validate_frames(
