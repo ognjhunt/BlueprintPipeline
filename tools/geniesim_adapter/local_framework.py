@@ -10559,6 +10559,21 @@ Scene objects: {scene_summary}
             return {"skipped": True, "reason": "no_rgb_frames"}
 
         try:
+            from PIL import Image
+        except Exception as exc:
+            self.log(f"  ℹ️  VLM audit skipped: PIL unavailable ({exc})", "INFO")
+            return {"skipped": True, "reason": "pil_unavailable"}
+
+        converted_images = []
+        for img in images:
+            try:
+                pil_image = Image.fromarray(img["rgb"].astype(np.uint8))
+            except Exception as exc:
+                self.log(f"  ⚠️  VLM audit skipped: failed to convert RGB frames ({exc})", "WARNING")
+                return {"skipped": True, "reason": f"image_conversion_failed: {exc}"}
+            converted_images.append({"frame_idx": img["frame_idx"], "image": pil_image})
+
+        try:
             from tools.llm_client import create_llm_client, LLMProvider
             vlm_client = create_llm_client(provider=LLMProvider.GEMINI)
             if not vlm_client:
@@ -10589,7 +10604,7 @@ Scene objects: {scene_summary}
             )
 
             # Pass images to VLM
-            image_data = [img["rgb"] for img in images]
+            image_data = [img["image"] for img in converted_images]
             response = vlm_client.generate(
                 prompt=prompt,
                 images=image_data,
@@ -10618,7 +10633,7 @@ Scene objects: {scene_summary}
                 "placement_stable": data.get("placement_stable"),
                 "visual_anomalies": data.get("visual_anomalies", []),
                 "assessment": data.get("assessment", ""),
-                "keyframes_analyzed": len(images),
+                "keyframes_analyzed": len(converted_images),
             }
             self.log(
                 f"  🔍 VLM audit: score={vlm_score:.3f}, blended={blended_score:.3f}, "
@@ -10664,6 +10679,24 @@ Scene objects: {scene_summary}
             return {"skipped": True, "reason": "no_rgb_frames"}
 
         try:
+            from PIL import Image
+        except Exception as exc:
+            self.log(f"  ℹ️  Sim-to-real assessment skipped: PIL unavailable ({exc})", "INFO")
+            return {"skipped": True, "reason": "pil_unavailable"}
+
+        converted_images = []
+        for rgb in images:
+            try:
+                pil_image = Image.fromarray(rgb.astype(np.uint8))
+            except Exception as exc:
+                self.log(
+                    f"  ⚠️  Sim-to-real assessment skipped: failed to convert RGB frames ({exc})",
+                    "WARNING",
+                )
+                return {"skipped": True, "reason": f"image_conversion_failed: {exc}"}
+            converted_images.append(pil_image)
+
+        try:
             from tools.llm_client import create_llm_client, LLMProvider
             vlm_client = create_llm_client(provider=LLMProvider.GEMINI)
             if not vlm_client:
@@ -10689,7 +10722,7 @@ Scene objects: {scene_summary}
 
             response = vlm_client.generate(
                 prompt=prompt,
-                images=images,
+                images=converted_images,
                 json_output=True,
                 temperature=0.3,
                 disable_tools=True,
@@ -10709,7 +10742,7 @@ Scene objects: {scene_summary}
                 "robot_pose_score": float(data.get("robot_pose_score", 0)),
                 "overall_realism_score": float(data.get("overall_realism_score", 0)),
                 "issues": data.get("issues", []),
-                "frames_analyzed": len(images),
+                "frames_analyzed": len(converted_images),
             }
             self.log(
                 f"  🌐 Sim-to-real: realism={result['overall_realism_score']:.3f}, "
