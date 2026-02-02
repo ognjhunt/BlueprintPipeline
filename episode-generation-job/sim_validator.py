@@ -1136,7 +1136,12 @@ class SimulationValidator:
         scene_objects: List[Dict[str, Any]],
         result: ValidationResult,
     ) -> None:
-        """Check for collisions with scene objects."""
+        """Check for collisions with scene objects.
+
+        Uses collision_aware_planner for swept-segment collision checking
+        when available, falling back to per-frame AABB point checks.
+        """
+        _collision_source = "ee_aabb_point"
 
         # Build obstacle list (excluding target object during manipulation)
         target_obj_id = motion_plan.target_object_id
@@ -1145,34 +1150,77 @@ class SimulationValidator:
             if obj.get("id") != target_obj_id and obj.get("sim_role") != "background"
         ]
 
-        for state in trajectory.states:
-            ee_pos = state.ee_position
-            if ee_pos is None:
-                continue
-
+        # Try collision_aware_planner for swept-segment checking
+        _use_planner = False
+        try:
+            from collision_aware_planner import CollisionAwarePlanner
+            planner = CollisionAwarePlanner()
+            # Add obstacles as collision primitives
             for obs in obstacles:
                 obs_pos = np.array(obs.get("position", [0, 0, 0]))
                 obs_dims = np.array(obs.get("dimensions", [0.1, 0.1, 0.1]))
+                planner.add_obstacle(
+                    position=obs_pos,
+                    dimensions=obs_dims,
+                )
+            _use_planner = True
+            _collision_source = "collision_aware_planner_aabb"
+        except (ImportError, AttributeError):
+            pass
 
-                # Simple AABB collision check
-                half_dims = obs_dims / 2 + 0.02  # Small padding
-                if np.all(np.abs(ee_pos - obs_pos) < half_dims):
+        if _use_planner:
+            # Use swept-segment collision checking between consecutive EE positions
+            ee_path = [
+                s.ee_position for s in trajectory.states
+                if s.ee_position is not None
+            ]
+            if len(ee_path) >= 2:
+                collision_found, seg_idx = planner.check_collision_path(
+                    ee_path, radius=0.04  # ~gripper radius
+                )
+                if collision_found and seg_idx is not None:
+                    _state = trajectory.states[seg_idx]
                     event = CollisionEvent(
-                        frame_idx=state.frame_idx,
-                        timestamp=state.timestamp,
+                        frame_idx=_state.frame_idx,
+                        timestamp=_state.timestamp,
                         body_a="gripper",
-                        body_b=obs.get("id", "obstacle"),
-                        contact_point=ee_pos.copy(),
-                        contact_force=10.0,  # Estimated
+                        body_b="environment",
+                        contact_point=ee_path[seg_idx].copy(),
+                        contact_force=10.0,
                         is_expected=False,
                     )
                     result.collision_events.append(event)
+        else:
+            # Fallback: per-frame AABB point check
+            for state in trajectory.states:
+                ee_pos = state.ee_position
+                if ee_pos is None:
+                    continue
+
+                for obs in obstacles:
+                    obs_pos = np.array(obs.get("position", [0, 0, 0]))
+                    obs_dims = np.array(obs.get("dimensions", [0.1, 0.1, 0.1]))
+
+                    # Simple AABB collision check
+                    half_dims = obs_dims / 2 + 0.02  # Small padding
+                    if np.all(np.abs(ee_pos - obs_pos) < half_dims):
+                        event = CollisionEvent(
+                            frame_idx=state.frame_idx,
+                            timestamp=state.timestamp,
+                            body_a="gripper",
+                            body_b=obs.get("id", "obstacle"),
+                            contact_point=ee_pos.copy(),
+                            contact_force=10.0,  # Estimated
+                            is_expected=False,
+                        )
+                        result.collision_events.append(event)
 
         # Count unexpected collisions
         result.metrics.total_collisions = len(result.collision_events)
         result.metrics.unexpected_collisions = sum(
             1 for e in result.collision_events if not e.is_expected
         )
+        result.metrics.collision_source = _collision_source
 
         if result.metrics.unexpected_collisions > self.config.max_unexpected_collisions:
             result.failure_reasons.append(FailureReason.COLLISION)
@@ -1226,10 +1274,40 @@ class SimulationValidator:
         if task_success_checker:
             result.metrics.task_success = task_success_checker(trajectory, motion_plan)
         else:
-            # Default: check if trajectory completed without major issues
+            # Default: require no failures AND meaningful manipulation evidence
+            _no_failures = len(result.failure_reasons) == 0
+            _enough_frames = len(trajectory.states) >= 10
+
+            # Check for gripper open→close→open transition (manipulation evidence)
+            _saw_open = False
+            _saw_close = False
+            _saw_reopen = False
+            for _s in trajectory.states:
+                _gp = _s.gripper_position
+                if _gp is not None:
+                    if _gp > 0.02:  # open
+                        if _saw_close:
+                            _saw_reopen = True
+                            break
+                        _saw_open = True
+                    elif _gp <= 0.02 and _saw_open:  # closed after open
+                        _saw_close = True
+            _gripper_transition = _saw_open and _saw_close and _saw_reopen
+
+            # Check for EE displacement (robot actually moved)
+            _ee_displaced = False
+            if len(trajectory.states) >= 2:
+                _first_ee = trajectory.states[0].ee_position
+                _last_ee = trajectory.states[-1].ee_position
+                if _first_ee is not None and _last_ee is not None:
+                    _ee_disp = float(np.linalg.norm(
+                        np.array(_last_ee) - np.array(_first_ee)
+                    ))
+                    _ee_displaced = _ee_disp > 0.01  # >1cm displacement
+
             result.metrics.task_success = (
-                len(result.failure_reasons) == 0 and
-                len(trajectory.states) >= 10
+                _no_failures and _enough_frames and
+                (_gripper_transition or _ee_displaced)
             )
 
         # Check grasp success (gripper closed during grasp phase)

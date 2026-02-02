@@ -379,6 +379,11 @@ class QualityCertificate:
 
         Uses the quality_weights field to determine relative importance of
         different quality aspects. Allows tuning for different use cases.
+
+        Hard-caps are applied based on data source to prevent inflated scores:
+        - sensor_source == "mock" → score forced to 0.0
+        - physics_backend == "heuristic" → score capped at 0.5
+        - camera_count == 0 → score forced to 0.0
         """
         w = self.quality_weights
 
@@ -397,6 +402,21 @@ class QualityCertificate:
             w.sim2real * scores["sim2real"] +
             w.diversity * scores["diversity"]
         )
+
+        # Hard-cap: mock sensor data → 0.0
+        if self.sensor_source == SensorSource.MOCK.value:
+            overall = 0.0
+            logger.warning("Quality score forced to 0.0: sensor_source=%s", self.sensor_source)
+
+        # Hard-cap: heuristic physics → max 0.5
+        if self.physics_backend == PhysicsValidationBackend.HEURISTIC.value:
+            overall = min(overall, 0.5)
+
+        # Hard-cap: no cameras → 0.0
+        if self.camera_count == 0:
+            overall = 0.0
+            logger.warning("Quality score forced to 0.0: camera_count=0")
+
         self.overall_quality_score = overall
         return overall
 
@@ -421,13 +441,22 @@ class QualityCertificate:
         return w.smoothness * smoothness + w.safety * safety + w.feasibility * feasibility
 
     def _compute_task_score(self) -> float:
-        """Compute task quality score using configurable weights."""
+        """Compute task quality score using configurable weights.
+
+        goal_achievement_score of 0.0 (default) is not inflated — callers must
+        set it based on actual object displacement or milestone checks.
+        """
         tm = self.task_metrics
         w = self.quality_weights
 
         goal = tm.goal_achievement_score
         skill = tm.skill_correctness_ratio
         constraints = tm.constraint_satisfaction_score
+
+        # If goal_achievement was never explicitly set (still default 0.0),
+        # don't let skill_correctness and constraint_satisfaction inflate the score
+        if goal == 0.0 and skill == 0.0:
+            return 0.0
 
         return w.goal_achievement * goal + w.skill_correctness * skill + w.constraint_satisfaction * constraints
 
@@ -448,10 +477,23 @@ class QualityCertificate:
         return w.target_visibility * visibility + w.image_sharpness * sharpness + w.viewpoint_diversity * diversity
 
     def _compute_sim2real_score(self) -> float:
-        """Compute sim-to-real quality score using configurable weights."""
+        """Compute sim-to-real quality score using configurable weights.
+
+        When physics_backend is not PhysX, both sub-scores are forced to 0.0
+        since no real physics simulation ran — any default of 1.0 is misleading.
+        """
         s2r = self.sim2real_metrics
         w = self.quality_weights
-        return w.physics_plausibility * s2r.physics_plausibility_score + w.timing_realism * s2r.timing_realism_score
+
+        phys_score = s2r.physics_plausibility_score
+        timing_score = s2r.timing_realism_score
+
+        # Without real PhysX, these scores are meaningless — force to 0
+        if self.physics_backend != PhysicsValidationBackend.PHYSX.value:
+            phys_score = 0.0
+            timing_score = 0.0
+
+        return w.physics_plausibility * phys_score + w.timing_realism * timing_score
 
     def _compute_diversity_score(self) -> float:
         """Compute diversity score using configurable weights."""

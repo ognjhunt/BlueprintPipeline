@@ -1427,17 +1427,35 @@ class EpisodeGenerator:
             )
 
     def _apply_camera_capture_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
-        """Filter episodes with missing required camera frames."""
+        """Filter episodes with missing required camera frames.
+
+        Checks both explicit camera_capture_warnings AND whether any RGB
+        images were actually captured (sensor_data.rgb_images non-empty).
+        """
         for episode in episodes:
             warnings = []
             if episode.sensor_data is not None:
                 warnings = getattr(episode.sensor_data, "camera_capture_warnings", [])
+
+                # Check if any frames actually have RGB data
+                _frame_data_list = getattr(episode.sensor_data, "frames", [])
+                _rgb_frame_count = 0
+                for _fd in _frame_data_list:
+                    if hasattr(_fd, "rgb_images") and _fd.rgb_images:
+                        _rgb_frame_count += 1
+                if _frame_data_list and _rgb_frame_count == 0:
+                    warnings.append(
+                        f"Zero frames have valid RGB images out of "
+                        f"{len(_frame_data_list)} captured frames"
+                    )
+
             if warnings:
-                episode.validation_errors.append("Missing required camera frames")
+                episode.validation_errors.extend(warnings)
                 episode.is_valid = False
                 episode.quality_score = min(episode.quality_score, 0.0)
                 self.log(
-                    f"Episode {episode.episode_id} filtered due to missing camera frames",
+                    f"Episode {episode.episode_id} filtered due to camera issues: "
+                    f"{'; '.join(warnings)}",
                     "WARNING",
                 )
 

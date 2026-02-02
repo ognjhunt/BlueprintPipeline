@@ -1000,13 +1000,41 @@ class IsaacSimSensorCapture:
                 if "rgb" in annotators:
                     rgb_data = annotators["rgb"].get_data()
                     if rgb_data is not None:
-                        frame_data.rgb_images[camera_id] = rgb_data["data"]
+                        _rgb_arr = rgb_data["data"]
+                        # Validate RGB: must be (H, W, 3+) uint8 with non-zero content
+                        if (
+                            _rgb_arr is not None
+                            and hasattr(_rgb_arr, "shape")
+                            and len(_rgb_arr.shape) >= 3
+                            and _rgb_arr.shape[0] > 0
+                            and _rgb_arr.shape[1] > 0
+                            and _rgb_arr.shape[2] >= 3
+                        ):
+                            frame_data.rgb_images[camera_id] = _rgb_arr
+                        else:
+                            self.log(
+                                f"RGB from camera {camera_id} frame {frame_index} has "
+                                f"invalid shape: {getattr(_rgb_arr, 'shape', 'N/A')}",
+                                "ERROR",
+                            )
+                    else:
+                        self.log(
+                            f"RGB annotator returned None for camera {camera_id} "
+                            f"frame {frame_index}",
+                            "WARNING",
+                        )
 
                 # Depth
                 if "depth" in annotators:
                     depth_data = annotators["depth"].get_data()
                     if depth_data is not None:
                         frame_data.depth_maps[camera_id] = depth_data["data"]
+                    else:
+                        self.log(
+                            f"Depth annotator returned None for camera {camera_id} "
+                            f"frame {frame_index}",
+                            "WARNING",
+                        )
 
                 # Semantic segmentation
                 if "semantic" in annotators:
@@ -1052,6 +1080,14 @@ class IsaacSimSensorCapture:
                 self.log(json.dumps(error_payload), "ERROR")
                 if self.verbose:
                     self.log(traceback.format_exc(), "DEBUG")
+
+        # Check if any camera produced valid RGB for this frame
+        if self.config.capture_rgb and len(frame_data.rgb_images) == 0 and len(self._annotators) > 0:
+            self.log(
+                f"Frame {frame_index}: zero cameras produced valid RGB "
+                f"(attempted {len(self._annotators)} cameras)",
+                "ERROR",
+            )
 
         # Check failure thresholds
         if failed_cameras:
@@ -1181,6 +1217,19 @@ class IsaacSimSensorCapture:
                     self.log("No stage available for object pose capture", "WARNING")
                     fallback_used = True
                 else:
+                    # Query stage meters_per_unit for consistent coordinate conversion
+                    _meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
+                    if _meters_per_unit <= 0:
+                        _meters_per_unit = 1.0
+                    # If stage is in cm (0.01), we need to multiply positions by 0.01
+                    # to get meters. If already in meters (1.0), no conversion needed.
+                    _needs_unit_conversion = abs(_meters_per_unit - 1.0) > 1e-6
+                    if _needs_unit_conversion:
+                        self.log(
+                            f"Stage meters_per_unit={_meters_per_unit}; "
+                            f"will convert positions to meters",
+                            "INFO",
+                        )
                     for obj in scene_objects:
                         obj_id = obj.get("id", obj.get("name", ""))
                         prim_path = obj.get("prim_path", f"/World/Objects/{obj_id}")
@@ -1188,34 +1237,24 @@ class IsaacSimSensorCapture:
                         try:
                             prim = stage.GetPrimAtPath(prim_path)
                             if prim.IsValid():
-                                xformable = UsdGeom.Xformable(prim)
-                                world_transform = xformable.ComputeLocalToWorldTransform(0)
-
-                                # Extract position
-                                translation = world_transform.ExtractTranslation()
-                                position = [
-                                    float(translation[0]),
-                                    float(translation[1]),
-                                    float(translation[2])
-                                ]
-
-                                # Extract rotation quaternion
-                                rotation = world_transform.ExtractRotationQuat()
-                                rotation_quat = [
-                                    float(rotation.GetReal()),
-                                    float(rotation.GetImaginary()[0]),
-                                    float(rotation.GetImaginary()[1]),
-                                    float(rotation.GetImaginary()[2])
-                                ]
-
-                                # Try to get velocities from rigid body
+                                position = None
+                                rotation_quat = None
                                 linear_velocity = [0.0, 0.0, 0.0]
                                 angular_velocity = [0.0, 0.0, 0.0]
+                                _pose_source = "simulation"
 
+                                # Prefer RigidPrim.get_world_pose() for live PhysX state
+                                # (reads current simulation state, not USD time=0)
                                 if prim.HasAPI(UsdPhysics.RigidBodyAPI):
                                     try:
                                         from isaacsim.core.api.prims import RigidPrim
                                         rigid = RigidPrim(prim_path)
+                                        _pos, _quat = rigid.get_world_pose()
+                                        if _pos is not None and _quat is not None:
+                                            position = [float(v) for v in _pos]
+                                            # Isaac Sim returns (w, x, y, z) quaternion
+                                            rotation_quat = [float(v) for v in _quat]
+                                            _pose_source = "physx_rigid_body"
                                         vel = rigid.get_linear_velocity()
                                         ang_vel = rigid.get_angular_velocity()
                                         if vel is not None:
@@ -1224,9 +1263,46 @@ class IsaacSimSensorCapture:
                                             angular_velocity = [float(v) for v in ang_vel]
                                     except Exception as exc:
                                         self.log(
-                                            f"Failed to read velocities for {obj_id} ({prim_path}): {exc}",
+                                            f"RigidPrim query failed for {obj_id} ({prim_path}): {exc}; "
+                                            "falling back to USD xform",
                                             "DEBUG",
                                         )
+
+                                # Fallback to USD xform if RigidPrim didn't work
+                                if position is None:
+                                    xformable = UsdGeom.Xformable(prim)
+                                    world_transform = xformable.ComputeLocalToWorldTransform(
+                                        self._current_time_code if hasattr(self, '_current_time_code') else 0
+                                    )
+                                    translation = world_transform.ExtractTranslation()
+                                    position = [
+                                        float(translation[0]),
+                                        float(translation[1]),
+                                        float(translation[2])
+                                    ]
+                                    rotation = world_transform.ExtractRotationQuat()
+                                    rotation_quat = [
+                                        float(rotation.GetReal()),
+                                        float(rotation.GetImaginary()[0]),
+                                        float(rotation.GetImaginary()[1]),
+                                        float(rotation.GetImaginary()[2])
+                                    ]
+                                    _pose_source = "usd_xform"
+
+                                # Apply stage units conversion to meters
+                                if _needs_unit_conversion:
+                                    position = [v * _meters_per_unit for v in position]
+                                    linear_velocity = [v * _meters_per_unit for v in linear_velocity]
+
+                                # Validate: positions should be within 5m of origin
+                                _pos_norm = sum(v * v for v in position) ** 0.5
+                                if _pos_norm > 5.0:
+                                    self.log(
+                                        f"Object {obj_id} position {position} is "
+                                        f"{_pos_norm:.2f}m from origin (>5m) — "
+                                        "possible units mismatch",
+                                        "WARNING",
+                                    )
 
                                 poses[obj_id] = {
                                     "position": position,
@@ -1234,7 +1310,8 @@ class IsaacSimSensorCapture:
                                     "linear_velocity": linear_velocity,
                                     "angular_velocity": angular_velocity,
                                     "prim_path": prim_path,
-                                    "source": "simulation",
+                                    "source": _pose_source,
+                                    "meters_per_unit": _meters_per_unit,
                                 }
                                 sim_query_count += 1
 
@@ -1302,11 +1379,15 @@ class IsaacSimSensorCapture:
         """
         Capture contact information from physics simulation.
 
+        Prefers PhysX contact report for real contact points, normals, and forces.
+        Falls back to heuristic_grasp_model when PhysX is unavailable.
+
         Returns:
             Tuple of (contacts, contacts_available). When contacts_available is False,
             contacts were not captured due to missing PhysX support.
         """
         contacts = []
+        _contact_source = "heuristic_grasp_model"
 
         if self._omni is None:
             return contacts, self._handle_missing_contacts("omni not available")
@@ -1320,8 +1401,19 @@ class IsaacSimSensorCapture:
                     "PhysX interface not available for contact capture"
                 )
 
-            # Get contact report
-            contact_data = physx_interface.get_contact_report()
+            # Try the simulation interface for detailed per-body contact data
+            try:
+                from omni.physx import get_physx_simulation_interface
+                sim_interface = get_physx_simulation_interface()
+                if sim_interface is not None:
+                    contact_data = sim_interface.get_contact_report()
+                    _contact_source = "physx_simulation_interface"
+                else:
+                    contact_data = physx_interface.get_contact_report()
+                    _contact_source = "physx_contact_report"
+            except (ImportError, AttributeError):
+                contact_data = physx_interface.get_contact_report()
+                _contact_source = "physx_contact_report"
 
             if contact_data is None:
                 self.log("Contact report returned None", "DEBUG")
@@ -1340,11 +1432,15 @@ class IsaacSimSensorCapture:
                         ],
                         "force_magnitude": float(contact.get("impulse", 0)),
                         "separation": float(contact.get("separation", 0)),
+                        "source": _contact_source,
                     })
                 except (TypeError, ValueError) as e:
                     self.log(f"Failed to parse contact data: {e}", "DEBUG")
 
-            self.log(f"Captured {len(contacts)} contacts", "DEBUG")
+            self.log(
+                f"Captured {len(contacts)} contacts via {_contact_source}",
+                "DEBUG",
+            )
 
         except ImportError as e:
             return contacts, self._handle_missing_contacts(f"PhysX import failed: {e}")

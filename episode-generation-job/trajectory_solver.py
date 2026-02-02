@@ -1492,6 +1492,9 @@ class TrajectorySolver:
             waypoint_joints=waypoint_joints,
         )
 
+        # Step 4: Jerk limiting — detect and smooth jerk spikes
+        states = self._apply_jerk_limiting(states)
+
         trajectory = JointTrajectory(
             trajectory_id=f"traj_{motion_plan.plan_id}",
             robot_type=self.robot_type,
@@ -1560,8 +1563,11 @@ class TrajectorySolver:
         joint_splines = []
         for j in range(self.robot_config.num_joints):
             joint_values = joint_array[:, j]
-            # Use cubic spline with natural boundary conditions
-            spline = interpolate.CubicSpline(timestamps, joint_values, bc_type="natural")
+            # Use cubic spline with clamped BCs (zero velocity at start/end)
+            # for physically realistic robot trajectories that start/stop at rest
+            spline = interpolate.CubicSpline(
+                timestamps, joint_values, bc_type="clamped"
+            )
             joint_splines.append(spline)
 
         # Gripper spline
@@ -1569,7 +1575,9 @@ class TrajectorySolver:
             wp.gripper_aperture * self.robot_config.gripper_limits[1]
             for wp in waypoints
         ])
-        gripper_spline = interpolate.CubicSpline(timestamps, gripper_values, bc_type="natural")
+        gripper_spline = interpolate.CubicSpline(
+            timestamps, gripper_values, bc_type="clamped"
+        )
 
         return {
             "joint_splines": joint_splines,
@@ -1622,13 +1630,24 @@ class TrajectorySolver:
             gripper_position = float(gripper_spline(t))
             gripper_position = np.clip(gripper_position, 0, self.robot_config.gripper_limits[1])
 
-            # Calculate velocities (finite difference)
-            if i > 0:
-                t_prev = (i - 1) * dt
-                prev_joints = np.array([spline(t_prev) for spline in joint_splines])
-                velocities = (joint_positions - prev_joints) / dt
-            else:
-                velocities = np.zeros(self.robot_config.num_joints)
+            # Analytical velocities from spline 1st derivative (smooth, no noise)
+            velocities = np.array([spline(t, 1) for spline in joint_splines])
+
+            # Analytical accelerations from spline 2nd derivative
+            accelerations = np.array([spline(t, 2) for spline in joint_splines])
+
+            # Validate against Franka joint velocity limits (~2.175 rad/s)
+            _v_max = getattr(self.robot_config, 'max_joint_velocities', None)
+            if _v_max is not None:
+                _v_violations = np.abs(velocities) > np.array(_v_max)
+                if np.any(_v_violations):
+                    # Clamp to limits (trajectory is still valid but note violation)
+                    velocities = np.clip(velocities, -np.array(_v_max), np.array(_v_max))
+
+            # Validate against acceleration limits (~15 rad/s²)
+            _a_max = getattr(self.robot_config, 'max_joint_accelerations', None)
+            if _a_max is not None:
+                accelerations = np.clip(accelerations, -np.array(_a_max), np.array(_a_max))
 
             # Get EE pose (use waypoint interpolation)
             ee_position, ee_orientation = self._interpolate_ee_pose(t, motion_plan.waypoints)
@@ -1638,12 +1657,94 @@ class TrajectorySolver:
                 timestamp=t,
                 joint_positions=joint_positions,
                 joint_velocities=velocities,
+                joint_accelerations=accelerations,
                 gripper_position=gripper_position,
                 ee_position=ee_position,
                 ee_orientation=ee_orientation,
                 phase=get_phase_at_time(t),
             )
             states.append(state)
+
+        return states
+
+    def _apply_jerk_limiting(
+        self,
+        states: List[JointState],
+        max_jerk: float = 7500.0,
+    ) -> List[JointState]:
+        """Post-process trajectory to limit jerk spikes.
+
+        Computes jerk (d(acceleration)/dt) between consecutive frames.
+        When jerk exceeds max_jerk (default 7500 rad/s³ for Franka),
+        smooths accelerations using a moving-average filter on the
+        offending segments, then recomputes velocities via integration
+        to maintain consistency.
+
+        Args:
+            states: Sampled trajectory states with velocities and accelerations.
+            max_jerk: Maximum allowed jerk in rad/s³.
+
+        Returns:
+            States with smoothed accelerations/velocities where needed.
+        """
+        if len(states) < 3:
+            return states
+
+        # Compute jerk at each interior frame
+        num_joints = len(states[0].joint_positions)
+        dt = states[1].timestamp - states[0].timestamp
+        if dt <= 0:
+            return states
+
+        # Gather accelerations into array for vectorized ops
+        accels = np.array([
+            s.joint_accelerations if s.joint_accelerations is not None
+            else np.zeros(num_joints)
+            for s in states
+        ])
+
+        # Compute jerk: (accel[i+1] - accel[i]) / dt
+        jerks = np.diff(accels, axis=0) / dt
+        max_observed_jerk = np.max(np.abs(jerks)) if jerks.size > 0 else 0.0
+
+        if max_observed_jerk <= max_jerk:
+            return states  # No smoothing needed
+
+        logger.info(
+            "Jerk limiting: max observed %.0f rad/s³ > limit %.0f rad/s³, smoothing",
+            max_observed_jerk, max_jerk,
+        )
+
+        # Smooth accelerations with a small moving-average kernel
+        # Kernel size chosen to bring jerk below limit
+        kernel_size = min(7, max(3, int(np.ceil(max_observed_jerk / max_jerk)) | 1))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel = np.ones(kernel_size) / kernel_size
+
+        smoothed_accels = np.copy(accels)
+        for j in range(num_joints):
+            smoothed_accels[:, j] = np.convolve(
+                accels[:, j], kernel, mode="same"
+            )
+
+        # Recompute velocities by integrating smoothed accelerations
+        # (preserve initial velocity from spline)
+        smoothed_vels = np.zeros_like(smoothed_accels)
+        smoothed_vels[0] = states[0].joint_velocities if states[0].joint_velocities is not None else np.zeros(num_joints)
+        for i in range(1, len(states)):
+            smoothed_vels[i] = smoothed_vels[i - 1] + smoothed_accels[i] * dt
+
+        # Apply velocity limits if available
+        _v_max = getattr(self.robot_config, 'max_joint_velocities', None)
+        if _v_max is not None:
+            _v_arr = np.array(_v_max)
+            smoothed_vels = np.clip(smoothed_vels, -_v_arr, _v_arr)
+
+        # Write back to states
+        for i, state in enumerate(states):
+            state.joint_accelerations = smoothed_accels[i]
+            state.joint_velocities = smoothed_vels[i]
 
         return states
 

@@ -6854,6 +6854,148 @@ class GenieSimLocalFramework:
             # Reproducibility seed (deterministic trajectory, but record for traceability)
             episode_seed = hash((episode_id, robot_type, num_joints)) & 0xFFFFFFFF
 
+            # =================================================================
+            # EPISODE VALIDITY GATE — reject garbage before export
+            # =================================================================
+            _validity_errors: list[str] = []
+
+            # 1. Camera: any required camera modality must have non-null RGB
+            _require_cameras = os.getenv("REQUIRE_CAMERA_DATA", "true").lower() == "true"
+            if _require_cameras and _camera_frame_count == 0:
+                _validity_errors.append(
+                    f"All {len(frames)} frames have null camera RGB. "
+                    "Set REQUIRE_CAMERA_DATA=false to allow export without cameras."
+                )
+
+            # 2. Scene state: reject if >10% of frames use synthetic fallback
+            if frames:
+                _synthetic_ratio = 1.0 - (_real_scene_state_count / max(1, len(frames)))
+                if _synthetic_ratio > 0.10:
+                    _validity_errors.append(
+                        f"scene_state is synthetic for {_synthetic_ratio:.0%} of frames "
+                        f"({len(frames) - _real_scene_state_count}/{len(frames)}). "
+                        "Real PhysX scene state required for >90% of frames."
+                    )
+
+            # 3. Pick/place must show gripper open→close→open transition
+            _task_type = task.get("task_type", "")
+            if _task_type in ("pick_place", "organize", "stack") and frames:
+                _gc_seq = [f.get("gripper_command") for f in frames]
+                _saw_open = False
+                _saw_close_after_open = False
+                _saw_reopen = False
+                for _gc in _gc_seq:
+                    if _gc == "open":
+                        if _saw_close_after_open:
+                            _saw_reopen = True
+                            break
+                        _saw_open = True
+                    elif _gc == "closed" and _saw_open:
+                        _saw_close_after_open = True
+                if not (_saw_open and _saw_close_after_open and _saw_reopen):
+                    _validity_errors.append(
+                        f"Task type '{_task_type}' requires gripper open→close→open "
+                        f"transition but sequence was: open={_saw_open}, "
+                        f"close_after_open={_saw_close_after_open}, "
+                        f"reopen={_saw_reopen}."
+                    )
+
+            # 4. Contradictory success reasoning overrides task_success
+            _ts_reasoning = llm_metadata.get("task_success_reasoning", "")
+            _failure_phrases = [
+                "gripper remains closed",
+                "prevents grasping",
+                "never opens",
+                "never closes",
+                "fails to grasp",
+                "object not moved",
+                "no displacement",
+                "task not completed",
+                "did not achieve",
+            ]
+            if task_success and _ts_reasoning:
+                for _fp in _failure_phrases:
+                    if _fp.lower() in _ts_reasoning.lower():
+                        self.log(
+                            f"[VALIDITY_GATE] Overriding task_success=True→False: "
+                            f"reasoning contains '{_fp}': {_ts_reasoning}",
+                            "WARNING",
+                        )
+                        task_success = False
+                        llm_metadata["task_success_override"] = (
+                            f"Overridden from True to False by validity gate: "
+                            f"reasoning contains failure phrase '{_fp}'"
+                        )
+                        break
+
+            # 5. Timestamps: monotonic and dt matches control_frequency_hz
+            if frames and len(frames) >= 2:
+                _ctrl_hz = 30.0
+                _expected_dt = 1.0 / _ctrl_hz
+                _prev_ts = frames[0].get("timestamp")
+                _ts_issues = 0
+                for _fi in range(1, len(frames)):
+                    _cur_ts = frames[_fi].get("timestamp")
+                    if _prev_ts is not None and _cur_ts is not None:
+                        _dt = _cur_ts - _prev_ts
+                        if _dt <= 0:
+                            _ts_issues += 1
+                        elif abs(_dt - _expected_dt) > _expected_dt * 0.5:
+                            _ts_issues += 1
+                    _prev_ts = _cur_ts
+                if _ts_issues > len(frames) * 0.05:
+                    _validity_errors.append(
+                        f"Timestamp issues in {_ts_issues}/{len(frames)-1} intervals "
+                        f"(non-monotonic or dt deviates >50% from {_expected_dt:.4f}s)."
+                    )
+
+            # 6. Hard-cap quality_score based on data source
+            _sensor_source = "isaac_sim_camera" if _camera_frame_count > 0 else "mock"
+            _physics_backend = "physx" if _real_scene_state_count > 0 else "heuristic"
+            if _sensor_source == "mock":
+                quality_score = 0.0
+                self.log("[VALIDITY_GATE] quality_score forced to 0.0: sensor_source=mock", "WARNING")
+            elif _physics_backend == "heuristic":
+                quality_score = min(quality_score, 0.5)
+                self.log(
+                    f"[VALIDITY_GATE] quality_score capped at {quality_score:.2f}: "
+                    "physics_backend=heuristic",
+                    "WARNING",
+                )
+            if _camera_frame_count == 0:
+                quality_score = 0.0
+                self.log("[VALIDITY_GATE] quality_score forced to 0.0: camera_count=0", "WARNING")
+
+            # Reject episode if validity errors found
+            if _validity_errors:
+                _gate_msg = (
+                    f"Episode {episode_id} REJECTED by validity gate: "
+                    f"{len(_validity_errors)} error(s):\n"
+                    + "\n".join(f"  - {e}" for e in _validity_errors)
+                )
+                self.log(_gate_msg, "ERROR")
+                # In strict mode (default), refuse to export
+                _strict_gate = os.getenv("STRICT_VALIDITY_GATE", "true").lower() == "true"
+                if _strict_gate:
+                    result["error"] = _gate_msg
+                    result["validity_gate"] = {
+                        "passed": False,
+                        "errors": _validity_errors,
+                    }
+                    _save_partial(_gate_msg)
+                    return result
+                else:
+                    # Non-strict: export but mark as invalid
+                    self.log(
+                        "[VALIDITY_GATE] STRICT_VALIDITY_GATE=false — exporting with warnings",
+                        "WARNING",
+                    )
+                    validation_passed = False
+
+            # =================================================================
+            # END EPISODE VALIDITY GATE
+            # =================================================================
+
             # Clean up internal metadata fields from frames before serialization
             for _f in frames:
                 _f.pop("_initial_object_poses", None)
@@ -7944,11 +8086,31 @@ class GenieSimLocalFramework:
                     robot_state["joint_positions"] = [
                         v + _noise_rng.gauss(0, _jp_noise_std) for v in _jp
                     ]
+                # Joint velocity noise
+                _jv = robot_state.get("joint_velocities", [])
+                if _jv:
+                    robot_state["joint_velocities"] = [
+                        v + _noise_rng.gauss(0, _jv_noise_std) for v in _jv
+                    ]
                 if frame_data.get("ee_pos"):
                     frame_data["ee_pos"] = [
                         v + _noise_rng.gauss(0, _ee_noise_std) for v in frame_data["ee_pos"]
                     ]
                     robot_state["ee_pos"] = frame_data["ee_pos"]
+                # Camera depth noise (Gaussian, ~1mm std for structured-light sensors)
+                _obs = frame_data.get("observation", {})
+                _cameras = _obs.get("cameras", {})
+                for _cam_id, _cam_data in _cameras.items():
+                    _depth = _cam_data.get("depth")
+                    if _depth is not None and hasattr(_depth, "__len__"):
+                        try:
+                            _depth_arr = np.array(_depth, dtype=np.float32)
+                            _depth_noise = np.random.RandomState(
+                                hash((episode_id, step_idx, _cam_id)) & 0xFFFFFFFF
+                            ).normal(0, 0.001, _depth_arr.shape).astype(np.float32)
+                            _cam_data["depth"] = (_depth_arr + _depth_noise).tolist()
+                        except Exception:
+                            pass  # Non-critical; skip if depth format unexpected
 
             # --- Fix 3: Split observation into sensors (proprio) vs privileged (GT state) ---
             _obs_full = frame_data.get("observation", {})
