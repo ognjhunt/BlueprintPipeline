@@ -6781,7 +6781,12 @@ class GenieSimLocalFramework:
             # Build robot metadata for dataset consumers
             robot_type = getattr(self.config, "robot_type", "unknown")
             joint_names = list(self._client._joint_names) if hasattr(self._client, "_joint_names") and self._client._joint_names else []
-            num_joints = len(frames[0]["action"]) if frames else 0
+            action_dof = len(frames[0].get("action", [])) if frames else 0
+            action_abs_dof = len(frames[0].get("action_abs", [])) if frames else 0
+            if action_abs_dof:
+                num_joints = max(action_abs_dof - 1, 0)
+            else:
+                num_joints = max(action_dof - 1, 0)
             rc = ROBOT_CONFIGS.get(robot_type)
             # Lightweight metadata fallback when trajectory_solver import fails
             _meta_fb = _ROBOT_METADATA_FALLBACK.get(robot_type, {}) if rc is None else {}
@@ -6804,10 +6809,13 @@ class GenieSimLocalFramework:
             gripper_indices = joint_groups["primary_gripper_indices"]
             arm_dof = len(arm_indices)
             gripper_dof = len(gripper_indices)
+            if not action_dof and arm_dof:
+                action_dof = arm_dof + 1
             robot_metadata = {
                 "robot_type": robot_type,
                 "num_joints": num_joints,
                 "arm_dof": arm_dof,
+                "action_dof": action_dof,
                 "gripper_dof": gripper_dof,
                 "joint_names": joint_names if joint_names else [f"joint_{i}" for i in range(num_joints)],
                 "joint_limits_lower": rc.joint_limits_lower.tolist() if rc is not None and hasattr(rc, "joint_limits_lower") else _meta_fb.get("joint_limits_lower"),
@@ -6822,13 +6830,13 @@ class GenieSimLocalFramework:
                 "right_gripper_indices": joint_groups["right_gripper_indices"],
                 "gripper_max_aperture": joint_groups["gripper_max_aperture"],
                 "default_joint_positions": rc.default_joint_positions.tolist() if rc is not None and hasattr(rc, "default_joint_positions") else _meta_fb.get("default_joint_positions"),
-                "action_space": "joint_delta",
-                "action_abs_space": "joint_position",
+                "action_space": "joint_delta_plus_gripper_delta",
+                "action_abs_space": "joint_position_plus_gripper_width_m",
                 "control_frequency_hz": 30.0,
                 "clock_model": "uniform_30hz",
                 "transition_convention": "obs_t_action_t_produces_obs_t+1",
-                "action_semantics": "joint_delta_from_current_to_next",
-                "action_abs_semantics": "target_joint_position_for_next_step",
+                "action_semantics": "joint_delta_from_current_to_next_with_gripper_delta_normalized",
+                "action_abs_semantics": "target_joint_position_for_next_step_with_gripper_width_m",
             }
 
             # Fallback collision check: verify waypoints within joint limits
@@ -7491,6 +7499,7 @@ class GenieSimLocalFramework:
         _real_effort_count = 0  # Track how many frames had real PhysX joint efforts
         _contact_force_cache: Dict[str, Dict] = {}  # cache Gemini contact force estimates
         self._prev_server_ee_pos = None  # Reset for each episode
+        self._prev_gripper_openness = None
         _recent_ee_positions: List[List[float]] = []
         _ee_static_fallback_used = False
         _ee_static_window = 5
@@ -7552,6 +7561,27 @@ class GenieSimLocalFramework:
             obs_joints = np.array(robot_state["joint_positions"], dtype=float)
 
             action_delta = (waypoint_joints - obs_joints).tolist()
+
+            # Determine gripper openness for action vectors (normalized [0,1])
+            _wp_gripper_aperture = waypoint.get("gripper_aperture")
+            if _wp_gripper_aperture is not None:
+                gripper_openness = float(_wp_gripper_aperture)
+            elif gripper_indices:
+                gripper_joints = [waypoint_joints[idx] for idx in gripper_indices if idx < len(waypoint_joints)]
+                _g_lims = joint_groups["gripper_limits"]
+                _g_range = float(_g_lims[1] - _g_lims[0]) if _g_lims[1] > _g_lims[0] else 1.0
+                gripper_mean = float(np.mean(np.abs(gripper_joints))) if gripper_joints else 0.0
+                gripper_openness = min(1.0, gripper_mean / _g_range) if _g_range > 0 else 0.0
+            else:
+                gripper_openness = 1.0
+
+            _prev_gripper = getattr(self, "_prev_gripper_openness", None)
+            if _prev_gripper is None:
+                _prev_gripper = gripper_openness
+            action_gripper_delta = gripper_openness - _prev_gripper
+            self._prev_gripper_openness = gripper_openness
+            _gripper_max_aperture = joint_groups.get("gripper_max_aperture", 0.04) or 0.0
+            gripper_width = gripper_openness * _gripper_max_aperture
 
             # Normalize timestamps to uniform 1/control_frequency_hz intervals
             _control_freq = 30.0  # Hz
@@ -7663,8 +7693,8 @@ class GenieSimLocalFramework:
             frame_data: Dict[str, Any] = {
                 "step": step_idx,
                 "observation": obs,
-                "action": action_delta,
-                "action_abs": waypoint["joint_positions"],
+                "action": action_delta + [action_gripper_delta],
+                "action_abs": list(waypoint["joint_positions"]) + [gripper_width],
                 "timestamp": _uniform_ts,
                 "dt": 1.0 / _control_freq,
             }
@@ -7810,17 +7840,6 @@ class GenieSimLocalFramework:
             # Explicit gripper command: prefer gripper_aperture from waypoint
             # (trajectory planner sets this per-phase), fall back to inferring
             # from gripper joint positions when available.
-            _wp_gripper_aperture = waypoint.get("gripper_aperture")
-            if _wp_gripper_aperture is not None:
-                gripper_openness = float(_wp_gripper_aperture)
-            elif gripper_indices:
-                gripper_joints = [waypoint_joints[idx] for idx in gripper_indices if idx < len(waypoint_joints)]
-                _g_lims = joint_groups["gripper_limits"]
-                _g_range = float(_g_lims[1] - _g_lims[0]) if _g_lims[1] > _g_lims[0] else 1.0
-                gripper_mean = float(np.mean(np.abs(gripper_joints))) if gripper_joints else 0.0
-                gripper_openness = min(1.0, gripper_mean / _g_range) if _g_range > 0 else 0.0
-            else:
-                gripper_openness = 1.0
             frame_data["gripper_command"] = "open" if gripper_openness > 0.5 else "closed"
             frame_data["gripper_openness"] = round(gripper_openness, 3)
 
@@ -8069,12 +8088,15 @@ class GenieSimLocalFramework:
 
             # Fix 11: Commanded vs measured state
             if frame_data.get("action_abs"):
-                robot_state["commanded_joint_positions"] = frame_data["action_abs"]
-                _jp = robot_state.get("joint_positions", [])
                 _cmd = frame_data["action_abs"]
-                if _jp and len(_jp) == len(_cmd):
+                _arm_cmd = _cmd[:arm_dof]
+                robot_state["commanded_joint_positions"] = _arm_cmd
+                if len(_cmd) > arm_dof:
+                    robot_state["commanded_gripper_width"] = _cmd[arm_dof]
+                _jp = robot_state.get("joint_positions", [])
+                if _jp and len(_jp) == len(_arm_cmd):
                     robot_state["tracking_error"] = [
-                        round(c - m, 8) for c, m in zip(_cmd, _jp)
+                        round(c - m, 8) for c, m in zip(_arm_cmd, _jp)
                     ]
 
             # --- Improvement E: Sensor noise injection ---
