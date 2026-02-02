@@ -289,9 +289,117 @@ _FRANKA_METADATA = {
     "gripper_joint_names": ["panda_finger_joint1", "panda_finger_joint2"],
     "gripper_limits": (0.0, 0.04),
 }
+_G1_RIGHT_ARM_JOINT_NAMES = [
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_pitch_joint",
+    "right_wrist_yaw_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_roll_joint",
+]
+_G1_LEFT_ARM_JOINT_NAMES = [
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_pitch_joint",
+    "left_wrist_yaw_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_roll_joint",
+]
+_G1_RIGHT_GRIPPER_JOINT_NAMES = [
+    "right_gripper_finger_joint1",
+    "right_gripper_finger_joint2",
+]
+_G1_LEFT_GRIPPER_JOINT_NAMES = [
+    "left_gripper_finger_joint1",
+    "left_gripper_finger_joint2",
+]
+_G1_ARM_JOINT_LIMITS_LOWER = [-2.9, -1.6, -2.9, -2.6, -2.9, -1.7, -2.9]
+_G1_ARM_JOINT_LIMITS_UPPER = [2.9, 1.6, 2.9, 2.6, 2.9, 1.7, 2.9]
+_G1_RIGHT_ARM_DEFAULT = [0.0, -0.2, 0.0, -1.2, 0.0, 0.6, 0.0]
+_G1_LEFT_ARM_DEFAULT = [0.0, 0.2, 0.0, -1.2, 0.0, -0.6, 0.0]
+_G1_RIGHT_METADATA = {
+    "joint_names": list(_G1_RIGHT_ARM_JOINT_NAMES),
+    "joint_limits_lower": list(_G1_ARM_JOINT_LIMITS_LOWER),
+    "joint_limits_upper": list(_G1_ARM_JOINT_LIMITS_UPPER),
+    "default_joint_positions": list(_G1_RIGHT_ARM_DEFAULT),
+    "gripper_joint_names": list(_G1_RIGHT_GRIPPER_JOINT_NAMES),
+    "gripper_limits": (0.0, 0.08),
+}
+_G1_LEFT_METADATA = {
+    "joint_names": list(_G1_LEFT_ARM_JOINT_NAMES),
+    "joint_limits_lower": list(_G1_ARM_JOINT_LIMITS_LOWER),
+    "joint_limits_upper": list(_G1_ARM_JOINT_LIMITS_UPPER),
+    "default_joint_positions": list(_G1_LEFT_ARM_DEFAULT),
+    "gripper_joint_names": list(_G1_LEFT_GRIPPER_JOINT_NAMES),
+    "gripper_limits": (0.0, 0.08),
+}
 _ROBOT_METADATA_FALLBACK = {
     "franka": _FRANKA_METADATA, "franka_panda": _FRANKA_METADATA, "panda": _FRANKA_METADATA,
+    "g1": _G1_RIGHT_METADATA,
+    "g1_right_arm": _G1_RIGHT_METADATA,
+    "g1_left_arm": _G1_LEFT_METADATA,
 }
+
+
+def _normalize_robot_name(robot_type: str) -> str:
+    return robot_type.lower().replace("-", "_").replace(" ", "_")
+
+
+def _g1_arm_side(robot_type: str) -> str:
+    normalized = _normalize_robot_name(robot_type)
+    if "left" in normalized:
+        return "left"
+    if "right" in normalized:
+        return "right"
+    return "right"
+
+
+def _resolve_named_joint_indices(
+    joint_names: Sequence[str],
+    expected_names: Sequence[str],
+) -> List[int]:
+    if not joint_names:
+        return []
+    name_map = {name.lower(): idx for idx, name in enumerate(joint_names)}
+    indices: List[int] = []
+    for expected in expected_names:
+        idx = name_map.get(expected.lower())
+        if idx is None:
+            return []
+        indices.append(idx)
+    return indices
+
+
+def _resolve_g1_arm_joint_indices(
+    robot_type: str,
+    joint_names: Sequence[str],
+    num_joints: int,
+) -> List[int]:
+    side = _g1_arm_side(robot_type)
+    expected = _G1_LEFT_ARM_JOINT_NAMES if side == "left" else _G1_RIGHT_ARM_JOINT_NAMES
+    indices = _resolve_named_joint_indices(joint_names, expected)
+    if indices:
+        return indices
+    if num_joints >= 14:
+        return list(range(7, 14)) if side == "left" else list(range(0, 7))
+    return list(range(min(7, num_joints)))
+
+
+def _resolve_g1_gripper_joint_indices(
+    robot_type: str,
+    joint_names: Sequence[str],
+    num_joints: int,
+    arm_joint_indices: Sequence[int],
+) -> List[int]:
+    side = _g1_arm_side(robot_type)
+    expected = _G1_LEFT_GRIPPER_JOINT_NAMES if side == "left" else _G1_RIGHT_GRIPPER_JOINT_NAMES
+    indices = _resolve_named_joint_indices(joint_names, expected)
+    if indices:
+        return indices
+    remaining = [idx for idx in range(num_joints) if idx not in arm_joint_indices]
+    return remaining[: len(expected)]
 
 
 def _franka_fk(joint_angles: "np.ndarray") -> Tuple[List[float], List[float]]:
@@ -4387,6 +4495,9 @@ class GenieSimLocalFramework:
             # crashes with AttributeError.
             robot_cfg = task_config.get("robot_config", {})
             robot_type = robot_cfg.get("type", self.config.robot_type or "franka")
+            if robot_type and robot_type != self.config.robot_type:
+                self.log(f"Using robot type from task config: {robot_type}", "INFO")
+                self.config.robot_type = robot_type
             # Map robot type to the server's robot config JSON filename.
             # The Genie Sim server stores configs in robot_cfg/ directory;
             # the robot_cfg_file field is looked up as:
@@ -7709,8 +7820,27 @@ class GenieSimLocalFramework:
             initial_joints = [0.0] * 7  # Default for 7-DOF arm
 
         # Truncate to expected DOF if server returns full-body joints (e.g. 34)
-        robot_config = ROBOT_CONFIGS.get(self.config.robot_type, ROBOT_CONFIGS.get("franka"))
-        if robot_config is not None:
+        robot_type = getattr(self.config, "robot_type", "")
+        robot_config = ROBOT_CONFIGS.get(robot_type, ROBOT_CONFIGS.get("franka"))
+        normalized_robot = _normalize_robot_name(robot_type) if robot_type else ""
+        if normalized_robot.startswith("g1"):
+            joint_names = (
+                list(self._client._joint_names)
+                if hasattr(self._client, "_joint_names") and self._client._joint_names
+                else []
+            )
+            arm_joint_indices = _resolve_g1_arm_joint_indices(
+                robot_type,
+                joint_names,
+                len(initial_joints),
+            )
+            if arm_joint_indices and len(initial_joints) > len(arm_joint_indices):
+                logger.info(
+                    "Truncating initial joints from %d to %d (G1 arm indices)",
+                    len(initial_joints), len(arm_joint_indices),
+                )
+                initial_joints = [initial_joints[i] for i in arm_joint_indices]
+        elif robot_config is not None:
             expected_dof = len(robot_config.joint_limits_lower)
             if len(initial_joints) > expected_dof:
                 logger.info(
@@ -8280,7 +8410,25 @@ class GenieSimLocalFramework:
         initial_joints = np.array(initial_joints, dtype=float)
 
         # Truncate to robot config DOF if server returns full-body joints
-        if robot_config is not None:
+        normalized_robot = _normalize_robot_name(getattr(self.config, "robot_type", ""))
+        if normalized_robot.startswith("g1"):
+            joint_names = (
+                list(self._client._joint_names)
+                if hasattr(self._client, "_joint_names") and self._client._joint_names
+                else []
+            )
+            arm_joint_indices = _resolve_g1_arm_joint_indices(
+                self.config.robot_type,
+                joint_names,
+                len(initial_joints),
+            )
+            if arm_joint_indices and len(initial_joints) > len(arm_joint_indices):
+                logger.info(
+                    "Truncating initial joints from %d to %d (G1 arm indices)",
+                    len(initial_joints), len(arm_joint_indices),
+                )
+                initial_joints = initial_joints[arm_joint_indices]
+        elif robot_config is not None:
             expected_dof = len(robot_config.joint_limits_lower)
             if len(initial_joints) > expected_dof:
                 logger.info(
@@ -8372,13 +8520,31 @@ class GenieSimLocalFramework:
         # initial joints, scaled by a fraction of the joint range.  This
         # ensures diversity while respecting limits.
         joint_range = upper - lower
-        # Identify arm joints (first ~6-7) vs gripper/finger joints (remaining)
+        # Identify arm joints vs gripper/finger joints (robot-specific).
         num_joints = len(initial_joints)
-        arm_end = min(7, num_joints)  # first 7 joints are typically arm
+        robot_type = getattr(self.config, "robot_type", "")
+        normalized_robot = _normalize_robot_name(robot_type) if robot_type else ""
+        joint_names = (
+            list(self._client._joint_names)
+            if hasattr(self._client, "_joint_names") and self._client._joint_names
+            else []
+        )
+        if normalized_robot.startswith("g1"):
+            arm_joint_indices = _resolve_g1_arm_joint_indices(robot_type, joint_names, num_joints)
+            gripper_joint_indices = _resolve_g1_gripper_joint_indices(
+                robot_type,
+                joint_names,
+                num_joints,
+                arm_joint_indices,
+            )
+        else:
+            arm_joint_indices = list(range(min(7, num_joints)))
+            gripper_joint_indices = list(range(len(arm_joint_indices), num_joints))
+        arm_end = len(arm_joint_indices)
         # Gripper open/closed state masks: 1.0 = open, 0.0 = closed
         gripper_open = np.ones(num_joints)
         gripper_closed = np.ones(num_joints)
-        for j in range(arm_end, num_joints):
+        for j in gripper_joint_indices:
             gripper_closed[j] = 0.3  # partially close fingers
 
         # Build phase waypoints using task geometry + numerical IK
@@ -8435,7 +8601,7 @@ class GenieSimLocalFramework:
                 ("place", place_pos_cart),
             ]
             ik_phase_joints = []
-            _prev_q = initial_joints[:arm_end]
+            _prev_q = np.array([initial_joints[idx] for idx in arm_joint_indices], dtype=float)
             _all_solved = True
             for _pname, _cart in _cart_targets:
                 _ik_result = _franka_numerical_ik(_cart, initial_guess=_prev_q)
@@ -8481,9 +8647,11 @@ class GenieSimLocalFramework:
             phase_targets = []
             for _pi, (_pn, _, _gm, _) in enumerate(phase_configs):
                 target = initial_joints.copy()
-                target[:arm_end] = ik_phase_joints[_pi]
+                for joint_offset, joint_idx in enumerate(arm_joint_indices):
+                    if joint_offset < len(ik_phase_joints[_pi]):
+                        target[joint_idx] = ik_phase_joints[_pi][joint_offset]
                 # Apply gripper state
-                for j in range(arm_end, num_joints):
+                for j in gripper_joint_indices:
                     mid = (lower[j] + upper[j]) / 2.0
                     target[j] = mid + (initial_joints[j] - mid) * _gm[j]
                 target = np.clip(target, lower, upper)
@@ -8501,8 +8669,9 @@ class GenieSimLocalFramework:
             for phase_name, arm_offsets, grip_mult, _ in phase_configs:
                 target = initial_joints.copy()
                 for j in range(min(len(arm_offsets), arm_end)):
-                    target[j] += arm_offsets[j] * joint_range[j]
-                for j in range(arm_end, num_joints):
+                    arm_idx = arm_joint_indices[j]
+                    target[arm_idx] += arm_offsets[j] * joint_range[arm_idx]
+                for j in gripper_joint_indices:
                     mid = (lower[j] + upper[j]) / 2.0
                     target[j] = mid + (initial_joints[j] - mid) * grip_mult[j]
                 target = np.clip(target, lower, upper)
@@ -8544,10 +8713,14 @@ class GenieSimLocalFramework:
                 grip_val = (1.0 - s) * current_grip + s * target_grip
                 _jp_list = joint_pos.tolist()
                 # Set gripper joints in the existing array (indices 7,8) rather than appending
-                if len(_jp_list) >= 9:
-                    _jp_list[7] = grip_val
-                    _jp_list[8] = grip_val
+                if gripper_joint_indices:
                     full_joints = _jp_list
+                    for idx in gripper_joint_indices:
+                        if idx < len(full_joints):
+                            full_joints[idx] = grip_val
+                        else:
+                            while len(full_joints) <= idx:
+                                full_joints.append(grip_val)
                 else:
                     full_joints = _jp_list + [grip_val, grip_val]
                 trajectory.append(
