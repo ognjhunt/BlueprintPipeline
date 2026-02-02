@@ -6509,6 +6509,33 @@ class GenieSimLocalFramework:
         _gemini_prop_llm = None
         _gemini_prop_llm_attempted = False
         _object_property_provenance: Dict[str, str] = {}
+        _gemini_prop_cooldowns: Dict[str, float] = {}
+        _gemini_prop_cooldown_logs: Dict[str, float] = {}
+        _gemini_prop_global_unavailable_until = 0.0
+        _gemini_prop_global_log_until = 0.0
+        _GEMINI_COOLDOWN_SKIPPED = object()
+
+        def _get_env_float(name: str, default: float) -> float:
+            raw = os.getenv(name)
+            if raw is None or raw == "":
+                return default
+            try:
+                return float(raw)
+            except ValueError:
+                return default
+
+        def _get_env_int(name: str, default: int) -> int:
+            raw = os.getenv(name)
+            if raw is None or raw == "":
+                return default
+            try:
+                return int(raw)
+            except ValueError:
+                return default
+
+        _GEMINI_PROP_COOLDOWN_S = _get_env_float("GENIESIM_GEMINI_PROP_COOLDOWN_S", 300.0)
+        _GEMINI_PROP_MAX_RETRIES = _get_env_int("GENIESIM_GEMINI_PROP_MAX_RETRIES", 3)
+        _GEMINI_PROP_RETRY_DELAY_S = _get_env_float("GENIESIM_GEMINI_PROP_RETRY_DELAY_S", 2.0)
 
         def _get_gemini_prop_client():
             nonlocal _gemini_prop_llm, _gemini_prop_llm_attempted
@@ -6516,16 +6543,57 @@ class GenieSimLocalFramework:
                 _gemini_prop_llm_attempted = True
                 try:
                     from tools.llm_client import create_llm_client as _create
-                    _gemini_prop_llm = _create()
+                    _gemini_prop_llm = _create(
+                        max_retries=_GEMINI_PROP_MAX_RETRIES,
+                        retry_delay=_GEMINI_PROP_RETRY_DELAY_S,
+                    )
                 except Exception:
                     _gemini_prop_llm = None
             return _gemini_prop_llm
 
+        def _is_gemini_rate_limit_error(exc: Exception) -> bool:
+            text = str(exc).lower()
+            return any(
+                token in text
+                for token in (
+                    "429",
+                    "rate limit",
+                    "rate-limit",
+                    "quota",
+                    "too many requests",
+                )
+            )
+
+        def _log_gemini_cooldown(cache_key: str, cooldown_until: float) -> None:
+            nonlocal _gemini_prop_global_log_until
+            now = time.time()
+            log_until = _gemini_prop_cooldown_logs.get(cache_key, 0.0)
+            if now >= log_until:
+                _gemini_prop_cooldown_logs[cache_key] = now + _GEMINI_PROP_COOLDOWN_S
+                logger.warning(
+                    "GEMINI_PROP_COOLDOWN: skipping Gemini for %s until %s; using hardcoded fallback.",
+                    cache_key,
+                    datetime.fromtimestamp(cooldown_until).isoformat(timespec="seconds"),
+                )
+            if now >= _gemini_prop_global_log_until and _gemini_prop_global_unavailable_until > now:
+                _gemini_prop_global_log_until = now + _GEMINI_PROP_COOLDOWN_S
+                logger.warning(
+                    "GEMINI_PROP_COOLDOWN: global Gemini cooldown active until %s; using hardcoded fallback.",
+                    datetime.fromtimestamp(_gemini_prop_global_unavailable_until).isoformat(timespec="seconds"),
+                )
+
         def _estimate_obj_prop_gemini(obj_type: str, prop: str):
             """Estimate a single object property via Gemini."""
+            nonlocal _gemini_prop_global_unavailable_until
             cache_key = f"{obj_type.lower()}:{prop}"
             if cache_key in _gemini_prop_cache:
                 return _gemini_prop_cache[cache_key]
+            now = time.time()
+            cooldown_until = _gemini_prop_cooldowns.get(cache_key, 0.0)
+            effective_cooldown_until = max(cooldown_until, _gemini_prop_global_unavailable_until)
+            if now < effective_cooldown_until:
+                _log_gemini_cooldown(cache_key, effective_cooldown_until)
+                return _GEMINI_COOLDOWN_SKIPPED
             llm = _get_gemini_prop_client()
             if not llm:
                 return None
@@ -6563,7 +6631,15 @@ class GenieSimLocalFramework:
                     logger.info("GEMINI_OBJ_PROP: %s.%s = %s", obj_type, prop, val)
                     return val
             except Exception as exc:
-                logger.debug("Gemini obj prop estimation failed for %s.%s: %s", obj_type, prop, exc)
+                if _is_gemini_rate_limit_error(exc):
+                    cooldown_until = time.time() + _GEMINI_PROP_COOLDOWN_S
+                    _gemini_prop_cooldowns[cache_key] = cooldown_until
+                    _gemini_prop_global_unavailable_until = max(
+                        _gemini_prop_global_unavailable_until, cooldown_until
+                    )
+                    _log_gemini_cooldown(cache_key, cooldown_until)
+                else:
+                    logger.debug("Gemini obj prop estimation failed for %s.%s: %s", obj_type, prop, exc)
             return None
 
         # Unified property lookup: scene_graph → Gemini estimated → hardcoded fallback
@@ -6579,7 +6655,8 @@ class GenieSimLocalFramework:
                     return entry[prop]
             # 2. Try Gemini estimation (GAP 1 fix)
             _gemini_val = _estimate_obj_prop_gemini(obj_id_or_type, prop)
-            if _gemini_val is not None:
+            gemini_skipped = _gemini_val is _GEMINI_COOLDOWN_SKIPPED
+            if _gemini_val is not None and not gemini_skipped:
                 _object_property_provenance[f"{obj_id_or_type}:{prop}"] = "gemini_estimated"
                 return _gemini_val
             # 3. Hardcoded fallback with warning
@@ -6603,6 +6680,8 @@ class GenieSimLocalFramework:
                     )
                 _object_property_provenance[f"{obj_id_or_type}:{prop}"] = "hardcoded_fallback"
                 return _table[_key_lower]
+            if gemini_skipped:
+                _object_property_provenance[f"{obj_id_or_type}:{prop}"] = "hardcoded_fallback"
             return default
 
         frames: List[Dict[str, Any]] = []
