@@ -109,6 +109,12 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from tools.camera_io import (
+    decode_camera_bytes,
+    expected_byte_count,
+    load_camera_frame,
+    strip_camera_data,
+)
 
 # Add parent paths for imports
 ADAPTER_ROOT = Path(__file__).resolve().parent
@@ -2821,26 +2827,38 @@ class GenieSimGRPCClient:
 
     def _parse_camera_data_response(self, data: bytes) -> Optional[Dict[str, Any]]:
         """Parse GetCameraDataResponse: field 2=color_info, field 3=color_image, field 5=depth_image."""
-        import struct as _struct
         fields = self._parse_protobuf_fields(data)
-        result: Dict[str, Any] = {"rgb": b"", "depth": b"", "width": 0, "height": 0}
+        result: Dict[str, Any] = {
+            "rgb": b"",
+            "depth": b"",
+            "width": 0,
+            "height": 0,
+            "rgb_encoding": "",
+            "depth_encoding": "",
+        }
         # color_info (field 2) — CameraInfo: width(1,int32), height(2,int32)
         if 2 in fields:
             info_fields = self._parse_protobuf_fields(fields[2][0][1])
             if 1 in info_fields:
-                result["width"] = int.from_bytes(info_fields[1][0][1], 'little')
+                result["width"] = int.from_bytes(info_fields[1][0][1], "little")
             if 2 in info_fields:
-                result["height"] = int.from_bytes(info_fields[2][0][1], 'little')
+                result["height"] = int.from_bytes(info_fields[2][0][1], "little")
         # color_image (field 3) — CompressedImage: format(2,string), data(3,bytes)
         if 3 in fields:
             img_fields = self._parse_protobuf_fields(fields[3][0][1])
+            if 2 in img_fields:
+                result["rgb_encoding"] = img_fields[2][0][1].decode("utf-8", errors="ignore")
             if 3 in img_fields:
                 result["rgb"] = img_fields[3][0][1]
         # depth_image (field 5) — CompressedImage
         if 5 in fields:
             img_fields = self._parse_protobuf_fields(fields[5][0][1])
+            if 2 in img_fields:
+                result["depth_encoding"] = img_fields[2][0][1].decode("utf-8", errors="ignore")
             if 3 in img_fields:
                 result["depth"] = img_fields[3][0][1]
+        # For convenience, keep a generic encoding if only one is present
+        result["encoding"] = result["rgb_encoding"] or result["depth_encoding"]
         return result
 
     def _format_observation_response(
@@ -3831,6 +3849,8 @@ class GenieSimGRPCClient:
             "width": width,
             "height": height,
             "encoding": encoding,
+            "rgb_encoding": encoding,
+            "depth_encoding": encoding,
             "timestamp": image_info.get("timestamp"),
         }
 
@@ -6476,7 +6496,8 @@ class GenieSimLocalFramework:
             _server_ee_frame_count = _frame_stats["server_ee_frame_count"]
             _real_velocity_count = _frame_stats["real_velocity_count"]
             _real_effort_count = _frame_stats["real_effort_count"]
-            _contact_force_cache = _frame_stats["contact_force_cache"]
+            _estimated_effort_count = _frame_stats.get("estimated_effort_count", 0)
+            _contact_report_count = _frame_stats.get("contact_report_count", 0)
             _object_property_provenance = _frame_stats.get("object_property_provenance", {})
             _ee_static_fallback_used = _frame_stats.get("ee_static_fallback_used", False)
             _scene_state_invalid = _real_scene_state_count == 0 and len(frames) > 0
@@ -6526,6 +6547,26 @@ class GenieSimLocalFramework:
                         self.log(message, "ERROR")
                         return result
                     self.log(message, "WARNING")
+
+            _efforts_source = _frame_stats.get("efforts_source", "none")
+            _fk_available = IK_PLANNING_AVAILABLE or getattr(self.config, "robot_type", "").lower() in _FRANKA_TYPES
+            _fk_consistent = _fk_available and not _ee_static_fallback_used
+            _ee_pose_conf = 0.98 if (_server_ee_frame_count > len(frames) * 0.5 or _fk_consistent) else 0.9
+            _ee_vel_conf = 0.85 if (_server_ee_frame_count > len(frames) * 0.5 or _fk_consistent) else 0.75
+            if _efforts_source == "physx":
+                _contact_forces_source = "physx_joint_effort"
+            elif _contact_report_count > 0:
+                _contact_forces_source = "physx_contact_query"
+            elif _efforts_source in ("estimated_inverse_dynamics", "mixed"):
+                _contact_forces_source = "estimated_inverse_dynamics"
+            else:
+                _contact_forces_source = "heuristic_grasp_model_v1"
+            if _server_ee_frame_count < len(frames):
+                self.log(
+                    f"EE pose missing in {_server_ee_frame_count}/{len(frames)} frames; "
+                    "verify EE link registration on server.",
+                    "WARNING",
+                )
 
             # Attempt a lightweight reset before stop_recording to unstick the
             # server's physics loop.  This is a mitigation for the known issue
@@ -7358,15 +7399,12 @@ class GenieSimLocalFramework:
                         "joint_velocities": "physx_server" if _real_velocity_count > 0 else "finite_difference",
                         "joint_accelerations": "finite_difference_smoothed",
                         "joint_efforts": (
-                            "physx_server" if _frame_stats.get("efforts_source") == "physx"
-                            else ("estimated_inverse_dynamics" if _real_effort_count > 0 else "unavailable")
+                            "physx_server" if _efforts_source == "physx"
+                            else ("estimated_inverse_dynamics" if _efforts_source in ("estimated_inverse_dynamics", "mixed") else "unavailable")
                         ),
                         "ee_vel": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
                         "ee_acc": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
-                        "contact_forces": (
-                            "physx_joint_effort" if _real_effort_count > 0
-                            else ("gemini_estimated" if _contact_force_cache else "heuristic_grasp_model_v1")
-                        ),
+                        "contact_forces": _contact_forces_source,
                         "camera_frames": "isaac_sim_camera" if _camera_frame_count > 0 else "unavailable",
                         "task_description": "task_config_hint",
                         "scene_state": (
@@ -7385,6 +7423,7 @@ class GenieSimLocalFramework:
                         "camera_capture_frames": f"{_camera_frame_count}/{len(frames)}",
                         "real_velocity_frames": f"{_real_velocity_count}/{len(frames)}",
                         "real_effort_frames": f"{_real_effort_count}/{len(frames)}",
+                        "estimated_effort_frames": f"{_estimated_effort_count}/{len(frames)}",
                         "diversity_calibration": _diversity_calibration_source,
                         "object_property_provenance": dict(_object_property_provenance),
                         "warnings": (
@@ -7395,20 +7434,20 @@ class GenieSimLocalFramework:
                     },
                     "channel_confidence": {
                         "joint_positions": 1.0,
-                        "ee_pos": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.9,
-                        "ee_quat": 0.98 if _server_ee_frame_count > len(frames) * 0.5 else 0.9,
+                        "ee_pos": _ee_pose_conf,
+                        "ee_quat": _ee_pose_conf,
                         "joint_velocities": 0.98 if _real_velocity_count > 0 else 0.7,
                         "joint_accelerations": 0.6,
                         "joint_efforts": (
-                            0.95 if _frame_stats.get("efforts_source") == "physx"
-                            else (0.7 if _real_effort_count > 0 else 0.0)
+                            0.95 if _efforts_source == "physx"
+                            else (0.7 if _efforts_source in ("estimated_inverse_dynamics", "mixed") else 0.0)
                         ),
                         "contact_forces": (
-                            0.9 if _frame_stats.get("efforts_source") == "physx"
-                            else (0.7 if _real_effort_count > 0 else 0.5)
+                            0.9 if _efforts_source == "physx"
+                            else (0.7 if _contact_report_count > 0 or _efforts_source in ("estimated_inverse_dynamics", "mixed") else 0.5)
                         ),
-                        "ee_vel": 0.85 if _server_ee_frame_count > len(frames) * 0.5 else 0.75,
-                        "ee_acc": 0.85 if _server_ee_frame_count > len(frames) * 0.5 else 0.75,
+                        "ee_vel": _ee_vel_conf,
+                        "ee_acc": _ee_vel_conf,
                         "scene_state": 0.95 if _real_scene_state_count > 0 else 0.3,
                         "camera_frames": 0.95 if _camera_frame_count > 0 else 0.0,
                     },
@@ -7877,7 +7916,9 @@ class GenieSimLocalFramework:
         _camera_frame_count = 0  # Track how many frames had camera data
         _real_velocity_count = 0  # Track how many frames had real PhysX velocities
         _real_effort_count = 0  # Track how many frames had real PhysX joint efforts
-        _contact_force_cache: Dict[str, Dict] = {}  # cache Gemini contact force estimates
+        _estimated_effort_count = 0  # Track how many frames used inverse-dynamics efforts
+        _effort_missing_count = 0  # Track frames missing/zero efforts
+        _contact_report_count = 0  # Track frames with contact report data
         self._prev_server_ee_pos = None  # Reset for each episode
         self._prev_gripper_openness = None
         _recent_ee_positions: List[List[float]] = []
@@ -8265,6 +8306,7 @@ class GenieSimLocalFramework:
 
             if _used_server_ee:
                 _server_ee_frame_count += 1
+            frame_data["ee_pose_source"] = "server" if _used_server_ee else "fk"
             if obs.get("scene_state", {}).get("objects") and obs.get("data_source") in ("real_composed", "between_waypoints"):
                 _real_scene_state_count += 1
             _cf = obs.get("camera_frames", {})
@@ -8277,10 +8319,14 @@ class GenieSimLocalFramework:
             if _rs_vel and any(abs(v) > 1e-10 for v in _rs_vel):
                 _real_velocity_count += 1
             _rs_eff = robot_state.get("joint_efforts", [])
-            if _rs_eff and any(abs(e) > 1e-6 for e in _rs_eff):
-                _real_effort_count += 1
             _real_efforts = _rs_eff if _rs_eff is not None else []
             _has_real_efforts = bool(_real_efforts and any(abs(e) > 1e-6 for e in _real_efforts))
+            if _has_real_efforts:
+                _real_effort_count += 1
+                frame_data["efforts_source"] = "physx"
+            else:
+                _effort_missing_count += 1
+                frame_data["efforts_source"] = "none"
 
             # Fix 6: Quaternion normalization, hemisphere continuity, and 6D rotation
             if frame_data.get("ee_quat"):
@@ -8442,7 +8488,7 @@ class GenieSimLocalFramework:
                         "force_sufficient": _grip_force_real > 0.5,
                     }
                 else:
-                    # Fallback: try Gemini estimation, then heuristic
+                    # Fallback: heuristic contact force model
                     _obj_type = ""
                     for _obj in obs.get("scene_state", {}).get("objects", []):
                         if _obj.get("object_id") == _attached_object_id:
@@ -8450,9 +8496,6 @@ class GenieSimLocalFramework:
                             break
                     _mass = _get_obj_prop(_obj_type, "mass", 0.3)
                     _weight = _mass * 9.81
-                    _openness_bucket = round(gripper_openness, 1)
-                    _cf_cache_key = f"{_obj_type}:{_openness_bucket}"
-                    _gemini_force = _contact_force_cache.get(_cf_cache_key)
 
                     # Heuristic contact force model (Gemini LLM estimation removed — heuristic is faster & sufficient)
                     _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
@@ -8468,7 +8511,14 @@ class GenieSimLocalFramework:
             # Add provenance to contact forces (for PhysX real data path)
             if "contact_forces" in frame_data and "provenance" not in frame_data["contact_forces"]:
                 frame_data["contact_forces"]["provenance"] = "physx_joint_effort" if _has_real_efforts else "heuristic_grasp_model_v1"
-                frame_data["contact_forces"]["confidence"] = 0.9 if _has_real_efforts else 0.2
+            if "contact_forces" in frame_data and "confidence" not in frame_data["contact_forces"]:
+                _cf_prov = frame_data["contact_forces"].get("provenance")
+                if _cf_prov == "physx_joint_effort":
+                    frame_data["contact_forces"]["confidence"] = 0.9
+                elif _cf_prov == "physx_contact_query":
+                    frame_data["contact_forces"]["confidence"] = 0.7
+                else:
+                    frame_data["contact_forces"]["confidence"] = 0.5
 
             # Detect release: gripper opens while holding object
             if frame_data.get("gripper_command") == "open" and _attached_object_id is not None:
@@ -8511,6 +8561,7 @@ class GenieSimLocalFramework:
                     if not _has_real_efforts:
                         frame_data["contact_forces"] = contact_forces
                     collision_provenance = "physx_contact_query"
+                    _contact_report_count += 1
                 else:
                     if _collision_source_hint == "joint_limits_only" and not _contact_query_warned:
                         logger.warning(
@@ -8536,7 +8587,7 @@ class GenieSimLocalFramework:
                         }
 
             # --- Improvement C: Mirror EE fields into observation.robot_state ---
-            for _key in ("ee_pos", "ee_quat", "ee_vel", "gripper_command", "gripper_openness"):
+            for _key in ("ee_pos", "ee_quat", "ee_vel", "ee_pose_source", "gripper_command", "gripper_openness"):
                 if _key in frame_data:
                     robot_state[_key] = frame_data[_key]
 
@@ -8709,8 +8760,7 @@ class GenieSimLocalFramework:
                         obs_rs["ee_vel"] = frame["ee_vel"]
 
         # Backfill joint efforts via inverse dynamics when PhysX didn't provide them
-        _efforts_source = "physx" if _real_effort_count > 0 else "none"
-        if _real_effort_count == 0 and len(frames) >= 3:
+        if len(frames) >= 3:
             # Simplified inverse dynamics: τ = I·α + C·v + G
             _id_inertia = np.array([2.0, 2.0, 1.5, 1.5, 1.0, 1.0, 0.5])
             _id_damping = np.array([10.0, 10.0, 8.0, 8.0, 5.0, 5.0, 3.0])
@@ -8719,27 +8769,88 @@ class GenieSimLocalFramework:
             _id_inertia = _id_inertia[:_id_dof]
             _id_damping = _id_damping[:_id_dof]
             _id_gravity = _id_gravity[:_id_dof]
-            _dt = 1.0 / int(os.getenv("GENIESIM_TARGET_FPS", "30"))
             _estimated_effort_count = 0
             for _fi in range(len(frames)):
                 _obs_rs = frames[_fi].get("observation", {}).get("robot_state", {})
+                _rs_eff = _obs_rs.get("joint_efforts", [])
+                _has_eff = (
+                    isinstance(_rs_eff, list)
+                    and len(_rs_eff) > 0
+                    and any(abs(e) > 1e-6 for e in _rs_eff)
+                )
+                if _has_eff:
+                    continue
                 _jp = np.array(_obs_rs.get("joint_positions", [])[:_id_dof], dtype=float)
                 _jv = np.array(_obs_rs.get("joint_velocities", [])[:_id_dof], dtype=float)
                 _ja = np.array(_obs_rs.get("joint_accelerations", [])[:_id_dof], dtype=float)
                 if _jp.size == _id_dof and _jv.size == _id_dof and _ja.size == _id_dof:
                     _torque = _id_inertia * _ja + _id_damping * _jv + _id_gravity * np.cos(_jp)
                     _efforts_list = _torque.tolist()
+                    # Pad to full joint count when available
+                    _full_len = len(_obs_rs.get("joint_positions", [])) or _id_dof
+                    if _full_len > _id_dof:
+                        _efforts_list = _efforts_list + [0.0] * (_full_len - _id_dof)
                     _obs_rs["joint_efforts"] = _efforts_list
                     if _obs_rs.get("joint_state"):
                         _obs_rs["joint_state"]["efforts"] = _efforts_list
+                    frames[_fi]["efforts_source"] = "estimated_inverse_dynamics"
                     _estimated_effort_count += 1
             if _estimated_effort_count > 0:
-                _real_effort_count = _estimated_effort_count
-                _efforts_source = "estimated_inverse_dynamics"
                 logger.info(
                     "Backfilled joint efforts via inverse dynamics for %d/%d frames.",
                     _estimated_effort_count, len(frames),
                 )
+        if _real_effort_count > 0 and _estimated_effort_count > 0:
+            _efforts_source = "mixed"
+        elif _real_effort_count > 0:
+            _efforts_source = "physx"
+        elif _estimated_effort_count > 0:
+            _efforts_source = "estimated_inverse_dynamics"
+        else:
+            _efforts_source = "none"
+
+        # Recompute contact forces after effort backfill when applicable
+        if _estimated_effort_count > 0:
+            for _frame in frames:
+                if _frame.get("efforts_source") != "estimated_inverse_dynamics":
+                    continue
+                _obs = _frame.get("observation", {})
+                _priv = _obs.get("privileged", {})
+                _cf_container = _priv if isinstance(_priv, dict) else _frame
+                _existing_cf = _cf_container.get("contact_forces")
+                if isinstance(_existing_cf, dict) and _existing_cf.get("provenance") not in ("heuristic_grasp_model_v1", "estimated_inverse_dynamics"):
+                    continue
+                _obs_rs = _obs.get("robot_state", {})
+                _efforts = _obs_rs.get("joint_efforts", [])
+                if not isinstance(_efforts, list) or not _efforts:
+                    continue
+                if gripper_indices:
+                    _gripper_efforts = [float(_efforts[idx]) for idx in gripper_indices if idx < len(_efforts)]
+                else:
+                    _gripper_efforts = [float(e) for e in _efforts[arm_dof:]]
+                if arm_indices:
+                    _arm_efforts = [float(_efforts[idx]) for idx in arm_indices if idx < len(_efforts)]
+                else:
+                    _arm_efforts = [float(e) for e in _efforts[:arm_dof]]
+                _grip_force = sum(abs(e) for e in _gripper_efforts)
+                _cf_payload = dict(_existing_cf) if isinstance(_existing_cf, dict) else {}
+                _cf_payload.update({
+                    "grip_force_N": round(_grip_force, 4),
+                    "arm_torques_Nm": [round(e, 4) for e in _arm_efforts],
+                    "gripper_efforts_N": [round(e, 4) for e in _gripper_efforts],
+                    "force_sufficient": _grip_force > 0.5,
+                    "provenance": "estimated_inverse_dynamics",
+                    "confidence": 0.7,
+                })
+                _cf_container["contact_forces"] = _cf_payload
+
+        # Refresh missing-effort count after backfill
+        _effort_missing_count = 0
+        for _frame in frames:
+            _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+            _eff = _obs_rs.get("joint_efforts", [])
+            if not isinstance(_eff, list) or len(_eff) == 0 or not any(abs(e) > 1e-6 for e in _eff):
+                _effort_missing_count += 1
 
         # Store initial/final object poses on first/last frame for success verification
         if frames:
@@ -8760,7 +8871,9 @@ class GenieSimLocalFramework:
             "real_velocity_count": _real_velocity_count,
             "real_effort_count": _real_effort_count,
             "efforts_source": _efforts_source,
-            "contact_force_cache": _contact_force_cache,
+            "estimated_effort_count": _estimated_effort_count,
+            "effort_missing_count": _effort_missing_count,
+            "contact_report_count": _contact_report_count,
             "object_property_provenance": _object_property_provenance,
             "missing_phase_frames": _missing_phase_frames,
             "ee_static_fallback_used": _ee_static_fallback_used,
@@ -8777,6 +8890,7 @@ class GenieSimLocalFramework:
         errors: List[str] = []
         warnings: List[str] = []
         invalid_frames: set[int] = set()
+        _validate_camera_shape = os.getenv("GENIESIM_VALIDATE_CAMERA_SHAPE", "0") == "1"
 
         required_cameras: List[str] = []
         for key in ("required_cameras", "required_camera_ids", "camera_ids"):
@@ -8868,6 +8982,16 @@ class GenieSimLocalFramework:
                     continue
                 width = int(camera_data.get("width") or 0)
                 height = int(camera_data.get("height") or 0)
+                rgb_encoding = (
+                    camera_data.get("rgb_encoding")
+                    or camera_data.get("encoding")
+                    or ""
+                )
+                depth_encoding = (
+                    camera_data.get("depth_encoding")
+                    or camera_data.get("encoding")
+                    or ""
+                )
                 if width <= 0 or height <= 0:
                     frame_errors.append(
                         f"Frame {idx} camera '{camera_id}' has invalid dimensions ({width}x{height})."
@@ -8884,15 +9008,37 @@ class GenieSimLocalFramework:
                             frame_errors.append(
                                 f"Frame {idx} camera '{camera_id}' rgb npy file not found: {rgb}."
                             )
+                        elif _validate_camera_shape and _npy_ref and _npy_ref.exists():
+                            try:
+                                _arr = np.load(_npy_ref)
+                                if _arr.ndim < 2:
+                                    frame_errors.append(
+                                        f"Frame {idx} camera '{camera_id}' rgb npy invalid shape {_arr.shape}."
+                                    )
+                                elif height > 0 and width > 0:
+                                    if _arr.shape[0] != height or _arr.shape[1] != width:
+                                        frame_errors.append(
+                                            f"Frame {idx} camera '{camera_id}' rgb npy shape {_arr.shape} "
+                                            f"does not match ({height}x{width})."
+                                        )
+                            except Exception as _npy_err:
+                                frame_errors.append(
+                                    f"Frame {idx} camera '{camera_id}' rgb npy load failed: {_npy_err}."
+                                )
                     elif isinstance(rgb, str):
                         # Base64-encoded image data — validate by expected byte count
-                        import base64 as _b64mod
                         try:
-                            _raw = _b64mod.b64decode(rgb)
-                            if width > 0 and height > 0 and len(_raw) < width * height * 3:
+                            _raw = base64.b64decode(rgb)
+                            _expected = expected_byte_count(
+                                rgb_encoding,
+                                width=width,
+                                height=height,
+                                kind="rgb",
+                            )
+                            if _expected is not None and len(_raw) < _expected:
                                 frame_errors.append(
                                     f"Frame {idx} camera '{camera_id}' rgb base64 decoded to "
-                                    f"{len(_raw)} bytes, expected >= {width * height * 3} for {width}x{height}."
+                                    f"{len(_raw)} bytes, expected >= {_expected} for {width}x{height}."
                                 )
                         except Exception as _b64err:
                             frame_errors.append(
@@ -8920,15 +9066,37 @@ class GenieSimLocalFramework:
                             frame_errors.append(
                                 f"Frame {idx} camera '{camera_id}' depth npy file not found: {depth}."
                             )
+                        elif _validate_camera_shape and _npy_ref and _npy_ref.exists():
+                            try:
+                                _arr = np.load(_npy_ref)
+                                if _arr.ndim < 2:
+                                    frame_errors.append(
+                                        f"Frame {idx} camera '{camera_id}' depth npy invalid shape {_arr.shape}."
+                                    )
+                                elif height > 0 and width > 0:
+                                    if _arr.shape[0] != height or _arr.shape[1] != width:
+                                        frame_errors.append(
+                                            f"Frame {idx} camera '{camera_id}' depth npy shape {_arr.shape} "
+                                            f"does not match ({height}x{width})."
+                                        )
+                            except Exception as _npy_err:
+                                frame_errors.append(
+                                    f"Frame {idx} camera '{camera_id}' depth npy load failed: {_npy_err}."
+                                )
                     elif isinstance(depth, str):
                         # Base64-encoded depth data — validate by expected byte count
-                        import base64 as _b64mod
                         try:
-                            _raw = _b64mod.b64decode(depth)
-                            if width > 0 and height > 0 and len(_raw) < width * height * 2:
+                            _raw = base64.b64decode(depth)
+                            _expected = expected_byte_count(
+                                depth_encoding,
+                                width=width,
+                                height=height,
+                                kind="depth",
+                            )
+                            if _expected is not None and len(_raw) < _expected:
                                 frame_errors.append(
                                     f"Frame {idx} camera '{camera_id}' depth base64 decoded to "
-                                    f"{len(_raw)} bytes, expected >= {width * height * 2} for {width}x{height}."
+                                    f"{len(_raw)} bytes, expected >= {_expected} for {width}x{height}."
                                 )
                         except Exception as _b64err:
                             frame_errors.append(
@@ -9028,6 +9196,7 @@ class GenieSimLocalFramework:
         _cam_map = getattr(self._client, "_camera_prim_map", {})
         if _cam_map:
             _camera_ids_to_try = [cid for cid in _camera_ids_to_try if cid in _cam_map]
+        _allow_base64 = os.getenv("GENIESIM_CAMERA_ALLOW_BASE64", "0") == "1"
         for camera_id in _camera_ids_to_try:
             try:
                 camera_data = None
@@ -9041,34 +9210,87 @@ class GenieSimLocalFramework:
                 if camera_data is not None:
                     # Save camera data as separate .npy files to keep JSON small.
                     # Store file references in JSON instead of inline base64.
-                    _sanitized = {}
+                    _sanitized: Dict[str, Any] = {}
                     _frames_dir = getattr(self, "_current_frames_dir", None)
                     _frame_idx = getattr(self, "_current_frame_idx", 0)
-                    for _k, _v in camera_data.items():
-                        if isinstance(_v, (bytes, bytearray)) and _v:
-                            if _frames_dir is not None:
-                                _npy_name = f"{camera_id}_{_k}_{_frame_idx:03d}.npy"
-                                _npy_path = _frames_dir / _npy_name
-                                try:
-                                    _width = camera_data.get("width", 0)
-                                    _height = camera_data.get("height", 0)
-                                    if _k == "rgb" and _width > 0 and _height > 0:
-                                        _arr = np.frombuffer(_v, dtype=np.uint8).reshape(_height, _width, -1)
-                                    elif _k == "depth" and _width > 0 and _height > 0:
-                                        _arr = np.frombuffer(_v, dtype=np.float32).reshape(_height, _width)
-                                    else:
-                                        _arr = np.frombuffer(_v, dtype=np.uint8)
-                                    np.save(_npy_path, _arr)
-                                    _sanitized[_k] = str(_npy_path.relative_to(_frames_dir.parent))
-                                except Exception as _npy_err:
-                                    logger.warning("Failed to save camera %s/%s as npy: %s", camera_id, _k, _npy_err)
-                                    import base64
-                                    _sanitized[_k] = base64.b64encode(_v).decode("ascii")
-                            else:
-                                import base64
-                                _sanitized[_k] = base64.b64encode(_v).decode("ascii")
+                    _width = int(camera_data.get("width") or 0)
+                    _height = int(camera_data.get("height") or 0)
+                    _rgb_encoding = camera_data.get("rgb_encoding") or camera_data.get("encoding") or ""
+                    _depth_encoding = camera_data.get("depth_encoding") or camera_data.get("encoding") or ""
+
+                    def _save_array(_arr: np.ndarray, _key: str) -> Optional[str]:
+                        if _frames_dir is None:
+                            return None
+                        _npy_name = f"{camera_id}_{_key}_{_frame_idx:03d}.npy"
+                        _npy_path = _frames_dir / _npy_name
+                        np.save(_npy_path, _arr)
+                        return str(_npy_path.relative_to(_frames_dir.parent))
+
+                    # Preserve metadata
+                    for _meta_key in ("camera_id", "width", "height", "timestamp", "encoding", "rgb_encoding", "depth_encoding"):
+                        if _meta_key in camera_data:
+                            _sanitized[_meta_key] = camera_data[_meta_key]
+                    _sanitized["width"] = _width
+                    _sanitized["height"] = _height
+                    if _rgb_encoding:
+                        _sanitized["rgb_encoding"] = _rgb_encoding
+                    if _depth_encoding:
+                        _sanitized["depth_encoding"] = _depth_encoding
+
+                    for _key in ("rgb", "depth"):
+                        _val = camera_data.get(_key)
+                        if _val is None:
+                            _sanitized[_key] = None
+                            continue
+                        _enc = _rgb_encoding if _key == "rgb" else _depth_encoding
+                        _arr = None
+                        if isinstance(_val, np.ndarray):
+                            _arr = _val
+                        elif isinstance(_val, list):
+                            try:
+                                _arr = np.array(_val)
+                            except Exception:
+                                _arr = None
+                        elif isinstance(_val, (bytes, bytearray)):
+                            _arr = decode_camera_bytes(
+                                bytes(_val),
+                                width=_width,
+                                height=_height,
+                                encoding=_enc,
+                                kind=_key,
+                            )
+                        elif isinstance(_val, str) and _val.endswith(".npy"):
+                            _sanitized[_key] = _val
+                            continue
+                        if _arr is not None and isinstance(_arr, np.ndarray):
+                            try:
+                                _ref = _save_array(_arr, _key)
+                                if _ref is not None:
+                                    _sanitized[_key] = _ref
+                                elif _allow_base64 and isinstance(_val, (bytes, bytearray)):
+                                    _sanitized[_key] = base64.b64encode(bytes(_val)).decode("ascii")
+                                else:
+                                    _sanitized[_key] = None
+                            except Exception as _npy_err:
+                                logger.warning(
+                                    "Failed to save camera %s/%s as npy: %s", camera_id, _key, _npy_err
+                                )
+                                if _allow_base64 and isinstance(_val, (bytes, bytearray)):
+                                    _sanitized[_key] = base64.b64encode(bytes(_val)).decode("ascii")
+                                else:
+                                    _sanitized[_key] = None
                         else:
-                            _sanitized[_k] = _v
+                            if _allow_base64 and isinstance(_val, (bytes, bytearray)):
+                                _sanitized[_key] = base64.b64encode(bytes(_val)).decode("ascii")
+                            else:
+                                if isinstance(_val, (bytes, bytearray)):
+                                    logger.warning(
+                                        "Camera %s/%s decode failed; storing null (set GENIESIM_CAMERA_ALLOW_BASE64=1 to fallback).",
+                                        camera_id,
+                                        _key,
+                                    )
+                                _sanitized[_key] = None
+
                     obs.setdefault("camera_frames", {})[camera_id] = _sanitized
                     _any_camera = True
                 else:
@@ -11894,49 +12116,6 @@ Scene objects: {scene_summary}
         # Set up video directories for camera data export
         videos_dir = lerobot_root / "videos" / "chunk-000"
 
-        def _load_camera_frame(cam_data: Dict[str, Any], key: str, ep_dir: Path) -> Optional[np.ndarray]:
-            """Load a camera frame from .npy file reference or base64 string."""
-            val = cam_data.get(key)
-            if val is None:
-                return None
-            width = int(cam_data.get("width") or 0)
-            height = int(cam_data.get("height") or 0)
-            if isinstance(val, str) and val.endswith(".npy"):
-                npy_path = ep_dir / val
-                if npy_path.exists():
-                    return np.load(npy_path)
-                return None
-            if isinstance(val, str):
-                try:
-                    import base64 as _b64
-                    raw = _b64.b64decode(val)
-                    if key == "rgb" and width > 0 and height > 0:
-                        return np.frombuffer(raw, dtype=np.uint8).reshape(height, width, -1)
-                    elif key == "depth" and width > 0 and height > 0:
-                        return np.frombuffer(raw, dtype=np.float32).reshape(height, width)
-                except Exception:
-                    pass
-            return None
-
-        def _strip_camera_data(obs: Any) -> Any:
-            """Remove bulky camera data from observation for parquet storage."""
-            if not isinstance(obs, dict):
-                return obs
-            obs = dict(obs)
-            cf = obs.get("camera_frames")
-            if isinstance(cf, dict):
-                stripped_cf = {}
-                for cam_id, cam_data in cf.items():
-                    if isinstance(cam_data, dict):
-                        stripped_cf[cam_id] = {
-                            k: v for k, v in cam_data.items()
-                            if k not in ("rgb", "depth")
-                        }
-                    else:
-                        stripped_cf[cam_id] = cam_data
-                obs["camera_frames"] = stripped_cf
-            return obs
-
         for ep_file in episode_files:
             try:
                 with open(ep_file) as f:
@@ -11961,7 +12140,7 @@ Scene objects: {scene_summary}
                     for cam_id, cam_data in cam_frames.items():
                         if not isinstance(cam_data, dict):
                             continue
-                        rgb_arr = _load_camera_frame(cam_data, "rgb", ep_dir)
+                        rgb_arr = load_camera_frame(cam_data, "rgb", ep_dir=ep_dir)
                         if rgb_arr is not None:
                             camera_rgb_frames.setdefault(cam_id, []).append(rgb_arr)
 
@@ -12021,7 +12200,7 @@ Scene objects: {scene_summary}
                     columns["frame_index"].append(idx)
                     columns["timestamp"].append(timestamp)
                     # Strip camera pixel data from observation for lightweight parquet
-                    obs_stripped = _strip_camera_data(frame.get("observation"))
+                    obs_stripped = strip_camera_data(frame.get("observation"))
                     columns["observation"].append(
                         json.dumps(_to_json_serializable(obs_stripped))
                     )

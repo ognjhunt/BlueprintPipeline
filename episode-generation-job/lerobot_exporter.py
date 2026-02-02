@@ -95,6 +95,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 from tools.config.env import parse_bool_env
+from tools.camera_io import coerce_rgb_frame
 from tools.config.production_mode import resolve_production_mode
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 
@@ -3558,12 +3559,18 @@ class LeRobotExporter:
             for frame_idx, frame in enumerate(sensor_data.frames):
                 if hasattr(frame, 'rgb_images') and camera_id in frame.rgb_images:
                     expected_frames += 1
-                    rgb_frame = frame.rgb_images[camera_id]
+                    rgb_frame = coerce_rgb_frame(frame.rgb_images[camera_id])
 
                     # Validate RGB frame
-                    frame_errors = self._validate_rgb_frame(
-                        rgb_frame, episode.episode_index, camera_id, frame_idx
-                    )
+                    if rgb_frame is None:
+                        frame_errors = [
+                            f"RGB frame decode failed for episode {episode.episode_index} "
+                            f"(camera={camera_id}, frame={frame_idx})."
+                        ]
+                    else:
+                        frame_errors = self._validate_rgb_frame(
+                            rgb_frame, episode.episode_index, camera_id, frame_idx
+                        )
                     if frame_errors:
                         validation_errors.extend(frame_errors)
                         dropped_frames += 1

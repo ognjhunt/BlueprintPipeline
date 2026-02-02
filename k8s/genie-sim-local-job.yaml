@@ -109,6 +109,10 @@ spec:
                   name: genie-sim-local-overrides
                   key: FIREBASE_SERVICE_ACCOUNT_PATH
                   optional: true
+            - name: ENABLE_VLM_QUALITY_AUDIT
+              value: "1"
+            - name: ENABLE_SIM2REAL_ASSESSMENT
+              value: "1"
             - name: FIREBASE_UPLOAD_PREFIX
               valueFrom:
                 configMapKeyRef:

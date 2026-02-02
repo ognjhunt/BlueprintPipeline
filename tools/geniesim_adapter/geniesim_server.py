@@ -29,6 +29,7 @@ from tools.geniesim_adapter.geniesim_grpc_pb2 import (
     ExitRsp,
     ContactReportReq,
     ContactReportRsp,
+    ContactPoint,
     GetCheckerStatusReq,
     GetCheckerStatusRsp,
     GetObservationReq,
@@ -247,6 +248,21 @@ class GenieSimLocalServicer(SimObservationServiceServicer):
 
     def get_contact_report(self, req: ContactReportReq, context) -> ContactReportRsp:
         del req
+        mock_force = float(os.getenv("GENIESIM_MOCK_CONTACT_FORCE_N", "0.0"))
+        if mock_force > 0.0:
+            contact = ContactPoint(
+                body_a="mock/gripper_left",
+                body_b="mock/object",
+                normal_force=mock_force,
+                penetration_depth=0.001,
+                position=[0.0, 0.0, 0.0],
+                normal=[0.0, 0.0, 1.0],
+            )
+            return ContactReportRsp(
+                contacts=[contact],
+                total_normal_force=mock_force,
+                max_penetration_depth=0.001,
+            )
         return ContactReportRsp(total_normal_force=0.0, max_penetration_depth=0.0)
 
 
@@ -270,7 +286,12 @@ class MockJointControlServicer(JointControlServiceServicer):
         return GetIKStatusRsp(isSuccess=True)
 
     def get_ee_pose(self, request, context):
-        return GetEEPoseRsp()
+        del request
+        ee_pose = SE3RpyPose(
+            position=Vec3(x=0.4, y=0.0, z=0.6),
+            rpy=rpy_pb2.Rpy(rw=1.0, rx=0.0, ry=0.0, rz=0.0),
+        )
+        return GetEEPoseRsp(prim_path="mock/ee_link", ee_pose=ee_pose)
 
 
 def _build_mock_object_pose_response() -> bytes:

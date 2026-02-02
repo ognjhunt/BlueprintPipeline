@@ -138,6 +138,10 @@ spec:
               value: "${OTEL_EXPORTER_OTLP_HEADERS}"
             - name: OTEL_SERVICE_NAME
               value: "genie-sim-gpu-job"
+            - name: ENABLE_VLM_QUALITY_AUDIT
+              value: "1"
+            - name: ENABLE_SIM2REAL_ASSESSMENT
+              value: "1"
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "service.namespace=blueprint,k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.job.name=${JOB_NAME},deployment.environment=production"
 
