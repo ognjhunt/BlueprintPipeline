@@ -6879,6 +6879,104 @@ class GenieSimLocalFramework:
 
             # 3. Pick/place must show gripper open→close→open transition
             _task_type = task.get("task_type", "")
+            _task_type_normalized = str(_task_type).lower()
+            if "interact" in _task_type_normalized and frames:
+                def _collect_articulation_vectors(frame: Dict[str, Any]) -> Dict[str, List[float]]:
+                    vectors: Dict[str, List[float]] = {}
+
+                    def _ingest_object_states(obj_states: Any) -> None:
+                        if not isinstance(obj_states, dict):
+                            return
+                        for _oid, _state in obj_states.items():
+                            if not isinstance(_state, dict):
+                                continue
+                            _art = _state.get("articulation_state")
+                            if not isinstance(_art, dict):
+                                continue
+                            _vals: List[float] = []
+                            for _key in (
+                                "joint_positions",
+                                "dof_positions",
+                                "joint_velocities",
+                                "dof_velocities",
+                            ):
+                                _entry = _art.get(_key)
+                                if isinstance(_entry, (list, tuple)):
+                                    _vals.extend(float(v) for v in _entry)
+                            if _vals:
+                                vectors[str(_oid)] = _vals
+
+                    _obs = frame.get("observation", {})
+                    _priv = _obs.get("privileged", {}) if isinstance(_obs, dict) else {}
+                    _ingest_object_states(_priv.get("object_states"))
+                    _ingest_object_states(_obs.get("object_states"))
+
+                    _scene_state = {}
+                    if isinstance(_obs, dict):
+                        _scene_state = _obs.get("scene_state") or {}
+                    if not _scene_state and isinstance(_priv, dict):
+                        _scene_state = _priv.get("scene_state") or {}
+                    if isinstance(_scene_state, dict):
+                        for _obj in _scene_state.get("objects", []) or []:
+                            if not isinstance(_obj, dict):
+                                continue
+                            _art = _obj.get("articulation_state")
+                            if not isinstance(_art, dict):
+                                continue
+                            _vals: List[float] = []
+                            for _key in (
+                                "joint_positions",
+                                "dof_positions",
+                                "joint_velocities",
+                                "dof_velocities",
+                            ):
+                                _entry = _art.get(_key)
+                                if isinstance(_entry, (list, tuple)):
+                                    _vals.extend(float(v) for v in _entry)
+                            if _vals:
+                                _oid = (
+                                    _obj.get("object_id")
+                                    or _obj.get("id")
+                                    or _obj.get("name")
+                                    or "unknown_object"
+                                )
+                                vectors[str(_oid)] = _vals
+
+                    return vectors
+
+                _articulation_vectors: Dict[str, List[List[float]]] = {}
+                for _frame in frames:
+                    _frame_vectors = _collect_articulation_vectors(_frame)
+                    for _oid, _vec in _frame_vectors.items():
+                        _articulation_vectors.setdefault(_oid, []).append(_vec)
+
+                if not _articulation_vectors:
+                    _validity_errors.append(
+                        f"Task type '{_task_type}' requires articulation_state but none was found."
+                    )
+                else:
+                    _tol = float(os.getenv("ARTICULATION_STATE_TOLERANCE", "1e-4"))
+                    _articulation_changed = False
+                    for _oid, _vecs in _articulation_vectors.items():
+                        if len(_vecs) < 2:
+                            continue
+                        _base = np.array(_vecs[0], dtype=float)
+                        for _vec in _vecs[1:]:
+                            _cur = np.array(_vec, dtype=float)
+                            _min_len = min(_base.shape[0], _cur.shape[0])
+                            if _min_len == 0:
+                                continue
+                            if np.nanmax(np.abs(_cur[:_min_len] - _base[:_min_len])) > _tol:
+                                _articulation_changed = True
+                                break
+                        if _articulation_changed:
+                            break
+
+                    if not _articulation_changed:
+                        _validity_errors.append(
+                            f"Task type '{_task_type}' requires articulation_state change > {_tol} across frames."
+                        )
+
             if _task_type in ("pick_place", "organize", "stack") and frames:
                 _gc_seq = [f.get("gripper_command") for f in frames]
                 _saw_open = False

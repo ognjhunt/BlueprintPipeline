@@ -1208,7 +1208,7 @@ class IsaacSimSensorCapture:
         try:
             # Try to get poses from Isaac Sim
             if self._omni is not None:
-                from pxr import UsdGeom, UsdPhysics
+                from pxr import Usd, UsdGeom, UsdPhysics
                 import isaacsim.core.api.utils.stage as stage_utils
                 from isaacsim.core.api.utils.stage import get_current_stage
 
@@ -1242,6 +1242,11 @@ class IsaacSimSensorCapture:
                                 linear_velocity = [0.0, 0.0, 0.0]
                                 angular_velocity = [0.0, 0.0, 0.0]
                                 _pose_source = "simulation"
+                                articulation_info: Dict[str, Any] = {
+                                    "detected": False,
+                                    "root_path": None,
+                                    "joint_paths": [],
+                                }
 
                                 # Prefer RigidPrim.get_world_pose() for live PhysX state
                                 # (reads current simulation state, not USD time=0)
@@ -1267,6 +1272,29 @@ class IsaacSimSensorCapture:
                                             "falling back to USD xform",
                                             "DEBUG",
                                         )
+
+                                # Detect articulated objects by joints or articulation roots
+                                try:
+                                    articulation_root_path = None
+                                    joint_paths: List[str] = []
+                                    for descendant in Usd.PrimRange(prim):
+                                        if articulation_root_path is None and descendant.HasAPI(
+                                            UsdPhysics.ArticulationRootAPI
+                                        ):
+                                            articulation_root_path = descendant.GetPath().pathString
+                                        if descendant.IsA(UsdPhysics.Joint):
+                                            joint_paths.append(descendant.GetPath().pathString)
+                                    if articulation_root_path is not None or joint_paths:
+                                        articulation_info = {
+                                            "detected": True,
+                                            "root_path": articulation_root_path,
+                                            "joint_paths": joint_paths,
+                                        }
+                                except Exception as exc:
+                                    self.log(
+                                        f"Failed to detect articulation for {obj_id} ({prim_path}): {exc}",
+                                        "DEBUG",
+                                    )
 
                                 # Fallback to USD xform if RigidPrim didn't work
                                 if position is None:
@@ -1312,6 +1340,7 @@ class IsaacSimSensorCapture:
                                     "prim_path": prim_path,
                                     "source": _pose_source,
                                     "meters_per_unit": _meters_per_unit,
+                                    "articulation": articulation_info,
                                 }
                                 sim_query_count += 1
 
@@ -1336,6 +1365,11 @@ class IsaacSimSensorCapture:
                     "linear_velocity": [0.0, 0.0, 0.0],
                     "angular_velocity": [0.0, 0.0, 0.0],
                     "source": "input_fallback",
+                    "articulation": {
+                        "detected": False,
+                        "root_path": None,
+                        "joint_paths": [],
+                    },
                 }
 
         # Log summary
@@ -1360,6 +1394,116 @@ class IsaacSimSensorCapture:
             )
 
         return poses
+
+    def _extract_usd_joint_state(self, joint_prim: Any) -> Dict[str, List[float]]:
+        """Extract available joint DOF values from USD joint prim attributes."""
+        positions: List[float] = []
+        velocities: List[float] = []
+
+        position_attrs = (
+            "physics:position",
+            "physics:angle",
+            "physics:distance",
+            "drive:targetPosition",
+        )
+        velocity_attrs = (
+            "physics:velocity",
+            "physics:angularVelocity",
+            "physics:linearVelocity",
+            "drive:targetVelocity",
+        )
+
+        for attr_name in position_attrs:
+            attr = joint_prim.GetAttribute(attr_name)
+            if attr:
+                value = attr.Get()
+                if value is not None:
+                    if isinstance(value, (list, tuple)):
+                        positions.extend(float(v) for v in value)
+                    else:
+                        positions.append(float(value))
+                    break
+
+        for attr_name in velocity_attrs:
+            attr = joint_prim.GetAttribute(attr_name)
+            if attr:
+                value = attr.Get()
+                if value is not None:
+                    if isinstance(value, (list, tuple)):
+                        velocities.extend(float(v) for v in value)
+                    else:
+                        velocities.append(float(value))
+                    break
+
+        return {"positions": positions, "velocities": velocities}
+
+    def _capture_articulation_state(
+        self,
+        stage: Optional[Any],
+        articulation_info: Optional[Dict[str, Any]],
+        obj_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Capture articulation state (joint positions/velocities) for an object."""
+        if not articulation_info or not articulation_info.get("detected"):
+            return None
+
+        root_path = articulation_info.get("root_path")
+        joint_paths = articulation_info.get("joint_paths", [])
+
+        if self._omni is not None and root_path:
+            try:
+                from isaacsim.core.api.articulations import Articulation
+
+                articulation = Articulation(root_path)
+                if not articulation.initialized:
+                    articulation.initialize()
+
+                joint_pos = articulation.get_joint_positions()
+                joint_vel = articulation.get_joint_velocities()
+                state = {
+                    "joint_positions": [
+                        float(x) for x in (joint_pos if joint_pos is not None else [])
+                    ],
+                    "joint_velocities": [
+                        float(x) for x in (joint_vel if joint_vel is not None else [])
+                    ],
+                    "num_dof": articulation.num_dof if hasattr(articulation, "num_dof") else 0,
+                    "root_path": root_path,
+                    "joint_paths": joint_paths,
+                    "source": "physx_articulation",
+                }
+                if state["joint_positions"] or state["joint_velocities"]:
+                    return state
+            except Exception as exc:
+                self.log(
+                    f"Articulation state query failed for {obj_id} ({root_path}): {exc}",
+                    "DEBUG",
+                )
+
+        if stage is not None and joint_paths:
+            dof_positions: List[float] = []
+            dof_velocities: List[float] = []
+            joint_states: Dict[str, Dict[str, List[float]]] = {}
+            for joint_path in joint_paths:
+                joint_prim = stage.GetPrimAtPath(joint_path)
+                if not joint_prim.IsValid():
+                    continue
+                joint_state = self._extract_usd_joint_state(joint_prim)
+                if joint_state["positions"] or joint_state["velocities"]:
+                    joint_states[joint_path] = joint_state
+                    dof_positions.extend(joint_state["positions"])
+                    dof_velocities.extend(joint_state["velocities"])
+            if dof_positions or dof_velocities:
+                return {
+                    "dof_positions": dof_positions,
+                    "dof_velocities": dof_velocities,
+                    "joint_states": joint_states,
+                    "root_path": root_path,
+                    "joint_paths": joint_paths,
+                    "source": "usd_xform",
+                }
+
+        return None
 
     def _handle_missing_contacts(self, reason: str) -> bool:
         if _is_production_run():
@@ -1489,6 +1633,15 @@ class IsaacSimSensorCapture:
         state["contacts"] = contacts
         state["contacts_available"] = contacts_available
 
+        stage = None
+        if self._omni is not None:
+            try:
+                from isaacsim.core.api.utils.stage import get_current_stage
+
+                stage = get_current_stage()
+            except Exception as e:
+                self.log(f"Failed to get USD stage for articulation state: {e}", "DEBUG")
+
         # Check for active grasps based on contacts
         active_grasps = set()
         gripper_keywords = ["hand", "finger", "gripper", "panda_leftfinger", "panda_rightfinger"]
@@ -1513,6 +1666,12 @@ class IsaacSimSensorCapture:
                 # Use simulation data if available
                 if obj_id in sim_poses:
                     pose_data = sim_poses[obj_id]
+                    articulation_info = pose_data.get("articulation")
+                    articulation_state = self._capture_articulation_state(
+                        stage,
+                        articulation_info,
+                        obj_id,
+                    )
                     state["object_states"][obj_id] = {
                         "position": pose_data.get("position", [0, 0, 0]),
                         "rotation": pose_data.get("rotation_quat", [1, 0, 0, 0]),
@@ -1524,8 +1683,21 @@ class IsaacSimSensorCapture:
                             obj_id.lower() in c.get("body_b", "").lower()
                             for c in state["contacts"]
                         ),
+                        "articulation_state": articulation_state,
                         "data_source": pose_data.get("source", "unknown"),
                     }
+                    if articulation_state is None:
+                        state["object_states"][obj_id]["articulation_state"] = {
+                            "source": (
+                                "missing"
+                                if articulation_info and articulation_info.get("detected")
+                                else "not_articulated"
+                            ),
+                            "joint_positions": [],
+                            "joint_velocities": [],
+                            "dof_positions": [],
+                            "dof_velocities": [],
+                        }
                 else:
                     # Fallback to input data
                     state["object_states"][obj_id] = {
@@ -1535,6 +1707,13 @@ class IsaacSimSensorCapture:
                         "angular_velocity": [0.0, 0.0, 0.0],
                         "is_grasped": False,
                         "in_contact": False,
+                        "articulation_state": {
+                            "source": "input_fallback",
+                            "joint_positions": [],
+                            "joint_velocities": [],
+                            "dof_positions": [],
+                            "dof_velocities": [],
+                        },
                         "data_source": "input_fallback",
                     }
 
