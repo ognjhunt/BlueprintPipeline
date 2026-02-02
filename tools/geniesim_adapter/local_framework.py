@@ -74,6 +74,7 @@ Environment Variables:
     GENIESIM_CLEANUP_TMP: Remove Genie Sim temp directories after a run (default: 1 for local, 0 in production)
     GENIESIM_VALIDATE_FRAMES: Validate recorded frames before saving (default: 0)
     GENIESIM_FAIL_ON_FRAME_VALIDATION: Fail episode when frame validation errors exist (default: 0)
+    GENIESIM_MAX_INIT_RESTARTS: Max init-only restarts before giving up (default: GENIESIM_MAX_RESTARTS)
 """
 
 import base64
@@ -1352,7 +1353,7 @@ class GenieSimGRPCClient:
             self.port,
         )
 
-    def _attempt_server_restart(self) -> bool:
+    def _attempt_server_restart(self, count_toward_budget: bool = True) -> bool:
         """Attempt to restart the Docker container running the Genie Sim server.
 
         Returns True if restart succeeded and gRPC became available again.
@@ -1362,14 +1363,22 @@ class GenieSimGRPCClient:
         import subprocess as _sp
 
         max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "3"))
+        max_init_restarts = int(os.environ.get("GENIESIM_MAX_INIT_RESTARTS", str(max_restarts)))
         cooldown_s = int(os.environ.get("GENIESIM_RESTART_COOLDOWN_S", "30"))
 
         if not hasattr(self, "_restart_count"):
             self._restart_count = 0
             self._last_restart_time = 0.0
+            self._init_restart_count = 0
 
-        if self._restart_count >= max_restarts:
+        if count_toward_budget and self._restart_count >= max_restarts:
             logger.warning("[RESTART] Max client-side restarts (%d) reached — not restarting", max_restarts)
+            return False
+        if not count_toward_budget and self._init_restart_count >= max_init_restarts:
+            logger.warning(
+                "[RESTART] Max init-only restarts (%d) reached — not restarting",
+                max_init_restarts,
+            )
             return False
 
         now = _time.time()
@@ -1382,7 +1391,14 @@ class GenieSimGRPCClient:
             "GENIESIM_RESTART_CMD",
             "sudo docker restart geniesim-server",
         )
-        logger.warning("[RESTART] Attempting server restart (#%d): %s", self._restart_count + 1, restart_cmd)
+        if count_toward_budget:
+            restart_label = f"#{self._restart_count + 1}"
+        else:
+            restart_label = f"init-free #{self._init_restart_count + 1}"
+            logger.warning(
+                "[RESTART] Init restart is free (not counted toward GENIESIM_MAX_RESTARTS)"
+            )
+        logger.warning("[RESTART] Attempting server restart (%s): %s", restart_label, restart_cmd)
 
         try:
             result = _sp.run(restart_cmd, shell=True, capture_output=True, text=True, timeout=120)
@@ -1394,7 +1410,10 @@ class GenieSimGRPCClient:
             logger.error("[RESTART] Restart command exception: %s", exc)
             return False
 
-        self._restart_count += 1
+        if count_toward_budget:
+            self._restart_count += 1
+        else:
+            self._init_restart_count += 1
         self._last_restart_time = _time.time()
 
         # Reset client-side concurrency state so we don't reuse a stale lock or
@@ -4667,7 +4686,10 @@ class GenieSimLocalFramework:
             "Joint health still failing after retry — attempting server restart",
             "WARNING",
         )
-        if hasattr(self._client, "_attempt_server_restart") and self._client._attempt_server_restart():
+        if (
+            hasattr(self._client, "_attempt_server_restart")
+            and self._client._attempt_server_restart(count_toward_budget=False)
+        ):
             _run_init_sequence("post-restart")
             _joint_health_ok("Post-restart check")
         else:
