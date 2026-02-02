@@ -2454,13 +2454,20 @@ class GenieSimGRPCClient:
         # Requires patched server (see deployment/patches/patch_camera_handler.py).
         # On unpatched servers, get_camera_data returns None and we fall back gracefully.
         camera_images = []
+        _camera_debug = os.environ.get("GENIESIM_CAMERA_DEBUG", "0") == "1"
         if self._channel is not None:
             _cam_prims = list(self._camera_prim_map.values()) if self._camera_prim_map else []
             if not _cam_prims:
                 _cam_prims = self._default_camera_ids  # logical names used as-is
+            if _camera_debug and not getattr(self, "_cam_debug_logged", False):
+                logger.info("[CAM_DEBUG] camera_prim_map=%s, cam_prims=%s", self._camera_prim_map, _cam_prims)
+                self._cam_debug_logged = True
             for _cam_prim in _cam_prims:
                 try:
                     cam_data = self._get_camera_data_raw(_cam_prim)
+                    if _camera_debug:
+                        _has_rgb = cam_data is not None and cam_data.get("rgb") not in (None, b"")
+                        logger.info("[CAM_DEBUG] %s -> data=%s, has_rgb=%s", _cam_prim, cam_data is not None, _has_rgb)
                     if cam_data is not None:
                         # Find logical name for this prim
                         _cam_name = _cam_prim
@@ -2643,7 +2650,16 @@ class GenieSimGRPCClient:
             raw_response = call(payload, timeout=self.timeout)
             return self._parse_camera_data_response(raw_response)
         except Exception as exc:
-            logger.debug(f"[OBS] raw get_camera_data failed: {exc}")
+            if not getattr(self, "_camera_grpc_error_logged", False):
+                logger.warning(
+                    "[OBS] raw get_camera_data failed for %s: %s. "
+                    "Ensure the camera prim exists in the USD stage and "
+                    "the CameraService patch is applied.",
+                    cam_prim_path, exc,
+                )
+                self._camera_grpc_error_logged = True
+            else:
+                logger.debug(f"[OBS] raw get_camera_data failed: {exc}")
             return None
 
     @staticmethod
@@ -3640,7 +3656,11 @@ class GenieSimGRPCClient:
         camera_observation = obs.get("camera_observation") or {}
         images = camera_observation.get("images") if camera_observation else None
 
-        if not images and not camera_observation:
+        if not images:
+            # No cached images — fetch a fresh observation from the server.
+            # This handles the case where _latest_observation has an empty
+            # camera_observation ({"images": []}) from a prior call that
+            # failed to capture images.
             obs_lock_timeout = float(os.getenv("OBS_LOCK_TIMEOUT_S", "1.0"))
             obs_result = self.get_observation(lock_timeout=obs_lock_timeout)
             if not obs_result.available or not obs_result.success:
@@ -3649,10 +3669,6 @@ class GenieSimGRPCClient:
             obs = obs_result.payload or {}
             camera_observation = obs.get("camera_observation") or {}
             images = camera_observation.get("images") if camera_observation else None
-
-        if camera_observation and not images:
-            logger.warning("Camera observation present but contains no images.")
-            return None
 
         if not images:
             return None
@@ -8673,9 +8689,16 @@ class GenieSimLocalFramework:
         episode_id: str,
         task: Dict[str, Any],
     ) -> None:
-        setattr(self._client, "_latest_observation", obs)
+        # Clear cached observation so get_camera_data() fetches fresh data
+        # from the server instead of reusing a stale observation with empty images.
+        setattr(self._client, "_latest_observation", {})
         _any_camera = False
-        for camera_id in ["wrist", "overhead", "side"]:
+        # Only request cameras that have valid prim mappings
+        _camera_ids_to_try = ["wrist", "overhead", "side"]
+        _cam_map = getattr(self._client, "_camera_prim_map", {})
+        if _cam_map:
+            _camera_ids_to_try = [cid for cid in _camera_ids_to_try if cid in _cam_map]
+        for camera_id in _camera_ids_to_try:
             try:
                 camera_data = self._client.get_camera_data(camera_id)
                 if camera_data is not None:
