@@ -6437,6 +6437,10 @@ class GenieSimLocalFramework:
             task_success = self._extract_task_success(frames, task)
             collision_free = planning_report.get("collision_free")
             collision_source = planning_report.get("collision_source")
+            joint_utilization = self._compute_joint_utilization(frames)
+            joint_utilization["threshold"] = float(
+                os.getenv("GENIESIM_JOINT_UTILIZATION_THRESHOLD", "0.6")
+            )
 
             # LLM-based episode enrichment: task metadata and success evaluation
             llm_metadata = self._enrich_episode_with_llm(
@@ -6896,6 +6900,7 @@ class GenieSimLocalFramework:
                     "frames": frames,
                     "frame_count": len(frames),
                     "quality_score": quality_score,
+                    "joint_utilization": joint_utilization,
                     "validation_passed": validation_passed,
                     "task_success": task_success,
                     "task_success_reasoning": llm_metadata.get("task_success_reasoning"),
@@ -6921,6 +6926,7 @@ class GenieSimLocalFramework:
             result["success"] = True
             result["frame_count"] = len(frames)
             result["quality_score"] = quality_score
+            result["joint_utilization"] = joint_utilization
             result["validation_passed"] = validation_passed
             result["task_success"] = task_success
             result["collision_free"] = collision_free
@@ -8385,6 +8391,7 @@ class GenieSimLocalFramework:
                 obstacles=obstacles,
             )
             if trajectory is not None:
+                trajectory = self._apply_joint_usage_regularizer(trajectory)
                 self.log(f"  ✅ cuRobo trajectory: {len(trajectory)} waypoints")
                 return trajectory
             else:
@@ -8418,11 +8425,14 @@ class GenieSimLocalFramework:
                 "(not collision-aware).",
                 "WARNING",
             )
-            return self._generate_linear_fallback_trajectory(
+            linear_trajectory = self._generate_linear_fallback_trajectory(
                 task=task,
                 initial_obs=initial_obs,
                 obstacles=obstacles,
             )
+            if linear_trajectory is not None:
+                linear_trajectory = self._apply_joint_usage_regularizer(linear_trajectory)
+            return linear_trajectory
 
         self.log(
             "  ❌ IK fallback failed; set GENIESIM_ALLOW_IK_FAILURE_FALLBACK=1 to allow "
@@ -8502,6 +8512,70 @@ class GenieSimLocalFramework:
             updated_waypoint["joint_positions"] = clamped.tolist()
             validated_trajectory.append(updated_waypoint)
         return validated_trajectory, clamped_waypoints
+
+    def _apply_joint_usage_regularizer(
+        self,
+        trajectory: List[Dict[str, Any]],
+        target_dof: int = 7,
+    ) -> List[Dict[str, Any]]:
+        if not trajectory:
+            return trajectory
+
+        epsilon = float(os.getenv("GENIESIM_JOINT_USAGE_EPS", "0.02"))
+        noise_scale = float(os.getenv("GENIESIM_JOINT_USAGE_NOISE", "0.02"))
+        if epsilon <= 0 or noise_scale <= 0:
+            return trajectory
+
+        joint_rows: List[np.ndarray] = []
+        for waypoint in trajectory:
+            joint_positions = waypoint.get("joint_positions")
+            if joint_positions is None:
+                continue
+            joint_rows.append(np.array(joint_positions, dtype=float))
+        if len(joint_rows) < 2:
+            return trajectory
+
+        joint_matrix = np.vstack(joint_rows)
+        dof = min(target_dof, joint_matrix.shape[1])
+        if dof <= 0:
+            return trajectory
+
+        joint_ranges = np.ptp(joint_matrix[:, :dof], axis=0)
+        underused_mask = joint_ranges < epsilon
+        if not np.any(underused_mask):
+            return trajectory
+
+        robot_config = _resolve_robot_config(self.config.robot_type)
+        phases = np.linspace(0.0, np.pi, len(trajectory))
+        adjustments = np.zeros((len(trajectory), dof))
+
+        for joint_idx, underused in enumerate(underused_mask):
+            if not underused:
+                continue
+            scale = max(0.0, (epsilon - joint_ranges[joint_idx]) / epsilon)
+            amplitude = noise_scale * scale
+            if amplitude <= 0:
+                continue
+            offsets = amplitude * np.sin(phases + joint_idx * 0.7)
+            adjustments[:, joint_idx] = offsets
+
+        for idx, waypoint in enumerate(trajectory):
+            joint_positions = waypoint.get("joint_positions")
+            if joint_positions is None:
+                continue
+            joints = np.array(joint_positions, dtype=float)
+            if joints.shape[0] < dof:
+                continue
+            joints[:dof] = joints[:dof] + adjustments[idx]
+            if robot_config is not None:
+                joints = self._clamp_joints_to_limits(joints, robot_config)
+            waypoint["joint_positions"] = joints.tolist()
+
+        self.log(
+            f"  ℹ️  Applied joint-usage regularizer to {int(np.sum(underused_mask))} underused joints.",
+            "DEBUG",
+        )
+        return trajectory
 
     def _resolve_workspace_bounds(
         self,
@@ -9080,6 +9154,7 @@ Scene objects: {scene_summary}
             current_time += duration
             current_joints = target_joints
 
+        trajectory = self._apply_joint_usage_regularizer(trajectory)
         return trajectory
 
     def _generate_linear_fallback_trajectory(
@@ -9960,6 +10035,46 @@ Scene objects: {scene_summary}
 
         return result
 
+    def _compute_joint_utilization(
+        self,
+        frames: List[Dict[str, Any]],
+        joint_count: int = 7,
+    ) -> Dict[str, Any]:
+        epsilon = float(os.getenv("GENIESIM_JOINT_UTILIZATION_EPS", "0.02"))
+        positions: List[np.ndarray] = []
+        for frame in frames:
+            obs = frame.get("observation") or {}
+            rs = obs.get("robot_state") or {}
+            jp = rs.get("joint_positions")
+            if isinstance(jp, (list, tuple, np.ndarray)) and len(jp) >= joint_count:
+                positions.append(np.array(jp[:joint_count], dtype=float))
+            elif isinstance(frame.get("action_abs"), (list, tuple, np.ndarray)):
+                action_abs = frame.get("action_abs") or []
+                if len(action_abs) >= joint_count:
+                    positions.append(np.array(action_abs[:joint_count], dtype=float))
+
+        if len(positions) < 2 or joint_count <= 0:
+            return {
+                "fraction": 0.0,
+                "utilized_joint_count": 0,
+                "joint_count": joint_count,
+                "epsilon": epsilon,
+                "per_joint_range": [],
+            }
+
+        joint_matrix = np.vstack(positions)
+        joint_ranges = np.ptp(joint_matrix, axis=0)
+        utilized = joint_ranges > epsilon
+        utilized_count = int(np.sum(utilized))
+        fraction = utilized_count / joint_count if joint_count > 0 else 0.0
+        return {
+            "fraction": float(fraction),
+            "utilized_joint_count": utilized_count,
+            "joint_count": joint_count,
+            "epsilon": epsilon,
+            "per_joint_range": [float(v) for v in joint_ranges.tolist()],
+        }
+
     def _calculate_quality_score(
         self,
         frames: List[Dict[str, Any]],
@@ -10320,6 +10435,20 @@ Scene objects: {scene_summary}
                     _min_dist, _initial_dist,
                 )
 
+        joint_utilization = self._compute_joint_utilization(frames)
+        utilization_threshold = float(os.getenv("GENIESIM_JOINT_UTILIZATION_THRESHOLD", "0.6"))
+        utilization_penalty_scale = float(os.getenv("GENIESIM_JOINT_UTILIZATION_PENALTY", "0.15"))
+        utilization_penalty = 0.0
+        if utilization_threshold > 0 and joint_utilization["fraction"] < utilization_threshold:
+            utilization_gap = utilization_threshold - joint_utilization["fraction"]
+            utilization_penalty = utilization_penalty_scale * (utilization_gap / utilization_threshold)
+            logger.warning(
+                "Quality penalty: joint utilization %.2f below threshold %.2f (penalty=%.3f).",
+                joint_utilization["fraction"],
+                utilization_threshold,
+                utilization_penalty,
+            )
+
         # Base score uses original weights for backward compatibility;
         # smoothness and collision are additive bonuses (up to +0.05 each).
         weighted_score = (
@@ -10337,6 +10466,7 @@ Scene objects: {scene_summary}
         # Physics plausibility penalties (Improvement I)
         weighted_score -= scene_state_penalty
         weighted_score -= ee_approach_penalty
+        weighted_score -= utilization_penalty
 
         # --- Fix 13: Stricter quality gates ---
         _gate_penalty = 0.0
