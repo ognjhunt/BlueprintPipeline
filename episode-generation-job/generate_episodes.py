@@ -1509,6 +1509,59 @@ class EpisodeGenerator:
 
         return missing_contact_frames, missing_grasp_frames, total
 
+    def _count_cameras_with_data(self, episode: GeneratedEpisode) -> int:
+        """Count cameras that actually produced data for this episode."""
+        if episode.sensor_data is None:
+            return 0
+        frames = getattr(episode.sensor_data, "frames", [])
+        if not frames:
+            return 0
+        camera_ids = set()
+        for frame in frames:
+            for payload in (
+                getattr(frame, "rgb_images", {}),
+                getattr(frame, "depth_maps", {}),
+                getattr(frame, "semantic_masks", {}),
+                getattr(frame, "instance_masks", {}),
+                getattr(frame, "bboxes_2d", {}),
+                getattr(frame, "bboxes_3d", {}),
+                getattr(frame, "normals", {}),
+            ):
+                camera_ids.update(payload.keys())
+        return len(camera_ids)
+
+    def _compute_ee_coverage_ratio(self, episode: GeneratedEpisode) -> float:
+        """Compute the fraction of frames with valid EE pose data."""
+        if episode.trajectory is not None and episode.trajectory.num_frames > 0:
+            states = getattr(episode.trajectory, "states", [])
+            if states:
+                available = sum(1 for state in states if state.ee_position is not None)
+                return available / len(states)
+
+        if episode.sensor_data is None:
+            return 0.0
+        frames = getattr(episode.sensor_data, "frames", [])
+        if not frames:
+            return 0.0
+
+        def _frame_has_ee(frame: Any) -> bool:
+            if getattr(frame, "ee_position", None) is not None:
+                return True
+            if getattr(frame, "ee_pose", None) is not None:
+                return True
+            privileged_state = getattr(frame, "privileged_state", None)
+            if isinstance(privileged_state, dict):
+                if privileged_state.get("ee_position") is not None:
+                    return True
+                if privileged_state.get("ee_pose") is not None:
+                    return True
+                if privileged_state.get("ee") is not None:
+                    return True
+            return False
+
+        available = sum(1 for frame in frames if _frame_has_ee(frame))
+        return available / len(frames)
+
     def _apply_contact_availability_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
         """Fail episodes with missing contacts during grasp phases when required."""
         require_contacts = parse_bool_env(
@@ -2739,7 +2792,7 @@ class EpisodeGenerator:
         )
 
         frame_count = episode.sensor_data.num_frames if episode.sensor_data else 0
-        camera_count = len(episode.sensor_data.camera_ids) if episode.sensor_data else 0
+        camera_count = self._count_cameras_with_data(episode)
         partial_camera_coverage = False
         if episode.sensor_data:
             camera_errors = (
@@ -2747,6 +2800,7 @@ class EpisodeGenerator:
                 + episode.sensor_data.validate_depth_frames()
             )
             partial_camera_coverage = any("missing" in error for error in camera_errors)
+        ee_coverage_ratio = self._compute_ee_coverage_ratio(episode)
         visual_metrics = VisualQualityMetrics(
             target_visibility_ratio=1.0 if episode.sensor_data and episode.sensor_data.has_rgb else 0.0,
             viewpoint_diversity=min(1.0, camera_count / 3.0) if camera_count else 0.0,
@@ -2782,16 +2836,19 @@ class EpisodeGenerator:
             frame_count=frame_count,
             camera_count=camera_count,
             partial_camera_coverage=partial_camera_coverage,
+            ee_coverage_ratio=ee_coverage_ratio,
             episode_data_hash=episode_hash,
         )
 
         cert.sensor_source = sensor_source
         cert.physics_backend = physics_backend
-        cert.overall_quality_score = episode.quality_score
+        cert.ee_coverage_ratio = ee_coverage_ratio
+        cert.compute_overall_quality_score()
         for error in episode.validation_errors:
             cert.add_error(error)
         cert.recommended_use = cert.assess_training_suitability()
         cert.confidence_score = generator._compute_confidence_score(cert)
+        generator._add_environment_warnings(cert)
 
         if sensor_source != SensorSource.ISAAC_SIM_REPLICATOR.value or (
             physics_backend != PhysicsValidationBackend.PHYSX.value
