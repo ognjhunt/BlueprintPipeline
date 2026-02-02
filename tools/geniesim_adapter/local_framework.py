@@ -4527,7 +4527,7 @@ class GenieSimLocalFramework:
                                 f'{{"width": <float>, "depth": <float>, "height": <float>, '
                                 f'"mass_kg": <float>, "graspable_width_m": <float>}}'
                             )
-                            _resp = _gemini_client_for_props.generate(prompt=_prompt, json_output=True)
+                            _resp = _gemini_client_for_props.generate(prompt=_prompt, json_output=True, disable_tools=True)
                             _text = _resp.text.strip()
                             _start = _text.find("{")
                             _end = _text.rfind("}") + 1
@@ -5379,8 +5379,18 @@ class GenieSimLocalFramework:
                         f"{len(collector_state['observations'])} frames: {exc}"
                     )
 
-            collector_thread = threading.Thread(target=_collect_streaming, daemon=True)
-            collector_thread.start()
+            # Only start the collector thread if we DON'T have an observation
+            # callback.  When execute_trajectory uses _between_waypoints_obs, that
+            # callback captures observations between waypoints while the gRPC lock
+            # is free.  Running a polling thread in parallel would just lose every
+            # lock acquisition race against the execution thread and produce
+            # "Composed real observation from: none" spam.
+            _use_callback_obs = True  # We always use the between-waypoints callback
+            if _use_callback_obs:
+                collector_thread = None
+            else:
+                collector_thread = threading.Thread(target=_collect_streaming, daemon=True)
+                collector_thread.start()
 
             collector_state["start_time"] = time.time()
             start_event.set()
@@ -5388,11 +5398,11 @@ class GenieSimLocalFramework:
             execution_state: Dict[str, Any] = {"success": False, "error": None}
 
             def _between_waypoints_obs(waypoint: Dict[str, Any], wp_idx: int) -> None:
-                """Capture a lightweight observation between waypoints.
+                """Capture a full observation between waypoints.
 
                 Called by execute_trajectory after each set_joint_position returns
                 and before the inter-waypoint delay.  The gRPC lock is NOT held
-                at this point, so we can make quick calls.
+                at this point, so we can make real gRPC calls without contention.
                 """
                 if abort_event.is_set():
                     return
@@ -5407,13 +5417,23 @@ class GenieSimLocalFramework:
                 jp = waypoint.get("joint_positions")
                 if jp is not None:
                     obs["robot_state"] = {"joint_positions": list(jp)}
-                # Try a quick ee_pose call (short timeout to not block)
+
+                # Attempt a full observation (lock is FREE between waypoints).
+                # This captures ee_pose, object poses, and camera data.
                 try:
-                    ee_result = self._client.get_ee_pose(lock_timeout=0.5)
-                    if ee_result.available and ee_result.success and ee_result.payload:
-                        obs["ee_pose"] = ee_result.payload
+                    full_obs = self._client.get_observation(lock_timeout=2.0)
+                    if full_obs.available and full_obs.success and full_obs.payload:
+                        obs_data = full_obs.payload.get("observation", {})
+                        if obs_data:
+                            obs.update(obs_data)
                 except Exception:
-                    pass
+                    # Fallback: try just ee_pose
+                    try:
+                        ee_result = self._client.get_ee_pose(lock_timeout=1.0)
+                        if ee_result.available and ee_result.success and ee_result.payload:
+                            obs["ee_pose"] = ee_result.payload
+                    except Exception:
+                        pass
                 collector_state["observations"].append(obs)
                 _note_progress(obs)
 
@@ -5447,6 +5467,12 @@ class GenieSimLocalFramework:
             trajectory_duration = (timestamps[-1] - timestamps[0]) if timestamps else 0.0
             trajectory_end_time = timestamps[-1] if timestamps else None
             end_time_tolerance_s = max(0.25, trajectory_duration * 0.05)
+            # When using the between-waypoints observation callback, observations
+            # arrive only after each gRPC set_joint_position completes.  The first
+            # call can take up to 300s (cuRobo lazy init).  Increase stall timeout
+            # so we don't false-abort while waiting for the first waypoint.
+            if _use_callback_obs:
+                stall_timeout_s = max(stall_timeout_s, trajectory_duration + 120.0)
 
             def _observation_has_success_flag(obs_frame: Optional[Dict[str, Any]]) -> Optional[bool]:
                 if not obs_frame:
@@ -5491,11 +5517,21 @@ class GenieSimLocalFramework:
                             task_success_flag = _observation_has_success_flag(last_obs)
                             last_obs_timestamp = collector_state.get("last_observation_timestamp")
                             near_trajectory_end = _is_near_trajectory_end(last_obs_timestamp)
-                            if task_success_flag or near_trajectory_end:
+                            _obs_count = len(collector_state["observations"])
+                            # Only treat near_trajectory_end as success if we
+                            # actually collected some observations.  Without
+                            # observations the "stall" is just gRPC lock
+                            # contention — the trajectory is still executing.
+                            _can_abort = (
+                                task_success_flag
+                                or (near_trajectory_end and _obs_count > 0)
+                            )
+                            if _can_abort:
                                 self.log(
                                     "Completion signal detected — aborting trajectory early "
                                     f"(task_success={task_success_flag}, "
                                     f"near_trajectory_end={near_trajectory_end}, "
+                                    f"observations={_obs_count}, "
                                     f"last_obs_timestamp={last_obs_timestamp}, "
                                     f"trajectory_end={trajectory_end_time}, "
                                     f"tolerance={end_time_tolerance_s:.2f}s).",
@@ -5548,10 +5584,11 @@ class GenieSimLocalFramework:
                 time.sleep(0.5)
 
             execution_thread.join(timeout=5.0)
-            collector_timeout = 5.0 if stall_detected else trajectory_duration + 10.0
-            collector_thread.join(timeout=collector_timeout)
+            if collector_thread is not None:
+                collector_timeout = 5.0 if stall_detected else trajectory_duration + 10.0
+                collector_thread.join(timeout=collector_timeout)
 
-            if collector_thread.is_alive():
+            if collector_thread is not None and collector_thread.is_alive():
                 last_obs_timestamp = collector_state.get("last_observation_timestamp")
                 if execution_state.get("success") and _is_near_trajectory_end(last_obs_timestamp):
                     self.log(
@@ -5766,6 +5803,7 @@ class GenieSimLocalFramework:
             _server_ee_frame_count = _frame_stats["server_ee_frame_count"]
             _real_velocity_count = _frame_stats["real_velocity_count"]
             _real_effort_count = _frame_stats["real_effort_count"]
+            _contact_force_cache = _frame_stats["contact_force_cache"]
 
             frame_validation = {
                 "enabled": False,
@@ -5934,7 +5972,7 @@ class GenieSimLocalFramework:
                         f"Respond with ONLY JSON: "
                         f'{{"success": <bool>, "confidence": <float 0-1>, "reasoning": "<short explanation>"}}'
                     )
-                    _ts_resp = _gemini_ts_client.generate(prompt=_ts_prompt, json_output=True)
+                    _ts_resp = _gemini_ts_client.generate(prompt=_ts_prompt, json_output=True, disable_tools=True)
                     _ts_text = _ts_resp.text.strip()
                     _ts_start = _ts_text.find("{")
                     _ts_end = _ts_text.rfind("}") + 1
@@ -6114,7 +6152,7 @@ class GenieSimLocalFramework:
                         f'[{{"start": <int>, "end": <int>, "phase": "<phase>"}},...] '
                         f"covering all frames from 0 to {len(frames)-1}."
                     )
-                    _pl_resp = _gemini_pl_client.generate(prompt=_pl_prompt, json_output=True)
+                    _pl_resp = _gemini_pl_client.generate(prompt=_pl_prompt, json_output=True, disable_tools=True)
                     _pl_text = _pl_resp.text.strip()
                     _pl_start = _pl_text.find("[")
                     _pl_end = _pl_text.rfind("]") + 1
@@ -6145,6 +6183,9 @@ class GenieSimLocalFramework:
                 data_mode = "proprioception_with_privileged_state"
             else:
                 data_mode = "proprioception_only"
+
+            # Default for diversity calibration source (may be overridden later by quality scoring)
+            _diversity_calibration_source = getattr(self, "_diversity_calibration_source", "hardcoded_default")
 
             # Save episode
             episode_path = output_dir / f"{episode_id}.json"
@@ -6504,21 +6545,12 @@ class GenieSimLocalFramework:
         }
         _hardcoded_fallback_warned: set = set()
 
-        # --- LLM object property estimation with model cascade ---
+        # --- LLM object property estimation ---
         _gemini_prop_cache: Dict[str, Dict[str, Any]] = {}
         _object_property_provenance: Dict[str, str] = {}
-        _gemini_prop_cooldowns: Dict[str, float] = {}  # keyed by "model:obj_type:prop"
-        _gemini_prop_cooldown_logs: Dict[str, float] = {}
-        _gemini_prop_global_unavailable_until = 0.0
-        _gemini_prop_global_log_until = 0.0
         _GEMINI_COOLDOWN_SKIPPED = object()
-        # Model cascade: ordered list of models to try for property estimation
-        _PROP_CASCADE_SPEC = os.getenv(
-            "GENIESIM_PROP_CASCADE",
-            "gemini-3-flash-preview,gemini-2.5-flash,openai:gpt-5.1",
-        ).split(",")
-        _prop_cascade_clients: List[Tuple[str, Any]] = []  # (model_name, client)
-        _prop_cascade_init_done = False
+        _prop_llm = None
+        _prop_llm_attempted = False
 
         def _get_env_float(name: str, default: float) -> float:
             raw = os.getenv(name)
@@ -6538,100 +6570,32 @@ class GenieSimLocalFramework:
             except ValueError:
                 return default
 
-        _GEMINI_PROP_COOLDOWN_S = _get_env_float("GENIESIM_GEMINI_PROP_COOLDOWN_S", 300.0)
         _GEMINI_PROP_MAX_RETRIES = _get_env_int("GENIESIM_GEMINI_PROP_MAX_RETRIES", 3)
         _GEMINI_PROP_RETRY_DELAY_S = _get_env_float("GENIESIM_GEMINI_PROP_RETRY_DELAY_S", 2.0)
 
-        def _get_prop_cascade_clients() -> List[Tuple[str, Any]]:
-            """Lazy-init and return the ordered model cascade for property estimation."""
-            nonlocal _prop_cascade_init_done
-            if _prop_cascade_init_done:
-                return _prop_cascade_clients
-            _prop_cascade_init_done = True
-            from tools.llm_client import create_llm_client as _create, LLMProvider as _LLMProv
-            for spec in _PROP_CASCADE_SPEC:
-                spec = spec.strip()
-                if not spec:
-                    continue
+        def _get_prop_llm():
+            """Lazy-init LLM client for property estimation (with auto fallback)."""
+            nonlocal _prop_llm, _prop_llm_attempted
+            if not _prop_llm_attempted:
+                _prop_llm_attempted = True
                 try:
-                    if spec.startswith("openai:"):
-                        _model = spec[len("openai:"):]
-                        _client = _create(
-                            provider=_LLMProv.OPENAI,
-                            model=_model,
-                            max_retries=_GEMINI_PROP_MAX_RETRIES,
-                            retry_delay=_GEMINI_PROP_RETRY_DELAY_S,
-                            fallback_enabled=False,
-                        )
-                        _prop_cascade_clients.append((spec, _client))
-                    elif spec.startswith("anthropic:"):
-                        _model = spec[len("anthropic:"):]
-                        _client = _create(
-                            provider=_LLMProv.ANTHROPIC,
-                            model=_model,
-                            max_retries=_GEMINI_PROP_MAX_RETRIES,
-                            retry_delay=_GEMINI_PROP_RETRY_DELAY_S,
-                            fallback_enabled=False,
-                        )
-                        _prop_cascade_clients.append((spec, _client))
-                    else:
-                        # Default: Gemini model
-                        _client = _create(
-                            provider=_LLMProv.GEMINI,
-                            model=spec,
-                            max_retries=_GEMINI_PROP_MAX_RETRIES,
-                            retry_delay=_GEMINI_PROP_RETRY_DELAY_S,
-                            fallback_enabled=False,
-                        )
-                        _prop_cascade_clients.append((spec, _client))
-                    logger.info("PROP_CASCADE: initialized client for '%s'", spec)
-                except Exception as _init_exc:
-                    logger.warning(
-                        "PROP_CASCADE: skipping '%s' — init failed: %s", spec, _init_exc,
+                    from tools.llm_client import create_llm_client as _create
+                    _prop_llm = _create(
+                        max_retries=_GEMINI_PROP_MAX_RETRIES,
+                        retry_delay=_GEMINI_PROP_RETRY_DELAY_S,
                     )
-            if not _prop_cascade_clients:
-                logger.warning("PROP_CASCADE: no clients initialized — will use hardcoded fallbacks only")
-            return _prop_cascade_clients
-
-        def _is_gemini_rate_limit_error(exc: Exception) -> bool:
-            text = str(exc).lower()
-            return any(
-                token in text
-                for token in (
-                    "429",
-                    "rate limit",
-                    "rate-limit",
-                    "quota",
-                    "too many requests",
-                )
-            )
-
-        def _log_gemini_cooldown(cache_key: str, cooldown_until: float) -> None:
-            nonlocal _gemini_prop_global_log_until
-            now = time.time()
-            log_until = _gemini_prop_cooldown_logs.get(cache_key, 0.0)
-            if now >= log_until:
-                _gemini_prop_cooldown_logs[cache_key] = now + _GEMINI_PROP_COOLDOWN_S
-                logger.warning(
-                    "GEMINI_PROP_COOLDOWN: skipping Gemini for %s until %s; using hardcoded fallback.",
-                    cache_key,
-                    datetime.fromtimestamp(cooldown_until).isoformat(timespec="seconds"),
-                )
-            if now >= _gemini_prop_global_log_until and _gemini_prop_global_unavailable_until > now:
-                _gemini_prop_global_log_until = now + _GEMINI_PROP_COOLDOWN_S
-                logger.warning(
-                    "GEMINI_PROP_COOLDOWN: global Gemini cooldown active until %s; using hardcoded fallback.",
-                    datetime.fromtimestamp(_gemini_prop_global_unavailable_until).isoformat(timespec="seconds"),
-                )
+                except Exception as _e:
+                    logger.warning("LLM property client init failed: %s", _e)
+                    _prop_llm = None
+            return _prop_llm
 
         def _estimate_obj_prop_llm(obj_type: str, prop: str):
-            """Estimate a single object property via LLM model cascade."""
-            nonlocal _gemini_prop_global_unavailable_until
+            """Estimate a single object property via LLM (with auto fallback via FallbackLLMClient)."""
             cache_key = f"{obj_type.lower()}:{prop}"
             if cache_key in _gemini_prop_cache:
                 return _gemini_prop_cache[cache_key]
-            cascade = _get_prop_cascade_clients()
-            if not cascade:
+            llm = _get_prop_llm()
+            if not llm:
                 return None
             prop_prompts = {
                 "graspable_width": (
@@ -6658,41 +6622,17 @@ class GenieSimLocalFramework:
             prompt = prop_prompts.get(prop)
             if not prompt:
                 return None
-            all_on_cooldown = True
-            for model_name, client in cascade:
-                model_cooldown_key = f"{model_name}:{cache_key}"
-                now = time.time()
-                cooldown_until = _gemini_prop_cooldowns.get(model_cooldown_key, 0.0)
-                if now < cooldown_until:
-                    _log_gemini_cooldown(model_cooldown_key, cooldown_until)
-                    continue
-                all_on_cooldown = False
-                try:
-                    resp = client.generate(prompt, json_output=True, temperature=0.3, disable_tools=True)
-                    data = resp.parse_json()
-                    if isinstance(data, dict) and "value" in data:
-                        val = data["value"]
-                        _gemini_prop_cache[cache_key] = val
-                        _object_property_provenance[f"{obj_type}:{prop}"] = f"llm_estimated:{model_name}"
-                        logger.info("LLM_OBJ_PROP [%s]: %s.%s = %s", model_name, obj_type, prop, val)
-                        return val
-                except Exception as exc:
-                    if _is_gemini_rate_limit_error(exc):
-                        cd = time.time() + _GEMINI_PROP_COOLDOWN_S
-                        _gemini_prop_cooldowns[model_cooldown_key] = cd
-                        logger.warning(
-                            "PROP_CASCADE: %s rate-limited for %s; trying next model",
-                            model_name, cache_key,
-                        )
-                        continue
-                    else:
-                        logger.debug(
-                            "PROP_CASCADE: %s failed for %s.%s: %s",
-                            model_name, obj_type, prop, exc,
-                        )
-                        continue
-            if all_on_cooldown:
-                return _GEMINI_COOLDOWN_SKIPPED
+            try:
+                resp = llm.generate(prompt, json_output=True, temperature=0.3, disable_tools=True)
+                data = resp.parse_json()
+                if isinstance(data, dict) and "value" in data:
+                    val = data["value"]
+                    _gemini_prop_cache[cache_key] = val
+                    _object_property_provenance[f"{obj_type}:{prop}"] = "llm_estimated"
+                    logger.info("LLM_OBJ_PROP: %s.%s = %s", obj_type, prop, val)
+                    return val
+            except Exception as exc:
+                logger.debug("LLM obj prop estimation failed for %s.%s: %s", obj_type, prop, exc)
             return None
 
         # Unified property lookup: scene_graph → Gemini estimated → hardcoded fallback
@@ -7149,7 +7089,7 @@ class GenieSimLocalFramework:
                                 f"Estimate the grip force in Newtons and whether the grasp is stable. "
                                 f'Respond with ONLY JSON: {{"grip_force_N": <float>, "stable": <bool>}}'
                             )
-                            _cf_resp = _gemini_cf_client.generate(prompt=_cf_prompt, json_output=True)
+                            _cf_resp = _gemini_cf_client.generate(prompt=_cf_prompt, json_output=True, disable_tools=True)
                             _cf_text = _cf_resp.text.strip()
                             _cf_start = _cf_text.find("{")
                             _cf_end = _cf_text.rfind("}") + 1
@@ -7381,6 +7321,7 @@ class GenieSimLocalFramework:
             "server_ee_frame_count": _server_ee_frame_count,
             "real_velocity_count": _real_velocity_count,
             "real_effort_count": _real_effort_count,
+            "contact_force_cache": _contact_force_cache,
         }
 
     def _validate_frames(
@@ -8960,6 +8901,7 @@ class GenieSimLocalFramework:
                 prompt=prompt,
                 json_output=True,
                 temperature=0.3,
+                disable_tools=True,
             )
             if response.error_message:
                 self.log(f"  ⚠️  LLM enrichment failed: {response.error_message}", "WARNING")

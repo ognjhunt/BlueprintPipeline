@@ -55,6 +55,7 @@ from .client import (
     AnthropicClient,
     OpenAIClient,
     MockLLMClient,
+    FallbackLLMClient,
     create_llm_client,
     get_default_provider,
 )
@@ -67,6 +68,7 @@ __all__ = [
     "AnthropicClient",
     "OpenAIClient",
     "MockLLMClient",
+    "FallbackLLMClient",
     "create_llm_client",
     "get_default_provider",
 ]

@@ -1383,6 +1383,107 @@ def _get_fallback_order(primary: LLMProvider) -> List[LLMProvider]:
     return [p for p in all_providers if p != primary]
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Check if an exception indicates a rate limit / quota error."""
+    text = str(exc).lower()
+    return any(t in text for t in ("429", "rate limit", "too many requests", "quota", "resource_exhausted"))
+
+
+class FallbackLLMClient(LLMClient):
+    """Wraps multiple LLM clients with automatic rate-limit fallback.
+
+    On generate(), tries the primary client first. If rate-limited (429/quota),
+    cascades to fallback clients in order. Per-provider cooldowns prevent
+    repeatedly hitting a rate-limited provider.
+
+    Environment Variables:
+        LLM_FALLBACK_MODELS: Comma-separated fallback model specs
+            (default: "gemini-2.5-flash,openai:gpt-5.1")
+        LLM_FALLBACK_COOLDOWN_S: Cooldown seconds per provider after rate limit
+            (default: 300)
+    """
+
+    provider = LLMProvider.GEMINI  # default; overridden by primary
+
+    def __init__(
+        self,
+        primary: LLMClient,
+        fallbacks: Optional[List[LLMClient]] = None,
+        cooldown_s: float = 300.0,
+    ):
+        # Don't call super().__init__ with model — we delegate to primary
+        self.max_retries = primary.max_retries
+        self.retry_delay = primary.retry_delay
+        self._model = None
+        self._primary = primary
+        self._fallbacks = fallbacks or []
+        self._clients: List[LLMClient] = [primary] + self._fallbacks
+        self._cooldowns: Dict[str, float] = {}
+        self._cooldown_s = cooldown_s
+        self._cooldown_logged: Dict[str, float] = {}
+
+    @property
+    def default_model(self) -> str:
+        return self._primary.default_model
+
+    @property
+    def model(self) -> str:
+        return self._primary.model
+
+    def generate(
+        self,
+        prompt: str,
+        image: Optional[Any] = None,
+        images: Optional[List[Any]] = None,
+        json_output: bool = False,
+        use_web_search: bool = False,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        **kwargs,
+    ) -> LLMResponse:
+        last_error: Optional[Exception] = None
+        now = time.time()
+        for client in self._clients:
+            client_key = f"{getattr(client, 'provider', 'unknown')}:{client.model}"
+            cooldown_until = self._cooldowns.get(client_key, 0.0)
+            if now < cooldown_until:
+                # Log once per cooldown period
+                if now >= self._cooldown_logged.get(client_key, 0.0):
+                    self._cooldown_logged[client_key] = now + 60.0
+                    print(
+                        f"[LLM_FALLBACK] Skipping {client_key} (on cooldown until "
+                        f"{time.strftime('%H:%M:%S', time.localtime(cooldown_until))})",
+                        file=sys.stderr,
+                    )
+                continue
+            try:
+                return client.generate(
+                    prompt=prompt,
+                    image=image,
+                    images=images,
+                    json_output=json_output,
+                    use_web_search=use_web_search,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+            except Exception as e:
+                last_error = e
+                if _is_rate_limit_error(e):
+                    self._cooldowns[client_key] = time.time() + self._cooldown_s
+                    print(
+                        f"[LLM_FALLBACK] {client_key} rate-limited, trying next provider",
+                        file=sys.stderr,
+                    )
+                    continue
+                # Non-rate-limit errors: propagate immediately
+                raise
+        # All clients exhausted (all on cooldown or rate-limited)
+        if last_error:
+            raise last_error
+        raise RuntimeError("All LLM providers are on cooldown")
+
+
 def create_llm_client(
     provider: Optional[LLMProvider] = None,
     model: Optional[str] = None,
@@ -1444,8 +1545,10 @@ def create_llm_client(
         default=True,
     )
 
+    # Build the primary client
+    primary_client: Optional[LLMClient] = None
     try:
-        return _create_client_for_provider(provider, model, **kwargs)
+        primary_client = _create_client_for_provider(provider, model, **kwargs)
     except Exception as e:
         if fallback_enabled:
             print(f"[LLM] Primary provider {provider.value} failed: {e}", file=sys.stderr)
@@ -1457,13 +1560,53 @@ def create_llm_client(
             for fallback_provider in fallback_order:
                 try:
                     print(f"[LLM] Trying {fallback_provider.value}...", file=sys.stderr)
-                    return _create_client_for_provider(fallback_provider, model, **kwargs)
+                    primary_client = _create_client_for_provider(fallback_provider, model, **kwargs)
+                    break
                 except Exception as e2:
                     errors[fallback_provider.value] = str(e2)
                     continue
 
-            # All providers failed
-            error_details = ", ".join(f"{k} ({v})" for k, v in errors.items())
-            raise ValueError(f"Failed to initialize any provider: {error_details}")
+            if primary_client is None:
+                error_details = ", ".join(f"{k} ({v})" for k, v in errors.items())
+                raise ValueError(f"Failed to initialize any provider: {error_details}")
         else:
             raise
+
+    # Build runtime fallback chain for rate-limit resilience
+    if fallback_enabled:
+        _fallback_specs = os.getenv(
+            "LLM_FALLBACK_MODELS", "gemini-2.5-flash,openai:gpt-5.1"
+        ).split(",")
+        _cooldown_s = float(os.getenv("LLM_FALLBACK_COOLDOWN_S", "300"))
+        _fallback_clients: List[LLMClient] = []
+        for spec in _fallback_specs:
+            spec = spec.strip()
+            if not spec:
+                continue
+            try:
+                if spec.startswith("openai:"):
+                    _fb_model = spec[len("openai:"):]
+                    _fb = _create_client_for_provider(LLMProvider.OPENAI, _fb_model, **kwargs)
+                elif spec.startswith("anthropic:"):
+                    _fb_model = spec[len("anthropic:"):]
+                    _fb = _create_client_for_provider(LLMProvider.ANTHROPIC, _fb_model, **kwargs)
+                else:
+                    # Default: Gemini model
+                    _fb = _create_client_for_provider(LLMProvider.GEMINI, spec, **kwargs)
+                # Skip if same as primary
+                if (getattr(_fb, 'provider', None) == getattr(primary_client, 'provider', None)
+                        and _fb.model == primary_client.model):
+                    continue
+                _fallback_clients.append(_fb)
+                print(f"[LLM_FALLBACK] Registered fallback: {spec}", file=sys.stderr)
+            except Exception as _fb_err:
+                print(f"[LLM_FALLBACK] Skipping fallback '{spec}': {_fb_err}", file=sys.stderr)
+
+        if _fallback_clients:
+            return FallbackLLMClient(
+                primary=primary_client,
+                fallbacks=_fallback_clients,
+                cooldown_s=_cooldown_s,
+            )
+
+    return primary_client

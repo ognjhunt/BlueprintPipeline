@@ -116,7 +116,7 @@ class DimensionEstimator:
         _attempt = 0
         while True:
             try:
-                response = llm.generate(prompt, json_output=True, temperature=0.3)
+                response = llm.generate(prompt, json_output=True, temperature=0.3, disable_tools=True)
                 data = response.parse_json()
                 if isinstance(data, dict) and "dimensions" in data:
                     dims = data["dimensions"]

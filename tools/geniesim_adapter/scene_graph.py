@@ -1316,7 +1316,7 @@ class SceneGraphConverter:
             f"Use meters. Be accurate to real-world objects."
         )
         try:
-            response = client.generate(prompt=prompt, json_output=True)
+            response = client.generate(prompt=prompt, json_output=True, disable_tools=True)
             text = response.text.strip()
             start = text.find("{")
             end = text.rfind("}") + 1
