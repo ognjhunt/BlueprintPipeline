@@ -6425,7 +6425,7 @@ class GenieSimLocalFramework:
         except Exception as e:
             import traceback
             result["error"] = str(e)
-            self.log(f"Episode failed: {e}", "ERROR")
+            self.log(f"Episode failed: {e}\n{traceback.format_exc()}", "ERROR")
             if recording_started and not recording_stopped:
                 stop_result = self._client.stop_recording()
                 if not stop_result.available:

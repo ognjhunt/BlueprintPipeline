@@ -1483,6 +1483,15 @@ class FallbackLLMClient(LLMClient):
             raise last_error
         raise RuntimeError("All LLM providers are on cooldown")
 
+    def _generate_image(
+        self,
+        prompt: str,
+        size: str = "1024x1024",
+        **kwargs,
+    ) -> LLMResponse:
+        """Delegate image generation to the primary client."""
+        return self._primary._generate_image(prompt=prompt, size=size, **kwargs)
+
 
 def create_llm_client(
     provider: Optional[LLMProvider] = None,
