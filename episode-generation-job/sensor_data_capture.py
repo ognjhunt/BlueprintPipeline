@@ -2155,6 +2155,7 @@ class SensorDataExporter:
         meta_file = chunk_dir / f"episode_{episode_index:06d}_sensor_meta.json"
 
         config = episode_data.config
+        contact_source = self._resolve_contact_source(episode_data)
 
         meta = {
             "episode_id": episode_data.episode_id,
@@ -2178,6 +2179,7 @@ class SensorDataExporter:
                 "has_object_poses": config.include_object_poses,
                 "has_contacts": config.include_contact_info,
                 "has_privileged_state": config.include_privileged_state,
+                "contact_source": contact_source,
             },
             "fps": config.fps,
         }
@@ -2186,6 +2188,28 @@ class SensorDataExporter:
             json.dump(meta, f, indent=2)
 
         return meta_file
+
+    def _resolve_contact_source(self, episode_data: EpisodeSensorData) -> Optional[str]:
+        """Summarize contact provenance for the episode metadata."""
+        sources = set()
+        contacts_available_true = False
+        contacts_available_false = False
+
+        for frame in episode_data.frames:
+            if frame.contacts_available is True:
+                contacts_available_true = True
+            elif frame.contacts_available is False:
+                contacts_available_false = True
+            for contact in frame.contacts:
+                source = contact.get("source")
+                if source:
+                    sources.add(source)
+
+        if any(source.startswith("physx") for source in sources) or contacts_available_true:
+            return "physx_contact_report"
+        if sources or contacts_available_false:
+            return "heuristic_grasp_model"
+        return None
 
     def _json_serializer(self, obj: Any) -> Any:
         """Custom JSON serializer for numpy types."""
