@@ -178,7 +178,13 @@ from motion_planner import AIMotionPlanner, MotionPlan, SceneContext
 from trajectory_solver import TrajectorySolver, JointTrajectory, ROBOT_CONFIGS
 from lerobot_exporter import LeRobotExporter, LeRobotDatasetConfig
 from multi_format_exporters import MultiFormatExporter
-from quality_constants import MIN_QUALITY_SCORE, MAX_RETRIES, PRODUCTION_TRAINING_THRESHOLD
+from quality_constants import (
+    MIN_QUALITY_SCORE,
+    MAX_RETRIES,
+    PRODUCTION_TRAINING_THRESHOLD,
+    OBJECT_DISPLACEMENT_THRESHOLD,
+    PLACEMENT_POSITION_TOLERANCE,
+)
 from tools.error_handling.partial_failure import (
     PartialFailureError,
     PartialFailureHandler,
@@ -2514,6 +2520,7 @@ class EpisodeGenerator:
                     episode.is_valid = False
                     episode.quality_score = 0.0
                     episode.validation_errors = [r.value for r in result.failure_reasons]
+                    episode.validation_errors.extend(result.validation_errors)
                     return episode
 
                 episode.is_valid = False
@@ -2532,6 +2539,7 @@ class EpisodeGenerator:
                 episode.is_valid = result.status == ValidationStatus.PASSED
                 episode.quality_score = result.metrics.overall_score
                 episode.validation_errors = [r.value for r in result.failure_reasons]
+                episode.validation_errors.extend(result.validation_errors)
 
             except Exception as e:
                 episode.is_valid = False
@@ -2636,8 +2644,21 @@ class EpisodeGenerator:
                         constraint_satisfaction = score
             except Exception:
                 pass  # Use graduated formula fallback
+        displacement_ok = (
+            validation_metrics is not None
+            and validation_metrics.object_displacement is not None
+            and validation_metrics.object_displacement > OBJECT_DISPLACEMENT_THRESHOLD
+        )
+        placement_ok = True
+        if episode.motion_plan and episode.motion_plan.place_position is not None:
+            placement_ok = (
+                validation_metrics is not None
+                and validation_metrics.placement_error is not None
+                and validation_metrics.placement_error <= PLACEMENT_POSITION_TOLERANCE
+            )
+        goal_achievement_score = 1.0 if displacement_ok and placement_ok else 0.0
         task_metrics = TaskQualityMetrics(
-            goal_achievement_score=1.0 if validation_metrics and validation_metrics.task_success else 0.0,
+            goal_achievement_score=goal_achievement_score,
             skill_segment_count=skill_segment_count,
             skill_segments_correct=skill_segments_correct,
             skill_correctness_ratio=skill_correctness_ratio,

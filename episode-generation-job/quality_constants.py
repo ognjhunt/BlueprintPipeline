@@ -65,6 +65,12 @@ MAX_RETRIES = 3
 # Stability threshold for object placement (meters)
 STABILITY_THRESHOLD = 0.001  # 1mm position change
 
+# Object displacement threshold for pick/place success (meters)
+OBJECT_DISPLACEMENT_THRESHOLD = 0.01  # 1cm minimum displacement
+
+# Placement tolerance for final object pose (meters)
+PLACEMENT_POSITION_TOLERANCE = 0.05  # 5cm placement tolerance
+
 # Collision penetration threshold (meters)
 COLLISION_PENETRATION_THRESHOLD = 0.005  # 5mm
 
@@ -125,5 +131,7 @@ def get_quality_thresholds() -> dict:
         "sensor_data_quality_min": SENSOR_DATA_QUALITY_MIN,
         "max_retries": MAX_RETRIES,
         "stability_threshold": STABILITY_THRESHOLD,
+        "object_displacement_threshold": OBJECT_DISPLACEMENT_THRESHOLD,
+        "placement_position_tolerance": PLACEMENT_POSITION_TOLERANCE,
         "collision_penetration_threshold": COLLISION_PENETRATION_THRESHOLD,
     }

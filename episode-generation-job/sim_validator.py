@@ -56,6 +56,8 @@ from quality_constants import (
     MAX_RETRIES,
     STABILITY_THRESHOLD,
     COLLISION_PENETRATION_THRESHOLD,
+    OBJECT_DISPLACEMENT_THRESHOLD,
+    PLACEMENT_POSITION_TOLERANCE,
 )
 from usd_scene_scan import resolve_robot_prim_paths
 from isaac_sim_enforcement import (
@@ -189,6 +191,8 @@ class QualityMetrics:
     gripper_slip_events: int = 0
     object_dropped: bool = False
     object_stable_at_end: bool = True
+    object_displacement: Optional[float] = None
+    placement_error: Optional[float] = None
 
     # Timing metrics
     total_duration: float = 0.0
@@ -218,6 +222,8 @@ class QualityMetrics:
             "gripper_slip_events": self.gripper_slip_events,
             "object_dropped": self.object_dropped,
             "object_stable_at_end": self.object_stable_at_end,
+            "object_displacement": self.object_displacement,
+            "placement_error": self.placement_error,
             "total_duration": self.total_duration,
             "execution_time": self.execution_time,
             "path_length": self.path_length,
@@ -276,6 +282,7 @@ class ValidationResult:
     # Failure info
     failure_reasons: List[FailureReason] = field(default_factory=list)
     failure_details: str = ""
+    validation_errors: List[str] = field(default_factory=list)
 
     # Retry info
     retry_count: int = 0
@@ -298,6 +305,7 @@ class ValidationResult:
             "joint_limit_events": [e.to_dict() for e in self.joint_limit_events],
             "failure_reasons": [r.value for r in self.failure_reasons],
             "failure_details": self.failure_details,
+            "validation_errors": list(self.validation_errors),
             "retry_count": self.retry_count,
             "can_retry": self.can_retry,
             "retry_suggestion": self.retry_suggestion,
@@ -679,6 +687,23 @@ class SimulationValidator:
                 result.metrics.unexpected_collisions == 0
             )
 
+        displacement_ok = self._is_displacement_sufficient(
+            motion_plan, result.metrics.object_displacement
+        )
+        placement_ok = self._is_placement_within_tolerance(
+            motion_plan, result.metrics.placement_error
+        )
+        if motion_plan.place_position is not None:
+            result.metrics.task_success = (
+                result.metrics.task_success and displacement_ok and placement_ok
+            )
+        elif result.metrics.object_displacement is not None:
+            result.metrics.task_success = result.metrics.task_success and displacement_ok
+
+        self._record_task_contradictions(
+            result, displacement_ok=displacement_ok, placement_ok=placement_ok
+        )
+
         # Set timing
         result.metrics.total_duration = trajectory.total_duration
         result.metrics.execution_time = trajectory.total_duration
@@ -860,8 +885,20 @@ class SimulationValidator:
             final_position = np.array(final_state.get("position", [0.0, 0.0, 0.0]))
             place_position = np.array(motion_plan.place_position)
             placement_error = np.linalg.norm(final_position - place_position)
+            result.metrics.placement_error = float(placement_error)
             result.metrics.placement_success = (
-                placement_error < 0.05 and object_stable_at_end and not gripper_in_contact
+                placement_error < PLACEMENT_POSITION_TOLERANCE
+                and object_stable_at_end
+                and not gripper_in_contact
+            )
+
+        if physics_results and target_obj_id:
+            first_state = physics_results[0].object_states.get(target_obj_id, {})
+            last_state = physics_results[-1].object_states.get(target_obj_id, {})
+            first_position = np.array(first_state.get("position", [0.0, 0.0, 0.0]))
+            last_position = np.array(last_state.get("position", [0.0, 0.0, 0.0]))
+            result.metrics.object_displacement = float(
+                np.linalg.norm(last_position - first_position)
             )
 
         if torque_violations > 0:
@@ -1260,6 +1297,123 @@ class SimulationValidator:
             smoothness = 1.0 - min(1.0, jerk_integral / max_expected_jerk)
             result.metrics.velocity_smoothness = smoothness
 
+    def _extract_position(self, pose: Any) -> Optional[np.ndarray]:
+        if pose is None:
+            return None
+        if isinstance(pose, np.ndarray):
+            if pose.size >= 3:
+                return pose.astype(float)
+            return None
+        if isinstance(pose, (list, tuple)) and len(pose) >= 3:
+            return np.array(pose[:3], dtype=float)
+        if isinstance(pose, dict):
+            pos = pose.get("position") or pose.get("translation")
+            if isinstance(pos, dict):
+                return np.array(
+                    [
+                        pos.get("x", 0.0),
+                        pos.get("y", 0.0),
+                        pos.get("z", 0.0),
+                    ],
+                    dtype=float,
+                )
+            if isinstance(pos, (list, tuple, np.ndarray)) and len(pos) >= 3:
+                return np.array(pos[:3], dtype=float)
+        return None
+
+    def _get_scene_object_position(
+        self,
+        target_obj_id: str,
+        scene_objects: List[Dict[str, Any]],
+        motion_plan: MotionPlan,
+    ) -> Optional[np.ndarray]:
+        for obj in scene_objects:
+            if obj.get("id") == target_obj_id or obj.get("name") == target_obj_id:
+                direct_pos = obj.get("position")
+                if direct_pos is not None:
+                    return self._extract_position(direct_pos)
+                transform = obj.get("transform", {})
+                transform_pos = transform.get("position")
+                if transform_pos is not None:
+                    return self._extract_position(transform_pos)
+                return self._extract_position(obj.get("pose"))
+        if motion_plan.target_object_position is not None:
+            return np.array(motion_plan.target_object_position, dtype=float)
+        return None
+
+    def _get_state_object_position(
+        self,
+        state: Any,
+        target_obj_id: str,
+    ) -> Optional[np.ndarray]:
+        for attr in ("object_poses", "object_states"):
+            data = getattr(state, attr, None)
+            if isinstance(data, dict) and target_obj_id in data:
+                return self._extract_position(data[target_obj_id])
+        privileged_state = getattr(state, "privileged_state", None)
+        if isinstance(privileged_state, dict):
+            object_states = privileged_state.get("object_states")
+            if isinstance(object_states, dict) and target_obj_id in object_states:
+                return self._extract_position(object_states[target_obj_id])
+        return None
+
+    def _get_initial_object_position(
+        self,
+        target_obj_id: str,
+        scene_objects: List[Dict[str, Any]],
+        motion_plan: MotionPlan,
+        trajectory: JointTrajectory,
+    ) -> Optional[np.ndarray]:
+        if target_obj_id and trajectory.states:
+            state_pos = self._get_state_object_position(trajectory.states[0], target_obj_id)
+            if state_pos is not None:
+                return state_pos
+        return self._get_scene_object_position(target_obj_id, scene_objects, motion_plan)
+
+    def _get_final_object_position(
+        self,
+        target_obj_id: str,
+        trajectory: JointTrajectory,
+    ) -> Optional[np.ndarray]:
+        if not target_obj_id or not trajectory.states:
+            return None
+        return self._get_state_object_position(trajectory.states[-1], target_obj_id)
+
+    def _is_displacement_sufficient(
+        self,
+        motion_plan: MotionPlan,
+        displacement: Optional[float],
+    ) -> bool:
+        if motion_plan.place_position is None:
+            return displacement is None or displacement > OBJECT_DISPLACEMENT_THRESHOLD
+        return displacement is not None and displacement > OBJECT_DISPLACEMENT_THRESHOLD
+
+    def _is_placement_within_tolerance(
+        self,
+        motion_plan: MotionPlan,
+        placement_error: Optional[float],
+    ) -> bool:
+        if motion_plan.place_position is None:
+            return True
+        return placement_error is not None and placement_error <= PLACEMENT_POSITION_TOLERANCE
+
+    def _record_task_contradictions(
+        self,
+        result: ValidationResult,
+        displacement_ok: bool,
+        placement_ok: bool,
+    ) -> None:
+        if result.metrics.task_success and (not displacement_ok or not placement_ok):
+            issues = []
+            if not displacement_ok:
+                issues.append("insufficient_object_displacement")
+            if not placement_ok:
+                issues.append("placement_out_of_tolerance")
+            if issues:
+                result.validation_errors.append(
+                    "Task success true but " + ", ".join(issues)
+                )
+
     def _check_task_success(
         self,
         trajectory: JointTrajectory,
@@ -1310,6 +1464,49 @@ class SimulationValidator:
                 (_gripper_transition or _ee_displaced)
             )
 
+        target_obj_id = motion_plan.target_object_id or ""
+        initial_object_position = self._get_initial_object_position(
+            target_obj_id, scene_objects, motion_plan, trajectory
+        )
+        final_object_position = self._get_final_object_position(
+            target_obj_id, trajectory
+        )
+
+        displacement_ok = True
+        placement_ok = True
+        if target_obj_id:
+            if initial_object_position is not None and final_object_position is not None:
+                displacement = float(
+                    np.linalg.norm(final_object_position - initial_object_position)
+                )
+                result.metrics.object_displacement = displacement
+                displacement_ok = displacement > OBJECT_DISPLACEMENT_THRESHOLD
+            else:
+                displacement_ok = False
+
+        if motion_plan.place_position is not None:
+            if final_object_position is not None:
+                placement_error = float(
+                    np.linalg.norm(
+                        final_object_position - np.array(motion_plan.place_position)
+                    )
+                )
+                result.metrics.placement_error = placement_error
+                placement_ok = placement_error <= PLACEMENT_POSITION_TOLERANCE
+            else:
+                placement_ok = False
+
+        if motion_plan.place_position is not None:
+            result.metrics.task_success = (
+                result.metrics.task_success and displacement_ok and placement_ok
+            )
+        elif result.metrics.object_displacement is not None:
+            result.metrics.task_success = result.metrics.task_success and displacement_ok
+
+        self._record_task_contradictions(
+            result, displacement_ok=displacement_ok, placement_ok=placement_ok
+        )
+
         # Check grasp success (gripper closed during grasp phase)
         grasp_states = [
             s for s in trajectory.states
@@ -1327,6 +1524,11 @@ class SimulationValidator:
             if final_state.ee_position is not None:
                 # Gripper should be open at end (released object)
                 result.metrics.placement_success = final_state.gripper_position > 0.02
+            if result.metrics.placement_error is not None:
+                result.metrics.placement_success = (
+                    result.metrics.placement_success
+                    and result.metrics.placement_error <= PLACEMENT_POSITION_TOLERANCE
+                )
 
         # Update object stability
         result.metrics.object_stable_at_end = (
