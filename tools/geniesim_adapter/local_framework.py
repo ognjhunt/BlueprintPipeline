@@ -1433,7 +1433,13 @@ class GenieSimGRPCClient:
             try:
                 if self._channel is not None:
                     self._channel.close()
-                self._channel = grpc.insecure_channel(f"{self.host}:{self.port}")
+                self._channel = grpc.insecure_channel(
+                    f"{self.host}:{self.port}",
+                    options=[
+                        ("grpc.max_send_message_length", 16094304),
+                        ("grpc.max_receive_message_length", 16094304),
+                    ],
+                )
                 # Try a lightweight call
                 future = grpc.channel_ready_future(self._channel)
                 future.result(timeout=5)
@@ -1602,7 +1608,14 @@ class GenieSimGRPCClient:
                     result = func()
             except Exception as exc:
                 last_exception = exc
-                if self._circuit_breaker:
+                # Don't count UNIMPLEMENTED toward circuit breaker — it means
+                # the server doesn't support this method, not that it's unhealthy.
+                _is_unimplemented = (
+                    hasattr(exc, "code")
+                    and callable(exc.code)
+                    and exc.code() == grpc.StatusCode.UNIMPLEMENTED
+                )
+                if self._circuit_breaker and not _is_unimplemented:
                     self._circuit_breaker.record_failure(exc)
 
                 if self._is_retryable_grpc_error(exc) and attempt < self._grpc_retry_config.max_retries:
@@ -7244,15 +7257,18 @@ class GenieSimLocalFramework:
                 quality_score = 0.0
                 self.log("[VALIDITY_GATE] quality_score forced to 0.0: camera_count=0", "WARNING")
 
-            # Gate: EE pose must exist in most frames
-            if _server_ee_frame_count <= 1 and len(frames) > 1:
+            # Gate: EE pose must exist in most frames (server or FK-computed)
+            _ee_present_count = sum(1 for f in frames if f.get("ee_pos") is not None)
+            if _ee_present_count <= 1 and len(frames) > 1:
                 quality_score = 0.0
                 _validity_errors.append(
-                    f"EE pose missing: server_ee_frames={_server_ee_frame_count}/{len(frames)}"
+                    f"EE pose missing: ee_present={_ee_present_count}/{len(frames)} "
+                    f"(server={_server_ee_frame_count})"
                 )
                 self.log(
                     f"[VALIDITY_GATE] quality_score forced to 0.0: "
-                    f"server_ee_frames={_server_ee_frame_count}/{len(frames)}",
+                    f"ee_present={_ee_present_count}/{len(frames)} "
+                    f"(server_ee_frames={_server_ee_frame_count})",
                     "WARNING",
                 )
 
@@ -8917,9 +8933,25 @@ class GenieSimLocalFramework:
             _camera_ids_to_try = [cid for cid in _camera_ids_to_try if cid in _cam_map]
         for camera_id in _camera_ids_to_try:
             try:
-                camera_data = self._client.get_camera_data(camera_id)
+                camera_data = None
+                # Try raw CameraService gRPC first (works reliably during trajectory)
+                _prim = _cam_map.get(camera_id)
+                if _prim and hasattr(self._client, "_get_camera_data_raw"):
+                    camera_data = self._client._get_camera_data_raw(_prim)
+                # Fall back to composed observation path
+                if camera_data is None:
+                    camera_data = self._client.get_camera_data(camera_id)
                 if camera_data is not None:
-                    obs.setdefault("camera_frames", {})[camera_id] = camera_data
+                    # Sanitize camera data for JSON serialization: convert raw
+                    # bytes to base64 strings to avoid circular reference errors.
+                    _sanitized = {}
+                    for _k, _v in camera_data.items():
+                        if isinstance(_v, (bytes, bytearray)):
+                            import base64
+                            _sanitized[_k] = base64.b64encode(_v).decode("ascii") if _v else None
+                        else:
+                            _sanitized[_k] = _v
+                    obs.setdefault("camera_frames", {})[camera_id] = _sanitized
                     _any_camera = True
                 else:
                     logger.debug(
