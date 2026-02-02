@@ -1472,6 +1472,70 @@ class EpisodeGenerator:
                     "WARNING",
                 )
 
+    def _summarize_contact_availability(
+        self,
+        episode: GeneratedEpisode,
+    ) -> Tuple[int, int, int]:
+        """Summarize contact-availability coverage for an episode.
+
+        Returns (missing_contact_frames, missing_grasp_frames, total_frames).
+        """
+        if episode.sensor_data is None or episode.trajectory is None:
+            return 0, 0, 0
+
+        frames = getattr(episode.sensor_data, "frames", [])
+        states = getattr(episode.trajectory, "states", [])
+        if not frames or not states:
+            return 0, 0, len(frames)
+
+        total = min(len(frames), len(states))
+        missing_contact_frames = 0
+        missing_grasp_frames = 0
+        grasp_phases = {"grasp", "articulate_grasp"}
+
+        for idx in range(total):
+            frame = frames[idx]
+            contacts_available = getattr(frame, "contacts_available", None)
+            if contacts_available is not False:
+                continue
+            missing_contact_frames += 1
+            phase = getattr(states[idx], "phase", None)
+            if hasattr(phase, "value"):
+                phase_label = phase.value
+            else:
+                phase_label = str(phase) if phase is not None else ""
+            if phase_label in grasp_phases:
+                missing_grasp_frames += 1
+
+        return missing_contact_frames, missing_grasp_frames, total
+
+    def _apply_contact_availability_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
+        """Fail episodes with missing contacts during grasp phases when required."""
+        require_contacts = parse_bool_env(
+            os.getenv("REQUIRE_CONTACTS"),
+            default=resolve_production_mode(),
+        )
+        if not require_contacts:
+            return
+
+        for episode in episodes:
+            missing_contact_frames, missing_grasp_frames, total_frames = (
+                self._summarize_contact_availability(episode)
+            )
+            if missing_grasp_frames > 0:
+                warning = (
+                    "Contact capture unavailable during grasp phases in "
+                    f"{missing_grasp_frames}/{total_frames} frames. "
+                    "Set REQUIRE_CONTACTS=false to allow missing contacts."
+                )
+                episode.validation_errors.append(warning)
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                self.log(
+                    f"Episode {episode.episode_id} filtered due to missing contacts: {warning}",
+                    "WARNING",
+                )
+
     def _solve_trajectory_with_replan(
         self,
         motion_plan: MotionPlan,
@@ -1587,6 +1651,7 @@ class EpisodeGenerator:
         validated_episodes = self._validate_episodes(all_episodes, manifest)
         self._enforce_physics_backed_qc(validated_episodes)
         self._apply_camera_capture_quality_gates(validated_episodes)
+        self._apply_contact_availability_quality_gates(validated_episodes)
 
         if HAVE_QUALITY_SYSTEM:
             self.log("\nStep 4b: Generating quality certificates...")
@@ -2745,6 +2810,21 @@ class EpisodeGenerator:
             cert.add_warning(
                 "Heuristic physics validation in use - not suitable for production filtering"
             )
+
+        missing_contact_frames, missing_grasp_frames, total_frames = (
+            self._summarize_contact_availability(episode)
+        )
+        if missing_contact_frames > 0 and total_frames > 0:
+            warning = (
+                "Contact capture unavailable in "
+                f"{missing_contact_frames}/{total_frames} frame(s)."
+            )
+            if missing_grasp_frames > 0:
+                warning += (
+                    f" Missing contact data during grasp phases in "
+                    f"{missing_grasp_frames}/{total_frames} frame(s)."
+                )
+            cert.add_warning(warning)
 
         return cert
 
