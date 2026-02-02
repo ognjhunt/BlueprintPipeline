@@ -722,6 +722,7 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | int | 3 | Failures before the Genie Sim gRPC circuit breaker opens. |
 | `GENIESIM_CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | int | 2 | Successes required to close the circuit breaker after half-open. |
 | `GENIESIM_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_S` | float | 30.0 | Recovery timeout (seconds) before the circuit breaker probes again. |
+| `GENIESIM_MAX_RESTARTS` | int | 10 | Max client-side container restarts per session. Init retries may still be noisy unless separated from the runtime restart budget. |
 | `GENIESIM_ROOT` | path | `/opt/geniesim` | Genie Sim repository root (local framework) |
 | `ISAACSIM_REQUIRED` | bool | false | Require Isaac Sim + Genie Sim installs when using the local framework (enforces `GENIESIM_ROOT` and `ISAAC_SIM_PATH/python.sh`). |
 | `CUROBO_REQUIRED` | bool | false | Require cuRobo planning support when using the local framework. |

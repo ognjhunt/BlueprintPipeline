@@ -1361,7 +1361,7 @@ class GenieSimGRPCClient:
         import time as _time
         import subprocess as _sp
 
-        max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "3"))
+        max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "10"))
         cooldown_s = int(os.environ.get("GENIESIM_RESTART_COOLDOWN_S", "30"))
 
         if not hasattr(self, "_restart_count"):
