@@ -1277,6 +1277,7 @@ class GenieSimGRPCClient:
         self._camera_missing_logged: set[str] = set()
         self._first_joint_call = True  # first set_joint_position uses longer timeout
         self._first_trajectory_call = True  # first trajectory waypoint uses longer timeout
+        self._curobo_initialized = False  # tracks if cuRobo has completed lazy init
         self._abort_event: Optional[_threading.Event] = None  # set by episode runner
         self._first_call_timeout = float(os.environ.get("GENIESIM_FIRST_CALL_TIMEOUT_S", "300"))
         self._circuit_breaker = CircuitBreaker(
@@ -3793,6 +3794,7 @@ class GenieSimGRPCClient:
         trajectory: List[Dict[str, Any]],
         abort_event: Optional[threading.Event] = None,
         observation_callback: Optional[Callable[[Dict[str, Any], int], None]] = None,
+        waypoint_completed_callback: Optional[Callable[[int], None]] = None,
     ) -> GrpcCallResult:
         """
         Execute a trajectory on the robot.
@@ -3806,6 +3808,9 @@ class GenieSimGRPCClient:
                 (waypoint_dict, waypoint_index). Called after each set_joint_position
                 returns and before the inter-waypoint delay, while _grpc_lock is NOT
                 held. Use this to capture observations without lock contention.
+            waypoint_completed_callback: Optional callback invoked after each waypoint
+                gRPC call completes (before observation_callback). Use this to update
+                progress tracking / stall watchdog.
 
         Returns:
             GrpcCallResult indicating success.
@@ -3860,6 +3865,9 @@ class GenieSimGRPCClient:
             elif self._first_trajectory_call:
                 call_timeout = max(self.timeout, self._first_call_timeout)
                 logger.info(f"First trajectory set_joint_position — using extended timeout {call_timeout}s")
+            elif not self._curobo_initialized and _wp_idx == 0:
+                call_timeout = min(self._first_call_timeout, 90.0)
+                logger.info(f"Pre-cuRobo-init first waypoint — using moderate timeout {call_timeout}s")
             else:
                 call_timeout = self.timeout
             _req = request
@@ -3871,6 +3879,12 @@ class GenieSimGRPCClient:
                 success_checker=lambda resp: bool(resp.errmsg),
                 abort_event=abort_event,
             )
+            # Notify watchdog that a waypoint gRPC call completed (progress signal)
+            if waypoint_completed_callback is not None:
+                try:
+                    waypoint_completed_callback(_wp_idx)
+                except Exception as _wp_cb_err:
+                    logger.warning("waypoint_completed_callback error at %d: %s", _wp_idx, _wp_cb_err)
             # Check abort after gRPC call returns (may have been set while blocked)
             if abort_event is not None and abort_event.is_set():
                 logger.info("execute_trajectory: abort_event set after gRPC call, exiting early")
@@ -3932,6 +3946,7 @@ class GenieSimGRPCClient:
 
         if self._first_trajectory_call:
             self._first_trajectory_call = False
+            self._curobo_initialized = True
         return GrpcCallResult(success=True, available=True)
 
     def start_recording(self, episode_id: str, output_dir: str) -> GrpcCallResult:
@@ -5913,12 +5928,17 @@ class GenieSimLocalFramework:
                 collector_state["observations"].append(obs)
                 _note_progress(obs)
 
+            def _on_waypoint_done(wp_idx: int) -> None:
+                """Update watchdog progress when a waypoint gRPC call completes."""
+                collector_state["last_progress_time"] = time.time()
+
             def _execute_trajectory() -> None:
                 try:
                     execution_result = self._client.execute_trajectory(
                         timed_trajectory,
                         abort_event=abort_event,
                         observation_callback=_between_waypoints_obs,
+                        waypoint_completed_callback=_on_waypoint_done,
                     )
                     if not execution_result.available:
                         execution_state["error"] = (
@@ -5936,6 +5956,10 @@ class GenieSimLocalFramework:
 
             execution_thread = threading.Thread(target=_execute_trajectory, daemon=True)
             execution_thread.start()
+
+            _trajectory_deadline = time.time() + float(
+                os.environ.get("GENIESIM_TRAJECTORY_TIMEOUT_S", "600")
+            )
 
             stall_timeout_s = self.config.stall_timeout_s
             stall_detected = False
@@ -5980,6 +6004,15 @@ class GenieSimLocalFramework:
                 return last_planned_timestamp >= trajectory_end_time - end_time_tolerance_s
 
             while execution_thread.is_alive():
+                # Hard deadline: abort if total trajectory time exceeded
+                if time.time() >= _trajectory_deadline:
+                    _traj_timeout_val = os.environ.get("GENIESIM_TRAJECTORY_TIMEOUT_S", "600")
+                    self.log(
+                        f"Total trajectory timeout exceeded ({_traj_timeout_val}s); aborting.",
+                        "WARNING",
+                    )
+                    abort_event.set()
+                    break
                 if stall_timeout_s > 0:
                     last_progress_time = collector_state.get("last_progress_time")
                     if last_progress_time:
@@ -8614,9 +8647,11 @@ Scene objects: {scene_summary}
         try:
             _wp_llm = _create_wp_llm()
             resp = _wp_llm.generate(prompt=prompt, json_output=True, disable_tools=True, temperature=0.2)
-            import json as _json_mod
-            resp_text = resp.text if hasattr(resp, "text") else resp
-            parsed = _json_mod.loads(resp_text) if isinstance(resp_text, str) else resp_text
+            if hasattr(resp, "parse_json"):
+                parsed = resp.parse_json()
+            else:
+                import json as _json_mod
+                parsed = _json_mod.loads(resp) if isinstance(resp, str) else resp
             raw_wps = parsed.get("waypoints", [])
             if not raw_wps or len(raw_wps) < 3:
                 self.log(f"  ⚠️  LLM returned {len(raw_wps)} waypoints (need ≥3); falling back", "WARNING")

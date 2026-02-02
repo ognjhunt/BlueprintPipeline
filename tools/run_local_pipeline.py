@@ -5316,6 +5316,26 @@ class LocalPipelineRunner:
 
 def main():
     os.environ["REQUEST_ID"] = ensure_request_id()
+
+    # Write PID file so the pipeline can be stopped safely via
+    # kill "$(cat /tmp/pipeline_run.pid)" instead of broad pkill commands.
+    _pid_path = os.environ.get("PIPELINE_PID_FILE", "/tmp/pipeline_run.pid")
+    try:
+        with open(_pid_path, "w") as _pf:
+            _pf.write(str(os.getpid()))
+    except OSError:
+        pass
+
+    # Graceful SIGTERM handler — lets current task finish before exiting.
+    import signal
+
+    def _sigterm_handler(signum, frame):
+        logging.warning("SIGTERM received — completing current task then exiting")
+        # Setting this env var is checked by the pipeline runner between steps.
+        os.environ["_PIPELINE_SHUTDOWN"] = "1"
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
     parser = argparse.ArgumentParser(
         description="Run BlueprintPipeline locally for testing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -5561,6 +5581,12 @@ def main():
         reset_breaker=args.reset_breaker,
         auto_trigger_import=auto_trigger_import,
     )
+
+    # Clean up PID file
+    try:
+        os.remove(_pid_path)
+    except OSError:
+        pass
 
     sys.exit(0 if success else 1)
 
