@@ -5462,7 +5462,10 @@ class GenieSimLocalFramework:
                     if full_obs.available and full_obs.success and full_obs.payload:
                         obs.update(full_obs.payload)
                         obs["planned_timestamp"] = float(wp_timestamp)
-                        obs["timestamp"] = time.time()
+                        obs["timestamp"] = self._coerce_timestamp(
+                            obs.get("timestamp"),
+                            fallback=time.time(),
+                        )
                         obs["data_source"] = "between_waypoints"
                     else:
                         obs["data_source"] = "between_waypoints_fallback"
@@ -6483,6 +6486,36 @@ class GenieSimLocalFramework:
             timed_trajectory.append(waypoint)
         return timed_trajectory
 
+    def _coerce_timestamp(self, value: Any, *, fallback: Optional[float] = None) -> float:
+        fallback_value: float
+        if fallback is None:
+            fallback_value = time.time()
+        else:
+            try:
+                fallback_value = float(fallback)
+            except (TypeError, ValueError):
+                fallback_value = time.time()
+
+        if value is None:
+            return fallback_value
+
+        if isinstance(value, dict):
+            seconds = value.get("sec", value.get("seconds"))
+            nanos = value.get("nsec", value.get("nanos"))
+            if seconds is None and nanos is None:
+                return fallback_value
+            try:
+                seconds_value = float(seconds) if seconds is not None else 0.0
+                nanos_value = float(nanos) if nanos is not None else 0.0
+            except (TypeError, ValueError):
+                return fallback_value
+            return seconds_value + (nanos_value / 1e9)
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback_value
+
     def _align_observations_to_trajectory(
         self,
         trajectory: List[Dict[str, Any]],
@@ -6493,14 +6526,13 @@ class GenieSimLocalFramework:
 
         def _obs_timestamp(obs: Dict[str, Any], index: int) -> float:
             timestamp = obs.get("timestamp")
+            if isinstance(timestamp, dict):
+                timestamp = None
             if timestamp is None:
                 timestamp = obs.get("planned_timestamp")
-            if timestamp is None:
-                return float(index)
-            try:
-                return float(timestamp)
-            except (TypeError, ValueError):
-                return float(index)
+            if isinstance(timestamp, dict):
+                timestamp = None
+            return self._coerce_timestamp(timestamp, fallback=float(index))
 
         indexed_obs = [
             (idx, obs, _obs_timestamp(obs, idx)) for idx, obs in enumerate(observations)
@@ -7440,6 +7472,20 @@ class GenieSimLocalFramework:
                 frame_index_indices.setdefault(frame_index, []).append(idx)
 
             timestamp = frame.get("timestamp")
+            if isinstance(timestamp, dict):
+                logger.warning(
+                    "Frame %d timestamp is a dict (%s); coercing value.",
+                    idx,
+                    timestamp,
+                )
+                warnings.append(
+                    f"Frame {idx} timestamp was a dict; coercing value from {timestamp!r}."
+                )
+                timestamp = self._coerce_timestamp(
+                    timestamp,
+                    fallback=prev_timestamp if prev_timestamp is not None else 0.0,
+                )
+                frame["timestamp"] = timestamp
             if timestamp is None:
                 frame_errors.append(f"Frame {idx} missing timestamp.")
             else:
