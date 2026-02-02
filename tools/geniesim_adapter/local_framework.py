@@ -5789,7 +5789,34 @@ class GenieSimLocalFramework:
                 return result
 
             # Minimum frame count guard
-            min_episode_frames = int(os.getenv("MIN_EPISODE_FRAMES", "20"))
+            env_min_frames = os.getenv("MIN_EPISODE_FRAMES")
+            env_min_value = int(env_min_frames) if env_min_frames is not None else None
+            min_required = max(1, int(len(timed_trajectory) * 0.5))
+            min_episode_frames = (
+                min(min_required, env_min_value)
+                if env_min_value is not None
+                else min_required
+            )
+            adaptive_notes = []
+            if env_min_value is None:
+                adaptive_notes.append("no MIN_EPISODE_FRAMES override")
+            elif min_episode_frames != env_min_value:
+                adaptive_notes.append(
+                    f"capped by MIN_EPISODE_FRAMES={env_min_value}"
+                )
+            if _use_callback_obs and _exec_succeeded and _has_observations:
+                if min_episode_frames > 1:
+                    min_episode_frames = 1
+                    adaptive_notes.append(
+                        "lowered threshold for between-waypoint observations"
+                    )
+            if adaptive_notes:
+                self.log(
+                    "Adaptive minimum frame threshold set to "
+                    f"{min_episode_frames} (trajectory_min={min_required}; "
+                    f"{', '.join(adaptive_notes)}).",
+                    "WARNING",
+                )
             if len(aligned_observations) < min_episode_frames:
                 result["error"] = (
                     f"Too few observations ({len(aligned_observations)}) for episode; "
