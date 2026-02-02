@@ -1146,6 +1146,8 @@ class IKSolver:
             return self._fk_franka(joints)
         elif self.config.name == "ur10":
             return self._fk_ur(joints)
+        elif self.config.name in ("g1", "g1_right_arm", "g1_left_arm"):
+            return self._fk_g1(joints)
         else:
             return self._fk_generic(joints)
 
@@ -1194,6 +1196,40 @@ class IKSolver:
         T = np.eye(4)
         for i, (a, d, alpha) in enumerate(dh):
             theta = joints[i] if i < len(joints) else 0
+            Ti = self._dh_transform(a, d, alpha, theta)
+            T = T @ Ti
+
+        position = T[:3, 3]
+        rotation_matrix = T[:3, :3]
+        quaternion = self._rotation_matrix_to_quaternion(rotation_matrix)
+
+        return position, quaternion
+
+    def _fk_g1(self, joints: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Forward kinematics for Unitree G1 right arm (7-DOF).
+
+        DH parameters derived from G1 URDF link offsets:
+        shoulder_pitch -> shoulder_roll -> shoulder_yaw -> elbow_pitch
+        -> wrist_yaw -> wrist_pitch -> wrist_roll -> EE
+        """
+        # Modified DH parameters (a, d, alpha) for each joint
+        dh = [
+            (0.0,     0.0,     -np.pi / 2),   # shoulder_pitch
+            (0.0,     0.0,      np.pi / 2),    # shoulder_roll
+            (0.0,    -0.2800,  -np.pi / 2),    # shoulder_yaw (upper arm length)
+            (0.0,     0.0,      np.pi / 2),    # elbow_pitch
+            (0.0,    -0.2430,  -np.pi / 2),    # wrist_yaw (forearm length)
+            (0.0,     0.0,      np.pi / 2),    # wrist_pitch
+            (0.0,    -0.0500,   0.0),           # wrist_roll (wrist to EE)
+        ]
+
+        # Base transform: right shoulder offset from torso origin
+        T = np.eye(4)
+        T[1, 3] = -0.1585   # y offset (right side)
+        T[2, 3] = 0.3520    # z offset (shoulder height)
+
+        for i, (a, d, alpha) in enumerate(dh):
+            theta = joints[i] if i < len(joints) else 0.0
             Ti = self._dh_transform(a, d, alpha, theta)
             T = T @ Ti
 

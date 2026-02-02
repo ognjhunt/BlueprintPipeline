@@ -452,6 +452,23 @@ def _resolve_robot_joint_groups(
     }
 
 
+def _pose_to_4x4(position: "np.ndarray", orientation: "np.ndarray") -> "np.ndarray":
+    """Convert position [x,y,z] + quaternion [w,x,y,z] to 4x4 homogeneous matrix."""
+    w, x, y, z = orientation[0], orientation[1], orientation[2], orientation[3]
+    T = np.eye(4)
+    T[0, 0] = 1 - 2 * (y * y + z * z)
+    T[0, 1] = 2 * (x * y - w * z)
+    T[0, 2] = 2 * (x * z + w * y)
+    T[1, 0] = 2 * (x * y + w * z)
+    T[1, 1] = 1 - 2 * (x * x + z * z)
+    T[1, 2] = 2 * (y * z - w * x)
+    T[2, 0] = 2 * (x * z - w * y)
+    T[2, 1] = 2 * (y * z + w * x)
+    T[2, 2] = 1 - 2 * (x * x + y * y)
+    T[:3, 3] = position
+    return T
+
+
 def _resolve_robot_config(robot_type: str) -> Any:
     robot_key = (robot_type or "").lower()
     robot_config = ROBOT_CONFIGS.get(robot_type) or ROBOT_CONFIGS.get(robot_key)
@@ -2932,6 +2949,51 @@ class GenieSimGRPCClient:
             payload={"msg": response.errmsg},
         )
 
+    def _expand_arm_to_full_body(
+        self,
+        arm_positions: List[float],
+        gripper_aperture: Optional[float] = None,
+    ) -> List[float]:
+        """Expand arm-only joint trajectory to full-body command (e.g. 7→34 for G1).
+
+        Copies latest full-body joint state, overlays arm joints at correct
+        indices, and optionally sets gripper finger joints.
+        """
+        robot_type = getattr(self, "_robot_type", "") or ""
+        normalized = _normalize_robot_name(robot_type)
+        if not normalized.startswith("g1"):
+            return arm_positions  # Non-G1: pass through
+
+        full_body = list(self._latest_joint_positions) if self._latest_joint_positions else []
+        joint_names = list(self._joint_names) if self._joint_names else []
+
+        if len(full_body) <= len(arm_positions):
+            return arm_positions  # Can't expand if we don't have full state
+
+        arm_indices = _resolve_g1_arm_joint_indices(robot_type, joint_names, len(full_body))
+        if not arm_indices or len(arm_indices) != len(arm_positions):
+            return arm_positions
+
+        for idx, arm_idx in enumerate(arm_indices):
+            full_body[arm_idx] = arm_positions[idx]
+
+        if gripper_aperture is not None:
+            gripper_indices = _resolve_g1_gripper_joint_indices(
+                robot_type, joint_names, len(full_body), arm_indices,
+            )
+            gripper_width = gripper_aperture * 0.04  # per-finger width
+            for gi in gripper_indices:
+                full_body[gi] = gripper_width
+
+        if not hasattr(self, "_logged_expand"):
+            logger.info(
+                "Expanding arm %d -> %d joints (G1 full-body)",
+                len(arm_positions), len(full_body),
+            )
+            self._logged_expand = True
+
+        return full_body
+
     def get_joint_position(self, lock_timeout: Optional[float] = None) -> GrpcCallResult:
         """
         Get current joint positions.
@@ -3117,6 +3179,94 @@ class GenieSimGRPCClient:
         except Exception as exc:
             logger.warning(f"[GRIPPER] set_gripper_state failed: {exc}")
             return GrpcCallResult(success=False, available=True, error=str(exc))
+
+    def get_ik_status(
+        self,
+        target_pose: "np.ndarray",
+        is_right: bool = True,
+        obs_avoid: bool = True,
+    ) -> GrpcCallResult:
+        """
+        Query server-side IK solver for joint positions reaching target_pose.
+
+        Uses JointControlService.get_ik_status which has the actual robot model
+        (e.g. G1 humanoid).
+
+        Args:
+            target_pose: 4x4 homogeneous transformation matrix
+            is_right: True for right arm, False for left
+            obs_avoid: Enable obstacle avoidance in IK
+
+        Returns:
+            GrpcCallResult with payload: {joint_names, joint_positions, is_success}
+        """
+        if not self._have_grpc:
+            return self._grpc_unavailable("get_ik_status", "gRPC stubs unavailable")
+        if self._joint_stub is None:
+            return self._grpc_unavailable("get_ik_status", "joint stub not initialized")
+
+        try:
+            from aimdk.protocol.common.se3_pose_pb2 import SE3MatrixPose
+            from aimdk.protocol.hal.joint.joint_channel_pb2 import GetIKStatusReq
+        except ImportError as exc:
+            return GrpcCallResult(
+                success=False, available=True,
+                error=f"Protobuf imports unavailable for get_ik_status: {exc}",
+            )
+
+        # Build SE3MatrixPose: 16 doubles row-major from 4x4 matrix
+        elements = target_pose.flatten().tolist()
+        matrix_pose = SE3MatrixPose(elements=elements)
+        request = GetIKStatusReq(
+            is_right=is_right,
+            target_pose=[matrix_pose],
+            ObsAvoid=obs_avoid,
+        )
+
+        def _request():
+            return self._joint_stub.get_ik_status(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "get_ik_status",
+            _request,
+            None,
+            success_checker=lambda resp: len(resp.IKStatus) > 0,
+        )
+        if response is None:
+            return GrpcCallResult(success=False, available=True, error="get_ik_status failed")
+
+        ik_results = []
+        for ik_status in response.IKStatus:
+            ik_results.append({
+                "joint_names": list(ik_status.joint_names),
+                "joint_positions": list(ik_status.joint_positions),
+                "is_success": ik_status.isSuccess,
+            })
+
+        any_success = any(r["is_success"] for r in ik_results)
+        return GrpcCallResult(
+            success=any_success,
+            available=True,
+            payload=ik_results[0] if ik_results else {},
+        )
+
+    def attach_object(
+        self,
+        object_prim: str,
+        is_right: bool = True,
+    ) -> GrpcCallResult:
+        """Attach an object to the robot gripper via gRPC."""
+        return self.send_command(
+            CommandType.ATTACH_OBJ,
+            {"object_prims": [object_prim], "is_right": is_right},
+        )
+
+    def detach_object(self) -> GrpcCallResult:
+        """Detach the currently held object from the gripper."""
+        return self.send_command(
+            CommandType.DETACH_OBJ,
+            {"detach": True},
+        )
 
     def get_object_pose(self, object_id: str) -> GrpcCallResult:
         """
@@ -3669,6 +3819,13 @@ class GenieSimGRPCClient:
             joint_positions = waypoint.get("joint_positions") or []
             if not joint_positions:
                 continue
+
+            # --- Fix 5: Expand arm-only trajectory to full-body (e.g. 7→34 for G1) ---
+            gripper_aperture = waypoint.get("gripper_aperture")
+            joint_positions = self._expand_arm_to_full_body(
+                list(joint_positions), gripper_aperture,
+            )
+
             joint_names = self._resolve_joint_names(len(joint_positions))
             commands = [
                 joint_pb2.JointCommand(name=name, position=float(value))
@@ -3708,6 +3865,34 @@ class GenieSimGRPCClient:
                     error="gRPC call failed",
                 )
             self._latest_joint_positions = list(joint_positions)
+
+            # --- Fix 4: Execute gripper commands + object attach/detach ---
+            phase = waypoint.get("phase")
+            _prev_gripper = getattr(self, "_last_gripper_aperture", None)
+            if gripper_aperture is not None and gripper_aperture != _prev_gripper:
+                _gripper_width = gripper_aperture * 0.08  # G1 max gripper width
+                try:
+                    self.set_gripper_state(width=_gripper_width, force=10.0)
+                except Exception as _g_err:
+                    logger.warning("Gripper command failed at wp %d: %s", _wp_idx, _g_err)
+                self._last_gripper_aperture = gripper_aperture
+            # Attach object on grasp (gripper closing)
+            if phase == "grasp" and gripper_aperture is not None and gripper_aperture < 0.1:
+                _obj_prims = waypoint.get("object_prims", [])
+                for _op in _obj_prims:
+                    try:
+                        self.attach_object(_op, is_right=True)
+                        logger.info("[GRASP] Attached object: %s", _op)
+                    except Exception as _a_err:
+                        logger.warning("[GRASP] attach_object failed: %s", _a_err)
+            # Detach object on place (gripper opening)
+            if phase == "place" and gripper_aperture is not None and gripper_aperture > 0.9:
+                try:
+                    self.detach_object()
+                    logger.info("[PLACE] Detached object")
+                except Exception as _d_err:
+                    logger.warning("[PLACE] detach_object failed: %s", _d_err)
+
             # Fire observation callback between waypoints while lock is free.
             if observation_callback is not None:
                 try:
@@ -4318,6 +4503,8 @@ class GenieSimLocalFramework:
         collection.
         """
         self.log(f"Initializing robot: cfg_file={robot_cfg_file}, scene_usd={scene_usd}")
+        # Store robot type on client for full-body expansion
+        self._client._robot_type = getattr(self.config, "robot_type", "")
         expected_joint_count = self._expected_joint_count_for_robot(robot_cfg_file)
 
         def _run_init_sequence(sequence_label: str) -> None:
@@ -8334,6 +8521,140 @@ class GenieSimLocalFramework:
                 return False
         return True
 
+    # ── Fix 6+7: LLM-driven adaptive waypoint planning + grasp orientation ──
+
+    def _plan_waypoints_with_llm(
+        self,
+        task: Dict[str, Any],
+        target_position: np.ndarray,
+        place_position: Optional[np.ndarray],
+        ee_position: Optional[np.ndarray] = None,
+    ) -> Optional[List["Waypoint"]]:
+        """Use LLM to plan Cartesian waypoints adapted to object type and task semantics.
+
+        Returns list of Waypoint objects or None on failure (falls back to hardcoded).
+        """
+        try:
+            from tools.llm_client import create_llm_client as _create_wp_llm
+        except Exception:
+            self.log("  ⚠️  LLM client import failed; skipping LLM waypoint planning", "WARNING")
+            return None
+
+        task_desc = task.get("task_description", task.get("task_name", "pick and place"))
+        target_obj = task.get("target_object", task.get("target_object_id", "object"))
+        target_obj_type = task.get("target_object_type", target_obj)
+        robot_type = getattr(self.config, "robot_type", "humanoid")
+
+        # Scene objects summary
+        scene_objs = []
+        try:
+            obs = getattr(self, "_latest_observations", {})
+            for k, v in obs.get("objects", {}).items():
+                if isinstance(v, dict) and "position" in v:
+                    scene_objs.append(f"{k}: pos={v['position']}")
+        except Exception:
+            pass
+        scene_summary = "; ".join(scene_objs[:10]) if scene_objs else "unknown"
+
+        ee_str = f"[{ee_position[0]:.3f}, {ee_position[1]:.3f}, {ee_position[2]:.3f}]" if ee_position is not None else "unknown"
+        target_str = f"[{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]"
+        place_str = f"[{place_position[0]:.3f}, {place_position[1]:.3f}, {place_position[2]:.3f}]" if place_position is not None else "same as target"
+
+        prompt = f"""Plan Cartesian waypoints for a robot manipulation task.
+
+Task: {task_desc}
+Target object: {target_obj_type} at position {target_str}
+Place location: {place_str}
+Current EE position: {ee_str}
+Robot: {robot_type}
+
+Return JSON with exactly this format:
+{{"waypoints": [
+  {{"phase": "approach", "position": [x,y,z], "orientation": [qw,qx,qy,qz], "gripper": 1.0, "duration": 1.0}},
+  {{"phase": "pre_grasp", "position": [x,y,z], "orientation": [qw,qx,qy,qz], "gripper": 1.0, "duration": 0.6}},
+  {{"phase": "grasp", "position": [x,y,z], "orientation": [qw,qx,qy,qz], "gripper": 0.0, "duration": 0.6}},
+  {{"phase": "lift", "position": [x,y,z], "orientation": [qw,qx,qy,qz], "gripper": 0.0, "duration": 0.8}},
+  {{"phase": "transport", "position": [x,y,z], "orientation": [qw,qx,qy,qz], "gripper": 0.0, "duration": 1.2}},
+  {{"phase": "place", "position": [x,y,z], "orientation": [qw,qx,qy,qz], "gripper": 1.0, "duration": 0.6}},
+  {{"phase": "retract", "position": [x,y,z], "orientation": [qw,qx,qy,qz], "gripper": 1.0, "duration": 0.8}}
+]}}
+
+Rules:
+- approach: 10-20cm above object
+- pre_grasp: 2-5cm above object
+- grasp: at object surface height, gripper=0.0 (closed)
+- lift: 15-25cm above grasp point
+- transport: above place location (if different from pick)
+- place: at place surface, gripper=1.0 (open to release)
+- retract: 15-20cm above place point
+- Orientations: top-down [0.707, 0.707, 0, 0] for flat objects (plates, books),
+  angled for tall objects (bottles, cups), handle-aligned for objects with handles (pots, pans, mugs).
+- All positions must be reachable (z > 0, within ~0.6m of robot base).
+- If place location equals target, skip transport/place/retract and just lift and release.
+Scene objects: {scene_summary}
+"""
+
+        try:
+            _wp_llm = _create_wp_llm()
+            resp = _wp_llm.generate(prompt=prompt, json_output=True, disable_tools=True, temperature=0.2)
+            import json as _json_mod
+            parsed = _json_mod.loads(resp) if isinstance(resp, str) else resp
+            raw_wps = parsed.get("waypoints", [])
+            if not raw_wps or len(raw_wps) < 3:
+                self.log(f"  ⚠️  LLM returned {len(raw_wps)} waypoints (need ≥3); falling back", "WARNING")
+                return None
+        except Exception as exc:
+            self.log(f"  ⚠️  LLM waypoint planning failed: {exc}; falling back", "WARNING")
+            return None
+
+        # Convert to Waypoint objects
+        phase_map = {
+            "approach": MotionPhase.APPROACH,
+            "pre_grasp": MotionPhase.APPROACH,
+            "grasp": MotionPhase.GRASP,
+            "lift": MotionPhase.LIFT,
+            "transport": MotionPhase.TRANSPORT,
+            "place": MotionPhase.PLACE,
+            "retract": MotionPhase.APPROACH,
+        }
+
+        waypoints: List[Waypoint] = []
+        timestamp = 0.0
+        for wp_data in raw_wps:
+            try:
+                pos = np.array(wp_data["position"], dtype=float)
+                ori = np.array(wp_data["orientation"], dtype=float)
+                # Normalize quaternion
+                norm = np.linalg.norm(ori)
+                if norm > 0:
+                    ori = ori / norm
+                else:
+                    ori = np.array([1.0, 0.0, 0.0, 0.0])
+                gripper = float(wp_data.get("gripper", 1.0))
+                duration = float(wp_data.get("duration", 0.8))
+                phase_str = wp_data.get("phase", "approach")
+                phase = phase_map.get(phase_str, MotionPhase.APPROACH)
+
+                waypoints.append(Waypoint(
+                    position=pos,
+                    orientation=ori,
+                    gripper_aperture=gripper,
+                    timestamp=timestamp,
+                    duration_to_next=duration,
+                    phase=phase,
+                ))
+                timestamp += duration
+            except (KeyError, ValueError, TypeError) as wp_err:
+                self.log(f"  ⚠️  Skipping invalid LLM waypoint: {wp_err}", "WARNING")
+                continue
+
+        if len(waypoints) < 3:
+            self.log(f"  ⚠️  Only {len(waypoints)} valid LLM waypoints; falling back", "WARNING")
+            return None
+
+        self.log(f"  ✅ LLM waypoint planning: {len(waypoints)} waypoints for '{task_desc}'")
+        return waypoints
+
     def _build_ik_fallback_waypoints(
         self,
         target_position: np.ndarray,
@@ -8380,6 +8701,7 @@ class GenieSimLocalFramework:
             target_orientation,
             MotionPhase.GRASP,
             duration=0.6,
+            gripper_aperture=0.0,  # Fix 4A: close gripper to grasp
         )
 
         lift_position = target_position.copy()
@@ -8389,6 +8711,7 @@ class GenieSimLocalFramework:
             target_orientation,
             MotionPhase.LIFT,
             duration=0.8,
+            gripper_aperture=0.0,  # Fix 4A: keep gripper closed while lifting
         )
 
         if place_position is not None:
@@ -8399,6 +8722,7 @@ class GenieSimLocalFramework:
                 place_orientation,
                 MotionPhase.TRANSPORT,
                 duration=1.2,
+                gripper_aperture=0.0,  # Fix 4A: keep gripper closed during transport
             )
 
             _add_waypoint(
@@ -8406,6 +8730,18 @@ class GenieSimLocalFramework:
                 place_orientation,
                 MotionPhase.PLACE,
                 duration=0.6,
+                gripper_aperture=1.0,  # Fix 4A: open gripper to release
+            )
+
+            # Fix 4A: RETRACT waypoint — pull back after placing
+            retract_position = place_position.copy()
+            retract_position[2] += 0.18
+            _add_waypoint(
+                retract_position,
+                place_orientation,
+                MotionPhase.APPROACH,  # reuse APPROACH phase for retract
+                duration=0.8,
+                gripper_aperture=1.0,  # gripper stays open
             )
 
         return waypoints
@@ -8436,12 +8772,32 @@ class GenieSimLocalFramework:
             task, "place_orientation", target_orientation
         )
 
-        waypoints = self._build_ik_fallback_waypoints(
+        # Fix 6+7: Try LLM-driven waypoint planning first (includes orientation)
+        ee_pos = None
+        try:
+            _ee_result = self._client.get_ee_pose(ee_link_name="right")
+            if _ee_result.success and _ee_result.payload:
+                _p = _ee_result.payload.get("position", {})
+                if isinstance(_p, dict):
+                    ee_pos = np.array([_p.get("x", 0), _p.get("y", 0), _p.get("z", 0)], dtype=float)
+                else:
+                    ee_pos = np.array(_p, dtype=float)
+        except Exception:
+            pass
+        waypoints = self._plan_waypoints_with_llm(
+            task=task,
             target_position=target_position,
             place_position=place_position,
-            target_orientation=target_orientation,
-            place_orientation=place_orientation,
+            ee_position=ee_pos,
         )
+        if waypoints is None:
+            self.log("  📐 Using hardcoded waypoint geometry (LLM planning unavailable)")
+            waypoints = self._build_ik_fallback_waypoints(
+                target_position=target_position,
+                place_position=place_position,
+                target_orientation=target_orientation,
+                place_orientation=place_orientation,
+            )
 
         planner = None
         collision_free: Optional[bool] = None
@@ -8463,33 +8819,61 @@ class GenieSimLocalFramework:
         ik_solver = IKSolver(robot_config, verbose=False)
         seed_joints = initial_joints.copy()
 
+        # --- Fix 3: Try server-side IK first (actual robot model) ---
+        normalized_robot = _normalize_robot_name(getattr(self.config, "robot_type", ""))
+        _use_server_ik = normalized_robot.startswith("g1")
+
         for wp in waypoints:
-            if planner is not None:
+            joints = None
+
+            # 1. Server-side IK (uses actual G1 model + obstacle avoidance)
+            if _use_server_ik and joints is None:
+                try:
+                    is_right = "left" not in normalized_robot
+                    T = _pose_to_4x4(wp.position, wp.orientation)
+                    ik_result = self._client.get_ik_status(T, is_right=is_right, obs_avoid=True)
+                    if ik_result.success and ik_result.payload:
+                        payload = ik_result.payload
+                        if payload.get("is_success") and payload.get("joint_positions"):
+                            joints = np.array(payload["joint_positions"], dtype=float)
+                            self.log(f"  ✅ Server IK solved for {wp.phase.value}", "DEBUG")
+                except Exception as _sik_err:
+                    self.log(f"  ⚠️  Server IK error for {wp.phase.value}: {_sik_err}", "WARNING")
+
+            # 2. Local collision-aware IK
+            if joints is None and planner is not None:
                 joints = planner.solve_ik_with_collision_check(
                     wp.position, wp.orientation, seed_joints=seed_joints
                 )
-            else:
+                if joints is not None:
+                    self.log(f"  ✅ Local collision-aware IK solved for {wp.phase.value}", "DEBUG")
+
+            # 3. Local numerical IK
+            if joints is None:
                 joints = ik_solver.solve(wp.position, wp.orientation, seed_joints)
+                if joints is not None:
+                    self.log(f"  ✅ Local numerical IK solved for {wp.phase.value}", "DEBUG")
 
             if joints is None:
                 self.log(
-                    f"  ❌ IK failed for waypoint {wp.phase.value} at position {wp.position.tolist()}",
+                    f"  ❌ All IK methods failed for {wp.phase.value} at {wp.position.tolist()}",
                     "ERROR",
                 )
                 return None
             if not self._within_joint_limits(joints, robot_config):
-                self.log(
-                    f"  ❌ IK solution violates joint limits for waypoint {wp.phase.value}",
-                    "ERROR",
-                )
-                return None
+                joints = self._clamp_joints_to_limits(joints, robot_config)
+                self.log(f"  ⚠️  IK solution clamped to joint limits for {wp.phase.value}", "WARNING")
 
             wp.joint_positions = joints
             seed_joints = joints
 
+        # --- Fix 4: Include gripper_aperture and phase in trajectory ---
         trajectory: List[Dict[str, Any]] = []
         current_joints = initial_joints.copy()
         current_time = 0.0
+
+        # Get target object prim for attach/detach
+        _target_prim = task.get("target_object_prim") or task.get("object_prim", "")
 
         for index, wp in enumerate(waypoints):
             target_joints = wp.joint_positions
@@ -8502,12 +8886,16 @@ class GenieSimLocalFramework:
             for step in range(start_step, steps):
                 t = step / (steps - 1)
                 joint_pos = (1 - t) * current_joints + t * target_joints
-                trajectory.append(
-                    {
-                        "joint_positions": joint_pos.tolist(),
-                        "timestamp": current_time + t * duration,
-                    }
-                )
+                wp_dict: Dict[str, Any] = {
+                    "joint_positions": joint_pos.tolist(),
+                    "timestamp": current_time + t * duration,
+                    "gripper_aperture": wp.gripper_aperture,
+                    "phase": wp.phase.value,
+                }
+                # Annotate grasp/lift/transport with object prim for attach
+                if wp.phase.value in ("grasp", "lift", "transport") and _target_prim:
+                    wp_dict["object_prims"] = [_target_prim]
+                trajectory.append(wp_dict)
 
             current_time += duration
             current_joints = target_joints
