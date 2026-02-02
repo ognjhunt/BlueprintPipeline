@@ -6899,6 +6899,11 @@ class GenieSimLocalFramework:
                         "real_effort_frames": f"{_real_effort_count}/{len(frames)}",
                         "diversity_calibration": _diversity_calibration_source,
                         "object_property_provenance": dict(_object_property_provenance),
+                        "warnings": (
+                            ["ee_pos_static_fk_direct_waypoint"]
+                            if _ee_static_fallback_used
+                            else []
+                        ),
                     },
                     "channel_confidence": {
                         "joint_positions": 1.0,
@@ -7344,6 +7349,10 @@ class GenieSimLocalFramework:
         _real_effort_count = 0  # Track how many frames had real PhysX joint efforts
         _contact_force_cache: Dict[str, Dict] = {}  # cache Gemini contact force estimates
         self._prev_server_ee_pos = None  # Reset for each episode
+        _recent_ee_positions: List[List[float]] = []
+        _ee_static_fallback_used = False
+        _ee_static_window = 5
+        _ee_static_std = 1e-4
         _is_production = getattr(self.config, "environment", "") == "production"
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
@@ -7529,6 +7538,7 @@ class GenieSimLocalFramework:
             _used_server_ee = False
             # Check if the server observation contains a real (dynamic) EE pose
             _server_ee = robot_state.get("ee_pose") or {}
+            _fk_source = None
             if isinstance(_server_ee, dict) and "position" in _server_ee:
                 _sep = _server_ee["position"]
                 if isinstance(_sep, dict) and "x" in _sep:
@@ -7561,17 +7571,21 @@ class GenieSimLocalFramework:
                         if config_names and all(name in joint_names for name in config_names):
                             indices = [joint_names.index(name) for name in config_names]
                             fk_joint_positions = waypoint_joints[indices]
+                            _fk_source = "indexed_config"
                     if fk_joint_positions is None and arm_indices:
                         # If waypoint is arm-only (e.g. 7-DOF Franka) and arm_indices
                         # point beyond its length, use waypoint_joints directly as
                         # they already represent the arm joint positions.
                         if max(arm_indices) < len(waypoint_joints):
                             fk_joint_positions = waypoint_joints[arm_indices]
+                            _fk_source = "indexed_arm"
                         elif len(waypoint_joints) == arm_dof:
                             fk_joint_positions = waypoint_joints
+                            _fk_source = "direct"
                     # Last resort: if waypoint length matches expected arm DOF, use directly
                     if fk_joint_positions is None and len(waypoint_joints) == arm_dof:
                         fk_joint_positions = waypoint_joints
+                        _fk_source = "direct"
                     if fk_solver is not None and fk_joint_positions is not None:
                         ee_pos, ee_quat = fk_solver._forward_kinematics(fk_joint_positions)
                         _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
@@ -7584,6 +7598,38 @@ class GenieSimLocalFramework:
                         frame_data["ee_quat"] = ee_quat
                 except Exception:
                     pass
+
+            if frame_data.get("ee_pos"):
+                _recent_ee_positions.append(frame_data["ee_pos"])
+                if len(_recent_ee_positions) > _ee_static_window:
+                    _recent_ee_positions.pop(0)
+                if (
+                    not _used_server_ee
+                    and _fk_source in {"indexed_config", "indexed_arm"}
+                    and len(_recent_ee_positions) == _ee_static_window
+                    and len(waypoint_joints) == arm_dof
+                ):
+                    _recent_arr = np.asarray(_recent_ee_positions, dtype=float)
+                    if np.all(np.std(_recent_arr, axis=0) < _ee_static_std):
+                        try:
+                            if fk_solver is not None:
+                                ee_pos, ee_quat = fk_solver._forward_kinematics(waypoint_joints)
+                                _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
+                                frame_data["ee_pos"] = _ee
+                                frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, "tolist") else ee_quat
+                                _recent_ee_positions[-1] = frame_data["ee_pos"]
+                                _ee_static_fallback_used = True
+                                _fk_source = "direct_fallback"
+                            elif getattr(self.config, "robot_type", "").lower() in _FRANKA_TYPES:
+                                ee_pos, ee_quat = _franka_fk(waypoint_joints)
+                                _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
+                                frame_data["ee_pos"] = _ee
+                                frame_data["ee_quat"] = ee_quat
+                                _recent_ee_positions[-1] = frame_data["ee_pos"]
+                                _ee_static_fallback_used = True
+                                _fk_source = "direct_fallback"
+                        except Exception:
+                            pass
 
             if _used_server_ee:
                 _server_ee_frame_count += 1
