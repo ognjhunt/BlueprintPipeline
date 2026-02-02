@@ -80,11 +80,11 @@ spec:
                   key: ROBOT_TYPE
                   optional: true
             - name: GENIESIM_PREFIX
-              value: "scenes/$(SCENE_ID)/geniesim"
+              value: "scenes/${SCENE_ID}/geniesim"
             - name: JOB_OUTPUT_PATH
-              value: "scenes/$(SCENE_ID)/geniesim/job.json"
+              value: "scenes/${SCENE_ID}/geniesim/job.json"
             - name: OUTPUT_PREFIX
-              value: "scenes/$(SCENE_ID)/episodes"
+              value: "scenes/${SCENE_ID}/episodes"
             - name: METRICS_BACKEND
               value: "cloud_monitoring"
             - name: GCP_PROJECT_ID

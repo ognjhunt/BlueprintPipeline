@@ -8760,6 +8760,7 @@ class GenieSimLocalFramework:
                         obs_rs["ee_vel"] = frame["ee_vel"]
 
         # Backfill joint efforts via inverse dynamics when PhysX didn't provide them
+        _estimated_effort_count = 0
         if len(frames) >= 3:
             # Simplified inverse dynamics: τ = I·α + C·v + G
             _id_inertia = np.array([2.0, 2.0, 1.5, 1.5, 1.0, 1.0, 0.5])
