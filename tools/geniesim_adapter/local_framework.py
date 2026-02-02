@@ -3617,20 +3617,25 @@ class GenieSimGRPCClient:
         Returns:
             Dict with decoded rgb/depth numpy arrays and metadata, or None
         """
-        obs = getattr(self, "_latest_observation", None)
-        if obs is None or not obs.get("success"):
+        obs = getattr(self, "_latest_observation", None) or {}
+        camera_observation = obs.get("camera_observation") or {}
+        images = camera_observation.get("images") if camera_observation else None
+
+        if not images and not camera_observation:
             obs_lock_timeout = float(os.getenv("OBS_LOCK_TIMEOUT_S", "1.0"))
             obs_result = self.get_observation(lock_timeout=obs_lock_timeout)
             if not obs_result.available or not obs_result.success:
+                logger.warning("No observation available for camera data.")
                 return None
             obs = obs_result.payload or {}
-        if not obs.get("success"):
+            camera_observation = obs.get("camera_observation") or {}
+            images = camera_observation.get("images") if camera_observation else None
+
+        if camera_observation and not images:
+            logger.warning("Camera observation present but contains no images.")
             return None
 
-        camera_observation = obs.get("camera_observation") or {}
-        images = camera_observation.get("images", [])
         if not images:
-            logger.warning("No camera images available in observation.")
             return None
 
         image_info = next(
