@@ -1,0 +1,56 @@
+{
+  "format": "lerobot",
+  "export_format": "lerobot_v2",
+  "version": "2.0",
+  "episodes": 1,
+  "total_episodes": 1,
+  "skipped": 0,
+  "total_frames": 22,
+  "exported_at": "2026-02-02T15:42:32.939399Z",
+  "data_path": "data",
+  "chunking": {
+    "strategy": "single",
+    "chunk_dir": "chunk-000"
+  },
+  "schema": [
+    {
+      "name": "episode_id",
+      "type": "string"
+    },
+    {
+      "name": "frame_index",
+      "type": "int64"
+    },
+    {
+      "name": "timestamp",
+      "type": "double"
+    },
+    {
+      "name": "observation",
+      "type": "large_string"
+    },
+    {
+      "name": "action",
+      "type": "large_string"
+    },
+    {
+      "name": "reward",
+      "type": "double"
+    },
+    {
+      "name": "done",
+      "type": "bool"
+    },
+    {
+      "name": "task_name",
+      "type": "string"
+    },
+    {
+      "name": "task_id",
+      "type": "string"
+    }
+  ],
+  "frame_counts": {
+    "task_2_ep0000": 22
+  }
+}

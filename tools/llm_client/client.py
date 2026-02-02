@@ -633,7 +633,10 @@ class GeminiClient(LLMClient):
             from google.genai import types
             self._genai = genai
             self._types = types
-            self._client = genai.Client(api_key=self.api_key)
+            self._client = genai.Client(
+                api_key=self.api_key,
+                http_options={"timeout": 120_000},  # 120s timeout for API calls
+            )
         except ImportError:
             raise ImportError("google-genai package is required for Gemini support")
 
