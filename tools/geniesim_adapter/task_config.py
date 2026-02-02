@@ -698,15 +698,22 @@ class TaskConfigGenerator:
         self.log(f"LLM generated {len(raw_tasks)} task suggestions")
 
         tasks = []
+        seen_task_keys = set()  # Deduplication: (task_type, target_object)
         valid_task_types = set(DIFFICULTY_FACTORS.keys())
         for t in raw_tasks:
             task_type = t.get("task_type", "")
             if task_type not in valid_task_types:
                 self.log(f"Skipping unknown task_type from LLM: {task_type}", level="WARNING")
                 continue
+            target_obj = str(t.get("target_object", ""))
+            dedup_key = (task_type, target_obj.lower())
+            if dedup_key in seen_task_keys:
+                self.log(f"Skipping duplicate LLM task: {task_type} -> {target_obj}", level="INFO")
+                continue
+            seen_task_keys.add(dedup_key)
             tasks.append(SuggestedTask(
                 task_type=task_type,
-                target_object=str(t.get("target_object", "")),
+                target_object=target_obj,
                 goal_region=t.get("goal_region"),
                 difficulty=t.get("difficulty", "medium"),
                 priority=min(int(t.get("priority", 1)), 5),
@@ -714,6 +721,7 @@ class TaskConfigGenerator:
                 constraints=t.get("constraints", {}),
             ))
 
+        self.log(f"LLM tasks after deduplication: {len(tasks)} (from {len(raw_tasks)} raw)")
         return tasks, robot_config
 
     def _build_scene_planning_prompt(
@@ -786,15 +794,18 @@ Given the objects below, you must:
 - Consider the robot's reach radius (~0.85m) — objects beyond this distance from the base cannot be manipulated
 
 ### Tasks
-- Generate up to {max_tasks} tasks
+- Generate up to {max_tasks} tasks — MAXIMIZE DIVERSITY
 - Each task MUST reference a real object ID from the scene
 - ONLY create tasks for objects within the robot's reach from the base position
 - Prefer objects with relevant affordances (e.g., Graspable for pick_place)
-- Vary task types for diversity
-- Set difficulty based on object size, mass, and task complexity
+- IMPORTANT: Use ALL applicable task types, not just pick_place. Include interact, open_close, slide, turn, press, pour, stack, organize, etc.
+- Generate MULTI-STEP tasks where possible (e.g., "pick up mug, place on tray, then pick up plate, place on tray")
+- For articulated objects (drawers, doors, knobs), prefer open_close, slide, or turn tasks
+- Vary difficulty levels: at least 20% easy, 50% medium, 30% hard
 - Set priority 1-5 (5 = most important)
-- Write a natural language description_hint explaining the task
+- Write unique, specific natural language description_hints (avoid generic descriptions)
 - goal_region should be another object ID (a surface or container) when applicable
+- Do NOT generate duplicate tasks targeting the same object with the same task_type
 
 ## Output Format
 Return JSON with this exact structure:

@@ -7284,6 +7284,24 @@ class GenieSimLocalFramework:
                     },
                 }, f, default=_json_default)
 
+            # VLM-based quality audit (gated by ENABLE_VLM_QUALITY_AUDIT=1)
+            vlm_audit = self._audit_episode_with_vlm(frames, task, quality_score)
+            if vlm_audit and not vlm_audit.get("skipped"):
+                # Use blended score if VLM audit succeeded
+                quality_score = vlm_audit.get("blended_quality_score", quality_score)
+                validation_passed = quality_score >= min_quality
+
+            # Sim-to-real gap assessment (gated by ENABLE_SIM2REAL_ASSESSMENT=1)
+            sim2real = self._assess_sim_to_real_gap(frames)
+
+            # Failure diagnosis (gated by ENABLE_LLM_FAILURE_DIAGNOSIS=1)
+            failure_diagnosis = self._diagnose_failure_with_llm(
+                validity_errors=_validity_errors if "_validity_errors" in dir() else [],
+                frames=frames,
+                quality_score=quality_score,
+                task=task,
+            )
+
             result["success"] = True
             result["frame_count"] = len(frames)
             result["quality_score"] = quality_score
@@ -7293,6 +7311,12 @@ class GenieSimLocalFramework:
             result["collision_free"] = collision_free
             result["output_path"] = str(episode_path)
             result["frame_validation"] = frame_validation
+            if vlm_audit:
+                result["vlm_audit"] = vlm_audit
+            if sim2real:
+                result["sim_to_real_assessment"] = sim2real
+            if failure_diagnosis:
+                result["failure_diagnosis"] = failure_diagnosis
 
         except Exception as e:
             import traceback
@@ -7525,7 +7549,23 @@ class GenieSimLocalFramework:
         _hardcoded_fallback_warned: set = set()
 
         # --- LLM object property estimation ---
-        _gemini_prop_cache: Dict[str, Dict[str, Any]] = {}
+        # Persistent JSON cache that survives across runs
+        _persistent_prop_cache_path = Path(os.getenv(
+            "GENIESIM_PROPERTY_CACHE",
+            str(self.config.recording_dir / "object_property_cache.json")
+        ))
+        _persistent_prop_cache: Dict[str, Any] = {}
+        if _persistent_prop_cache_path.exists():
+            try:
+                import json as _json_pc
+                with open(_persistent_prop_cache_path) as _f_pc:
+                    _persistent_prop_cache = _json_pc.load(_f_pc)
+                logger.info("Loaded %d entries from persistent property cache: %s",
+                            len(_persistent_prop_cache), _persistent_prop_cache_path)
+            except Exception as _pc_exc:
+                logger.warning("Failed to load persistent property cache: %s", _pc_exc)
+
+        _gemini_prop_cache: Dict[str, Dict[str, Any]] = dict(_persistent_prop_cache)
         _object_property_provenance: Dict[str, str] = {}
         _GEMINI_COOLDOWN_SKIPPED = object()
         _prop_llm = None
@@ -7573,6 +7613,10 @@ class GenieSimLocalFramework:
             cache_key = f"{obj_type.lower()}:{prop}"
             if cache_key in _gemini_prop_cache:
                 return _gemini_prop_cache[cache_key]
+            # Check persistent cache (may have entries from previous runs not yet in memory)
+            if cache_key in _persistent_prop_cache:
+                _gemini_prop_cache[cache_key] = _persistent_prop_cache[cache_key]
+                return _persistent_prop_cache[cache_key]
             llm = _get_prop_llm()
             if not llm:
                 return None
@@ -7608,6 +7652,14 @@ class GenieSimLocalFramework:
                     val = data["value"]
                     _gemini_prop_cache[cache_key] = val
                     _object_property_provenance[f"{obj_type}:{prop}"] = "llm_estimated"
+                    # Write-through to persistent cache
+                    _persistent_prop_cache[cache_key] = val
+                    try:
+                        import json as _json_wt
+                        with open(_persistent_prop_cache_path, "w") as _f_wt:
+                            _json_wt.dump(_persistent_prop_cache, _f_wt, indent=2)
+                    except Exception:
+                        pass
                     logger.info("LLM_OBJ_PROP: %s.%s = %s", obj_type, prop, val)
                     return val
             except Exception as exc:
@@ -8161,53 +8213,16 @@ class GenieSimLocalFramework:
                     _cf_cache_key = f"{_obj_type}:{_openness_bucket}"
                     _gemini_force = _contact_force_cache.get(_cf_cache_key)
 
-                    _gemini_cf_client = getattr(self, "_gemini_client_for_props", None)
-                    if _gemini_force is None and _gemini_cf_client:
-                        try:
-                            _obj_width_cf = _get_obj_prop(_obj_type, "graspable_width", 0.06)
-                            _robot_label = getattr(self.config, "robot_type", "robot")
-                            _cf_prompt = (
-                                f"A {_robot_label} gripper (max aperture {_GRIPPER_MAX_APERTURE*1000:.0f}mm, "
-                                f"max force {_GRIPPER_MAX_FORCE:.0f}N) is at {_openness_bucket*100:.0f}% openness "
-                                f"grasping a {_obj_type} (mass={_mass:.2f}kg, width={_obj_width_cf:.3f}m). "
-                                f"Estimate the grip force in Newtons and whether the grasp is stable. "
-                                f'Respond with ONLY JSON: {{"grip_force_N": <float>, "stable": <bool>}}'
-                            )
-                            _cf_resp = _gemini_cf_client.generate(prompt=_cf_prompt, json_output=True, disable_tools=True)
-                            _cf_text = _cf_resp.text.strip()
-                            _cf_start = _cf_text.find("{")
-                            _cf_end = _cf_text.rfind("}") + 1
-                            if _cf_start >= 0 and _cf_end > _cf_start:
-                                import json as _json_mod
-                                _cf_data = _json_mod.loads(_cf_text[_cf_start:_cf_end])
-                                _gemini_force = {
-                                    "grip_force_N": round(float(_cf_data.get("grip_force_N", 0)), 2),
-                                    "stable": bool(_cf_data.get("stable", False)),
-                                }
-                                _contact_force_cache[_cf_cache_key] = _gemini_force
-                        except Exception as _cf_exc:
-                            logger.debug("Gemini contact force estimation failed: %s", _cf_exc)
-
-                    if _gemini_force is not None:
-                        frame_data["contact_forces"] = {
-                            "weight_force_N": round(_weight, 2),
-                            "grip_force_N": _gemini_force["grip_force_N"],
-                            "force_sufficient": _gemini_force["stable"],
-                            "grasped_object_id": _attached_object_id,
-                            "provenance": "gemini_estimated",
-                            "confidence": 0.6,
-                        }
-                    else:
-                        # Last-resort heuristic
-                        _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
-                        frame_data["contact_forces"] = {
-                            "weight_force_N": round(_weight, 2),
-                            "grip_force_N": round(_grip_force, 2),
-                            "force_sufficient": _grip_force >= _weight,
-                            "grasped_object_id": _attached_object_id,
-                            "provenance": "heuristic_grasp_model_v1",
-                            "confidence": 0.2,
-                        }
+                    # Heuristic contact force model (Gemini LLM estimation removed — heuristic is faster & sufficient)
+                    _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
+                    frame_data["contact_forces"] = {
+                        "weight_force_N": round(_weight, 2),
+                        "grip_force_N": round(_grip_force, 2),
+                        "force_sufficient": _grip_force >= _weight,
+                        "grasped_object_id": _attached_object_id,
+                        "provenance": "heuristic_grasp_model_v1",
+                        "confidence": 0.2,
+                    }
 
             # Add provenance to contact forces (for PhysX real data path)
             if "contact_forces" in frame_data and "provenance" not in frame_data["contact_forces"]:
@@ -9433,32 +9448,14 @@ Scene objects: {scene_summary}
             task, "place_orientation", target_orientation
         )
 
-        # Fix 6+7: Try LLM-driven waypoint planning first (includes orientation)
-        ee_pos = None
-        try:
-            _ee_result = self._client.get_ee_pose(ee_link_name="right")
-            if _ee_result.success and _ee_result.payload:
-                _p = _ee_result.payload.get("position", {})
-                if isinstance(_p, dict):
-                    ee_pos = np.array([_p.get("x", 0), _p.get("y", 0), _p.get("z", 0)], dtype=float)
-                else:
-                    ee_pos = np.array(_p, dtype=float)
-        except Exception:
-            pass
-        waypoints = self._plan_waypoints_with_llm(
-            task=task,
+        # Geometric waypoint planner (LLM waypoint planning removed — deterministic is faster & sufficient)
+        waypoints = self._build_ik_fallback_waypoints(
             target_position=target_position,
             place_position=place_position,
-            ee_position=ee_pos,
+            target_orientation=target_orientation,
+            place_orientation=place_orientation,
         )
-        if waypoints is None:
-            self.log("  📐 Using hardcoded waypoint geometry (LLM planning unavailable)")
-            waypoints = self._build_ik_fallback_waypoints(
-                target_position=target_position,
-                place_position=place_position,
-                target_orientation=target_orientation,
-                place_orientation=place_orientation,
-            )
+        self.log("  ✅ Using geometric waypoint planner (no LLM)")
 
         planner = None
         collision_free: Optional[bool] = None
@@ -10421,7 +10418,12 @@ Scene objects: {scene_summary}
             f' "scene_description": "brief description of the scene and objects present",\n'
             f' "success_criteria": ["list of criteria for task success"],\n'
             f' "task_success": true/false (whether the trajectory plausibly accomplishes the task),\n'
-            f' "task_success_reasoning": "1 sentence explanation of success/failure assessment"}}\n'
+            f' "task_success_reasoning": "1 sentence explanation of success/failure assessment",\n'
+            f' "phase_descriptions": {{"approach": "description", "grasp": "description", "lift": "description", "transport": "description", "place": "description", "release": "description"}},\n'
+            f' "paraphrases": ["alternative description 1", "alternative description 2", "alternative description 3"],\n'
+            f' "high_level_goal": "abstract goal description",\n'
+            f' "per_frame_narration": [{{"frame": 0, "narration": "what happens at this keyframe"}}, ...]}}\n'
+            f"\nFor per_frame_narration, narrate only these sampled keyframes: {sample_indices}\n"
         )
 
         try:
@@ -10446,6 +10448,19 @@ Scene objects: {scene_summary}
             result["success_criteria"] = data.get("success_criteria")
             result["task_success"] = data.get("task_success")
             result["task_success_reasoning"] = data.get("task_success_reasoning")
+
+            # Rich language annotations (C2)
+            language_annotations = {}
+            if data.get("phase_descriptions"):
+                language_annotations["phase_descriptions"] = data["phase_descriptions"]
+            if data.get("paraphrases"):
+                language_annotations["paraphrases"] = data["paraphrases"]
+            if data.get("high_level_goal"):
+                language_annotations["high_level_goal"] = data["high_level_goal"]
+            if data.get("per_frame_narration"):
+                language_annotations["per_frame_narration"] = data["per_frame_narration"]
+            if language_annotations:
+                result["language_annotations"] = language_annotations
 
             self.log(
                 f"  ✅ LLM enrichment: task_name={result.get('task_name')}, "
@@ -10496,6 +10511,285 @@ Scene objects: {scene_summary}
             "epsilon": epsilon,
             "per_joint_range": [float(v) for v in joint_ranges.tolist()],
         }
+
+    def _audit_episode_with_vlm(
+        self,
+        frames: List[Dict[str, Any]],
+        task: Dict[str, Any],
+        quality_score: float,
+    ) -> Dict[str, Any]:
+        """Vision-based quality audit using VLM. Gated by ENABLE_VLM_QUALITY_AUDIT=1."""
+        if os.getenv("ENABLE_VLM_QUALITY_AUDIT", "0") != "1":
+            return {}
+        if not frames:
+            return {}
+
+        # Sample keyframes: first, 25%, 50%, 75%, last
+        n = len(frames)
+        sample_indices = sorted(set([0, n // 4, n // 2, 3 * n // 4, n - 1]))
+        sample_indices = [i for i in sample_indices if 0 <= i < n]
+
+        # Extract RGB images from camera frames
+        images = []
+        for idx in sample_indices:
+            frame = frames[idx]
+            camera_frames = frame.get("observation", {}).get("camera_frames") or {}
+            # Try wrist camera first, then any available camera
+            rgb = None
+            for cam_id in ["wrist", "front", "overhead"]:
+                cam_data = camera_frames.get(cam_id)
+                if cam_data and cam_data.get("rgb") is not None:
+                    rgb = cam_data["rgb"]
+                    break
+            if rgb is None:
+                # Try any camera
+                for cam_id, cam_data in camera_frames.items():
+                    if cam_data and cam_data.get("rgb") is not None:
+                        rgb = cam_data["rgb"]
+                        break
+            if rgb is not None:
+                images.append({"frame_idx": idx, "rgb": rgb})
+
+        if not images:
+            self.log("  ℹ️  VLM audit skipped: no RGB frames available", "INFO")
+            return {"skipped": True, "reason": "no_rgb_frames"}
+
+        try:
+            from tools.llm_client import create_llm_client, LLMProvider
+            vlm_client = create_llm_client(provider=LLMProvider.GEMINI)
+            if not vlm_client:
+                return {"skipped": True, "reason": "vlm_client_unavailable"}
+
+            task_desc = task.get("description_hint") or task.get("task_type", "manipulation")
+            target_obj = task.get("target_object", "unknown")
+
+            prompt = (
+                f"You are auditing a robot manipulation episode for data quality.\n\n"
+                f"Task: {task_desc}\n"
+                f"Target object: {target_obj}\n"
+                f"Heuristic quality score: {quality_score:.3f}\n"
+                f"Number of frames: {len(frames)}\n\n"
+                f"I'm showing you {len(images)} keyframes from the episode. Analyze:\n"
+                f"1. Does the gripper make contact with the target object?\n"
+                f"2. Is the grasp stable (no slipping/dropping)?\n"
+                f"3. Is the placement stable and at a reasonable location?\n"
+                f"4. Are there any visual anomalies (clipping, floating objects, impossible poses)?\n"
+                f"5. Overall visual quality assessment.\n\n"
+                f"Return ONLY JSON:\n"
+                f'{{"gripper_contact": true/false,\n'
+                f' "grasp_stable": true/false,\n'
+                f' "placement_stable": true/false,\n'
+                f' "visual_anomalies": ["list of issues or empty"],\n'
+                f' "vlm_quality_score": 0.0-1.0,\n'
+                f' "assessment": "1-2 sentence summary"}}\n'
+            )
+
+            # Pass images to VLM
+            image_data = [img["rgb"] for img in images]
+            response = vlm_client.generate(
+                prompt=prompt,
+                images=image_data,
+                json_output=True,
+                temperature=0.3,
+                disable_tools=True,
+            )
+
+            if response.error_message:
+                self.log(f"  ⚠️  VLM audit failed: {response.error_message}", "WARNING")
+                return {"skipped": True, "reason": f"vlm_error: {response.error_message}"}
+
+            data = response.data
+            if data is None:
+                data = json.loads(response.text)
+
+            vlm_score = float(data.get("vlm_quality_score", quality_score))
+            # Blend: 70% heuristic + 30% VLM
+            blended_score = 0.7 * quality_score + 0.3 * vlm_score
+
+            result = {
+                "vlm_quality_score": round(vlm_score, 4),
+                "blended_quality_score": round(blended_score, 4),
+                "gripper_contact": data.get("gripper_contact"),
+                "grasp_stable": data.get("grasp_stable"),
+                "placement_stable": data.get("placement_stable"),
+                "visual_anomalies": data.get("visual_anomalies", []),
+                "assessment": data.get("assessment", ""),
+                "keyframes_analyzed": len(images),
+            }
+            self.log(
+                f"  🔍 VLM audit: score={vlm_score:.3f}, blended={blended_score:.3f}, "
+                f"contact={data.get('gripper_contact')}, stable={data.get('grasp_stable')}",
+                "INFO",
+            )
+            return result
+
+        except Exception as exc:
+            self.log(f"  ⚠️  VLM audit error: {exc}", "WARNING")
+            return {"skipped": True, "reason": str(exc)}
+
+    def _assess_sim_to_real_gap(
+        self,
+        frames: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Assess sim-to-real visual gap using VLM. Gated by ENABLE_SIM2REAL_ASSESSMENT=1."""
+        if os.getenv("ENABLE_SIM2REAL_ASSESSMENT", "0") != "1":
+            return {}
+        if not frames:
+            return {}
+
+        # Sample 3 frames: start, mid, end
+        n = len(frames)
+        sample_indices = sorted(set([0, n // 2, n - 1]))
+
+        images = []
+        for idx in sample_indices:
+            frame = frames[idx]
+            camera_frames = frame.get("observation", {}).get("camera_frames") or {}
+            for cam_id in ["wrist", "front", "overhead"]:
+                cam_data = camera_frames.get(cam_id)
+                if cam_data and cam_data.get("rgb") is not None:
+                    images.append(cam_data["rgb"])
+                    break
+            else:
+                for cam_data in camera_frames.values():
+                    if cam_data and cam_data.get("rgb") is not None:
+                        images.append(cam_data["rgb"])
+                        break
+
+        if not images:
+            return {"skipped": True, "reason": "no_rgb_frames"}
+
+        try:
+            from tools.llm_client import create_llm_client, LLMProvider
+            vlm_client = create_llm_client(provider=LLMProvider.GEMINI)
+            if not vlm_client:
+                return {"skipped": True, "reason": "vlm_client_unavailable"}
+
+            prompt = (
+                f"You are assessing the sim-to-real visual gap in these robot simulation frames.\n\n"
+                f"Rate the following aspects on a 0.0-1.0 scale (1.0 = perfectly realistic):\n"
+                f"1. Lighting quality and shadows\n"
+                f"2. Object textures and materials\n"
+                f"3. Object placement realism\n"
+                f"4. Robot pose and motion realism\n"
+                f"5. Overall scene realism\n\n"
+                f"Flag anything that looks obviously simulated or unrealistic.\n\n"
+                f"Return ONLY JSON:\n"
+                f'{{"lighting_score": 0.0-1.0,\n'
+                f' "texture_score": 0.0-1.0,\n'
+                f' "placement_score": 0.0-1.0,\n'
+                f' "robot_pose_score": 0.0-1.0,\n'
+                f' "overall_realism_score": 0.0-1.0,\n'
+                f' "issues": ["list of identified sim-to-real gap issues"]}}\n'
+            )
+
+            response = vlm_client.generate(
+                prompt=prompt,
+                images=images,
+                json_output=True,
+                temperature=0.3,
+                disable_tools=True,
+            )
+
+            if response.error_message:
+                return {"skipped": True, "reason": f"vlm_error: {response.error_message}"}
+
+            data = response.data
+            if data is None:
+                data = json.loads(response.text)
+
+            result = {
+                "lighting_score": float(data.get("lighting_score", 0)),
+                "texture_score": float(data.get("texture_score", 0)),
+                "placement_score": float(data.get("placement_score", 0)),
+                "robot_pose_score": float(data.get("robot_pose_score", 0)),
+                "overall_realism_score": float(data.get("overall_realism_score", 0)),
+                "issues": data.get("issues", []),
+                "frames_analyzed": len(images),
+            }
+            self.log(
+                f"  🌐 Sim-to-real: realism={result['overall_realism_score']:.3f}, "
+                f"issues={len(result['issues'])}",
+                "INFO",
+            )
+            return result
+
+        except Exception as exc:
+            self.log(f"  ⚠️  Sim-to-real assessment error: {exc}", "WARNING")
+            return {"skipped": True, "reason": str(exc)}
+
+    def _diagnose_failure_with_llm(
+        self,
+        validity_errors: List[str],
+        frames: List[Dict[str, Any]],
+        quality_score: float,
+        task: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Diagnose episode failure using LLM. Gated by ENABLE_LLM_FAILURE_DIAGNOSIS=1."""
+        if os.getenv("ENABLE_LLM_FAILURE_DIAGNOSIS", "0") != "1":
+            return {}
+        if not validity_errors and quality_score >= float(os.getenv("MIN_QUALITY_SCORE", "0.7")):
+            return {}  # No failure to diagnose
+
+        try:
+            from tools.llm_client import create_llm_client, LLMProvider
+            llm = create_llm_client(provider=LLMProvider.GEMINI)
+            if not llm:
+                return {}
+
+            task_desc = task.get("description_hint") or task.get("task_type", "manipulation")
+            target_obj = task.get("target_object", "unknown")
+
+            # Build compact trajectory summary
+            trajectory_info = {}
+            if frames:
+                trajectory_info["num_frames"] = len(frames)
+                if frames[0].get("ee_pos"):
+                    trajectory_info["ee_start"] = [round(v, 3) for v in frames[0]["ee_pos"]]
+                if frames[-1].get("ee_pos"):
+                    trajectory_info["ee_end"] = [round(v, 3) for v in frames[-1]["ee_pos"]]
+                gripper_states = [f.get("gripper_command") for f in frames if f.get("gripper_command")]
+                trajectory_info["gripper_states"] = list(set(gripper_states))
+
+            prompt = (
+                f"A robot manipulation episode has failed or has low quality.\n\n"
+                f"Task: {task_desc}\n"
+                f"Target object: {target_obj}\n"
+                f"Quality score: {quality_score:.3f}\n"
+                f"Validity errors: {json.dumps(validity_errors[:10])}\n"
+                f"Trajectory info: {json.dumps(trajectory_info)}\n\n"
+                f"Diagnose the root cause and suggest how to fix it for a retry.\n\n"
+                f"Return ONLY JSON:\n"
+                f'{{"root_cause": "1-sentence diagnosis",\n'
+                f' "suggested_fix": "1-sentence fix description",\n'
+                f' "retry_possible": true/false,\n'
+                f' "retry_params": {{"position_offset_m": [0,0,0], "force_multiplier": 1.0}}}}\n'
+            )
+
+            response = llm.generate(prompt=prompt, json_output=True, temperature=0.3, disable_tools=True)
+            if response.error_message:
+                return {"error": response.error_message}
+
+            data = response.data
+            if data is None:
+                data = json.loads(response.text)
+
+            result = {
+                "root_cause": data.get("root_cause", "unknown"),
+                "suggested_fix": data.get("suggested_fix", ""),
+                "retry_possible": data.get("retry_possible", False),
+                "retry_params": data.get("retry_params", {}),
+            }
+            self.log(
+                f"  🔬 Failure diagnosis: {result['root_cause']} | "
+                f"retry={'yes' if result['retry_possible'] else 'no'}",
+                "INFO",
+            )
+            return result
+
+        except Exception as exc:
+            self.log(f"  ⚠️  Failure diagnosis error: {exc}", "WARNING")
+            return {"error": str(exc)}
 
     def _calculate_quality_score(
         self,
@@ -10695,34 +10989,19 @@ Scene objects: {scene_summary}
 
         frame_count_score = 1.0 if total_frames >= 10 else 0.5
 
-        # GAP 2: Diversity divisors — calibrate via Gemini per robot type
-        _diversity_calibration_source = "hardcoded_default"
-        _action_divisor = 0.05
-        _obs_divisor = 0.05
+        # Diversity divisors — robot-specific hardcoded values (Gemini LLM calibration removed)
+        _DIVERSITY_DIVISORS = {
+            "franka": (0.05, 0.05),
+            "panda": (0.05, 0.05),
+            "g1": (0.08, 0.08),
+            "ur5": (0.04, 0.04),
+            "ur10": (0.04, 0.04),
+        }
         _robot_type = getattr(self.config, "robot_type", "franka") if hasattr(self, "config") else "franka"
-        try:
-            from tools.llm_client import create_llm_client as _create_div_llm
-            _div_llm = _create_div_llm()
-            if _div_llm:
-                _div_prompt = (
-                    f"For a {_robot_type} robot arm, estimate the typical per-step joint velocity "
-                    f"magnitude (in radians) that represents high action diversity during a "
-                    f"pick-and-place task. Return ONLY JSON: "
-                    f"{{\"action_divisor\": 0.05, \"obs_divisor\": 0.05}}"
-                )
-                _div_resp = _div_llm.generate(_div_prompt, json_output=True, temperature=0.3)
-                _div_data = _div_resp.parse_json()
-                if isinstance(_div_data, dict):
-                    if "action_divisor" in _div_data and "obs_divisor" in _div_data:
-                        _action_divisor = float(_div_data["action_divisor"])
-                        _obs_divisor = float(_div_data["obs_divisor"])
-                        _diversity_calibration_source = "gemini_calibrated"
-                        logger.info(
-                            "GEMINI_DIVERSITY: robot=%s action_div=%.4f obs_div=%.4f",
-                            _robot_type, _action_divisor, _obs_divisor,
-                        )
-        except Exception:
-            pass  # Keep defaults
+        _action_divisor, _obs_divisor = _DIVERSITY_DIVISORS.get(
+            _robot_type.lower() if _robot_type else "franka", (0.05, 0.05)
+        )
+        _diversity_calibration_source = "hardcoded_robot_specific"
 
         # Action diversity: measure how much the actions change across frames.
         # A trajectory where all actions are identical is low quality.
