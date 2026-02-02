@@ -7084,7 +7084,11 @@ class GenieSimLocalFramework:
                     if "x" in _p:
                         _pos = np.array([_p["x"], _p["y"], _p["z"]], dtype=float)
                     elif "position" in _p:
-                        _pos = np.array(_p["position"], dtype=float)
+                        _pos_val = _p["position"]
+                        if isinstance(_pos_val, dict):
+                            _pos = np.array([_pos_val.get("x", 0), _pos_val.get("y", 0), _pos_val.get("z", 0)], dtype=float)
+                        else:
+                            _pos = np.array(_pos_val, dtype=float)
                     else:
                         continue  # skip objects with no valid pose
                     # Validate against kinematic tracking if available
