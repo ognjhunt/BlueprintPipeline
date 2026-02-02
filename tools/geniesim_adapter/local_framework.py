@@ -6504,16 +6504,21 @@ class GenieSimLocalFramework:
         }
         _hardcoded_fallback_warned: set = set()
 
-        # --- Gemini object property estimation (GAP 1) ---
+        # --- LLM object property estimation with model cascade ---
         _gemini_prop_cache: Dict[str, Dict[str, Any]] = {}
-        _gemini_prop_llm = None
-        _gemini_prop_llm_attempted = False
         _object_property_provenance: Dict[str, str] = {}
-        _gemini_prop_cooldowns: Dict[str, float] = {}
+        _gemini_prop_cooldowns: Dict[str, float] = {}  # keyed by "model:obj_type:prop"
         _gemini_prop_cooldown_logs: Dict[str, float] = {}
         _gemini_prop_global_unavailable_until = 0.0
         _gemini_prop_global_log_until = 0.0
         _GEMINI_COOLDOWN_SKIPPED = object()
+        # Model cascade: ordered list of models to try for property estimation
+        _PROP_CASCADE_SPEC = os.getenv(
+            "GENIESIM_PROP_CASCADE",
+            "gemini-3-flash-preview,gemini-2.5-flash,openai:gpt-5.1",
+        ).split(",")
+        _prop_cascade_clients: List[Tuple[str, Any]] = []  # (model_name, client)
+        _prop_cascade_init_done = False
 
         def _get_env_float(name: str, default: float) -> float:
             raw = os.getenv(name)
@@ -6537,19 +6542,56 @@ class GenieSimLocalFramework:
         _GEMINI_PROP_MAX_RETRIES = _get_env_int("GENIESIM_GEMINI_PROP_MAX_RETRIES", 3)
         _GEMINI_PROP_RETRY_DELAY_S = _get_env_float("GENIESIM_GEMINI_PROP_RETRY_DELAY_S", 2.0)
 
-        def _get_gemini_prop_client():
-            nonlocal _gemini_prop_llm, _gemini_prop_llm_attempted
-            if not _gemini_prop_llm_attempted:
-                _gemini_prop_llm_attempted = True
+        def _get_prop_cascade_clients() -> List[Tuple[str, Any]]:
+            """Lazy-init and return the ordered model cascade for property estimation."""
+            nonlocal _prop_cascade_init_done
+            if _prop_cascade_init_done:
+                return _prop_cascade_clients
+            _prop_cascade_init_done = True
+            from tools.llm_client import create_llm_client as _create, LLMProvider as _LLMProv
+            for spec in _PROP_CASCADE_SPEC:
+                spec = spec.strip()
+                if not spec:
+                    continue
                 try:
-                    from tools.llm_client import create_llm_client as _create
-                    _gemini_prop_llm = _create(
-                        max_retries=_GEMINI_PROP_MAX_RETRIES,
-                        retry_delay=_GEMINI_PROP_RETRY_DELAY_S,
+                    if spec.startswith("openai:"):
+                        _model = spec[len("openai:"):]
+                        _client = _create(
+                            provider=_LLMProv.OPENAI,
+                            model=_model,
+                            max_retries=_GEMINI_PROP_MAX_RETRIES,
+                            retry_delay=_GEMINI_PROP_RETRY_DELAY_S,
+                            fallback_enabled=False,
+                        )
+                        _prop_cascade_clients.append((spec, _client))
+                    elif spec.startswith("anthropic:"):
+                        _model = spec[len("anthropic:"):]
+                        _client = _create(
+                            provider=_LLMProv.ANTHROPIC,
+                            model=_model,
+                            max_retries=_GEMINI_PROP_MAX_RETRIES,
+                            retry_delay=_GEMINI_PROP_RETRY_DELAY_S,
+                            fallback_enabled=False,
+                        )
+                        _prop_cascade_clients.append((spec, _client))
+                    else:
+                        # Default: Gemini model
+                        _client = _create(
+                            provider=_LLMProv.GEMINI,
+                            model=spec,
+                            max_retries=_GEMINI_PROP_MAX_RETRIES,
+                            retry_delay=_GEMINI_PROP_RETRY_DELAY_S,
+                            fallback_enabled=False,
+                        )
+                        _prop_cascade_clients.append((spec, _client))
+                    logger.info("PROP_CASCADE: initialized client for '%s'", spec)
+                except Exception as _init_exc:
+                    logger.warning(
+                        "PROP_CASCADE: skipping '%s' — init failed: %s", spec, _init_exc,
                     )
-                except Exception:
-                    _gemini_prop_llm = None
-            return _gemini_prop_llm
+            if not _prop_cascade_clients:
+                logger.warning("PROP_CASCADE: no clients initialized — will use hardcoded fallbacks only")
+            return _prop_cascade_clients
 
         def _is_gemini_rate_limit_error(exc: Exception) -> bool:
             text = str(exc).lower()
@@ -6582,20 +6624,14 @@ class GenieSimLocalFramework:
                     datetime.fromtimestamp(_gemini_prop_global_unavailable_until).isoformat(timespec="seconds"),
                 )
 
-        def _estimate_obj_prop_gemini(obj_type: str, prop: str):
-            """Estimate a single object property via Gemini."""
+        def _estimate_obj_prop_llm(obj_type: str, prop: str):
+            """Estimate a single object property via LLM model cascade."""
             nonlocal _gemini_prop_global_unavailable_until
             cache_key = f"{obj_type.lower()}:{prop}"
             if cache_key in _gemini_prop_cache:
                 return _gemini_prop_cache[cache_key]
-            now = time.time()
-            cooldown_until = _gemini_prop_cooldowns.get(cache_key, 0.0)
-            effective_cooldown_until = max(cooldown_until, _gemini_prop_global_unavailable_until)
-            if now < effective_cooldown_until:
-                _log_gemini_cooldown(cache_key, effective_cooldown_until)
-                return _GEMINI_COOLDOWN_SKIPPED
-            llm = _get_gemini_prop_client()
-            if not llm:
+            cascade = _get_prop_cascade_clients()
+            if not cascade:
                 return None
             prop_prompts = {
                 "graspable_width": (
@@ -6622,24 +6658,41 @@ class GenieSimLocalFramework:
             prompt = prop_prompts.get(prop)
             if not prompt:
                 return None
-            try:
-                resp = llm.generate(prompt, json_output=True, temperature=0.3)
-                data = resp.parse_json()
-                if isinstance(data, dict) and "value" in data:
-                    val = data["value"]
-                    _gemini_prop_cache[cache_key] = val
-                    logger.info("GEMINI_OBJ_PROP: %s.%s = %s", obj_type, prop, val)
-                    return val
-            except Exception as exc:
-                if _is_gemini_rate_limit_error(exc):
-                    cooldown_until = time.time() + _GEMINI_PROP_COOLDOWN_S
-                    _gemini_prop_cooldowns[cache_key] = cooldown_until
-                    _gemini_prop_global_unavailable_until = max(
-                        _gemini_prop_global_unavailable_until, cooldown_until
-                    )
-                    _log_gemini_cooldown(cache_key, cooldown_until)
-                else:
-                    logger.debug("Gemini obj prop estimation failed for %s.%s: %s", obj_type, prop, exc)
+            all_on_cooldown = True
+            for model_name, client in cascade:
+                model_cooldown_key = f"{model_name}:{cache_key}"
+                now = time.time()
+                cooldown_until = _gemini_prop_cooldowns.get(model_cooldown_key, 0.0)
+                if now < cooldown_until:
+                    _log_gemini_cooldown(model_cooldown_key, cooldown_until)
+                    continue
+                all_on_cooldown = False
+                try:
+                    resp = client.generate(prompt, json_output=True, temperature=0.3, disable_tools=True)
+                    data = resp.parse_json()
+                    if isinstance(data, dict) and "value" in data:
+                        val = data["value"]
+                        _gemini_prop_cache[cache_key] = val
+                        _object_property_provenance[f"{obj_type}:{prop}"] = f"llm_estimated:{model_name}"
+                        logger.info("LLM_OBJ_PROP [%s]: %s.%s = %s", model_name, obj_type, prop, val)
+                        return val
+                except Exception as exc:
+                    if _is_gemini_rate_limit_error(exc):
+                        cd = time.time() + _GEMINI_PROP_COOLDOWN_S
+                        _gemini_prop_cooldowns[model_cooldown_key] = cd
+                        logger.warning(
+                            "PROP_CASCADE: %s rate-limited for %s; trying next model",
+                            model_name, cache_key,
+                        )
+                        continue
+                    else:
+                        logger.debug(
+                            "PROP_CASCADE: %s failed for %s.%s: %s",
+                            model_name, obj_type, prop, exc,
+                        )
+                        continue
+            if all_on_cooldown:
+                return _GEMINI_COOLDOWN_SKIPPED
             return None
 
         # Unified property lookup: scene_graph → Gemini estimated → hardcoded fallback
@@ -6653,12 +6706,12 @@ class GenieSimLocalFramework:
                 if entry and prop in entry:
                     _object_property_provenance[f"{obj_id_or_type}:{prop}"] = "scene_graph"
                     return entry[prop]
-            # 2. Try Gemini estimation (GAP 1 fix)
-            _gemini_val = _estimate_obj_prop_gemini(obj_id_or_type, prop)
-            gemini_skipped = _gemini_val is _GEMINI_COOLDOWN_SKIPPED
-            if _gemini_val is not None and not gemini_skipped:
-                _object_property_provenance[f"{obj_id_or_type}:{prop}"] = "gemini_estimated"
-                return _gemini_val
+            # 2. Try LLM estimation via model cascade
+            _llm_val = _estimate_obj_prop_llm(obj_id_or_type, prop)
+            gemini_skipped = _llm_val is _GEMINI_COOLDOWN_SKIPPED
+            if _llm_val is not None and not gemini_skipped:
+                # Provenance already set inside _estimate_obj_prop_llm
+                return _llm_val
             # 3. Hardcoded fallback with warning
             _hc_tables = {
                 "graspable_width": _HARDCODED_OBJECT_SIZES,

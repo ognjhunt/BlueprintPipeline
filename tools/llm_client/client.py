@@ -717,7 +717,8 @@ class GeminiClient(LLMClient):
             config_kwargs["response_mime_type"] = "application/json"
 
         # Enable thinking, grounding, and URL context for Gemini 3.x models
-        if self.model.startswith("gemini-3"):
+        # Callers can pass disable_tools=True to skip AFC/thinking (e.g. simple factual prompts)
+        if self.model.startswith("gemini-3") and not kwargs.get("disable_tools", False):
             config_kwargs["thinking_config"] = self._types.ThinkingConfig(thinking_level="HIGH")
             tools = [
                 self._types.Tool(url_context=self._types.UrlContext()),
@@ -770,6 +771,10 @@ class GeminiClient(LLMClient):
 
             except Exception as e:
                 last_error = e
+                # Don't retry rate-limit errors — let caller handle cooldown/cascade
+                _err_lower = str(e).lower()
+                if any(t in _err_lower for t in ("429", "rate limit", "too many requests", "quota", "resource_exhausted")):
+                    raise
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay * (attempt + 1))
 
