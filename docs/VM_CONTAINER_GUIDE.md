@@ -163,6 +163,22 @@ nohup python3 tools/run_local_pipeline.py \
 echo PID: $!
 # Monitor: tail -f /tmp/pipeline_run.log
 ```
+For long runs, prefer `nohup` or a `tmux` session and avoid broad `pkill -9 python3`-style commands. Under heavy GPU/CPU load, SSH sessions can become unstable, so keeping the pipeline detached prevents drops from killing the job and makes it easier to reconnect safely.
+
+To stop only the pipeline, target its PID instead of sweeping all Python processes. For example, save the PID to a file and use it to terminate the run:
+```bash
+nohup python3 tools/run_local_pipeline.py \
+  --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
+  --steps genie-sim-export,genie-sim-submit,genie-sim-import \
+  --use-geniesim --fail-fast \
+  > /tmp/pipeline_run.log 2>&1 &
+echo $! > /tmp/pipeline_run.pid
+kill "$(cat /tmp/pipeline_run.pid)"
+```
+Alternatively, locate the pipeline process directly:
+```bash
+kill "$(pgrep -f "tools/run_local_pipeline.py")"
+```
 
 ### Stop VM (saves costs — run from local machine)
 ```bash
