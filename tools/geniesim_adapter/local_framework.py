@@ -5261,6 +5261,7 @@ class GenieSimLocalFramework:
                 "start_time": None,
                 "last_progress_time": time.time(),
                 "last_observation_timestamp": None,
+                "last_planned_timestamp": None,
                 "completion_signal_logged": False,
             }
             start_event = threading.Event()
@@ -5270,9 +5271,10 @@ class GenieSimLocalFramework:
 
             def _note_progress(obs_frame: Dict[str, Any]) -> None:
                 collector_state["last_progress_time"] = time.time()
-                collector_state["last_observation_timestamp"] = (
-                    obs_frame.get("timestamp")
-                    or obs_frame.get("planned_timestamp")
+                collector_state["last_observation_timestamp"] = obs_frame.get("timestamp")
+                collector_state["last_planned_timestamp"] = (
+                    obs_frame.get("planned_timestamp")
+                    or obs_frame.get("timestamp")
                 )
 
             def _collect_streaming() -> None:
@@ -5498,10 +5500,10 @@ class GenieSimLocalFramework:
                             return bool(container.get(key))
                 return None
 
-            def _is_near_trajectory_end(last_timestamp: Optional[float]) -> bool:
-                if last_timestamp is None or trajectory_end_time is None:
+            def _is_near_trajectory_end(last_planned_timestamp: Optional[float]) -> bool:
+                if last_planned_timestamp is None or trajectory_end_time is None:
                     return False
-                return last_timestamp >= trajectory_end_time - end_time_tolerance_s
+                return last_planned_timestamp >= trajectory_end_time - end_time_tolerance_s
 
             while execution_thread.is_alive():
                 if stall_timeout_s > 0:
@@ -5516,7 +5518,8 @@ class GenieSimLocalFramework:
                             )
                             task_success_flag = _observation_has_success_flag(last_obs)
                             last_obs_timestamp = collector_state.get("last_observation_timestamp")
-                            near_trajectory_end = _is_near_trajectory_end(last_obs_timestamp)
+                            last_planned_timestamp = collector_state.get("last_planned_timestamp")
+                            near_trajectory_end = _is_near_trajectory_end(last_planned_timestamp)
                             _obs_count = len(collector_state["observations"])
                             # Only treat near_trajectory_end as success if we
                             # actually collected some observations.  Without
@@ -5532,6 +5535,7 @@ class GenieSimLocalFramework:
                                     f"(task_success={task_success_flag}, "
                                     f"near_trajectory_end={near_trajectory_end}, "
                                     f"observations={_obs_count}, "
+                                    f"last_planned_timestamp={last_planned_timestamp}, "
                                     f"last_obs_timestamp={last_obs_timestamp}, "
                                     f"trajectory_end={trajectory_end_time}, "
                                     f"tolerance={end_time_tolerance_s:.2f}s).",
@@ -5590,11 +5594,13 @@ class GenieSimLocalFramework:
 
             if collector_thread is not None and collector_thread.is_alive():
                 last_obs_timestamp = collector_state.get("last_observation_timestamp")
-                if execution_state.get("success") and _is_near_trajectory_end(last_obs_timestamp):
+                last_planned_timestamp = collector_state.get("last_planned_timestamp")
+                if execution_state.get("success") and _is_near_trajectory_end(last_planned_timestamp):
                     self.log(
                         "Observation collection still running, but execution completed and "
                         "final observation is near trajectory end; treating episode as complete "
                         f"(trajectory_end={trajectory_end_time}, "
+                        f"last_planned_timestamp={last_planned_timestamp}, "
                         f"last_obs_timestamp={last_obs_timestamp}, "
                         f"tolerance={end_time_tolerance_s:.2f}s).",
                         "INFO",
