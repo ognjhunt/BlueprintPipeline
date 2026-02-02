@@ -8997,6 +8997,20 @@ Scene objects: {scene_summary}
             seed_joints = joints
 
         # --- Fix 4: Include gripper_aperture and phase in trajectory ---
+        phase_gripper_map = {
+            "approach": 1.0,
+            "pre_grasp": 1.0,
+            "place": 1.0,
+            "retract": 1.0,
+            "grasp": 0.0,
+            "lift": 0.0,
+            "transport": 0.0,
+        }
+        for wp in waypoints:
+            if wp.gripper_aperture is None:
+                phase_value = wp.phase.value if hasattr(wp.phase, "value") else str(wp.phase)
+                wp.gripper_aperture = phase_gripper_map.get(phase_value, 1.0)
+
         trajectory: List[Dict[str, Any]] = []
         current_joints = initial_joints.copy()
         current_time = 0.0
