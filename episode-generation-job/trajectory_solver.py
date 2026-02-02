@@ -325,6 +325,53 @@ TIAGO_CONFIG = RobotConfig(
     gripper_limits=(0.0, 0.044),
 )
 
+# Humanoids (arm joints only)
+G1_ARM_JOINT_LIMITS_LOWER = np.array([-2.9, -1.6, -2.9, -2.6, -2.9, -1.7, -2.9])
+G1_ARM_JOINT_LIMITS_UPPER = np.array([2.9, 1.6, 2.9, 2.6, 2.9, 1.7, 2.9])
+G1_RIGHT_ARM_DEFAULT = np.array([0.0, -0.2, 0.0, -1.2, 0.0, 0.6, 0.0])
+G1_LEFT_ARM_DEFAULT = np.array([0.0, 0.2, 0.0, -1.2, 0.0, -0.6, 0.0])
+
+G1_RIGHT_ARM_CONFIG = RobotConfig(
+    name="g1_right_arm",
+    num_joints=7,
+    joint_names=[
+        "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+        "right_elbow_pitch_joint", "right_wrist_yaw_joint", "right_wrist_pitch_joint",
+        "right_wrist_roll_joint",
+    ],
+    joint_limits_lower=G1_ARM_JOINT_LIMITS_LOWER,
+    joint_limits_upper=G1_ARM_JOINT_LIMITS_UPPER,
+    default_joint_positions=G1_RIGHT_ARM_DEFAULT,
+    gripper_joint_names=["right_gripper_finger_joint1", "right_gripper_finger_joint2"],
+    gripper_limits=(0.0, 0.08),
+)
+
+G1_LEFT_ARM_CONFIG = RobotConfig(
+    name="g1_left_arm",
+    num_joints=7,
+    joint_names=[
+        "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
+        "left_elbow_pitch_joint", "left_wrist_yaw_joint", "left_wrist_pitch_joint",
+        "left_wrist_roll_joint",
+    ],
+    joint_limits_lower=G1_ARM_JOINT_LIMITS_LOWER,
+    joint_limits_upper=G1_ARM_JOINT_LIMITS_UPPER,
+    default_joint_positions=G1_LEFT_ARM_DEFAULT,
+    gripper_joint_names=["left_gripper_finger_joint1", "left_gripper_finger_joint2"],
+    gripper_limits=(0.0, 0.08),
+)
+
+G1_CONFIG = RobotConfig(
+    name="g1",
+    num_joints=7,
+    joint_names=G1_RIGHT_ARM_CONFIG.joint_names,
+    joint_limits_lower=G1_ARM_JOINT_LIMITS_LOWER,
+    joint_limits_upper=G1_ARM_JOINT_LIMITS_UPPER,
+    default_joint_positions=G1_RIGHT_ARM_DEFAULT,
+    gripper_joint_names=G1_RIGHT_ARM_CONFIG.gripper_joint_names,
+    gripper_limits=G1_RIGHT_ARM_CONFIG.gripper_limits,
+)
+
 # =============================================================================
 # Robot Configuration Registry
 # =============================================================================
@@ -380,6 +427,11 @@ ROBOT_CONFIGS = {
     "stretch": STRETCH_CONFIG,
     "hello_robot_stretch": STRETCH_CONFIG,
     "tiago": TIAGO_CONFIG,
+
+    # Humanoids (arm-only control)
+    "g1": G1_CONFIG,
+    "g1_right_arm": G1_RIGHT_ARM_CONFIG,
+    "g1_left_arm": G1_LEFT_ARM_CONFIG,
 }
 
 
