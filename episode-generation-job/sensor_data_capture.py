@@ -874,6 +874,8 @@ class IsaacSimSensorCapture:
         self._camera_error_counts: Dict[str, int] = {}
         self._camera_missing_rgb_counts: Dict[str, int] = {}
         self._camera_missing_depth_counts: Dict[str, int] = {}
+        self._contact_reporting_enabled = False
+        self._contact_reporting_attempted = False
 
         # Isaac Sim module references
         self._rep = None
@@ -1046,6 +1048,12 @@ class IsaacSimSensorCapture:
 
         if not self.initialized:
             return frame_data
+
+        if (
+            (self.config.include_contact_info or self.config.include_privileged_state)
+            and not self._contact_reporting_attempted
+        ):
+            self._ensure_contact_reporting(scene_objects)
 
         # Capture from each camera
         failed_cameras = []
@@ -1538,6 +1546,75 @@ class IsaacSimSensorCapture:
             self.log(f"Failed to enable contact reporting: {e}", "WARNING")
 
         return enabled_count
+
+    def _ensure_contact_reporting(
+        self,
+        scene_objects: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Enable PhysX contact reporting for gripper links and scene objects."""
+        if self._contact_reporting_attempted:
+            return
+        self._contact_reporting_attempted = True
+
+        if self._omni is None:
+            self.log("Cannot enable contact reporting: Omniverse not available", "WARNING")
+            return
+
+        try:
+            from pxr import Usd, UsdPhysics
+            from isaacsim.core.api.utils.stage import get_current_stage
+
+            stage = get_current_stage()
+            if stage is None:
+                self.log("Cannot enable contact reporting: no stage available", "WARNING")
+                return
+
+            prim_paths: set[str] = set()
+            robot_paths = resolve_robot_prim_paths(
+                self.config.robot_prim_paths,
+                scene_usd_path=self.config.scene_usd_path,
+                stage=stage,
+            )
+
+            gripper_keywords = ("finger", "gripper", "hand", "leftfinger", "rightfinger")
+            for robot_path in robot_paths:
+                prim = stage.GetPrimAtPath(robot_path)
+                if not prim.IsValid():
+                    continue
+                for desc in Usd.PrimRange(prim):
+                    name = desc.GetName().lower()
+                    if not any(kw in name for kw in gripper_keywords):
+                        continue
+                    if desc.HasAPI(UsdPhysics.RigidBodyAPI) or desc.HasAPI(UsdPhysics.CollisionAPI):
+                        prim_paths.add(str(desc.GetPath()))
+
+            if scene_objects:
+                for obj in scene_objects:
+                    prim_path = obj.get("prim_path") or obj.get("usd_path")
+                    if not prim_path:
+                        obj_id = obj.get("id") or obj.get("name") or ""
+                        if obj_id:
+                            prim_path = f"/World/{obj_id}"
+                    if prim_path:
+                        prim_paths.add(str(prim_path))
+
+            if not prim_paths:
+                self.log("No prims discovered for contact reporting", "WARNING")
+                return
+
+            threshold = float(os.getenv("PHYSX_CONTACT_REPORT_THRESHOLD_N", "0.1"))
+            enabled = self._enable_contact_reporting(sorted(prim_paths), threshold=threshold)
+            if enabled > 0:
+                self._contact_reporting_enabled = True
+                self.log(
+                    f"Contact reporting enabled on {enabled}/{len(prim_paths)} prims "
+                    f"(threshold={threshold}N)",
+                    "INFO",
+                )
+            else:
+                self.log("Contact reporting enablement returned 0 prims", "WARNING")
+        except Exception as exc:
+            self.log(f"Failed to enable contact reporting: {exc}", "WARNING")
 
     def _extract_usd_joint_state(self, joint_prim: Any) -> Dict[str, List[float]]:
         """Extract available joint DOF values from USD joint prim attributes."""

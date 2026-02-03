@@ -64,6 +64,9 @@ _check_patch_marker \
 _check_patch_marker \
   "${GENIESIM_ROOT}/source/data_collection/server/command_controller.py" \
   "BlueprintPipeline observation_cameras patch"
+_check_patch_marker \
+  "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py" \
+  "BlueprintPipeline contact_report patch"
 
 if [ "${#_missing_patches[@]}" -gt 0 ]; then
   echo "[geniesim] WARNING: Missing expected BlueprintPipeline patch markers:" >&2

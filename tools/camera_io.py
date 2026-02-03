@@ -125,11 +125,42 @@ def decode_camera_bytes(
     return arr
 
 
+def resolve_npy_path(
+    val: str,
+    ep_dir: Optional[Path] = None,
+    frames_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    """Resolve a .npy path reference across episode and frames directories."""
+    if not val:
+        return None
+    raw_path = Path(val)
+    if raw_path.is_absolute() and raw_path.exists():
+        return raw_path
+    if ep_dir is not None:
+        candidate = ep_dir / val
+        if candidate.exists():
+            return candidate
+    if frames_dir is not None:
+        candidate = frames_dir / val
+        if candidate.exists():
+            return candidate
+    if ep_dir is not None and raw_path.name == val:
+        try:
+            for subdir in ep_dir.glob("*_frames"):
+                candidate = subdir / val
+                if candidate.exists():
+                    return candidate
+        except Exception:
+            return None
+    return None
+
+
 def load_camera_frame(
     cam_data: dict,
     key: str,
     *,
     ep_dir: Optional[Path] = None,
+    frames_dir: Optional[Path] = None,
 ) -> Optional[np.ndarray]:
     val = cam_data.get(key)
     if val is None:
@@ -143,10 +174,8 @@ def load_camera_frame(
         or ""
     )
     if isinstance(val, str) and val.endswith(".npy"):
-        if ep_dir is None:
-            return None
-        npy_path = ep_dir / val
-        if not npy_path.exists():
+        npy_path = resolve_npy_path(val, ep_dir=ep_dir, frames_dir=frames_dir)
+        if npy_path is None or not npy_path.exists():
             return None
         return np.load(npy_path)
     if isinstance(val, bytes):

@@ -113,7 +113,9 @@ from tools.camera_io import (
     decode_camera_bytes,
     expected_byte_count,
     load_camera_frame,
+    resolve_npy_path,
     strip_camera_data,
+    validate_camera_array,
 )
 
 # Add parent paths for imports
@@ -5827,6 +5829,7 @@ class GenieSimLocalFramework:
             "frame_count": 0,
             "quality_score": 0.0,
             "collision_free": None,
+            "collision_free_physics": None,
             "task_success": None,
             "stall_info": {
                 "stall_detected": False,
@@ -6514,6 +6517,7 @@ class GenieSimLocalFramework:
             _real_effort_count = _frame_stats["real_effort_count"]
             _estimated_effort_count = _frame_stats.get("estimated_effort_count", 0)
             _contact_report_count = _frame_stats.get("contact_report_count", 0)
+            _collision_free_physics = _frame_stats.get("collision_free_physics")
             _object_property_provenance = _frame_stats.get("object_property_provenance", {})
             _ee_static_fallback_used = _frame_stats.get("ee_static_fallback_used", False)
             _scene_state_invalid = _real_scene_state_count == 0 and len(frames) > 0
@@ -6572,7 +6576,7 @@ class GenieSimLocalFramework:
             if _efforts_source == "physx":
                 _contact_forces_source = "physx_joint_effort"
             elif _contact_report_count > 0:
-                _contact_forces_source = "physx_contact_query"
+                _contact_forces_source = "physx_contact_report"
             elif _efforts_source in ("estimated_inverse_dynamics", "mixed"):
                 _contact_forces_source = "estimated_inverse_dynamics"
             else:
@@ -6653,6 +6657,9 @@ class GenieSimLocalFramework:
             task_success = self._extract_task_success(frames, task)
             collision_free = planning_report.get("collision_free")
             collision_source = planning_report.get("collision_source")
+            collision_free_physics = _collision_free_physics
+            if _contact_report_count > 0:
+                collision_source = "physx_contact_report"
             joint_utilization = self._compute_joint_utilization(frames)
             joint_utilization["threshold"] = float(
                 os.getenv("GENIESIM_JOINT_UTILIZATION_THRESHOLD", "0.6")
@@ -7482,7 +7489,9 @@ class GenieSimLocalFramework:
                     "task_success": task_success,
                     "task_success_reasoning": llm_metadata.get("task_success_reasoning"),
                     "collision_free": collision_free,
+                    "collision_free_physics": collision_free_physics,
                     "collision_source": collision_source,
+                    "effort_source_policy": _frame_stats.get("effort_source_policy", _efforts_source),
                     "scene_description": llm_metadata.get("scene_description"),
                     "success_criteria": llm_metadata.get("success_criteria"),
                     "recording_stopped_cleanly": recording_stopped_cleanly,
@@ -7529,6 +7538,7 @@ class GenieSimLocalFramework:
             result["validation_passed"] = validation_passed
             result["task_success"] = task_success
             result["collision_free"] = collision_free
+            result["collision_free_physics"] = collision_free_physics
             result["output_path"] = str(episode_path)
             result["frame_validation"] = frame_validation
             if vlm_audit:
@@ -7716,6 +7726,7 @@ class GenieSimLocalFramework:
         _initial_object_poses: Dict[str, np.ndarray] = {}  # for success verification
         # Per-frame object pose history for trajectory analysis (Issue 2 fix)
         _object_pose_history: Dict[str, List[Dict[str, Any]]] = {}
+        _object_prev_state: Dict[str, Dict[str, Any]] = {}
         _release_decay_obj: Optional[str] = None
         _release_decay_remaining: int = 0
         # Fix 10: Phase progress tracking
@@ -7771,6 +7782,26 @@ class GenieSimLocalFramework:
         }
         _hardcoded_fallback_warned: set = set()
 
+        _GRIPPER_CONTACT_KEYWORDS = (
+            "finger",
+            "gripper",
+            "hand",
+            "panda_leftfinger",
+            "panda_rightfinger",
+        )
+        _SURFACE_CONTACT_KEYWORDS = ("table", "counter", "surface")
+
+        def _normalize_body_name(name: str) -> str:
+            if not name:
+                return ""
+            return str(name).rsplit("/", 1)[-1].lower()
+
+        def _is_gripper_body(name: str) -> bool:
+            return any(kw in name for kw in _GRIPPER_CONTACT_KEYWORDS)
+
+        def _is_surface_body(name: str) -> bool:
+            return any(kw in name for kw in _SURFACE_CONTACT_KEYWORDS)
+
         # --- LLM object property estimation ---
         # Persistent JSON cache that survives across runs
         _persistent_prop_cache_path = Path(os.getenv(
@@ -7811,6 +7842,91 @@ class GenieSimLocalFramework:
                 return int(raw)
             except ValueError:
                 return default
+
+        def _normalize_quat(quat_val: Any) -> Optional[List[float]]:
+            if quat_val is None:
+                return None
+            if isinstance(quat_val, dict):
+                quat_val = [
+                    quat_val.get("rw", 1.0),
+                    quat_val.get("rx", 0.0),
+                    quat_val.get("ry", 0.0),
+                    quat_val.get("rz", 0.0),
+                ]
+            if not isinstance(quat_val, (list, tuple, np.ndarray)) or len(quat_val) < 4:
+                return None
+            quat_arr = np.array(quat_val[:4], dtype=float)
+            norm = float(np.linalg.norm(quat_arr))
+            if norm <= 1e-9:
+                return None
+            quat_arr = quat_arr / norm
+            return quat_arr.tolist()
+
+        def _coerce_vec3(vec_val: Any) -> Optional[List[float]]:
+            if vec_val is None:
+                return None
+            if isinstance(vec_val, dict):
+                return [
+                    float(vec_val.get("x", 0.0)),
+                    float(vec_val.get("y", 0.0)),
+                    float(vec_val.get("z", 0.0)),
+                ]
+            if isinstance(vec_val, (list, tuple, np.ndarray)) and len(vec_val) >= 3:
+                return [float(v) for v in vec_val[:3]]
+            return None
+
+        def _quat_to_ang_vel(
+            prev_quat: Optional[List[float]],
+            curr_quat: Optional[List[float]],
+            dt: float,
+        ) -> Optional[List[float]]:
+            if prev_quat is None or curr_quat is None or dt <= 0:
+                return None
+            q_prev = np.array(prev_quat, dtype=float)
+            q_curr = np.array(curr_quat, dtype=float)
+            if q_prev.shape[0] != 4 or q_curr.shape[0] != 4:
+                return None
+            q_prev /= max(1e-9, float(np.linalg.norm(q_prev)))
+            q_curr /= max(1e-9, float(np.linalg.norm(q_curr)))
+            # Delta quaternion: q_delta = q_curr * conj(q_prev)
+            w1, x1, y1, z1 = q_curr
+            w2, x2, y2, z2 = q_prev
+            w = w1 * w2 + x1 * x2 + y1 * y2 + z1 * z2
+            x = -w1 * x2 + x1 * w2 - y1 * z2 + z1 * y2
+            y = -w1 * y2 + x1 * z2 + y1 * w2 - z1 * x2
+            z = -w1 * z2 - x1 * y2 + y1 * x2 + z1 * w2
+            w = max(-1.0, min(1.0, w))
+            angle = 2.0 * float(np.arccos(w))
+            if angle < 1e-6:
+                return [0.0, 0.0, 0.0]
+            sin_half = float(np.sin(angle / 2.0))
+            if abs(sin_half) < 1e-6:
+                return [0.0, 0.0, 0.0]
+            axis = np.array([x, y, z], dtype=float) / sin_half
+            ang_vel = axis * (angle / dt)
+            return [float(v) for v in ang_vel.tolist()]
+
+        def _update_pose_dict(_obj: Dict[str, Any], _pos: np.ndarray) -> None:
+            """Update pose position while preserving existing rotation fields."""
+            _x = round(float(_pos[0]), 6)
+            _y = round(float(_pos[1]), 6)
+            _z = round(float(_pos[2]), 6)
+            _pose = _obj.get("pose")
+            if isinstance(_pose, dict):
+                _pose = dict(_pose)
+            else:
+                _pose = {}
+            _pose["x"] = _x
+            _pose["y"] = _y
+            _pose["z"] = _z
+            if "position" in _pose:
+                if isinstance(_pose["position"], dict):
+                    _pose["position"] = {"x": _x, "y": _y, "z": _z}
+                elif isinstance(_pose["position"], (list, tuple)) and len(_pose["position"]) >= 3:
+                    _pose["position"] = [_x, _y, _z]
+            else:
+                _pose["position"] = [_x, _y, _z]
+            _obj["pose"] = _pose
 
         _GEMINI_PROP_MAX_RETRIES = _get_env_int("GENIESIM_GEMINI_PROP_MAX_RETRIES", 3)
         _GEMINI_PROP_RETRY_DELAY_S = _get_env_float("GENIESIM_GEMINI_PROP_RETRY_DELAY_S", 2.0)
@@ -8348,7 +8464,12 @@ class GenieSimLocalFramework:
             if _used_server_ee:
                 _server_ee_frame_count += 1
             frame_data["ee_pose_source"] = "server" if _used_server_ee else "fk"
-            if obs.get("scene_state", {}).get("objects") and obs.get("data_source") in ("real_composed", "between_waypoints"):
+            _scene_state_for_count = obs.get("scene_state") or (obs.get("privileged", {}) or {}).get("scene_state")
+            if (
+                _scene_state_for_count
+                and _scene_state_for_count.get("objects")
+                and obs.get("data_source") in ("real_composed", "between_waypoints")
+            ):
                 _real_scene_state_count += 1
             _cf = obs.get("camera_frames", {})
             if _cf and any(
@@ -8431,8 +8552,11 @@ class GenieSimLocalFramework:
 
             # Update object poses from real scene_state every frame (not just frame 0).
             # On frame 0, also store initial poses for displacement calculation.
-            if obs.get("scene_state"):
-                for _obj in obs["scene_state"].get("objects", []):
+            _scene_state = obs.get("scene_state") or (obs.get("privileged", {}) or {}).get("scene_state")
+            if _scene_state is not None and obs.get("scene_state") is None:
+                obs["scene_state"] = _scene_state
+            if _scene_state:
+                for _obj in _scene_state.get("objects", []):
                     _oid = _obj.get("object_id", "")
                     _p = _obj.get("pose", {})
                     if "x" in _p:
@@ -8440,17 +8564,55 @@ class GenieSimLocalFramework:
                     elif "position" in _p:
                         _pos_val = _p["position"]
                         if isinstance(_pos_val, dict):
-                            _pos = np.array([_pos_val.get("x", 0), _pos_val.get("y", 0), _pos_val.get("z", 0)], dtype=float)
+                            _pos = np.array([
+                                _pos_val.get("x", 0),
+                                _pos_val.get("y", 0),
+                                _pos_val.get("z", 0),
+                            ], dtype=float)
                         else:
                             _pos = np.array(_pos_val, dtype=float)
                     else:
                         continue  # skip objects with no valid pose
 
-                    # Extract rotation and velocity if available
-                    _rot = _p.get("rotation_quat") or _p.get("orientation") or _obj.get("rotation_quat")
-                    _lvel = _p.get("linear_velocity") or _obj.get("linear_velocity")
-                    _avel = _p.get("angular_velocity") or _obj.get("angular_velocity")
+                    # Extract rotation (normalize to [w, x, y, z])
+                    _rot = None
+                    for _candidate in (
+                        _p.get("rotation_quat"),
+                        _p.get("orientation"),
+                        _p.get("rotation"),
+                        _obj.get("rotation_quat"),
+                        _obj.get("orientation"),
+                        _obj.get("rotation"),
+                    ):
+                        _rot = _normalize_quat(_candidate)
+                        if _rot is not None:
+                            break
+
+                    _lvel = _coerce_vec3(_p.get("linear_velocity") or _obj.get("linear_velocity"))
+                    _avel = _coerce_vec3(_p.get("angular_velocity") or _obj.get("angular_velocity"))
                     _pose_source = _p.get("source") or _obj.get("source", "unknown")
+                    _lvel_source = _p.get("linear_velocity_source") or _obj.get("linear_velocity_source") or _pose_source
+                    _avel_source = _p.get("angular_velocity_source") or _obj.get("angular_velocity_source") or _pose_source
+
+                    # Compute finite-difference velocities if missing
+                    _prev_state = _object_prev_state.get(_oid, {})
+                    _prev_pos = _prev_state.get("position")
+                    _prev_rot = _prev_state.get("rotation_quat")
+                    _prev_ts = _prev_state.get("timestamp")
+                    _cur_ts = frame_data.get("timestamp")
+                    _dt = None
+                    if _prev_ts is not None and _cur_ts is not None:
+                        try:
+                            _dt = float(_cur_ts) - float(_prev_ts)
+                        except (TypeError, ValueError):
+                            _dt = None
+                    if _lvel is None and _prev_pos is not None and _dt and _dt > 0:
+                        _lvel = ((_pos - _prev_pos) / _dt).tolist()
+                        _lvel_source = "finite_difference"
+                    if _avel is None and _rot is not None and _prev_rot is not None and _dt and _dt > 0:
+                        _avel = _quat_to_ang_vel(_prev_rot, _rot, _dt)
+                        if _avel is not None:
+                            _avel_source = "finite_difference"
 
                     # Validate against kinematic tracking if available
                     if _oid in _object_poses and step_idx > 0:
@@ -8466,17 +8628,31 @@ class GenieSimLocalFramework:
                     if step_idx == 0:
                         _initial_object_poses[_oid] = _pos.copy()
 
-                    # Capture per-frame pose history for trajectory analysis (Issue 2 fix)
                     if _oid not in _object_pose_history:
                         _object_pose_history[_oid] = []
                     _object_pose_history[_oid].append({
                         "frame_idx": step_idx,
                         "position": _pos.tolist() if hasattr(_pos, 'tolist') else list(_pos),
-                        "rotation_quat": list(_rot) if _rot is not None else None,
-                        "linear_velocity": list(_lvel) if _lvel is not None else [0.0, 0.0, 0.0],
-                        "angular_velocity": list(_avel) if _avel is not None else [0.0, 0.0, 0.0],
+                        "rotation_quat": _rot,
+                        "linear_velocity": (
+                            list(_lvel)
+                            if _lvel is not None
+                            else [0.0, 0.0, 0.0]
+                        ),
+                        "angular_velocity": (
+                            list(_avel)
+                            if _avel is not None
+                            else [0.0, 0.0, 0.0]
+                        ),
+                        "velocity_source": _lvel_source,
+                        "angular_velocity_source": _avel_source,
                         "source": _pose_source,
                     })
+                    _object_prev_state[_oid] = {
+                        "position": _pos.copy(),
+                        "rotation_quat": _rot,
+                        "timestamp": _cur_ts,
+                    }
 
             # Detect grasp: gripper closes near an object
             if (frame_data.get("gripper_command") == "closed"
@@ -8486,7 +8662,7 @@ class GenieSimLocalFramework:
                     _dist = float(np.linalg.norm(ee_pos_arr - _opos))
                     # Compute proximity threshold from real object bbox diagonal
                     _obj_type = ""
-                    for _obj in obs.get("scene_state", {}).get("objects", []):
+                    for _obj in (_scene_state or {}).get("objects", []):
                         if _obj.get("object_id") == _oid:
                             _obj_type = (_obj.get("object_type") or "").lower()
                             break
@@ -8510,8 +8686,8 @@ class GenieSimLocalFramework:
             # poses are static (same value every frame), fall back to kinematic
             # EE-offset tracking so grasped objects follow the end-effector.
             _attached_has_real_pose = False
-            if _attached_object_id is not None and obs.get("scene_state"):
-                for _obj in obs.get("scene_state", {}).get("objects", []):
+            if _attached_object_id is not None and _scene_state:
+                for _obj in _scene_state.get("objects", []):
                     if _obj.get("object_id") == _attached_object_id:
                         _p = _obj.get("pose", {})
                         if "x" in _p:
@@ -8534,81 +8710,192 @@ class GenieSimLocalFramework:
                 if obs.get("scene_state"):
                     for _obj in obs["scene_state"].get("objects", []):
                         if _obj.get("object_id") == _attached_object_id:
-                            _obj["pose"] = {
-                                "x": round(float(_new_pos[0]), 6),
-                                "y": round(float(_new_pos[1]), 6),
-                                "z": round(float(_new_pos[2]), 6),
+                            _update_pose_dict(_obj, _new_pos)
+                            break
+
+            # Query physics contact report before estimating forces (Issue 3/4 fix)
+            _contact_result_available = False
+            _contact_payload: Optional[Dict[str, Any]] = None
+            _contacts: List[Dict[str, Any]] = []
+            collision_provenance = None
+            _should_query_contacts = True
+            if _should_query_contacts:
+                contact_result = self._client.get_contact_report(
+                    include_points=False,
+                    lock_timeout=1.0,
+                )
+                if contact_result.available and contact_result.success and contact_result.payload is not None:
+                    payload = contact_result.payload
+                    _contact_payload = payload
+                    _contact_result_available = True
+                    frame_data["penetration_depth"] = payload.get("max_penetration_depth")
+                    frame_data["contact_count"] = int(payload.get("contact_count", 0))
+
+                    _contacts = payload.get("contacts", []) or []
+                    if _contacts:
+                        frame_data["collision_contacts"] = [
+                            {
+                                "body_a": c.get("body_a", "") if isinstance(c, dict) else getattr(c, "body_a", ""),
+                                "body_b": c.get("body_b", "") if isinstance(c, dict) else getattr(c, "body_b", ""),
+                                "force_N": round(
+                                    float(
+                                        c.get("normal_force_N")
+                                        if isinstance(c, dict) and c.get("normal_force_N") is not None
+                                        else (
+                                            c.get("normal_force", 0)
+                                            if isinstance(c, dict)
+                                            else getattr(c, "normal_force", 0)
+                                        )
+                                    ),
+                                    4,
+                                ),
                             }
-                            break
-
-                # Contact force estimation: prefer real joint efforts from PhysX
-                if _has_real_efforts:
-                    # Real PhysX joint torques available
-                    if gripper_indices:
-                        _gripper_efforts = [
-                            _real_efforts[idx] for idx in gripper_indices if idx < len(_real_efforts)
+                            for c in _contacts[:5]  # Top 5 contacts
                         ]
-                    else:
-                        _gripper_efforts = _real_efforts[arm_dof:]  # gripper joint efforts
-                    _grip_force_real = sum(abs(e) for e in _gripper_efforts)
-                    if arm_indices:
-                        _arm_efforts = [
-                            _real_efforts[idx] for idx in arm_indices if idx < len(_real_efforts)
-                        ]
-                    else:
-                        _arm_efforts = _real_efforts[:arm_dof]
-                    frame_data["contact_forces"] = {
-                        "grip_force_N": round(_grip_force_real, 4),
-                        "arm_torques_Nm": [round(e, 4) for e in _arm_efforts],
-                        "gripper_efforts_N": [round(e, 4) for e in _gripper_efforts],
-                        "grasped_object_id": _attached_object_id,
-                        "force_sufficient": _grip_force_real > 0.5,
-                    }
+                    collision_provenance = "physx_contact_report"
+                    _contact_report_count += 1
                 else:
-                    # Fallback: heuristic contact force model
-                    _obj_type = ""
-                    for _obj in obs.get("scene_state", {}).get("objects", []):
-                        if _obj.get("object_id") == _attached_object_id:
-                            _obj_type = (_obj.get("object_type") or "").lower()
+                    if _collision_source_hint == "joint_limits_only" and not _contact_query_warned:
+                        logger.warning(
+                            "Contact report unavailable; using joint-limits-only collision heuristic."
+                        )
+                        _contact_query_warned = True
+                    collision_provenance = "joint_limits_only"
+
+            if collision_provenance is None:
+                collision_provenance = "physx_joint_effort" if _has_real_efforts else "joint_limits_only"
+            frame_data["collision_provenance"] = collision_provenance
+
+            # Hybrid collision metric: allow gripper-target and target-surface contacts
+            collision_free_physics = None
+            if _contact_result_available:
+                _target_norm = (task.get("target_object") or task.get("target_object_id") or "").rsplit("/", 1)[-1].lower()
+                if _target_norm:
+                    collision_free_physics = True
+                    for _c in _contacts:
+                        _body_a = _normalize_body_name(
+                            _c.get("body_a", "") if isinstance(_c, dict) else getattr(_c, "body_a", "")
+                        )
+                        _body_b = _normalize_body_name(
+                            _c.get("body_b", "") if isinstance(_c, dict) else getattr(_c, "body_b", "")
+                        )
+                        if not _body_a or not _body_b:
+                            continue
+                        _allowed = False
+                        if (_is_gripper_body(_body_a) and _target_norm in _body_b) or (
+                            _is_gripper_body(_body_b) and _target_norm in _body_a
+                        ):
+                            _allowed = True
+                        if (_is_surface_body(_body_a) and _target_norm in _body_b) or (
+                            _is_surface_body(_body_b) and _target_norm in _body_a
+                        ):
+                            _allowed = True
+                        if not _allowed:
+                            collision_free_physics = False
                             break
-                    _mass = _get_obj_prop(_obj_type, "mass", 0.3)
-                    _weight = _mass * 9.81
+            frame_data["collision_free_physics"] = collision_free_physics
 
-                    # Heuristic contact force model (Gemini LLM estimation removed — heuristic is faster & sufficient)
-                    _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
+            # Contact force estimation: prefer real joint efforts, then contact report, else heuristic
+            _contact_forces_payload = None
+            if _has_real_efforts:
+                if gripper_indices:
+                    _gripper_efforts = [
+                        _real_efforts[idx] for idx in gripper_indices if idx < len(_real_efforts)
+                    ]
+                else:
+                    _gripper_efforts = _real_efforts[arm_dof:]  # gripper joint efforts
+                _grip_force_real = sum(abs(e) for e in _gripper_efforts)
+                if arm_indices:
+                    _arm_efforts = [
+                        _real_efforts[idx] for idx in arm_indices if idx < len(_real_efforts)
+                    ]
+                else:
+                    _arm_efforts = _real_efforts[:arm_dof]
+                _contact_forces_payload = {
+                    "grip_force_N": round(_grip_force_real, 4),
+                    "arm_torques_Nm": [round(e, 4) for e in _arm_efforts],
+                    "gripper_efforts_N": [round(e, 4) for e in _gripper_efforts],
+                    "grasped_object_id": _attached_object_id,
+                    "force_sufficient": _grip_force_real > 0.5,
+                    "provenance": "physx_joint_effort",
+                    "confidence": 0.9,
+                }
+            elif _contact_result_available:
+                _gripper_force = 0.0
+                _total_force = 0.0
+                for _c in _contacts:
+                    _body_a = _normalize_body_name(
+                        _c.get("body_a", "") if isinstance(_c, dict) else getattr(_c, "body_a", "")
+                    )
+                    _body_b = _normalize_body_name(
+                        _c.get("body_b", "") if isinstance(_c, dict) else getattr(_c, "body_b", "")
+                    )
+                    _nf = float(
+                        _c.get("normal_force_N")
+                        if isinstance(_c, dict) and _c.get("normal_force_N") is not None
+                        else (
+                            _c.get("normal_force", 0)
+                            if isinstance(_c, dict)
+                            else getattr(_c, "normal_force", 0)
+                        )
+                    )
+                    _total_force += abs(_nf)
+                    if _is_gripper_body(_body_a) or _is_gripper_body(_body_b):
+                        _gripper_force += abs(_nf)
+                if _gripper_force <= 0.0 and _contact_payload:
+                    _gripper_force = float(_contact_payload.get("total_normal_force", 0.0) or 0.0)
+                _contact_forces_payload = {
+                    "total_normal_force_N": round(_total_force, 4),
+                    "grip_force_N": round(_gripper_force, 4),
+                    "contact_count": len(_contacts),
+                    "grasped_object_id": _attached_object_id,
+                    "provenance": "physx_contact_report",
+                    "confidence": 0.7,
+                }
+            elif _attached_object_id is not None:
+                _obj_type = ""
+                for _obj in (_scene_state or {}).get("objects", []):
+                    if _obj.get("object_id") == _attached_object_id:
+                        _obj_type = (_obj.get("object_type") or "").lower()
+                        break
+                _mass = _get_obj_prop(_obj_type, "mass", 0.3)
+                _weight = _mass * 9.81
 
-                    # Compute adaptive confidence based on available signals (Issue 4 fix)
-                    _heuristic_confidence = 0.2  # base confidence
-                    _confidence_factors = {"base": 0.2}
+                _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
 
-                    # Boost confidence if we have supporting data
-                    if _contact_result_available:
-                        _heuristic_confidence += 0.25
-                        _confidence_factors["contact_report"] = 0.25
-                    else:
-                        _confidence_factors["contact_report"] = 0.0
+                _heuristic_confidence = 0.2
+                _confidence_factors = {"base": 0.2}
 
-                    if _attached_object_id is not None:
-                        _heuristic_confidence += 0.15
-                        _confidence_factors["grasp_detected"] = 0.15
-                    else:
-                        _confidence_factors["grasp_detected"] = 0.0
+                if _contact_result_available:
+                    _heuristic_confidence += 0.25
+                    _confidence_factors["contact_report"] = 0.25
+                else:
+                    _confidence_factors["contact_report"] = 0.0
 
-                    if frame_data.get("gripper_command") == "close" and gripper_openness < 0.3:
-                        _heuristic_confidence += 0.1
-                        _confidence_factors["gripper_closing"] = 0.1
-                    else:
-                        _confidence_factors["gripper_closing"] = 0.0
+                if _attached_object_id is not None:
+                    _heuristic_confidence += 0.15
+                    _confidence_factors["grasp_detected"] = 0.15
+                else:
+                    _confidence_factors["grasp_detected"] = 0.0
 
-                    frame_data["contact_forces"] = {
-                        "weight_force_N": round(_weight, 2),
-                        "grip_force_N": round(_grip_force, 2),
-                        "force_sufficient": _grip_force >= _weight,
-                        "grasped_object_id": _attached_object_id,
-                        "provenance": "heuristic_grasp_model_v2",
-                        "confidence": round(min(0.7, _heuristic_confidence), 2),
-                        "confidence_factors": _confidence_factors,
-                    }
+                if frame_data.get("gripper_command") == "closed" and gripper_openness < 0.3:
+                    _heuristic_confidence += 0.1
+                    _confidence_factors["gripper_closing"] = 0.1
+                else:
+                    _confidence_factors["gripper_closing"] = 0.0
+
+                _contact_forces_payload = {
+                    "weight_force_N": round(_weight, 2),
+                    "grip_force_N": round(_grip_force, 2),
+                    "force_sufficient": _grip_force >= _weight,
+                    "grasped_object_id": _attached_object_id,
+                    "provenance": "heuristic_grasp_model_v2",
+                    "confidence": round(min(0.7, _heuristic_confidence), 2),
+                    "confidence_factors": _confidence_factors,
+                }
+
+            if _contact_forces_payload is not None:
+                frame_data["contact_forces"] = _contact_forces_payload
 
             # Add provenance to contact forces (for PhysX real data path)
             if "contact_forces" in frame_data and "provenance" not in frame_data["contact_forces"]:
@@ -8643,69 +8930,12 @@ class GenieSimLocalFramework:
                     "confidence": 0.1,
                 }
 
-            # Query physics contact report when collision data is limited.
-            collision_provenance = None
-            _contact_result_available = False
-            _should_query_contacts = _collision_source_hint == "joint_limits_only" or not _has_real_efforts
-            if _should_query_contacts:
-                contact_result = self._client.get_contact_report(
-                    include_points=False,
-                    lock_timeout=1.0,
-                )
-                if contact_result.available and contact_result.success and contact_result.payload is not None:
-                    payload = contact_result.payload
-                    _contact_result_available = True
-                    frame_data["penetration_depth"] = payload.get("max_penetration_depth")
-                    frame_data["contact_count"] = int(payload.get("contact_count", 0))
-
-                    # Store contact details for debugging (Issue 3 fix)
-                    _contacts = payload.get("contacts", [])
-                    if _contacts and len(_contacts) > 0:
-                        frame_data["collision_contacts"] = [
-                            {
-                                "body_a": c.get("body_a", "") if isinstance(c, dict) else getattr(c, "body_a", ""),
-                                "body_b": c.get("body_b", "") if isinstance(c, dict) else getattr(c, "body_b", ""),
-                                "force_N": round(
-                                    float(c.get("normal_force", 0) if isinstance(c, dict) else getattr(c, "normal_force", 0)),
-                                    4,
-                                ),
-                            }
-                            for c in _contacts[:5]  # Top 5 contacts
-                        ]
-
-                    contact_forces = {
-                        "total_normal_force_N": round(float(payload.get("total_normal_force", 0.0)), 4),
-                        "contact_count": int(payload.get("contact_count", 0)),
-                        "provenance": "physx_contact_report",
-                        "confidence": 0.7,
-                    }
-                    if not _has_real_efforts:
-                        frame_data["contact_forces"] = contact_forces
-                    collision_provenance = "physx_contact_report"
-                    _contact_report_count += 1
-                else:
-                    if _collision_source_hint == "joint_limits_only" and not _contact_query_warned:
-                        logger.warning(
-                            "Contact report unavailable; using joint-limits-only collision heuristic."
-                        )
-                        _contact_query_warned = True
-                    collision_provenance = "joint_limits_only"
-
-            if collision_provenance is None:
-                collision_provenance = "physx_joint_effort" if _has_real_efforts else "joint_limits_only"
-            frame_data["collision_provenance"] = collision_provenance
-
             # Update ALL tracked object poses in scene_state (not just attached)
-            if obs.get("scene_state") and _object_poses:
-                for _obj in obs["scene_state"].get("objects", []):
+            if _scene_state and _object_poses:
+                for _obj in _scene_state.get("objects", []):
                     _oid = _obj.get("object_id", "")
                     if _oid in _object_poses:
-                        _p = _object_poses[_oid]
-                        _obj["pose"] = {
-                            "x": round(float(_p[0]), 6),
-                            "y": round(float(_p[1]), 6),
-                            "z": round(float(_p[2]), 6),
-                        }
+                        _update_pose_dict(_obj, _object_poses[_oid])
 
             # Store per-frame object poses with full data (Issue 2 fix)
             if _object_poses:
@@ -9120,6 +9350,7 @@ class GenieSimLocalFramework:
         # If we have mixed sources, apply inverse dynamics to ALL frames for consistency
         _efforts_consistency = 1.0
         _total_frames = len(frames)
+        _efforts_forced_consistency = False
         if _efforts_source == "mixed" and _total_frames > 0:
             # Count frames by source
             _physx_frames = sum(1 for f in frames if f.get("efforts_source") == "physx")
@@ -9163,9 +9394,14 @@ class GenieSimLocalFramework:
                             _obs_rs["joint_efforts"] = _efforts_list
                             _frame["efforts_source"] = "estimated_inverse_dynamics"
                 _efforts_consistency = 1.0
+                _efforts_forced_consistency = True
             else:
                 # Mostly PhysX - keep as is, but track consistency
                 _efforts_consistency = _physx_frames / _total_frames
+
+        if _efforts_forced_consistency:
+            for _frame in frames:
+                _frame["efforts_source"] = "estimated_inverse_dynamics"
 
         # Ensure every frame has explicit efforts_source tag
         for _frame in frames:
@@ -9181,7 +9417,11 @@ class GenieSimLocalFramework:
                 _priv = _obs.get("privileged", {})
                 _cf_container = _priv if isinstance(_priv, dict) else _frame
                 _existing_cf = _cf_container.get("contact_forces")
-                if isinstance(_existing_cf, dict) and _existing_cf.get("provenance") not in ("heuristic_grasp_model_v1", "estimated_inverse_dynamics"):
+                if isinstance(_existing_cf, dict) and _existing_cf.get("provenance") not in (
+                    "heuristic_grasp_model_v1",
+                    "heuristic_grasp_model_v2",
+                    "estimated_inverse_dynamics",
+                ):
                     continue
                 _obs_rs = _obs.get("robot_state", {})
                 _efforts = _obs_rs.get("joint_efforts", [])
@@ -9231,9 +9471,20 @@ class GenieSimLocalFramework:
                 _object_trajectories[_oid] = {
                     "position_trajectory": [h["position"] for h in _history],
                     "velocity_trajectory": [h.get("linear_velocity", [0, 0, 0]) for h in _history],
+                    "rotation_trajectory": [h.get("rotation_quat") for h in _history],
+                    "angular_velocity_trajectory": [h.get("angular_velocity", [0, 0, 0]) for h in _history],
                     "frame_indices": [h["frame_idx"] for h in _history],
                     "source": _history[-1].get("source", "unknown") if _history else "unknown",
                 }
+
+        _collision_free_physics = None
+        _physics_flags = [
+            f.get("collision_free_physics")
+            for f in frames
+            if f.get("collision_free_physics") is not None
+        ]
+        if _physics_flags:
+            _collision_free_physics = all(bool(v) for v in _physics_flags)
 
         return frames, {
             "camera_frame_count": _camera_frame_count,
@@ -9245,10 +9496,12 @@ class GenieSimLocalFramework:
             "real_velocity_count": _real_velocity_count,
             "real_effort_count": _real_effort_count,
             "efforts_source": _efforts_source,
+            "effort_source_policy": _efforts_source,
             "joint_efforts_consistency": round(_efforts_consistency, 3),  # Issue 5 fix
             "estimated_effort_count": _estimated_effort_count,
             "effort_missing_count": _effort_missing_count,
             "contact_report_count": _contact_report_count,
+            "collision_free_physics": _collision_free_physics,
             "object_property_provenance": _object_property_provenance,
             "missing_phase_frames": _missing_phase_frames,
             "ee_static_fallback_used": _ee_static_fallback_used,
@@ -9267,6 +9520,9 @@ class GenieSimLocalFramework:
         warnings: List[str] = []
         invalid_frames: set[int] = set()
         _validate_camera_shape = os.getenv("GENIESIM_VALIDATE_CAMERA_SHAPE", "0") == "1"
+        _frames_dir = None
+        if episode_dir is not None:
+            _frames_dir = episode_dir / f"{episode_id}_frames"
 
         required_cameras: List[str] = []
         for key in ("required_cameras", "required_camera_ids", "camera_ids"):
@@ -9379,8 +9635,8 @@ class GenieSimLocalFramework:
                 else:
                     if isinstance(rgb, str) and rgb.endswith(".npy"):
                         # File reference to .npy — check file exists
-                        _npy_ref = Path(episode_dir) / rgb if episode_dir else None
-                        if _npy_ref and not _npy_ref.exists():
+                        _npy_ref = resolve_npy_path(rgb, ep_dir=episode_dir, frames_dir=_frames_dir)
+                        if _npy_ref is None or not _npy_ref.exists():
                             frame_errors.append(
                                 f"Frame {idx} camera '{camera_id}' rgb npy file not found: {rgb}."
                             )
@@ -9437,8 +9693,8 @@ class GenieSimLocalFramework:
                 else:
                     if isinstance(depth, str) and depth.endswith(".npy"):
                         # File reference to .npy — check file exists
-                        _npy_ref = Path(episode_dir) / depth if episode_dir else None
-                        if _npy_ref and not _npy_ref.exists():
+                        _npy_ref = resolve_npy_path(depth, ep_dir=episode_dir, frames_dir=_frames_dir)
+                        if _npy_ref is None or not _npy_ref.exists():
                             frame_errors.append(
                                 f"Frame {idx} camera '{camera_id}' depth npy file not found: {depth}."
                             )
@@ -11516,6 +11772,7 @@ Scene objects: {scene_summary}
 
         # Extract RGB images from camera frames
         _ep_dir = getattr(self, "_current_episode_dir", None)
+        _frames_dir = getattr(self, "_current_frames_dir", None)
         images = []
         for idx in sample_indices:
             frame = frames[idx]
@@ -11525,28 +11782,26 @@ Scene objects: {scene_summary}
             for cam_id in ["wrist", "front", "overhead"]:
                 cam_data = camera_frames.get(cam_id)
                 if cam_data and isinstance(cam_data, dict):
-                    rgb = load_camera_frame(cam_data, "rgb", ep_dir=_ep_dir)
-                    # Validate that loaded data is a numpy array (not a string path)
-                    if rgb is not None and not isinstance(rgb, np.ndarray):
-                        logger.warning(
-                            "VLM audit: camera frame is not ndarray (type=%s), skipping",
-                            type(rgb).__name__,
-                        )
-                        rgb = None
+                    rgb = load_camera_frame(
+                        cam_data,
+                        "rgb",
+                        ep_dir=_ep_dir,
+                        frames_dir=_frames_dir,
+                    )
+                    rgb = validate_camera_array(rgb, context=f"vlm_audit:{cam_id}:{idx}")
                     if rgb is not None:
                         break
             if rgb is None:
                 # Try any camera
                 for cam_id, cam_data in camera_frames.items():
                     if cam_data and isinstance(cam_data, dict):
-                        rgb = load_camera_frame(cam_data, "rgb", ep_dir=_ep_dir)
-                        # Validate that loaded data is a numpy array
-                        if rgb is not None and not isinstance(rgb, np.ndarray):
-                            logger.warning(
-                                "VLM audit: camera frame is not ndarray (type=%s), skipping",
-                                type(rgb).__name__,
-                            )
-                            rgb = None
+                        rgb = load_camera_frame(
+                            cam_data,
+                            "rgb",
+                            ep_dir=_ep_dir,
+                            frames_dir=_frames_dir,
+                        )
+                        rgb = validate_camera_array(rgb, context=f"vlm_audit:{cam_id}:{idx}")
                         if rgb is not None:
                             break
             if rgb is not None:
@@ -11667,6 +11922,7 @@ Scene objects: {scene_summary}
         sample_indices = sorted(set([0, n // 2, n - 1]))
 
         _ep_dir = getattr(self, "_current_episode_dir", None)
+        _frames_dir = getattr(self, "_current_frames_dir", None)
         images = []
         for idx in sample_indices:
             frame = frames[idx]
@@ -11675,14 +11931,13 @@ Scene objects: {scene_summary}
             for cam_id in ["wrist", "front", "overhead"]:
                 cam_data = camera_frames.get(cam_id)
                 if cam_data and isinstance(cam_data, dict):
-                    rgb = load_camera_frame(cam_data, "rgb", ep_dir=_ep_dir)
-                    # Validate that loaded data is a numpy array (not a string path)
-                    if rgb is not None and not isinstance(rgb, np.ndarray):
-                        logger.warning(
-                            "Sim-to-real: camera frame is not ndarray (type=%s), skipping",
-                            type(rgb).__name__,
-                        )
-                        rgb = None
+                    rgb = load_camera_frame(
+                        cam_data,
+                        "rgb",
+                        ep_dir=_ep_dir,
+                        frames_dir=_frames_dir,
+                    )
+                    rgb = validate_camera_array(rgb, context=f"sim2real:{cam_id}:{idx}")
                     if rgb is not None:
                         images.append(rgb)
                         _found = True
@@ -11690,14 +11945,13 @@ Scene objects: {scene_summary}
             if not _found:
                 for cam_data in camera_frames.values():
                     if cam_data and isinstance(cam_data, dict):
-                        rgb = load_camera_frame(cam_data, "rgb", ep_dir=_ep_dir)
-                        # Validate that loaded data is a numpy array
-                        if rgb is not None and not isinstance(rgb, np.ndarray):
-                            logger.warning(
-                                "Sim-to-real: camera frame is not ndarray (type=%s), skipping",
-                                type(rgb).__name__,
-                            )
-                            rgb = None
+                        rgb = load_camera_frame(
+                            cam_data,
+                            "rgb",
+                            ep_dir=_ep_dir,
+                            frames_dir=_frames_dir,
+                        )
+                        rgb = validate_camera_array(rgb, context=f"sim2real:unknown:{idx}")
                         if rgb is not None:
                             images.append(rgb)
                             break
@@ -12113,13 +12367,24 @@ Scene objects: {scene_summary}
 
         # Collision-free score: check if episode has collision info
         collision_free_score = 0.5  # neutral when unknown
-        for frame in frames:
-            if frame.get("collision_free") is True:
-                collision_free_score = 1.0
-                break
-            elif frame.get("collision_free") is False:
+        physics_flags = [
+            f.get("collision_free_physics")
+            for f in frames
+            if f.get("collision_free_physics") is not None
+        ]
+        if physics_flags:
+            if any(flag is False for flag in physics_flags):
                 collision_free_score = 0.0
-                break
+            elif any(flag is True for flag in physics_flags):
+                collision_free_score = 1.0
+        else:
+            for frame in frames:
+                if frame.get("collision_free") is True:
+                    collision_free_score = 1.0
+                    break
+                elif frame.get("collision_free") is False:
+                    collision_free_score = 0.0
+                    break
 
         # --- Improvement I: Physics plausibility penalties ---
         scene_state_penalty = 0.0
