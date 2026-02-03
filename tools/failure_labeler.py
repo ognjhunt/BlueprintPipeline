@@ -79,6 +79,7 @@ class FailureInfo:
     # Detailed information
     involved_objects: List[str] = field(default_factory=list)
     contact_forces: List[float] = field(default_factory=list)  # Forces at failure
+    contact_positions: List[List[float]] = field(default_factory=list)  # Contact positions at failure
     joint_positions: List[float] = field(default_factory=list)  # Robot state at failure
     ee_position: Optional[List[float]] = None  # End-effector position at failure
 
@@ -98,6 +99,7 @@ class FailureInfo:
             "severity": self.severity.value,
             "involved_objects": self.involved_objects,
             "contact_forces": self.contact_forces,
+            "contact_positions": self.contact_positions,
             "joint_positions": self.joint_positions,
             "ee_position": self.ee_position,
             "nearest_success_distance": self.nearest_success_distance,
@@ -117,6 +119,7 @@ class FailureInfo:
             severity=FailureSeverity(data.get("severity", "major")),
             involved_objects=data.get("involved_objects", []),
             contact_forces=data.get("contact_forces", []),
+            contact_positions=data.get("contact_positions", []),
             joint_positions=data.get("joint_positions", []),
             ee_position=data.get("ee_position"),
             nearest_success_distance=data.get("nearest_success_distance"),
@@ -286,6 +289,7 @@ class FailureLabeler:
 
             body_a = str(event.get("body_a", "")).lower()
             body_b = str(event.get("body_b", "")).lower()
+            contact_pos = self._extract_contact_position(event)
 
             # Check if this is an unexpected collision with environment
             is_env_collision = any(
@@ -309,6 +313,7 @@ class FailureLabeler:
                         recovery_possible=False,
                         severity=FailureSeverity.MAJOR,
                         contact_forces=[force],
+                        contact_positions=[contact_pos] if contact_pos else [],
                         involved_objects=[body_a, body_b],
                     )
 
@@ -321,9 +326,34 @@ class FailureLabeler:
                     recovery_possible=force < self.collision_threshold * 2,
                     severity=self._severity_from_force(force),
                     contact_forces=[force],
+                    contact_positions=[contact_pos] if contact_pos else [],
                     involved_objects=[body_a, body_b],
                 )
 
+        return None
+
+    def _extract_contact_position(self, event: Dict[str, Any]) -> Optional[List[float]]:
+        """Extract a contact position from an event if present."""
+        if not isinstance(event, dict):
+            return None
+        for key in ("position", "contact_position", "pos", "contact_point"):
+            value = event.get(key)
+            if value is None:
+                continue
+            if isinstance(value, dict):
+                try:
+                    return [
+                        float(value.get("x", 0.0)),
+                        float(value.get("y", 0.0)),
+                        float(value.get("z", 0.0)),
+                    ]
+                except Exception:
+                    return None
+            if isinstance(value, (list, tuple)) and len(value) >= 3:
+                try:
+                    return [float(value[0]), float(value[1]), float(value[2])]
+                except Exception:
+                    return None
         return None
 
     def _check_drops(
@@ -394,6 +424,8 @@ class FailureLabeler:
                 # Large force drop indicates slip
                 for i in range(1, len(forces)):
                     if forces[i-1] > self.GRASP_FORCE_THRESHOLD and forces[i] < self.GRASP_FORCE_THRESHOLD * 0.2:
+                        contact_pos = self._extract_contact_position(gripper_contacts[i])
+                        contact_force = forces[i]
                         return FailureInfo(
                             is_failure=True,
                             failure_type=FailureType.SLIP,
@@ -401,6 +433,8 @@ class FailureLabeler:
                             failure_reason="Object slipped from gripper",
                             recovery_possible=False,
                             severity=FailureSeverity.MAJOR,
+                            contact_forces=[contact_force],
+                            contact_positions=[contact_pos] if contact_pos else [],
                         )
 
         return None

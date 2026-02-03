@@ -269,6 +269,16 @@ message ContactReportRsp {
     float total_normal_force = 2;
     float max_penetration_depth = 3;
 }
+message EEWrenchReq {
+    bool include_contacts = 1;
+}
+message EEWrenchRsp {
+    repeated float force = 1;  // [fx, fy, fz]
+    repeated float torque = 2; // [tx, ty, tz]
+    string frame = 3;          // wrench frame
+    string source = 4;         // physx_contact_report, physx_joint_effort, etc.
+    repeated ContactPoint contacts = 5;
+}
 service SimObservationService {
     rpc get_observation(GetObservationReq) returns(GetObservationRsp);
     rpc reset(ResetReq) returns(ResetRsp);
@@ -289,4 +299,5 @@ service SimObservationService {
     rpc playback(PlaybackReq) returns(PlaybackRsp);
     rpc get_checker_status(GetCheckerStatusReq) returns(GetCheckerStatusRsp);
     rpc get_contact_report(ContactReportReq) returns(ContactReportRsp);
+    rpc get_ee_wrench(EEWrenchReq) returns(EEWrenchRsp);
 }

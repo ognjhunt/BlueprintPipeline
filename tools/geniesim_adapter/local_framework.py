@@ -164,6 +164,8 @@ try:
         CameraRequest,
         ContactReportReq,
         ContactReportRsp,
+        EEWrenchReq,
+        EEWrenchRsp,
         DetachReq,
         DetachRsp,
         ExitReq,
@@ -214,6 +216,8 @@ except ImportError:
         "CameraRequest",
         "ContactReportReq",
         "ContactReportRsp",
+        "EEWrenchReq",
+        "EEWrenchRsp",
         "DetachReq",
         "DetachRsp",
         "ExitReq",
@@ -2613,6 +2617,59 @@ class GenieSimGRPCClient:
             "contact_count": len(contacts),
             "total_normal_force": total_force,
             "max_penetration_depth": max_penetration,
+        }
+        return GrpcCallResult(success=True, available=True, payload=payload)
+
+    def get_ee_wrench(
+        self,
+        *,
+        include_contacts: bool = False,
+        lock_timeout: Optional[float] = None,
+    ) -> GrpcCallResult:
+        """Fetch end-effector wrench from the server, if supported."""
+        if not self._have_grpc:
+            return self._grpc_unavailable("get_ee_wrench", "gRPC not available")
+        if self._stub is None:
+            return self._grpc_unavailable("get_ee_wrench", "gRPC channel not initialized")
+        if not hasattr(self._stub, "get_ee_wrench"):
+            return self._grpc_unavailable("get_ee_wrench", "RPC not supported by server")
+
+        request = EEWrenchReq(include_contacts=include_contacts)
+
+        def _request() -> EEWrenchRsp:
+            return self._stub.get_ee_wrench(request, timeout=self.timeout)
+
+        response = self._call_grpc(
+            "get_ee_wrench",
+            _request,
+            None,
+            success_checker=lambda resp: resp is not None,
+            lock_timeout=lock_timeout,
+        )
+        if response is None:
+            return GrpcCallResult(success=False, available=True, error="gRPC call failed")
+
+        contacts = []
+        for contact in getattr(response, "contacts", []):
+            contacts.append({
+                "body_a": contact.body_a,
+                "body_b": contact.body_b,
+                "normal_force_N": float(contact.normal_force),
+                "penetration_depth": float(contact.penetration_depth),
+                "position": list(contact.position) if contact.position else [],
+                "normal": list(contact.normal) if contact.normal else [],
+                "force_vector": list(contact.force_vector) if getattr(contact, "force_vector", None) else [],
+                "tangent_impulse": list(contact.tangent_impulse) if getattr(contact, "tangent_impulse", None) else [],
+                "friction": float(contact.friction) if hasattr(contact, "friction") else None,
+                "contact_area": float(contact.contact_area) if hasattr(contact, "contact_area") else None,
+            })
+
+        payload = {
+            "force": list(response.force) if getattr(response, "force", None) else [],
+            "torque": list(response.torque) if getattr(response, "torque", None) else [],
+            "frame": getattr(response, "frame", "end_effector"),
+            "source": getattr(response, "source", "unknown"),
+            "contacts": contacts,
         }
         return GrpcCallResult(success=True, available=True, payload=payload)
 
@@ -7744,7 +7801,7 @@ class GenieSimLocalFramework:
                             "physx_server" if _efforts_source == "physx"
                             else ("estimated_inverse_dynamics" if _efforts_source in ("estimated_inverse_dynamics", "mixed") else "unavailable")
                         ),
-                        "ee_wrench": "joint_efforts" if _real_effort_count > 0 else "unavailable",
+                        "ee_wrench": _ee_wrench_source,
                         "ee_vel": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
                         "ee_acc": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
                         "contact_forces": _contact_forces_source,
@@ -8373,6 +8430,7 @@ class GenieSimLocalFramework:
         _camera_frame_count = 0  # Track how many frames had camera data
         _real_velocity_count = 0  # Track how many frames had real PhysX velocities
         _real_effort_count = 0  # Track how many frames had real PhysX joint efforts
+        _ee_wrench_source = "unavailable"
         _estimated_effort_count = 0  # Track how many frames used inverse-dynamics efforts
         _effort_missing_count = 0  # Track frames missing/zero efforts
         _contact_report_count = 0  # Track frames with contact report data
@@ -8800,7 +8858,28 @@ class GenieSimLocalFramework:
             _rs_eff = robot_state.get("joint_efforts", [])
             _real_efforts = _rs_eff if _rs_eff is not None else []
             _has_real_efforts = bool(_real_efforts and any(abs(e) > 1e-6 for e in _real_efforts))
-            if _has_real_efforts:
+            _server_wrench = None
+            try:
+                ee_wrench_result = self._client.get_ee_wrench(
+                    include_contacts=False,
+                    lock_timeout=1.0,
+                )
+                if ee_wrench_result.available and ee_wrench_result.success and ee_wrench_result.payload:
+                    payload = ee_wrench_result.payload
+                    if payload.get("force") or payload.get("torque"):
+                        _server_wrench = {
+                            "force": payload.get("force", [0.0, 0.0, 0.0]),
+                            "torque": payload.get("torque", [0.0, 0.0, 0.0]),
+                            "frame": payload.get("frame", "end_effector"),
+                            "source": payload.get("source", "physx_contact_report"),
+                        }
+                        frame_data["ee_wrench"] = _server_wrench
+                        robot_state["ee_wrench"] = _server_wrench
+                        _ee_wrench_source = _server_wrench.get("source", "physx_contact_report")
+            except Exception:
+                _server_wrench = None
+
+            if _has_real_efforts and _server_wrench is None:
                 _real_effort_count += 1
                 frame_data["efforts_source"] = "physx"
                 # Approximate EE wrench from joint efforts (wrist torques + grip force proxy)
@@ -8822,9 +8901,10 @@ class GenieSimLocalFramework:
                     }
                     frame_data["ee_wrench"] = ee_wrench
                     robot_state["ee_wrench"] = ee_wrench
+                    _ee_wrench_source = "joint_efforts"
                 except Exception:
                     pass
-            else:
+            elif _server_wrench is None:
                 _effort_missing_count += 1
                 frame_data["efforts_source"] = "none"
 

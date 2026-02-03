@@ -30,6 +30,8 @@ from tools.geniesim_adapter.geniesim_grpc_pb2 import (
     ContactReportReq,
     ContactReportRsp,
     ContactPoint,
+    EEWrenchReq,
+    EEWrenchRsp,
     GetCheckerStatusReq,
     GetCheckerStatusRsp,
     GetObservationReq,
@@ -313,6 +315,62 @@ class GenieSimLocalServicer(SimObservationServiceServicer):
             )
 
         return ContactReportRsp(total_normal_force=0.0, max_penetration_depth=0.0)
+
+    def get_ee_wrench(self, req: EEWrenchReq, context) -> EEWrenchRsp:
+        """Return an EE wrench estimate derived from PhysX contacts."""
+        include_contacts = bool(getattr(req, "include_contacts", False))
+        force = [0.0, 0.0, 0.0]
+        torque = [0.0, 0.0, 0.0]
+        contacts = []
+
+        try:
+            from omni.physx import get_physx_interface
+            physx = get_physx_interface()
+            contact_data = physx.get_contact_report() if physx is not None else None
+            if contact_data:
+                for contact in contact_data:
+                    body_a = str(contact.get("actor0", ""))
+                    body_b = str(contact.get("actor1", ""))
+                    lower_a = body_a.lower()
+                    lower_b = body_b.lower()
+                    if not any(kw in lower_a or kw in lower_b for kw in ("gripper", "finger", "hand", "wrist")):
+                        continue
+                    impulse = float(contact.get("impulse", 0.0))
+                    normal = contact.get("normal", [0, 0, 1])
+                    position = contact.get("position", [0, 0, 0])
+                    force_vector = contact.get("force_vector") or contact.get("impulse_vector")
+                    if force_vector is None and normal is not None:
+                        try:
+                            force_vector = [float(impulse) * float(n) for n in normal]
+                        except Exception:
+                            force_vector = None
+                    if force_vector is not None:
+                        force[0] += float(force_vector[0])
+                        force[1] += float(force_vector[1])
+                        force[2] += float(force_vector[2])
+                    if include_contacts:
+                        contacts.append(ContactPoint(
+                            body_a=body_a,
+                            body_b=body_b,
+                            normal_force=impulse,
+                            penetration_depth=0.0,
+                            position=list(position) if position is not None else [],
+                            normal=list(normal) if normal is not None else [],
+                            force_vector=list(force_vector) if force_vector is not None else [],
+                            tangent_impulse=[],
+                            friction=0.0,
+                            contact_area=0.0,
+                        ))
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"EE wrench report failed: {e}")
+
+        return EEWrenchRsp(
+            force=force,
+            torque=torque,
+            frame="end_effector",
+            source="physx_contact_report",
+            contacts=contacts,
+        )
 
 
 class MockJointControlServicer(JointControlServiceServicer):

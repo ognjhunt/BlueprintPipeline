@@ -38,6 +38,8 @@ The local framework relies on these variables:
 - `GENIESIM_PORT`: gRPC port for the Genie Sim server (default: `50051`)
 - `GENIESIM_CLEANUP_TMP`: Remove Genie Sim temp directories after a run completes
   (default: `1` for local/development, `0` in production)
+- `GENIESIM_EE_PRIM_PATH`: USD prim path for the end-effector used by the EE wrench
+  server patch to resolve the EE frame (example: `/World/Robot/ee_link`)
 
 ## Notes
 

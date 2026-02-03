@@ -129,6 +129,11 @@ class SimObservationServiceStub(object):
                 request_serializer=geniesim__grpc__pb2.ContactReportReq.SerializeToString,
                 response_deserializer=geniesim__grpc__pb2.ContactReportRsp.FromString,
                 _registered_method=True)
+        self.get_ee_wrench = channel.unary_unary(
+                '/aimdk.protocol.SimObservationService/get_ee_wrench',
+                request_serializer=geniesim__grpc__pb2.EEWrenchReq.SerializeToString,
+                response_deserializer=geniesim__grpc__pb2.EEWrenchRsp.FromString,
+                _registered_method=True)
 
 
 class SimObservationServiceServicer(object):
@@ -248,6 +253,12 @@ class SimObservationServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def get_ee_wrench(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_SimObservationServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -345,6 +356,11 @@ def add_SimObservationServiceServicer_to_server(servicer, server):
                     servicer.get_contact_report,
                     request_deserializer=geniesim__grpc__pb2.ContactReportReq.FromString,
                     response_serializer=geniesim__grpc__pb2.ContactReportRsp.SerializeToString,
+            ),
+            'get_ee_wrench': grpc.unary_unary_rpc_method_handler(
+                    servicer.get_ee_wrench,
+                    request_deserializer=geniesim__grpc__pb2.EEWrenchReq.FromString,
+                    response_serializer=geniesim__grpc__pb2.EEWrenchRsp.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -860,6 +876,33 @@ class SimObservationService(object):
             '/aimdk.protocol.SimObservationService/get_contact_report',
             geniesim__grpc__pb2.ContactReportReq.SerializeToString,
             geniesim__grpc__pb2.ContactReportRsp.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def get_ee_wrench(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aimdk.protocol.SimObservationService/get_ee_wrench',
+            geniesim__grpc__pb2.EEWrenchReq.SerializeToString,
+            geniesim__grpc__pb2.EEWrenchRsp.FromString,
             options,
             channel_credentials,
             insecure,
