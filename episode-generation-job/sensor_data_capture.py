@@ -40,6 +40,8 @@ import json
 import logging
 import os
 import sys
+import hashlib
+from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -344,6 +346,11 @@ class SensorDataConfig:
     # End-effector wrench (6D force/torque) - critical for contact manipulation
     include_ee_wrench: bool = False
 
+    # Joint dynamics capture
+    capture_joint_torques: bool = False
+    capture_joint_efforts: bool = False
+    capture_joint_accelerations: bool = False
+
     # Optical flow / motion vectors - for video diffusion models
     include_optical_flow: bool = False
 
@@ -443,6 +450,8 @@ class SensorDataConfig:
 
             # Extended sensor options (FULL pack)
             config.include_ee_wrench = True
+            config.capture_joint_torques = True
+            config.capture_joint_efforts = True
             config.include_optical_flow = True
             config.include_balance_state = True  # Enable for humanoids
             config.include_foot_contacts = True  # Enable for humanoids
@@ -580,6 +589,8 @@ class ContactData:
     separation: float                     # Separation distance (negative = penetrating)
 
     # Optional fields for advanced analysis
+    force_vector: Optional[Tuple[float, float, float]] = None  # Vector impulse/force if available
+    tangent_impulse: Optional[Tuple[float, float, float]] = None  # Tangential impulse (if available)
     contact_area: Optional[float] = None  # Contact area (if available)
     relative_velocity: Optional[Tuple[float, float, float]] = None  # Relative velocity at contact
     friction_coefficient: Optional[float] = None  # Friction coefficient
@@ -593,6 +604,8 @@ class ContactData:
             "normal": list(self.normal),
             "force_magnitude": float(self.force_magnitude),
             "separation": float(self.separation),
+            "force_vector": list(self.force_vector) if self.force_vector is not None else None,
+            "tangent_impulse": list(self.tangent_impulse) if self.tangent_impulse is not None else None,
             "contact_area": float(self.contact_area) if self.contact_area is not None else None,
             "relative_velocity": list(self.relative_velocity) if self.relative_velocity is not None else None,
             "friction_coefficient": float(self.friction_coefficient) if self.friction_coefficient is not None else None,
@@ -608,6 +621,8 @@ class ContactData:
             normal=tuple(data.get("normal", [0, 0, 1])),
             force_magnitude=float(data.get("force_magnitude", 0)),
             separation=float(data.get("separation", 0)),
+            force_vector=tuple(data.get("force_vector")) if data.get("force_vector") is not None else None,
+            tangent_impulse=tuple(data.get("tangent_impulse")) if data.get("tangent_impulse") is not None else None,
             contact_area=float(data["contact_area"]) if data.get("contact_area") is not None else None,
             relative_velocity=tuple(data["relative_velocity"]) if data.get("relative_velocity") is not None else None,
             friction_coefficient=float(data["friction_coefficient"]) if data.get("friction_coefficient") is not None else None,
@@ -672,6 +687,9 @@ class FrameSensorData:
     # =========================================================================
     # Ground-Truth Annotations
     # =========================================================================
+
+    # Per-frame camera extrinsics (moving cameras only): {camera_id: 4x4 matrix}
+    camera_extrinsics: Dict[str, Any] = field(default_factory=dict)
 
     # Object poses (world frame): {object_id: {'position': [x,y,z], 'orientation': [qx,qy,qz,qw], ...}}
     object_poses: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -829,6 +847,9 @@ class EpisodeSensorData:
     # Object metadata {object_id: {class, dimensions, etc.}}
     object_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+    # Camera calibration metadata {camera_id: calibration dict}
+    camera_calibration: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     # Capture diagnostics
     camera_capture_warnings: List[str] = field(default_factory=list)
     camera_error_counts: Dict[str, int] = field(default_factory=dict)
@@ -974,6 +995,12 @@ class IsaacSimSensorCapture:
         self._camera_missing_depth_counts: Dict[str, int] = {}
         self._contact_reporting_enabled = False
         self._contact_reporting_attempted = False
+        self._stage = None
+        self._dynamic_cameras: Dict[str, bool] = {}
+        self._camera_calibration_ids: Dict[str, str] = {}
+        self._last_joint_velocities: Dict[str, np.ndarray] = {}
+        self._last_frame_timestamp: Optional[float] = None
+        self._last_joint_velocity_timestamp: Optional[float] = None
 
         # Isaac Sim module references
         self._rep = None
@@ -1027,6 +1054,7 @@ class IsaacSimSensorCapture:
             import omni.replicator.core as rep
             import omni.usd
             self._rep = rep
+            self._omni = sys.modules.get("omni")
             self.log("Isaac Sim Replicator initialized successfully")
         except ImportError as e:
             self.log(
@@ -1045,9 +1073,33 @@ class IsaacSimSensorCapture:
             except Exception as e:
                 self.log(f"Failed to load scene: {e}", "WARNING")
 
+        # Resolve USD stage and robot prims for calibration
+        try:
+            import omni.usd
+            self._stage = omni.usd.get_context().get_stage()
+        except Exception:
+            self._stage = None
+
+        robot_paths: List[str] = []
+        if self._stage is not None:
+            robot_paths = resolve_robot_prim_paths(
+                self.config.robot_prim_paths,
+                scene_usd_path=self.config.scene_usd_path,
+                stage=self._stage,
+            )
+
         # Set up cameras and annotators
         try:
             for camera_config in self.config.cameras:
+                # Compute calibration (intrinsics + extrinsics) once at init
+                calibration = camera_config.get_or_compute_calibration()
+                extrinsic = self._get_camera_extrinsic(camera_config.prim_path)
+                if extrinsic is not None:
+                    calibration.extrinsic_matrix = extrinsic
+                calibration.calibration_timestamp = datetime.utcnow().isoformat() + "Z"
+                self._dynamic_cameras[camera_config.camera_id] = self._is_dynamic_camera(
+                    camera_config, robot_paths
+                )
                 self._setup_camera(camera_config)
 
             self.initialized = True
@@ -1140,6 +1192,84 @@ class IsaacSimSensorCapture:
 
         self._annotators[camera_config.camera_id] = annotators
 
+    def _get_stage(self):
+        if self._stage is not None:
+            return self._stage
+        try:
+            from isaacsim.core.api.utils.stage import get_current_stage
+
+            self._stage = get_current_stage()
+        except Exception:
+            self._stage = None
+        return self._stage
+
+    def _get_camera_extrinsic(
+        self,
+        camera_prim_path: str,
+    ) -> Optional[np.ndarray]:
+        stage = self._get_stage()
+        if stage is None:
+            return None
+        try:
+            from pxr import UsdGeom, Usd
+
+            prim = stage.GetPrimAtPath(camera_prim_path)
+            if not prim.IsValid():
+                return None
+            xformable = UsdGeom.Xformable(prim)
+            if not xformable:
+                return None
+            matrix = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            return np.array(matrix, dtype=np.float64)
+        except Exception as e:
+            self.log(f"Failed to compute camera extrinsic for {camera_prim_path}: {e}", "DEBUG")
+            return None
+
+    def _is_dynamic_camera(self, camera_config: CameraConfig, robot_paths: List[str]) -> bool:
+        if camera_config.camera_type.lower() in {"wrist", "hand", "gripper"}:
+            return True
+        prim_path = camera_config.prim_path
+        for robot_path in robot_paths:
+            if prim_path.startswith(robot_path):
+                return True
+        return False
+
+    def _build_camera_calibration_metadata(self) -> Dict[str, Dict[str, Any]]:
+        calibration_payload: Dict[str, Dict[str, Any]] = {}
+        for cam in self.config.cameras:
+            calib = cam.get_or_compute_calibration()
+            calib_dict = calib.to_dict()
+            # USD-based extrinsics (camera-to-world)
+            extrinsic = self._get_camera_extrinsic(cam.prim_path)
+            if extrinsic is not None:
+                calib_dict["extrinsic_matrix"] = extrinsic.tolist()
+            calib_id = self._camera_calibration_ids.get(cam.camera_id)
+            if not calib_id:
+                signature = f"{cam.camera_id}:{cam.resolution}:{calib_dict}"
+                calib_id = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
+                self._camera_calibration_ids[cam.camera_id] = calib_id
+            # Convenience intrinsics fields
+            intrinsic = calib_dict.get("intrinsic_matrix")
+            if intrinsic and isinstance(intrinsic, list) and len(intrinsic) >= 2:
+                try:
+                    calib_dict.setdefault("fx", float(intrinsic[0][0]))
+                    calib_dict.setdefault("fy", float(intrinsic[1][1]))
+                    calib_dict.setdefault("ppx", float(intrinsic[0][2]))
+                    calib_dict.setdefault("ppy", float(intrinsic[1][2]))
+                except (TypeError, ValueError, IndexError):
+                    pass
+            calib_dict.update(
+                {
+                    "camera_id": cam.camera_id,
+                    "calibration_id": calib_id,
+                    "prim_path": cam.prim_path,
+                    "camera_type": cam.camera_type,
+                    "is_dynamic": bool(self._dynamic_cameras.get(cam.camera_id, False)),
+                }
+            )
+            calibration_payload[cam.camera_id] = calib_dict
+        return calibration_payload
+
     def capture_frame(
         self,
         frame_index: int,
@@ -1161,6 +1291,7 @@ class IsaacSimSensorCapture:
             frame_index=frame_index,
             timestamp=timestamp,
         )
+        self._last_frame_timestamp = timestamp
 
         if not self.initialized:
             return frame_data
@@ -1314,6 +1445,15 @@ class IsaacSimSensorCapture:
                 "ERROR",
             )
 
+        # Per-frame camera extrinsics for moving cameras
+        if self._dynamic_cameras:
+            for cam in self.config.cameras:
+                if not self._dynamic_cameras.get(cam.camera_id, False):
+                    continue
+                extrinsic = self._get_camera_extrinsic(cam.prim_path)
+                if extrinsic is not None:
+                    frame_data.camera_extrinsics[cam.camera_id] = extrinsic.tolist()
+
         # Check failure thresholds
         if failed_cameras:
             total_cameras = len(self._annotators)
@@ -1368,7 +1508,13 @@ class IsaacSimSensorCapture:
 
         # Balance state for humanoid robots
         if getattr(self.config, 'include_balance_state', False):
-            frame_data.balance_state = self._capture_balance_state()
+            balance_state = self._capture_balance_state()
+            if balance_state is None and _is_production_run():
+                balance_state = {
+                    "available": False,
+                    "reason": "balance_state_unavailable",
+                }
+            frame_data.balance_state = balance_state
 
         # Ground reaction forces / foot contacts
         if getattr(self.config, 'include_foot_contacts', False):
@@ -1952,17 +2098,52 @@ class IsaacSimSensorCapture:
 
             for contact in contact_data:
                 try:
+                    body_a = str(contact.get("actor0", ""))
+                    body_b = str(contact.get("actor1", ""))
+                    position = [float(x) for x in contact.get("position", [0, 0, 0])]
+                    normal = [float(x) for x in contact.get("normal", [0, 0, 1])]
+                    impulse = contact.get("impulse")
+                    if impulse is None:
+                        impulse = contact.get("normal_force", contact.get("normal_force_N", 0.0))
+                    force_magnitude = float(impulse or 0.0)
+
+                    # Force vector (if provided) or derived from normal/impulse
+                    force_vector = contact.get("force_vector") or contact.get("impulse_vector")
+                    if force_vector is None and force_magnitude and normal:
+                        force_vector = [force_magnitude * float(n) for n in normal]
+                    if force_vector is not None:
+                        force_vector = [float(x) for x in force_vector]
+
+                    # Tangential impulse (if provided)
+                    tangent_impulse = contact.get("tangent_impulse") or contact.get("tangent_impulse_vector")
+                    if tangent_impulse is None:
+                        ti0 = contact.get("tangent_impulse0")
+                        ti1 = contact.get("tangent_impulse1")
+                        if ti0 is not None or ti1 is not None:
+                            tangent_impulse = [float(ti0 or 0.0), float(ti1 or 0.0), 0.0]
+                    if tangent_impulse is not None:
+                        tangent_impulse = [float(x) for x in tangent_impulse]
+
+                    friction = (
+                        contact.get("friction")
+                        or contact.get("friction_coefficient")
+                        or contact.get("frictionCoefficient")
+                    )
+                    contact_area = contact.get("contact_area") or contact.get("contactArea")
+                    relative_velocity = contact.get("relative_velocity") or contact.get("relativeVelocity")
+
                     contacts.append({
-                        "body_a": str(contact.get("actor0", "")),
-                        "body_b": str(contact.get("actor1", "")),
-                        "position": [
-                            float(x) for x in contact.get("position", [0, 0, 0])
-                        ],
-                        "normal": [
-                            float(x) for x in contact.get("normal", [0, 0, 1])
-                        ],
-                        "force_magnitude": float(contact.get("impulse", 0)),
+                        "body_a": body_a,
+                        "body_b": body_b,
+                        "position": position,
+                        "normal": normal,
+                        "force_magnitude": force_magnitude,
                         "separation": float(contact.get("separation", 0)),
+                        "force_vector": force_vector,
+                        "tangent_impulse": tangent_impulse,
+                        "friction_coefficient": float(friction) if friction is not None else None,
+                        "contact_area": float(contact_area) if contact_area is not None else None,
+                        "relative_velocity": [float(x) for x in relative_velocity] if relative_velocity is not None else None,
                         "source": _contact_source,
                     })
                 except (TypeError, ValueError) as e:
@@ -2135,6 +2316,35 @@ class IsaacSimSensorCapture:
 
                             joint_pos = robot.get_joint_positions()
                             joint_vel = robot.get_joint_velocities()
+                            joint_efforts = None
+                            if getattr(self.config, "capture_joint_efforts", False) or getattr(
+                                self.config, "capture_joint_torques", False
+                            ):
+                                try:
+                                    joint_efforts = robot.get_applied_joint_efforts()
+                                except Exception:
+                                    joint_efforts = None
+
+                            joint_accel = None
+                            if getattr(self.config, "capture_joint_accelerations", False):
+                                if hasattr(robot, "get_joint_accelerations"):
+                                    try:
+                                        joint_accel = robot.get_joint_accelerations()
+                                    except Exception:
+                                        joint_accel = None
+                                elif joint_vel is not None:
+                                    prev_vel = self._last_joint_velocities.get(robot_path)
+                                    if (
+                                        prev_vel is not None
+                                        and self._last_joint_velocity_timestamp is not None
+                                        and self._last_frame_timestamp is not None
+                                    ):
+                                        dt = self._last_frame_timestamp - self._last_joint_velocity_timestamp
+                                        if dt > 1e-6:
+                                            try:
+                                                joint_accel = (np.array(joint_vel) - prev_vel) / dt
+                                            except Exception:
+                                                joint_accel = None
 
                             state["robot_state"] = {
                                 "prim_path": robot_path,
@@ -2144,9 +2354,34 @@ class IsaacSimSensorCapture:
                                 "joint_velocities": [
                                     float(x) for x in (joint_vel if joint_vel is not None else [])
                                 ],
+                                "joint_efforts": (
+                                    [float(x) for x in joint_efforts] if joint_efforts is not None else []
+                                )
+                                if getattr(self.config, "capture_joint_efforts", False)
+                                else [],
+                                "joint_torques": (
+                                    [float(x) for x in joint_efforts] if joint_efforts is not None else []
+                                )
+                                if getattr(self.config, "capture_joint_torques", False)
+                                else [],
+                                "joint_accelerations": (
+                                    [float(x) for x in joint_accel] if joint_accel is not None else []
+                                )
+                                if getattr(self.config, "capture_joint_accelerations", False)
+                                else [],
                                 "num_dof": robot.num_dof if hasattr(robot, "num_dof") else 0,
                                 "data_source": "simulation",
                             }
+                            if getattr(self.config, "include_ee_wrench", False) or self.config.include_privileged_state:
+                                ee_wrench = self._capture_ee_wrench(robot_path)
+                                if ee_wrench is not None:
+                                    state["robot_state"]["ee_wrench"] = ee_wrench
+                            if joint_vel is not None:
+                                try:
+                                    self._last_joint_velocities[robot_path] = np.array(joint_vel, dtype=float)
+                                    self._last_joint_velocity_timestamp = self._last_frame_timestamp
+                                except Exception:
+                                    pass
                             break
                         except Exception as e:
                             self.log(f"Failed to get robot state from {robot_path}: {e}", "DEBUG")
@@ -2715,6 +2950,107 @@ class IsaacSimSensorCapture:
 
         return articulated_states
 
+    def _capture_object_physics_metadata(
+        self,
+        scene_objects: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Capture physical properties for scene objects from USD/PhysX."""
+        metadata: Dict[str, Dict[str, Any]] = {}
+        if self._stage is None or not scene_objects:
+            return metadata
+
+        try:
+            from pxr import UsdGeom, UsdPhysics, PhysxSchema, UsdShade
+        except Exception:
+            return metadata
+
+        for obj in scene_objects:
+            obj_id = obj.get("id", obj.get("name", ""))
+            prim_path = obj.get("prim_path") or obj.get("usd_path") or f"/World/{obj_id}"
+            prim = self._stage.GetPrimAtPath(prim_path)
+            if not prim.IsValid():
+                metadata[obj_id] = {
+                    "prim_path": prim_path,
+                    "provenance": "missing_prim",
+                }
+                continue
+
+            props: Dict[str, Any] = {
+                "prim_path": prim_path,
+                "usd_path": obj.get("usd_path"),
+                "asset_id": obj.get("asset_id"),
+                "provenance": "usd_physx",
+            }
+
+            # Mass + inertia
+            try:
+                mass_api = UsdPhysics.MassAPI(prim)
+                if mass_api:
+                    mass_attr = mass_api.GetMassAttr()
+                    if mass_attr:
+                        props["mass_kg"] = float(mass_attr.Get() or 0.0)
+                    inertia_attr = mass_api.GetDiagonalInertiaAttr()
+                    if inertia_attr:
+                        props["inertia"] = [float(v) for v in (inertia_attr.Get() or [])]
+            except Exception:
+                pass
+
+            # Material/friction/restitution
+            try:
+                material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+                if material:
+                    material_prim = material.GetPrim()
+                    props["material"] = str(material_prim.GetPath())
+                    physx_mat = PhysxSchema.PhysxMaterialAPI(material_prim)
+                    if physx_mat:
+                        static_friction = physx_mat.GetStaticFrictionAttr()
+                        dynamic_friction = physx_mat.GetDynamicFrictionAttr()
+                        restitution = physx_mat.GetRestitutionAttr()
+                        if static_friction:
+                            props["static_friction"] = float(static_friction.Get() or 0.0)
+                        if dynamic_friction:
+                            props["dynamic_friction"] = float(dynamic_friction.Get() or 0.0)
+                        if restitution:
+                            props["restitution"] = float(restitution.Get() or 0.0)
+            except Exception:
+                pass
+
+            # Scale (if authored)
+            try:
+                xformable = UsdGeom.Xformable(prim)
+                scale = None
+                if xformable:
+                    for op in xformable.GetOrderedXformOps():
+                        if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                            scale = op.Get()
+                            break
+                if scale:
+                    props["scale"] = [float(v) for v in scale]
+            except Exception:
+                pass
+
+            # Normalize friction for convenience
+            if "static_friction" in props and "friction" not in props:
+                props["friction"] = props.get("static_friction")
+
+            # Track missing physics fields for quality gates
+            missing_fields = []
+            if "mass_kg" not in props:
+                missing_fields.append("mass_kg")
+            if "restitution" not in props:
+                missing_fields.append("restitution")
+            if "static_friction" not in props and "dynamic_friction" not in props:
+                missing_fields.append("friction")
+            if "material" not in props:
+                missing_fields.append("material")
+            if missing_fields:
+                props["missing_fields"] = missing_fields
+                props["provenance"] = "usd_physx_incomplete"
+
+            metadata[obj_id] = props
+
+        return metadata
+
     def _summarize_camera_capture_warnings(
         self,
         episode_data: EpisodeSensorData,
@@ -2766,6 +3102,7 @@ class IsaacSimSensorCapture:
             episode_id=episode_id,
             config=self.config,
         )
+        episode_data.camera_calibration = self._build_camera_calibration_metadata()
         self._camera_error_counts = {
             cam.camera_id: 0 for cam in self.config.cameras
         }
@@ -2810,6 +3147,12 @@ class IsaacSimSensorCapture:
                     "dimensions": obj.get("dimensions", [0.1, 0.1, 0.1]),
                     "semantic_id": semantic_id,
                 }
+
+        # Enrich object metadata with physical properties from USD/PhysX
+        if scene_objects:
+            physics_metadata = self._capture_object_physics_metadata(scene_objects)
+            for obj_id, props in physics_metadata.items():
+                episode_data.object_metadata.setdefault(obj_id, {}).update(props)
 
         return episode_data
 

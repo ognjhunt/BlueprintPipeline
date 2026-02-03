@@ -371,6 +371,12 @@ class GeneratedEpisode:
     # Object metadata for ground-truth
     object_metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Control metadata (control mode, action space, gains)
+    control_metadata: Optional[Dict[str, Any]] = None
+
+    # Failure labels (structured failure taxonomy)
+    failure_labels: Optional[Dict[str, Any]] = None
+
     # Quality certificate (new)
     quality_certificate: Optional[Any] = None  # QualityCertificate when available
 
@@ -379,6 +385,89 @@ class GeneratedEpisode:
 
     # Timing
     generation_time_seconds: float = 0.0
+
+
+_FAILURE_REASON_PRIORITY = [
+    "collision",
+    "grasp_failure",
+    "placement_failure",
+    "timeout",
+    "IK_fail",
+    "joint_limit",
+    "unstable",
+]
+
+_FAILURE_REASON_MAP = {
+    FailureReason.COLLISION: "collision",
+    FailureReason.SELF_COLLISION: "collision",
+    FailureReason.GRASP_FAILURE: "grasp_failure",
+    FailureReason.PLACEMENT_FAILURE: "placement_failure",
+    FailureReason.TIMEOUT: "timeout",
+    FailureReason.IK_FAILURE: "IK_fail",
+    FailureReason.PLANNING_FAILURE: "IK_fail",
+    FailureReason.JOINT_LIMIT: "joint_limit",
+    FailureReason.INSTABILITY: "unstable",
+    FailureReason.EXCESSIVE_VELOCITY: "unstable",
+    FailureReason.TASK_FAILURE: "unstable",
+}
+
+
+def _normalize_failure_reason(reason: FailureReason) -> Optional[str]:
+    if reason is None:
+        return None
+    return _FAILURE_REASON_MAP.get(reason, reason.value if hasattr(reason, "value") else str(reason))
+
+
+def _primary_failure_reason(reasons: List[str]) -> Optional[str]:
+    if not reasons:
+        return None
+    for candidate in _FAILURE_REASON_PRIORITY:
+        if candidate in reasons:
+            return candidate
+    return reasons[0]
+
+
+def _build_failure_labels(
+    validation_result: Optional[ValidationResult],
+) -> Optional[Dict[str, Any]]:
+    if validation_result is None or not validation_result.failure_reasons:
+        return None
+    normalized = []
+    for reason in validation_result.failure_reasons:
+        normalized_reason = _normalize_failure_reason(reason)
+        if normalized_reason:
+            normalized.append(normalized_reason)
+    if not normalized:
+        return None
+    return {
+        "failure_reasons": normalized,
+        "primary_failure": _primary_failure_reason(normalized),
+        "failure_source": "sim_validator",
+    }
+
+
+def _is_failure_episode(episode: GeneratedEpisode) -> bool:
+    if episode.validation_result is not None:
+        return episode.validation_result.status != ValidationStatus.PASSED
+    return not episode.is_valid
+
+
+def _select_failure_episodes(
+    failures: List[GeneratedEpisode],
+    ratio: float,
+    seed: int,
+) -> List[GeneratedEpisode]:
+    if not failures or ratio <= 0:
+        return []
+    if ratio >= 1.0:
+        return list(failures)
+    target_count = int(round(len(failures) * ratio))
+    target_count = max(0, min(target_count, len(failures)))
+    if target_count == 0:
+        return []
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(len(failures), size=target_count, replace=False)
+    return [failures[idx] for idx in sorted(indices)]
 
 
 def _convert_episode_for_multiformat(
@@ -433,6 +522,10 @@ def _convert_episode_for_multiformat(
         "frames": frames,
         "resolution": list(resolution),
     }
+    if episode.failure_labels:
+        result["failure_labels"] = episode.failure_labels
+    if episode.control_metadata:
+        result["control_metadata"] = episode.control_metadata
 
     if episode.task_spec and episode.task_spec.segments and frames:
         fps = trajectory.fps if trajectory and trajectory.fps else default_fps
@@ -460,10 +553,26 @@ def _convert_episode_for_multiformat(
 def _build_multiformat_splits(
     episodes: List[GeneratedEpisode],
     split_config: Any,
+    *,
+    failure_config: Optional[Any] = None,
 ) -> Dict[str, List[str]]:
-    """Build train/val/test split mapping from DatasetSplitConfig."""
+    """Build train/val/test (and optional failures) split mapping."""
     split_map: Dict[str, List[str]] = {"train": [], "val": [], "test": []}
-    episode_ids = [episode.episode_id for episode in episodes]
+    failure_ids: List[str] = []
+
+    include_failures = bool(getattr(failure_config, "include_failures", False)) if failure_config else False
+    separate_failure_split = bool(getattr(failure_config, "separate_failure_split", False)) if failure_config else False
+
+    success_episodes = []
+    for episode in episodes:
+        if _is_failure_episode(episode) and include_failures:
+            failure_ids.append(episode.episode_id)
+        else:
+            success_episodes.append(episode)
+
+    episode_ids = [episode.episode_id for episode in success_episodes] if separate_failure_split else [
+        episode.episode_id for episode in episodes
+    ]
 
     explicit_splits = getattr(split_config, "explicit_splits", None)
     if explicit_splits:
@@ -495,6 +604,8 @@ def _build_multiformat_splits(
     split_map["train"] = shuffled_ids[:train_count]
     split_map["val"] = shuffled_ids[train_count:train_count + val_count]
     split_map["test"] = shuffled_ids[train_count + val_count:train_count + val_count + test_count]
+    if separate_failure_split and failure_ids:
+        split_map["failures"] = failure_ids
     return split_map
 
 
@@ -1318,6 +1429,43 @@ class EpisodeGenerator:
                 # Check if we got mock capture using the dedicated method
                 self._sensor_capture_is_mock = hasattr(self.sensor_capture, 'is_mock') and self.sensor_capture.is_mock()
 
+                # Apply data-pack specific sensor toggles
+                if get_data_pack_config is not None:
+                    try:
+                        pack_config = get_data_pack_config(
+                            tier,
+                            num_cameras=config.num_cameras,
+                            resolution=config.image_resolution,
+                            fps=config.fps,
+                        )
+                    except Exception:
+                        pack_config = None
+                    if pack_config is not None:
+                        joint_cfg = getattr(pack_config, "joint_dynamics_config", None)
+                        if joint_cfg and getattr(joint_cfg, "enabled", True):
+                            self.sensor_capture.config.capture_joint_torques = bool(getattr(joint_cfg, "capture_torques", False))
+                            self.sensor_capture.config.capture_joint_efforts = bool(getattr(joint_cfg, "capture_efforts", False))
+                            self.sensor_capture.config.capture_joint_accelerations = bool(getattr(joint_cfg, "capture_accelerations", False))
+                            self.sensor_capture.config.include_ee_wrench = bool(getattr(joint_cfg, "capture_ee_wrench", False))
+
+                        ext_cfg = getattr(pack_config, "extended_sensor_config", None)
+                        if ext_cfg:
+                            self.sensor_capture.config.include_optical_flow = bool(getattr(ext_cfg, "include_optical_flow", False))
+                            self.sensor_capture.config.include_depth_confidence = bool(getattr(ext_cfg, "include_depth_confidence", False))
+                            self.sensor_capture.config.include_balance_state = bool(getattr(ext_cfg, "include_balance_state", False))
+                            self.sensor_capture.config.include_foot_contacts = bool(getattr(ext_cfg, "include_foot_contacts", False))
+                            self.sensor_capture.config.include_articulated_objects = bool(getattr(ext_cfg, "include_articulated_objects", False))
+                            if getattr(ext_cfg, "include_ee_wrench", False):
+                                self.sensor_capture.config.include_ee_wrench = True
+
+                        humanoid_cfg = getattr(pack_config, "humanoid_sensor_config", None)
+                        if humanoid_cfg and getattr(humanoid_cfg, "enabled", False):
+                            self.sensor_capture.config.include_balance_state = bool(getattr(humanoid_cfg, "capture_balance_state", True))
+                            self.sensor_capture.config.include_foot_contacts = bool(getattr(humanoid_cfg, "capture_foot_contacts", True) or getattr(humanoid_cfg, "capture_grf", True))
+                            if getattr(humanoid_cfg, "capture_torso_imu", False):
+                                self.sensor_capture.config.include_imu_data = True
+                                self.sensor_capture.config.imu_location = "torso"
+
                 self.log(f"Sensor capture initialized: {config.data_pack_tier} pack, {config.num_cameras} cameras")
                 if self._sensor_capture_is_mock:
                     self.log("⚠️  [TEST] Using MOCK sensor capture - NOT suitable for production training!", "WARNING")
@@ -1562,6 +1710,240 @@ class EpisodeGenerator:
         available = sum(1 for frame in frames if _frame_has_ee(frame))
         return available / len(frames)
 
+    def _is_humanoid_robot_type(self) -> bool:
+        """Return True if the configured robot type is a humanoid (G1/GR1/H1)."""
+        robot_type = (self.config.robot_type or "").lower()
+        if not robot_type:
+            return False
+        return any(token in robot_type for token in ("g1", "gr1", "h1"))
+
+    def _build_control_metadata(self, episode: GeneratedEpisode) -> Dict[str, Any]:
+        """Build control metadata from config and trajectory provenance."""
+        control_mode = getattr(self.config, "control_mode", None)
+        action_space = getattr(self.config, "action_space", None)
+        action_scale = getattr(self.config, "action_scale", None)
+        controller_gains = getattr(self.config, "controller_gains", None)
+        controller_config_source = "config" if controller_gains else "default"
+        action_source = None
+        if episode.trajectory and hasattr(episode.trajectory, "provenance"):
+            action_source = episode.trajectory.provenance.get("action_source")
+
+        # Defaults aligned with action generation (next joint positions)
+        control_mode = control_mode or "joint_position"
+        action_space = action_space or "joint_position"
+
+        return {
+            "control_mode": control_mode,
+            "action_space": action_space,
+            "action_scale": action_scale,
+            "controller_gains": controller_gains,
+            "controller_config_source": controller_config_source,
+            "action_source": action_source,
+            "control_frequency_hz": self.config.fps,
+        }
+
+    def _apply_camera_calibration_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
+        """Fail episodes missing required camera calibration metadata."""
+        require_calibration = parse_bool_env(
+            os.getenv("REQUIRE_CAMERA_CALIBRATION"),
+            default=resolve_production_mode(),
+        )
+        if not require_calibration:
+            return
+
+        for episode in episodes:
+            if episode.sensor_data is None:
+                episode.validation_errors.append("Camera calibration missing (no sensor data).")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            calib_map = getattr(episode.sensor_data, "camera_calibration", {}) or {}
+            if not calib_map:
+                episode.validation_errors.append("Camera calibration missing from sensor data.")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            frames = getattr(episode.sensor_data, "frames", []) or []
+            for camera_id in episode.sensor_data.camera_ids if hasattr(episode.sensor_data, "camera_ids") else []:
+                calib = calib_map.get(camera_id)
+                if not calib:
+                    episode.validation_errors.append(f"Camera calibration missing for {camera_id}.")
+                    episode.is_valid = False
+                    episode.quality_score = min(episode.quality_score, 0.0)
+                    continue
+                if not calib.get("intrinsic_matrix"):
+                    episode.validation_errors.append(f"Camera intrinsics missing for {camera_id}.")
+                    episode.is_valid = False
+                    episode.quality_score = min(episode.quality_score, 0.0)
+
+                is_dynamic = bool(calib.get("is_dynamic", False))
+                if is_dynamic:
+                    if frames:
+                        with_extrinsics = sum(
+                            1 for frame in frames
+                            if getattr(frame, "camera_extrinsics", {}) and camera_id in frame.camera_extrinsics
+                        )
+                        coverage = with_extrinsics / max(1, len(frames))
+                        if coverage < 0.9:
+                            episode.validation_errors.append(
+                                f"Per-frame extrinsics missing for dynamic camera {camera_id} "
+                                f"({coverage:.0%} coverage)."
+                            )
+                            episode.is_valid = False
+                            episode.quality_score = min(episode.quality_score, 0.0)
+                else:
+                    if not calib.get("extrinsic_matrix"):
+                        episode.validation_errors.append(f"Camera extrinsics missing for {camera_id}.")
+                        episode.is_valid = False
+                        episode.quality_score = min(episode.quality_score, 0.0)
+
+    def _apply_ee_wrench_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
+        """Fail episodes missing EE wrench data when required."""
+        require_ee = parse_bool_env(
+            os.getenv("REQUIRE_EE_WRENCH"),
+            default=resolve_production_mode(),
+        )
+        if not require_ee:
+            return
+
+        for episode in episodes:
+            if episode.sensor_data is None:
+                episode.validation_errors.append("EE wrench missing (no sensor data).")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            cfg = getattr(episode.sensor_data, "config", None)
+            include_ee = bool(getattr(cfg, "include_ee_wrench", False))
+            if not include_ee:
+                episode.validation_errors.append("EE wrench required but capture disabled.")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            frames = getattr(episode.sensor_data, "frames", []) or []
+            if not frames:
+                episode.validation_errors.append("EE wrench missing (no frames).")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            def _frame_has_wrench(frame: Any) -> bool:
+                if getattr(frame, "ee_wrench", None):
+                    return True
+                ps = getattr(frame, "privileged_state", None)
+                if isinstance(ps, dict):
+                    rs = ps.get("robot_state", {})
+                    if isinstance(rs, dict) and rs.get("ee_wrench"):
+                        return True
+                return False
+
+            with_wrench = sum(1 for frame in frames if _frame_has_wrench(frame))
+            coverage = with_wrench / max(1, len(frames))
+            if coverage < 0.9:
+                episode.validation_errors.append(
+                    f"EE wrench missing in {1.0 - coverage:.0%} of frames."
+                )
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+
+    def _apply_humanoid_sensor_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
+        """Fail episodes missing humanoid-specific sensors when required."""
+        if not self._is_humanoid_robot_type():
+            return
+
+        require_humanoid = parse_bool_env(
+            os.getenv("REQUIRE_HUMANOID_SENSORS"),
+            default=resolve_production_mode(),
+        )
+        if not require_humanoid:
+            return
+
+        require_imu = parse_bool_env(
+            os.getenv("REQUIRE_HUMANOID_IMU"),
+            default=require_humanoid,
+        )
+        require_foot = parse_bool_env(
+            os.getenv("REQUIRE_HUMANOID_FOOT_CONTACTS"),
+            default=require_humanoid,
+        )
+
+        for episode in episodes:
+            if episode.sensor_data is None:
+                episode.validation_errors.append("Humanoid sensors missing (no sensor data).")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            frames = getattr(episode.sensor_data, "frames", []) or []
+            if not frames:
+                episode.validation_errors.append("Humanoid sensors missing (no frames).")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            if require_foot:
+                foot_coverage = sum(
+                    1 for frame in frames if getattr(frame, "foot_contacts", None)
+                ) / max(1, len(frames))
+                if foot_coverage < 0.9:
+                    episode.validation_errors.append(
+                        f"Foot contacts missing in {1.0 - foot_coverage:.0%} of frames."
+                    )
+                    episode.is_valid = False
+                    episode.quality_score = min(episode.quality_score, 0.0)
+
+            if require_imu:
+                imu_coverage = sum(
+                    1 for frame in frames if getattr(frame, "imu_data", None)
+                ) / max(1, len(frames))
+                if imu_coverage < 0.9:
+                    episode.validation_errors.append(
+                        f"IMU data missing in {1.0 - imu_coverage:.0%} of frames."
+                    )
+                    episode.is_valid = False
+                    episode.quality_score = min(episode.quality_score, 0.0)
+
+    def _apply_object_physics_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
+        """Fail episodes missing object physics metadata when required."""
+        require_physics = parse_bool_env(
+            os.getenv("REQUIRE_OBJECT_PHYSICS"),
+            default=resolve_production_mode(),
+        )
+        if not require_physics:
+            return
+
+        for episode in episodes:
+            if episode.sensor_data is None:
+                episode.validation_errors.append("Object physics metadata missing (no sensor data).")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            obj_meta = getattr(episode.sensor_data, "object_metadata", {}) or {}
+            if not obj_meta:
+                episode.validation_errors.append("Object physics metadata missing.")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            for obj_id, props in obj_meta.items():
+                provenance = props.get("provenance")
+                if provenance != "usd_physx":
+                    episode.validation_errors.append(
+                        f"Object '{obj_id}' physics provenance not real: {provenance}."
+                    )
+                    episode.is_valid = False
+                    episode.quality_score = min(episode.quality_score, 0.0)
+                if props.get("missing_fields"):
+                    episode.validation_errors.append(
+                        f"Object '{obj_id}' missing physics fields: {props['missing_fields']}."
+                    )
+                    episode.is_valid = False
+                    episode.quality_score = min(episode.quality_score, 0.0)
+
     def _apply_contact_availability_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
         """Fail episodes with missing contacts during grasp phases when required."""
         require_contacts = parse_bool_env(
@@ -1704,7 +2086,11 @@ class EpisodeGenerator:
         validated_episodes = self._validate_episodes(all_episodes, manifest)
         self._enforce_physics_backed_qc(validated_episodes)
         self._apply_camera_capture_quality_gates(validated_episodes)
+        self._apply_camera_calibration_quality_gates(validated_episodes)
         self._apply_contact_availability_quality_gates(validated_episodes)
+        self._apply_ee_wrench_quality_gates(validated_episodes)
+        self._apply_humanoid_sensor_quality_gates(validated_episodes)
+        self._apply_object_physics_quality_gates(validated_episodes)
 
         if HAVE_QUALITY_SYSTEM:
             self.log("\nStep 4b: Generating quality certificates...")
@@ -1717,11 +2103,60 @@ class EpisodeGenerator:
             self._write_quality_artifacts(validated_episodes)
 
         # Step 6: Filter to high-quality episodes
+        data_pack_config = None
+        if get_data_pack_config is not None:
+            data_pack_config = get_data_pack_config(
+                self.config.data_pack_tier,
+                num_cameras=self.config.num_cameras,
+                resolution=self.config.image_resolution,
+                fps=self.config.fps,
+            )
+
+        failure_config = data_pack_config.failure_config if data_pack_config else None
+        include_failures = bool(getattr(failure_config, "include_failures", False)) or bool(
+            getattr(self.config, "include_failed", False)
+        )
+        failure_ratio = float(getattr(failure_config, "failure_ratio", 0.0)) if failure_config else 0.0
+        include_failure_labels = bool(getattr(failure_config, "include_failure_labels", True)) if failure_config else True
+
         valid_episodes = [
             ep for ep in validated_episodes
             if ep.is_valid and ep.quality_score >= self.config.min_quality_score
         ]
         self.log(f"  {len(valid_episodes)}/{len(validated_episodes)} episodes passed validation")
+
+        failure_candidates = [ep for ep in validated_episodes if _is_failure_episode(ep)]
+        selected_failures: List[GeneratedEpisode] = []
+        if include_failures and failure_candidates:
+            split_seed = getattr(getattr(data_pack_config, "split_config", None), "split_seed", 42)
+            selected_failures = _select_failure_episodes(
+                failure_candidates,
+                ratio=failure_ratio,
+                seed=split_seed,
+            )
+            if include_failure_labels:
+                missing_labels = [ep.episode_id for ep in selected_failures if not ep.failure_labels]
+                if missing_labels:
+                    message = (
+                        "Failure labels required but missing for failed episodes: "
+                        + ", ".join(missing_labels[:10])
+                    )
+                    if self._is_production_quality_level():
+                        raise RuntimeError(message)
+                    self.log(message, "WARNING")
+                    selected_failures = [ep for ep in selected_failures if ep.failure_labels]
+
+        export_episodes = valid_episodes + selected_failures
+        if include_failures:
+            self.log(
+                f"  Including {len(selected_failures)}/{len(failure_candidates)} failure episodes "
+                f"(ratio={failure_ratio:.2f}, labels={'on' if include_failure_labels else 'off'})"
+            )
+
+        # Attach control metadata for export
+        for episode in export_episodes:
+            if episode.trajectory and episode.control_metadata is None:
+                episode.control_metadata = self._build_control_metadata(episode)
 
         # Clean up memory after filtering (remove references to invalid episodes)
         invalid_episodes = [ep for ep in validated_episodes if not ep.is_valid or ep.quality_score < self.config.min_quality_score]
@@ -1780,7 +2215,7 @@ class EpisodeGenerator:
             export_format=self.config.lerobot_export_format,
             parquet_compression=self.config.lerobot_parquet_compression,
         )
-        export_estimate = _estimate_export_requirements(valid_episodes, self.config)
+        export_estimate = _estimate_export_requirements(export_episodes, self.config)
         self.log(
             "  Estimated export size: "
             f"{_format_bytes(export_estimate['required_bytes'])} "
@@ -1794,7 +2229,7 @@ class EpisodeGenerator:
         _ensure_disk_space(lerobot_config.output_dir, export_estimate["required_bytes"])
         exporter = LeRobotExporter(lerobot_config, verbose=False)
 
-        for episode in valid_episodes:
+        for episode in export_episodes:
             if episode.trajectory:
                 exporter.add_episode(
                     trajectory=episode.trajectory,
@@ -1805,6 +2240,8 @@ class EpisodeGenerator:
                     quality_score=episode.quality_score,
                     sensor_data=episode.sensor_data,
                     object_metadata=episode.object_metadata,
+                    control_metadata=episode.control_metadata,
+                    failure_labels=episode.failure_labels,
                 )
 
                 # Track task coverage
@@ -1846,14 +2283,6 @@ class EpisodeGenerator:
         gc.collect()
 
         if not lerobot_export_failed:
-            data_pack_config = None
-            if get_data_pack_config is not None:
-                data_pack_config = get_data_pack_config(
-                    self.config.data_pack_tier,
-                    num_cameras=self.config.num_cameras,
-                    resolution=self.config.image_resolution,
-                    fps=self.config.fps,
-                )
             if data_pack_config is None:
                 self.log(
                     "Skipping multi-format export; data pack configuration unavailable.",
@@ -1864,11 +2293,12 @@ class EpisodeGenerator:
                 if formats:
                     self.log("\nStep 6b: Exporting additional dataset formats...")
                     exportable_episodes = [
-                        episode for episode in valid_episodes if episode.trajectory
+                        episode for episode in export_episodes if episode.trajectory
                     ]
                     splits = _build_multiformat_splits(
                         exportable_episodes,
                         data_pack_config.split_config,
+                        failure_config=data_pack_config.failure_config,
                     )
                     converted_episodes = [
                         _convert_episode_for_multiformat(
@@ -1921,7 +2351,7 @@ class EpisodeGenerator:
 
         # Step 8: Write generation manifest
         self.log("\nStep 7: Writing generation manifest and validation report...")
-        output.manifest_path = self._write_manifest(valid_episodes, tasks_with_specs, output)
+        output.manifest_path = self._write_manifest(export_episodes, tasks_with_specs, output)
 
         # Write validation report
         if self.validator:
@@ -2653,6 +3083,7 @@ class EpisodeGenerator:
                     result.failure_reasons.append(FailureReason.PLANNING_FAILURE)
                     result.failure_details = "; ".join(episode.motion_plan.planning_errors)
                     episode.validation_result = result
+                    episode.failure_labels = _build_failure_labels(result)
                     episode.is_valid = False
                     episode.quality_score = 0.0
                     episode.validation_errors = [r.value for r in result.failure_reasons]
@@ -2676,6 +3107,7 @@ class EpisodeGenerator:
                 episode.validation_result = result
                 episode.is_valid = result.status == ValidationStatus.PASSED
                 episode.quality_score = result.metrics.overall_score
+                episode.failure_labels = _build_failure_labels(result)
                 episode.validation_errors = [r.value for r in result.failure_reasons]
                 episode.validation_errors.extend(result.validation_errors)
 

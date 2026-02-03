@@ -159,7 +159,7 @@ try:
         SensorDataConfig,
         DataPackTier,
     )
-    from data_pack_config import DataPackConfig, get_data_pack_config
+    from data_pack_config import DataPackConfig, get_data_pack_config, data_pack_from_string
     HAVE_SENSOR_CAPTURE = True
 except ImportError:
     HAVE_SENSOR_CAPTURE = False
@@ -301,6 +301,12 @@ class LeRobotEpisode:
     # Ground-truth metadata
     object_metadata: Dict[str, Any] = field(default_factory=dict)
 
+    # Control metadata (control mode, action space, gains)
+    control_metadata: Optional[Dict[str, Any]] = None
+
+    # Failure labels (optional)
+    failure_labels: Optional[Dict[str, Any]] = None
+
     # Capture diagnostics
     camera_capture_warnings: List[str] = field(default_factory=list)
     camera_error_counts: Dict[str, int] = field(default_factory=dict)
@@ -355,6 +361,10 @@ class LeRobotDatasetConfig:
 
     # Output paths
     output_dir: Path = Path("./lerobot_dataset")
+
+    # Dataset splits + failure rollout configuration (optional)
+    split_config: Optional[Any] = None
+    failure_config: Optional[Any] = None
 
     # Export format
     export_format: LeRobotExportFormat = LeRobotExportFormat.LEROBOT_V2
@@ -424,6 +434,19 @@ class LeRobotDatasetConfig:
                 default=LeRobotExportFormat.LEROBOT_V2,
             ),
         }
+        if HAVE_SENSOR_CAPTURE and get_data_pack_config is not None:
+            try:
+                tier_enum = data_pack_from_string(data_pack_tier)
+                pack_config = get_data_pack_config(
+                    tier_enum,
+                    num_cameras=num_cameras,
+                    resolution=resolution,
+                    fps=fps,
+                )
+                config_kwargs["split_config"] = getattr(pack_config, "split_config", None)
+                config_kwargs["failure_config"] = getattr(pack_config, "failure_config", None)
+            except Exception:
+                pass
         if parquet_compression is not None:
             config_kwargs["parquet_compression"] = parquet_compression
 
@@ -786,10 +809,15 @@ class LeRobotExporter:
         return parse_bool_env(os.getenv(key))
 
     def _requires_camera_calibration(self) -> bool:
+        env_override = self._parse_bool_env("REQUIRE_CAMERA_CALIBRATION")
+        if env_override is not None:
+            return bool(env_override)
         if self.config.require_camera_calibration is not None:
             return bool(self.config.require_camera_calibration)
         if not self.config.include_images:
             return False
+        if self._is_production_mode():
+            return True
         tier = self.config.data_pack_tier.lower()
         return tier in {"core", "plus", "full"}
 
@@ -1023,6 +1051,8 @@ class LeRobotExporter:
         quality_score: float = 1.0,
         sensor_data: Optional[Any] = None,
         object_metadata: Optional[Dict[str, Any]] = None,
+        control_metadata: Optional[Dict[str, Any]] = None,
+        failure_labels: Optional[Dict[str, Any]] = None,
         motion_plan: Optional[Any] = None,
         validation_result: Optional[Any] = None,
     ) -> int:
@@ -1038,6 +1068,8 @@ class LeRobotExporter:
             quality_score: Quality score from validation (0.0-1.0)
             sensor_data: EpisodeSensorData with visual observations (optional)
             object_metadata: Object metadata for ground-truth (optional)
+            control_metadata: Control metadata (control mode, action space, gains) (optional)
+            failure_labels: Failure labels for failed episodes (optional)
             motion_plan: Original motion plan for reward computation (optional)
             validation_result: Validation result with physics data (optional)
 
@@ -1158,6 +1190,8 @@ class LeRobotExporter:
             motion_plan=motion_plan,
             validation_result=validation_result,
             object_metadata=object_metadata or {},
+            control_metadata=control_metadata,
+            failure_labels=failure_labels,
             camera_capture_warnings=camera_capture_warnings,
             camera_error_counts=camera_error_counts,
         )
@@ -1225,6 +1259,16 @@ class LeRobotExporter:
 
             if self.config.include_depth and (episode.sensor_data is None or not episode.sensor_data.has_depth):
                 errors.append(f"Data pack tier requires depth maps but episode has none")
+
+            failure_config = getattr(self.config, "failure_config", None)
+            if (
+                failure_config
+                and getattr(failure_config, "include_failures", False)
+                and getattr(failure_config, "include_failure_labels", True)
+                and not episode.success
+                and not episode.failure_labels
+            ):
+                errors.append("Failure labels missing for failed episode")
 
             if errors:
                 incomplete_episodes.append((episode.episode_index, errors))
@@ -1388,12 +1432,19 @@ class LeRobotExporter:
             if not hasattr(episode.sensor_data, 'frames') or len(episode.sensor_data.frames) == 0:
                 continue
 
-            first_frame = episode.sensor_data.frames[0]
+            calibration_map = {}
+            if hasattr(episode.sensor_data, "camera_calibration") and episode.sensor_data.camera_calibration:
+                calibration_map = dict(episode.sensor_data.camera_calibration)
+            elif hasattr(episode.sensor_data, "config") and episode.sensor_data.config is not None:
+                camera_config = episode.sensor_data.config
+                if hasattr(camera_config, "cameras"):
+                    for cam in camera_config.cameras:
+                        calib = getattr(cam, "calibration", None) or cam.get_or_compute_calibration()
+                        calibration_map[cam.camera_id] = calib.to_dict()
 
-            # Get camera calibration from sensor config
-            if not hasattr(episode.sensor_data, 'config') or episode.sensor_data.config is None:
+            if not calibration_map:
                 if require_calibration:
-                    errors.append("Camera calibration config missing from sensor data")
+                    errors.append("Camera calibration missing from sensor data")
                 if errors:
                     invalid_calibrations.append({
                         "episode_index": episode.episode_index,
@@ -1401,73 +1452,71 @@ class LeRobotExporter:
                     })
                 continue
 
-            camera_config = episode.sensor_data.config
+            for camera_id, calib_payload in calibration_map.items():
+                is_dynamic = bool(calib_payload.get("is_dynamic", False))
+                intrinsic = np.array(
+                    calib_payload.get("intrinsic_matrix", []),
+                    dtype=np.float64,
+                ) if calib_payload.get("intrinsic_matrix") is not None else None
+                extrinsic = np.array(
+                    calib_payload.get("extrinsic_matrix", []),
+                    dtype=np.float64,
+                ) if calib_payload.get("extrinsic_matrix") is not None else None
 
-            # Check for CameraCalibration config
-            if not hasattr(camera_config, 'camera_calibration') or camera_config.camera_calibration is None:
-                if require_calibration:
-                    errors.append("Camera calibration missing from sensor config")
-                if errors:
-                    invalid_calibrations.append({
-                        "episode_index": episode.episode_index,
-                        "errors": errors,
-                    })
-                continue
+                # Validate intrinsic matrix
+                if intrinsic is not None:
+                    K = intrinsic
+                    # Check shape
+                    if K.shape != (3, 3):
+                        errors.append(f"{camera_id}: Intrinsic matrix shape {K.shape} != (3, 3)")
+                    else:
+                        if abs(K[0, 1]) > 1e-6 or abs(K[1, 0]) > 1e-6 or abs(K[2, 0]) > 1e-6 or abs(K[2, 1]) > 1e-6:
+                            errors.append(f"{camera_id}: Intrinsic matrix not upper triangular")
+                        if K[0, 0] <= 0 or K[1, 1] <= 0:
+                            errors.append(f"{camera_id}: Intrinsic focal lengths must be positive")
+                        try:
+                            det = np.linalg.det(K)
+                            if abs(det) < 1e-10:
+                                errors.append(f"{camera_id}: Intrinsic matrix is singular")
+                        except np.linalg.LinAlgError:
+                            errors.append(f"{camera_id}: Failed to compute intrinsic determinant")
 
-            calibration = camera_config.camera_calibration
+                # Validate extrinsic matrix
+                if extrinsic is not None:
+                    T = extrinsic
+                    if T.shape != (4, 4):
+                        errors.append(f"{camera_id}: Extrinsic matrix shape {T.shape} != (4, 4)")
+                    else:
+                        R = T[:3, :3]
+                        RTR = np.dot(R.T, R)
+                        should_be_identity = np.eye(3)
+                        if not np.allclose(RTR, should_be_identity, atol=1e-3):
+                            errors.append(
+                                f"{camera_id}: Extrinsic rotation not orthogonal "
+                                f"(||R^T R - I||={np.linalg.norm(RTR - should_be_identity):.4f})"
+                            )
+                        det_R = np.linalg.det(R)
+                        if abs(det_R - 1.0) > 1e-2:
+                            errors.append(f"{camera_id}: Extrinsic rotation det {det_R:.3f} != 1")
+                        expected_last_row = np.array([0, 0, 0, 1])
+                        if not np.allclose(T[3, :], expected_last_row, atol=1e-6):
+                            errors.append(f"{camera_id}: Extrinsic last row not [0,0,0,1]")
+                elif require_calibration and not is_dynamic:
+                    errors.append(f"{camera_id}: Extrinsic matrix missing for static camera")
 
-            # Validate intrinsic matrix
-            if calibration.intrinsic_matrix is not None:
-                K = calibration.intrinsic_matrix
-                # Check shape
-                if K.shape != (3, 3):
-                    errors.append(f"Intrinsic matrix: Expected shape (3, 3), got {K.shape}")
-                else:
-                    # Check upper triangular structure (most elements below diagonal should be ~0)
-                    # K = [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
-                    if abs(K[0, 1]) > 1e-6 or abs(K[1, 0]) > 1e-6 or abs(K[2, 0]) > 1e-6 or abs(K[2, 1]) > 1e-6:
-                        errors.append(f"Intrinsic matrix: Not properly upper triangular")
-
-                    # Check diagonal elements are positive (focal lengths)
-                    if K[0, 0] <= 0 or K[1, 1] <= 0:
-                        errors.append(f"Intrinsic matrix: Focal lengths must be positive")
-
-                    # Check invertibility (determinant non-zero)
-                    try:
-                        det = np.linalg.det(K)
-                        if abs(det) < 1e-10:
-                            errors.append(f"Intrinsic matrix: Singular matrix (det ≈ 0)")
-                    except np.linalg.LinAlgError:
-                        errors.append(f"Intrinsic matrix: Failed to compute determinant")
-
-            # Validate extrinsic matrix
-            if calibration.extrinsic_matrix is not None:
-                T = calibration.extrinsic_matrix
-                # Check shape (4x4 homogeneous transform)
-                if T.shape != (4, 4):
-                    errors.append(f"Extrinsic matrix: Expected shape (4, 4), got {T.shape}")
-                else:
-                    # Extract rotation part (top-left 3x3)
-                    R = T[:3, :3]
-
-                    # Check orthogonality (R^T * R should be I)
-                    RTR = np.dot(R.T, R)
-                    should_be_identity = np.eye(3)
-                    if not np.allclose(RTR, should_be_identity, atol=1e-3):
+                # Validate per-frame extrinsics for dynamic cameras
+                if is_dynamic and require_calibration:
+                    frames = getattr(episode.sensor_data, "frames", []) or []
+                    with_extrinsics = sum(
+                        1 for frame in frames
+                        if getattr(frame, "camera_extrinsics", {}) and camera_id in frame.camera_extrinsics
+                    )
+                    coverage = with_extrinsics / max(1, len(frames))
+                    if coverage < 0.9:
                         errors.append(
-                            f"Extrinsic matrix: Rotation part is not orthogonal "
-                            f"(R^T*R deviation from I: {np.linalg.norm(RTR - should_be_identity):.4f})"
+                            f"{camera_id}: Per-frame extrinsics missing for dynamic camera "
+                            f"({coverage:.0%} coverage)"
                         )
-
-                    # Check determinant is 1 (proper rotation, not reflection)
-                    det_R = np.linalg.det(R)
-                    if abs(det_R - 1.0) > 1e-2:
-                        errors.append(f"Extrinsic matrix: Rotation determinant is {det_R:.3f}, expected 1.0")
-
-                    # Check last row is [0, 0, 0, 1]
-                    expected_last_row = np.array([0, 0, 0, 1])
-                    if not np.allclose(T[3, :], expected_last_row, atol=1e-6):
-                        errors.append(f"Extrinsic matrix: Last row is not [0, 0, 0, 1]")
 
             if errors:
                 invalid_calibrations.append({
@@ -2319,6 +2368,7 @@ class LeRobotExporter:
             try:
                 self._write_info(meta_dir)
                 self._write_tasks(meta_dir)
+                self._write_camera_calibration(meta_dir)
                 self._write_episodes_meta(meta_dir)
                 self._write_episode_index(meta_dir)
             except Exception as exc:
@@ -3092,6 +3142,68 @@ class LeRobotExporter:
                 video_path.unlink()
                 self._remove_checksum_entry(video_path)
 
+    def _build_episode_splits(self) -> Dict[str, List[int]]:
+        """Build split mapping for exported episodes."""
+        split_map: Dict[str, List[int]] = {"train": [], "val": [], "test": []}
+        split_config = getattr(self.config, "split_config", None)
+        failure_config = getattr(self.config, "failure_config", None)
+
+        include_failures = bool(getattr(failure_config, "include_failures", False)) if failure_config else False
+        separate_failure_split = bool(getattr(failure_config, "separate_failure_split", False)) if failure_config else False
+
+        failure_indices = [ep.episode_index for ep in self.episodes if not ep.success] if include_failures else []
+        if separate_failure_split and failure_indices:
+            candidates = [ep.episode_index for ep in self.episodes if ep.success]
+        else:
+            candidates = [ep.episode_index for ep in self.episodes]
+
+        if split_config is None or not candidates:
+            split_map["train"] = sorted(candidates)
+            if separate_failure_split and failure_indices:
+                split_map["failures"] = sorted(failure_indices)
+            return split_map
+
+        explicit_splits = getattr(split_config, "explicit_splits", None)
+        if explicit_splits:
+            numeric_keys = all(str(k).isdigit() for k in explicit_splits.keys())
+            if numeric_keys:
+                for episode_index in candidates:
+                    split_name = explicit_splits.get(episode_index)
+                    if split_name is None:
+                        split_name = explicit_splits.get(str(episode_index))
+                    if split_name not in split_map:
+                        split_name = "train"
+                    split_map[split_name].append(episode_index)
+            else:
+                logger.warning(
+                    "Explicit splits provided but episode ids are non-numeric; "
+                    "ignoring explicit splits for LeRobot export."
+                )
+                explicit_splits = None
+
+        if not explicit_splits:
+            rng = np.random.default_rng(getattr(split_config, "split_seed", 42))
+            shuffled_ids = sorted(candidates)
+            rng.shuffle(shuffled_ids)
+
+            train_ratio = getattr(split_config, "train_ratio", 0.8)
+            val_ratio = getattr(split_config, "val_ratio", 0.1)
+            test_ratio = getattr(split_config, "test_ratio", 0.1)
+
+            total = len(shuffled_ids)
+            train_count = int(total * train_ratio)
+            val_count = int(total * val_ratio)
+            test_count = max(0, total - train_count - val_count)
+
+            split_map["train"] = shuffled_ids[:train_count]
+            split_map["val"] = shuffled_ids[train_count:train_count + val_count]
+            split_map["test"] = shuffled_ids[train_count + val_count:train_count + val_count + test_count]
+
+        if separate_failure_split and failure_indices:
+            split_map["failures"] = sorted(failure_indices)
+
+        return split_map
+
     def _write_info(self, meta_dir: Path) -> None:
         """Write dataset info JSON."""
         # Base features
@@ -3179,6 +3291,12 @@ class LeRobotExporter:
                 "format": "physics_state",
             }
 
+        # Camera calibration stream (if available)
+        features["ground_truth.camera_calibration"] = {
+            "dtype": "json",
+            "format": "intrinsic_extrinsic",
+        }
+
         # Check data source for validation
         # This determines if the data was generated with real physics or mock
         data_source_info = self._get_data_source_info()
@@ -3201,6 +3319,15 @@ class LeRobotExporter:
             data_path_template = None
             episodes_path_template = None
             videos_path_template = None
+
+        split_map = self._build_episode_splits()
+        self._episode_splits = split_map
+        split_counts = {name: len(ids) for name, ids in split_map.items()}
+        has_camera_calibration = any(
+            getattr(ep.sensor_data, "camera_calibration", None)
+            for ep in self.episodes
+            if ep.sensor_data is not None
+        )
 
         info = {
             "format": "lerobot",
@@ -3270,9 +3397,9 @@ class LeRobotExporter:
                 ),
             },
             "lineage": lineage,
-            "splits": {
-                "train": f"0:{len(self.episodes)}",
-            },
+            "splits": split_counts,
+            "split_manifest": "meta/splits.json",
+            "camera_calibration_path": "meta/camera_calibration.json" if has_camera_calibration else None,
             "created_at": datetime.utcnow().isoformat() + "Z",
             "generator": "BlueprintPipeline/episode-generation-job",
             "generator_version": "2.0.0",
@@ -3311,6 +3438,30 @@ class LeRobotExporter:
             lambda tmp_path: tmp_path.write_text(json.dumps(info, indent=2)),
         )
 
+        splits_path = meta_dir / "splits.json"
+        self._atomic_write(
+            splits_path,
+            lambda tmp_path: tmp_path.write_text(json.dumps(split_map, indent=2)),
+        )
+
+    def _write_camera_calibration(self, meta_dir: Path) -> None:
+        """Write camera calibration metadata if available."""
+        calibration_payload = None
+        for episode in self.episodes:
+            if episode.sensor_data is None:
+                continue
+            payload = getattr(episode.sensor_data, "camera_calibration", None)
+            if payload:
+                calibration_payload = payload
+                break
+        if not calibration_payload:
+            return
+        calib_path = meta_dir / "camera_calibration.json"
+        self._atomic_write(
+            calib_path,
+            lambda tmp_path: tmp_path.write_text(json.dumps(calibration_payload, indent=2)),
+        )
+
     def _write_tasks(self, meta_dir: Path) -> None:
         """Write tasks JSONL."""
         tasks_path = meta_dir / "tasks.jsonl"
@@ -3324,6 +3475,11 @@ class LeRobotExporter:
     def _write_episodes_meta(self, meta_dir: Path) -> None:
         """Write episodes metadata JSONL."""
         episodes_path = meta_dir / "episodes.jsonl"
+        split_map = getattr(self, "_episode_splits", None) or self._build_episode_splits()
+        split_lookup: Dict[int, str] = {}
+        for split_name, episode_ids in split_map.items():
+            for episode_id in episode_ids:
+                split_lookup[int(episode_id)] = split_name
         def write_episodes(tmp_path: Path) -> None:
             with open(tmp_path, "w") as f:
                 for episode in self.episodes:
@@ -3337,7 +3493,12 @@ class LeRobotExporter:
                         "success": episode.success,
                         "quality_score": episode.quality_score,
                         "is_mock": episode.is_mock,  # Explicit flag for mock data
+                        "split": split_lookup.get(episode.episode_index, "train"),
                     }
+                    if episode.failure_labels:
+                        meta["failure_labels"] = episode.failure_labels
+                    if episode.control_metadata:
+                        meta["control_metadata"] = episode.control_metadata
                     # Add sensor data info if available
                     if episode.sensor_data is not None:
                         meta["has_visual_obs"] = True
@@ -3394,6 +3555,11 @@ class LeRobotExporter:
 
         # Write as chunked Parquet
         import pyarrow as pa
+        split_map = getattr(self, "_episode_splits", None) or self._build_episode_splits()
+        split_lookup: Dict[int, str] = {}
+        for split_name, episode_ids in split_map.items():
+            for episode_id in episode_ids:
+                split_lookup[int(episode_id)] = split_name
         schema = pa.schema([
             ("episode_index", pa.int64()),
             ("num_frames", pa.int64()),
@@ -3403,6 +3569,8 @@ class LeRobotExporter:
             ("scene_id", pa.string()),
             ("data_path", pa.string()),
             ("video_paths", pa.string()),
+            ("split", pa.string()),
+            ("failure_labels", pa.string()),
         ])
         chunk_size = self.config.chunk_size
 
@@ -3427,6 +3595,8 @@ class LeRobotExporter:
                     "scene_id": episode.scene_id or "",
                     "data_path": ep_meta.get("data_path", ""),
                     "video_paths": json.dumps(video_paths) if video_paths else "",
+                    "split": split_lookup.get(episode.episode_index, "train"),
+                    "failure_labels": json.dumps(episode.failure_labels) if episode.failure_labels else "",
                 })
 
             table = pa.table(
@@ -3726,6 +3896,34 @@ class LeRobotExporter:
         # Privileged state
         if self.config.include_privileged_state:
             self._write_privileged_state_data(sensor_data, chunk_dir, episode_idx)
+
+        # Camera calibration + per-frame extrinsics (JSON)
+        self._write_camera_calibration_stream(sensor_data, chunk_dir, episode_idx)
+
+    def _write_camera_calibration_stream(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
+        """Write camera calibration metadata and per-frame extrinsics."""
+        calibration = getattr(sensor_data, "camera_calibration", None)
+        if not calibration:
+            return
+
+        per_frame_extrinsics: Dict[str, List[Any]] = {}
+        for frame in getattr(sensor_data, "frames", []):
+            frame_extrinsics = getattr(frame, "camera_extrinsics", {}) or {}
+            for camera_id, extrinsic in frame_extrinsics.items():
+                per_frame_extrinsics.setdefault(camera_id, []).append(extrinsic)
+
+        payload = {
+            "camera_calibration": calibration,
+            "per_frame_extrinsics": per_frame_extrinsics,
+        }
+
+        calib_dir = chunk_dir / "camera_calibration"
+        calib_dir.mkdir(parents=True, exist_ok=True)
+        calib_path = calib_dir / f"episode_{episode_idx:06d}.json"
+        self._atomic_write(
+            calib_path,
+            lambda tmp_path: tmp_path.write_text(json.dumps(payload, indent=2)),
+        )
 
     def _write_depth_data(self, sensor_data: Any, chunk_dir: Path, episode_idx: int) -> None:
         """Write depth maps with validation."""

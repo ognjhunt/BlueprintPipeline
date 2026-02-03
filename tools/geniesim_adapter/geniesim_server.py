@@ -149,6 +149,13 @@ class GenieSimLocalServicer(SimObservationServiceServicer):
                 rgb_camera=CamImage(format="png", data=synthetic_rgb),
                 depth_camera=CamImage(format="png", data=synthetic_depth),
                 semantic_mask=SemanticData(name="semantic", data=synthetic_depth),
+                extrinsic=[
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ],
+                calibration_id="mock_cam_calib",
             )
             rsp.camera.append(cam_rsp)
 

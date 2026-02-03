@@ -97,6 +97,19 @@ CAMERA_HANDLER = textwrap.dedent("""\
             if not camera_prim_path:
                 camera_prim_path = "/OmniverseKit_Persp"
 
+            # Compute camera extrinsics from USD (camera-to-world)
+            try:
+                cam_prim = stage.GetPrimAtPath(camera_prim_path)
+                if cam_prim and cam_prim.IsValid() and cam_prim.IsA(UsdGeom.Camera):
+                    xformable = UsdGeom.Xformable(cam_prim)
+                    if xformable:
+                        from pxr import Usd
+                        cam_xform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                        result["camera_info"]["extrinsic"] = np.array(cam_xform, dtype=np.float64).reshape(4, 4).tolist()
+                        result["camera_info"]["calibration_id"] = f"{camera_prim_path}_calib"
+            except Exception as _ext_err:
+                print(f"[PATCH] Failed to compute camera extrinsic: {_ext_err}")
+
             # Cache render products and annotators across calls
             cls = type(self)
             if camera_prim_path not in cls._bp_render_products:

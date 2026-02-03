@@ -2598,6 +2598,10 @@ class GenieSimGRPCClient:
                 "penetration_depth": penetration_depth,
                 "position": list(contact.position) if contact.position else [],
                 "normal": list(contact.normal) if contact.normal else [],
+                "force_vector": list(contact.force_vector) if contact.force_vector else [],
+                "tangent_impulse": list(contact.tangent_impulse) if contact.tangent_impulse else [],
+                "friction": float(contact.friction) if hasattr(contact, "friction") else None,
+                "contact_area": float(contact.contact_area) if hasattr(contact, "contact_area") else None,
             })
             if penetration_depth > max_penetration:
                 max_penetration = penetration_depth
@@ -2908,6 +2912,12 @@ class GenieSimGRPCClient:
                     else "",
                     "width": camera_rsp.camera_info.width,
                     "height": camera_rsp.camera_info.height,
+                    "fx": camera_rsp.camera_info.fx,
+                    "fy": camera_rsp.camera_info.fy,
+                    "ppx": camera_rsp.camera_info.ppx,
+                    "ppy": camera_rsp.camera_info.ppy,
+                    "extrinsic": list(camera_rsp.extrinsic) if getattr(camera_rsp, "extrinsic", None) else None,
+                    "calibration_id": getattr(camera_rsp, "calibration_id", "") or "",
                     "encoding": encoding,
                 }
             )
@@ -3854,6 +3864,12 @@ class GenieSimGRPCClient:
             "rgb_encoding": encoding,
             "depth_encoding": encoding,
             "timestamp": image_info.get("timestamp"),
+            "fx": image_info.get("fx"),
+            "fy": image_info.get("fy"),
+            "ppx": image_info.get("ppx"),
+            "ppy": image_info.get("ppy"),
+            "extrinsic": image_info.get("extrinsic"),
+            "calibration_id": image_info.get("calibration_id"),
         }
 
     @staticmethod
@@ -7351,6 +7367,233 @@ class GenieSimLocalFramework:
                     "WARNING",
                 )
 
+            # Gate: camera calibration must be present in production
+            require_calibration = (
+                os.getenv("REQUIRE_CAMERA_CALIBRATION", "true").lower() == "true"
+                if _is_production
+                else os.getenv("REQUIRE_CAMERA_CALIBRATION", "false").lower() == "true"
+            )
+            if require_calibration and frames:
+                _cam_calib_missing = False
+                _cam_frames = (frames[0].get("observation") or {}).get("camera_frames") or {}
+                if not _cam_frames:
+                    _cam_calib_missing = True
+                else:
+                    for _cam_id, _cam_data in _cam_frames.items():
+                        if not isinstance(_cam_data, dict):
+                            _cam_calib_missing = True
+                            continue
+                        if _cam_data.get("fx") is None or _cam_data.get("fy") is None:
+                            _cam_calib_missing = True
+                        if _cam_data.get("ppx") is None or _cam_data.get("ppy") is None:
+                            _cam_calib_missing = True
+                        if not _cam_data.get("calibration_id"):
+                            _cam_calib_missing = True
+                if _cam_calib_missing:
+                    _validity_errors.append(
+                        "Camera calibration missing in camera_frames; set REQUIRE_CAMERA_CALIBRATION=false to bypass."
+                    )
+
+            # Gate: object physics metadata must be real in production
+            object_metadata: Dict[str, Any] = {}
+            object_metadata_provenance: Dict[str, str] = {}
+            fallback_used = False
+            require_object_physics = (
+                os.getenv("REQUIRE_OBJECT_PHYSICS", "true").lower() == "true"
+                if _is_production
+                else os.getenv("REQUIRE_OBJECT_PHYSICS", "false").lower() == "true"
+            )
+
+            scene_objects = scene_config.get("objects", []) if isinstance(scene_config, dict) else []
+            sg_nodes = _sg_nodes if isinstance(_sg_nodes, list) else []
+            sg_lookup: Dict[str, Dict[str, Any]] = {}
+            for _node in sg_nodes:
+                if not isinstance(_node, dict):
+                    continue
+                _asset_id = _node.get("asset_id", "")
+                if _asset_id:
+                    sg_lookup[_asset_id] = _node
+                    if "_obj_" in _asset_id:
+                        sg_lookup[_asset_id.split("_obj_")[-1]] = _node
+                _semantic = _node.get("semantic")
+                if _semantic and _semantic not in sg_lookup:
+                    sg_lookup[_semantic] = _node
+
+            asset_index_lookup: Dict[str, Dict[str, Any]] = {}
+            asset_index_path = None
+            if isinstance(scene_config, dict):
+                assets_cfg = scene_config.get("assets", {}) if isinstance(scene_config.get("assets", {}), dict) else {}
+                asset_index_path = assets_cfg.get("index_path") or scene_config.get("asset_index_path")
+            if asset_index_path and scene_usd_path:
+                candidate = Path(scene_usd_path).parent / asset_index_path
+                if candidate.exists():
+                    asset_index_path = candidate
+            if asset_index_path and Path(asset_index_path).exists():
+                try:
+                    with open(asset_index_path) as _aif:
+                        asset_index_data = json.load(_aif)
+                    for _asset in asset_index_data.get("assets", []):
+                        if not isinstance(_asset, dict):
+                            continue
+                        _asset_id = _asset.get("asset_id")
+                        if _asset_id:
+                            asset_index_lookup[_asset_id] = _asset
+                            if "_obj_" in _asset_id:
+                                asset_index_lookup[_asset_id.split("_obj_")[-1]] = _asset
+                except Exception as _exc:
+                    self.log(f"Failed to load asset_index for object metadata: {_exc}", "WARNING")
+
+            for _obj in scene_objects:
+                if not isinstance(_obj, dict):
+                    continue
+                obj_id = _obj.get("id") or _obj.get("name") or "unknown_object"
+                node = sg_lookup.get(obj_id)
+                if node is None:
+                    # Try matching by asset id
+                    asset_path = (_obj.get("asset") or {}).get("path", "")
+                    if asset_path:
+                        stem = Path(asset_path).stem
+                        node = sg_lookup.get(stem)
+
+                asset_entry = None
+                asset_id = None
+                if node is not None:
+                    asset_id = node.get("asset_id")
+                    asset_entry = asset_index_lookup.get(asset_id or "")
+                if asset_entry is None and asset_id:
+                    asset_entry = asset_index_lookup.get(asset_id.split("_obj_")[-1])
+
+                # Base provenance
+                provenance = "scene_manifest"
+                if node is not None:
+                    provenance = "scene_graph"
+                elif asset_entry is not None:
+                    provenance = "asset_index"
+
+                physics = _obj.get("physics", {}) if isinstance(_obj.get("physics", {}), dict) else {}
+                physics_hints = _obj.get("physics_hints", {}) if isinstance(_obj.get("physics_hints", {}), dict) else {}
+                props = node.get("properties", {}) if isinstance(node, dict) else {}
+                bp_meta = node.get("bp_metadata", {}) if isinstance(node, dict) else {}
+                material_meta = asset_entry.get("material", {}) if isinstance(asset_entry, dict) else {}
+
+                mass_kg = (
+                    physics.get("mass")
+                    or props.get("mass")
+                    or bp_meta.get("physics", {}).get("mass")
+                    or asset_entry.get("mass") if isinstance(asset_entry, dict) else None
+                )
+
+                friction = (
+                    physics.get("friction")
+                    or props.get("friction")
+                    or physics_hints.get("roughness")
+                    or material_meta.get("friction")
+                )
+                restitution = (
+                    physics.get("restitution")
+                    or props.get("restitution")
+                    or material_meta.get("restitution")
+                )
+
+                usd_path = None
+                if node is not None:
+                    usd_path = node.get("usd_path")
+                if not usd_path:
+                    usd_path = (_obj.get("asset") or {}).get("path")
+                if not usd_path and asset_entry:
+                    usd_path = asset_entry.get("usd_path")
+
+                scale = None
+                transform = _obj.get("transform", {}) if isinstance(_obj.get("transform", {}), dict) else {}
+                scale_dict = transform.get("scale") if isinstance(transform.get("scale", {}), dict) else {}
+                if scale_dict:
+                    scale = [float(scale_dict.get("x", 1.0)), float(scale_dict.get("y", 1.0)), float(scale_dict.get("z", 1.0))]
+
+                # Size for inertia estimation
+                size = None
+                if node is not None:
+                    size = node.get("size")
+                if size is None:
+                    size = _get_obj_prop(obj_id, "bbox", None)
+                if size is not None and isinstance(size, (list, tuple)) and len(size) >= 3:
+                    size = [float(size[0]), float(size[1]), float(size[2])]
+                else:
+                    size = None
+
+                inertia = None
+                if mass_kg is not None and size is not None:
+                    try:
+                        w, d, h = size[0], size[1], size[2]
+                        inertia = [
+                            (1.0 / 12.0) * float(mass_kg) * (d * d + h * h),
+                            (1.0 / 12.0) * float(mass_kg) * (w * w + h * h),
+                            (1.0 / 12.0) * float(mass_kg) * (w * w + d * d),
+                        ]
+                    except Exception:
+                        inertia = None
+
+                # Determine property provenance
+                prop_fallbacks = []
+                for prop in ("mass", "bbox", "category"):
+                    key = f"{obj_id}:{prop}"
+                    prov = _object_property_provenance.get(key)
+                    if prov in ("hardcoded_fallback", "llm_estimated", "gemini_estimated"):
+                        prop_fallbacks.append(key)
+
+                if prop_fallbacks:
+                    provenance = "fallback"
+                    fallback_used = True
+
+                missing_fields = []
+                if mass_kg is None:
+                    missing_fields.append("mass_kg")
+                if friction is None:
+                    missing_fields.append("friction")
+                if restitution is None:
+                    missing_fields.append("restitution")
+                if usd_path is None:
+                    missing_fields.append("usd_path")
+
+                object_metadata[obj_id] = {
+                    "asset_id": asset_id or obj_id,
+                    "usd_path": usd_path,
+                    "mass_kg": float(mass_kg) if mass_kg is not None else None,
+                    "friction": float(friction) if friction is not None else None,
+                    "restitution": float(restitution) if restitution is not None else None,
+                    "material": material_meta if material_meta else None,
+                    "scale": scale,
+                    "size": size,
+                    "inertia": inertia,
+                    "provenance": provenance,
+                    "missing_fields": missing_fields,
+                }
+                object_metadata_provenance[obj_id] = provenance
+
+            if _is_production and require_object_physics:
+                if fallback_used:
+                    _validity_errors.append(
+                        "Object metadata used fallback values; production requires scene_graph/asset_index provenance."
+                    )
+                for _oid, _meta in object_metadata.items():
+                    if _meta.get("missing_fields"):
+                        _validity_errors.append(
+                            f"Object '{_oid}' missing physics fields: {_meta['missing_fields']}."
+                        )
+
+            # Gate: EE wrench required in production when enabled
+            require_ee_wrench = (
+                os.getenv("REQUIRE_EE_WRENCH", "true").lower() == "true"
+                if _is_production
+                else os.getenv("REQUIRE_EE_WRENCH", "false").lower() == "true"
+            )
+            if require_ee_wrench and frames:
+                _wrench_frames = sum(1 for _f in frames if _f.get("ee_wrench") is not None)
+                _coverage = _wrench_frames / max(1, len(frames))
+                if _coverage < 0.9:
+                    _validity_errors.append(
+                        f"EE wrench missing in {1.0 - _coverage:.0%} of frames."
+                    )
+
             # Reject episode if validity errors found
             if _validity_errors:
                 _gate_msg = (
@@ -7407,6 +7650,75 @@ class GenieSimLocalFramework:
                 task=task,
             )
 
+            # Camera calibration metadata (intrinsics + extrinsics)
+            camera_calibration: Dict[str, Any] = {}
+            for _frame in frames:
+                _cam_frames = (_frame.get("observation") or {}).get("camera_frames") or {}
+                if not isinstance(_cam_frames, dict):
+                    continue
+                for _cam_id, _cam_data in _cam_frames.items():
+                    if _cam_id in camera_calibration:
+                        continue
+                    if not isinstance(_cam_data, dict):
+                        continue
+                    _fx = _cam_data.get("fx")
+                    _fy = _cam_data.get("fy")
+                    _ppx = _cam_data.get("ppx")
+                    _ppy = _cam_data.get("ppy")
+                    _width = _cam_data.get("width")
+                    _height = _cam_data.get("height")
+                    _calib_id = _cam_data.get("calibration_id") or f"{_cam_id}_calib"
+                    _intrinsic = None
+                    if _fx is not None and _fy is not None and _ppx is not None and _ppy is not None:
+                        _intrinsic = [
+                            [float(_fx), 0.0, float(_ppx)],
+                            [0.0, float(_fy), float(_ppy)],
+                            [0.0, 0.0, 1.0],
+                        ]
+                    camera_calibration[_cam_id] = {
+                        "camera_id": _cam_id,
+                        "calibration_id": _calib_id,
+                        "width": _width,
+                        "height": _height,
+                        "fx": _fx,
+                        "fy": _fy,
+                        "ppx": _ppx,
+                        "ppy": _ppy,
+                        "intrinsic_matrix": _intrinsic,
+                        "extrinsic_matrix": _cam_data.get("extrinsic"),
+                        "source": "geniesim_grpc",
+                    }
+
+            # Frame conventions metadata
+            frame_conventions = {
+                "world_frame": "world",
+                "base_frame": "robot_base",
+                "ee_frame": "end_effector",
+                "camera_frame": "camera",
+                "handedness": "right",
+                "axis_convention": "X forward, Y left, Z up (USD/Isaac)",
+                "units": {
+                    "length": "meters",
+                    "angles": "radians",
+                    "time": "seconds",
+                },
+                "meters_per_unit": getattr(self, "_meters_per_unit", 1.0),
+                "units_per_meter": getattr(self, "_units_per_meter", 1.0),
+            }
+
+            # Control metadata
+            control_metadata = {
+                "control_mode": task.get("control_mode") or "joint_delta",
+                "action_space": robot_metadata.get("action_space"),
+                "action_abs_space": robot_metadata.get("action_abs_space"),
+                "action_scale": (task.get("action_scale") or task.get("action_scale_config")),
+                "controller_gains": task.get("controller_gains"),
+                "controller_config_source": (
+                    "task_config" if task.get("controller_gains") else "default"
+                ),
+                "control_frequency_hz": robot_metadata.get("control_frequency_hz"),
+            }
+
             with open(episode_path, "w") as f:
                 json.dump({
                     "episode_id": episode_id,
@@ -7416,6 +7728,10 @@ class GenieSimLocalFramework:
                     "task_description": llm_metadata.get("task_description"),
                     "data_mode": data_mode,
                     "robot_metadata": robot_metadata,
+                    "object_metadata": object_metadata,
+                    "camera_calibration": camera_calibration,
+                    "frame_conventions": frame_conventions,
+                    "control_metadata": control_metadata,
                     "episode_seed": episode_seed,
                     "provenance": {
                         "joint_positions": "physx_server",
@@ -7428,6 +7744,7 @@ class GenieSimLocalFramework:
                             "physx_server" if _efforts_source == "physx"
                             else ("estimated_inverse_dynamics" if _efforts_source in ("estimated_inverse_dynamics", "mixed") else "unavailable")
                         ),
+                        "ee_wrench": "joint_efforts" if _real_effort_count > 0 else "unavailable",
                         "ee_vel": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
                         "ee_acc": "derived_from_physx_positions" if _server_ee_frame_count > 0 else "derived_from_fk_positions",
                         "contact_forces": _contact_forces_source,
@@ -8486,6 +8803,27 @@ class GenieSimLocalFramework:
             if _has_real_efforts:
                 _real_effort_count += 1
                 frame_data["efforts_source"] = "physx"
+                # Approximate EE wrench from joint efforts (wrist torques + grip force proxy)
+                try:
+                    if gripper_indices:
+                        _gripper_efforts = [
+                            _real_efforts[idx] for idx in gripper_indices if idx < len(_real_efforts)
+                        ]
+                    else:
+                        _gripper_efforts = _real_efforts[arm_dof:]
+                    _grip_force_real = sum(abs(e) for e in _gripper_efforts)
+                    _arm_efforts = _real_efforts[:arm_dof] if arm_dof else _real_efforts
+                    _torque = _arm_efforts[-3:] if len(_arm_efforts) >= 3 else ([0.0, 0.0, 0.0])
+                    ee_wrench = {
+                        "force": [0.0, 0.0, round(float(_grip_force_real), 4)],
+                        "torque": [round(float(t), 4) for t in _torque],
+                        "frame": "end_effector",
+                        "source": "joint_efforts",
+                    }
+                    frame_data["ee_wrench"] = ee_wrench
+                    robot_state["ee_wrench"] = ee_wrench
+                except Exception:
+                    pass
             else:
                 _effort_missing_count += 1
                 frame_data["efforts_source"] = "none"
@@ -8749,6 +9087,13 @@ class GenieSimLocalFramework:
                                     ),
                                     4,
                                 ),
+                                "force_vector": c.get("force_vector") if isinstance(c, dict) else getattr(c, "force_vector", None),
+                                "tangent_impulse": c.get("tangent_impulse") if isinstance(c, dict) else getattr(c, "tangent_impulse", None),
+                                "friction": c.get("friction") if isinstance(c, dict) else getattr(c, "friction", None),
+                                "contact_area": c.get("contact_area") if isinstance(c, dict) else getattr(c, "contact_area", None),
+                                "position": c.get("position") if isinstance(c, dict) else getattr(c, "position", None),
+                                "normal": c.get("normal") if isinstance(c, dict) else getattr(c, "normal", None),
+                                "penetration_depth": c.get("penetration_depth") if isinstance(c, dict) else getattr(c, "penetration_depth", None),
                             }
                             for c in _contacts[:5]  # Top 5 contacts
                         ]
@@ -8848,6 +9193,7 @@ class GenieSimLocalFramework:
                     "total_normal_force_N": round(_total_force, 4),
                     "grip_force_N": round(_gripper_force, 4),
                     "contact_count": len(_contacts),
+                    "contact_details": _contacts[:5],
                     "grasped_object_id": _attached_object_id,
                     "provenance": "physx_contact_report",
                     "confidence": 0.7,
@@ -9859,7 +10205,21 @@ class GenieSimLocalFramework:
                         return str(_npy_path.relative_to(_frames_dir.parent))
 
                     # Preserve metadata
-                    for _meta_key in ("camera_id", "width", "height", "timestamp", "encoding", "rgb_encoding", "depth_encoding"):
+                    for _meta_key in (
+                        "camera_id",
+                        "width",
+                        "height",
+                        "timestamp",
+                        "encoding",
+                        "rgb_encoding",
+                        "depth_encoding",
+                        "fx",
+                        "fy",
+                        "ppx",
+                        "ppy",
+                        "calibration_id",
+                        "extrinsic",
+                    ):
                         if _meta_key in camera_data:
                             _sanitized[_meta_key] = camera_data[_meta_key]
                     _sanitized["width"] = _width

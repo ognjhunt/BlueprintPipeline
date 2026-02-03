@@ -134,6 +134,15 @@ def main() -> None:
     local_hash = _hash(local_content)
 
     if expected_hash != local_hash:
+        allow_patch = os.getenv("ALLOW_GENIESIM_PROTO_PATCH", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+        if allow_patch:
+            print(
+                "Genie Sim proto differs from GENIESIM_REF, but ALLOW_GENIESIM_PROTO_PATCH is set. "
+                "Skipping strict hash check."
+            )
+            print(f"Expected (from {ref}): {expected_hash}")
+            print(f"Found (local): {local_hash}")
+            return
         message = (
             "Genie Sim proto is out of sync with GENIESIM_REF.\n"
             f"Expected (from {ref}): {expected_hash}\n"

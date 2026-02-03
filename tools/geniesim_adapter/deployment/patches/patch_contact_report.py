@@ -60,6 +60,10 @@ CONTACT_HANDLER = textwrap.dedent("""\
 
             if contact_data:
                 for contact in contact_data:
+                    force_vector = None
+                    tangent_impulse = None
+                    friction = None
+                    contact_area = None
                     if isinstance(contact, dict):
                         body_a = str(contact.get("actor0", ""))
                         body_b = str(contact.get("actor1", ""))
@@ -67,6 +71,10 @@ CONTACT_HANDLER = textwrap.dedent("""\
                         separation = float(contact.get("separation", 0.0))
                         position = contact.get("position", [0, 0, 0])
                         normal = contact.get("normal", [0, 0, 1])
+                        force_vector = contact.get("force_vector") or contact.get("impulse_vector")
+                        tangent_impulse = contact.get("tangent_impulse") or contact.get("tangent_impulse_vector")
+                        friction = contact.get("friction") or contact.get("friction_coefficient")
+                        contact_area = contact.get("contact_area")
                     else:
                         body_a = str(getattr(contact, "actor0", ""))
                         body_b = str(getattr(contact, "actor1", ""))
@@ -74,6 +82,16 @@ CONTACT_HANDLER = textwrap.dedent("""\
                         separation = float(getattr(contact, "separation", 0.0))
                         position = getattr(contact, "position", [0, 0, 0])
                         normal = getattr(contact, "normal", [0, 0, 1])
+                        force_vector = getattr(contact, "force_vector", None) or getattr(contact, "impulse_vector", None)
+                        tangent_impulse = getattr(contact, "tangent_impulse", None) or getattr(contact, "tangent_impulse_vector", None)
+                        friction = getattr(contact, "friction", None) or getattr(contact, "friction_coefficient", None)
+                        contact_area = getattr(contact, "contact_area", None)
+
+                    if force_vector is None and normal is not None:
+                        try:
+                            force_vector = [float(impulse) * float(n) for n in normal]
+                        except Exception:
+                            force_vector = None
 
                     penetration = abs(separation)
                     total_force += impulse
@@ -86,6 +104,10 @@ CONTACT_HANDLER = textwrap.dedent("""\
                         penetration_depth=penetration,
                         position=list(position) if include_points else [],
                         normal=list(normal) if include_points else [],
+                        force_vector=list(force_vector) if force_vector is not None else [],
+                        tangent_impulse=list(tangent_impulse) if tangent_impulse is not None else [],
+                        friction=float(friction) if friction is not None else 0.0,
+                        contact_area=float(contact_area) if contact_area is not None else 0.0,
                     ))
 
             return ContactReportRsp(

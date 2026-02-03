@@ -41,6 +41,8 @@ message CameraRsp {
     CamImage depth_camera = 3;
     SemanticData semantic_mask = 4;
     repeated SemanticDict label_dict = 5;
+    repeated float extrinsic = 6; // 4x4 camera-to-world matrix (row-major)
+    string calibration_id = 7;
 }
 
 message JointRsp {
@@ -254,6 +256,10 @@ message ContactPoint {
     float penetration_depth = 4;
     repeated float position = 5;
     repeated float normal = 6;
+    repeated float force_vector = 7;     // Optional force/impulse vector
+    repeated float tangent_impulse = 8;  // Optional tangential impulse vector
+    float friction = 9;                  // Optional friction coefficient
+    float contact_area = 10;             // Optional contact area
 }
 message ContactReportReq {
     bool include_points = 1;

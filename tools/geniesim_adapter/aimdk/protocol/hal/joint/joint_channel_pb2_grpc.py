@@ -5,7 +5,7 @@ import warnings
 
 from aimdk.protocol.hal.joint import joint_channel_pb2 as aimdk_dot_protocol_dot_hal_dot_joint_dot_joint__channel__pb2
 
-GRPC_GENERATED_VERSION = '1.66.1'
+GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in aimdk/protocol/hal/joint/joint_channel_pb2_grpc.py depends on'
+        + ' but the generated code in aimdk/protocol/hal/joint/joint_channel_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
