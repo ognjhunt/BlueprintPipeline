@@ -4948,6 +4948,21 @@ class GenieSimLocalFramework:
             if scene_usd_path:
                 scene_usd_path = Path(scene_usd_path)
 
+            # Normalize scene units (meters_per_unit) for EE/object comparisons
+            _mpu = None
+            if scene_config:
+                _mpu = scene_config.get("meters_per_unit")
+                if _mpu is None:
+                    _mpu = (scene_config.get("scene") or {}).get("meters_per_unit")
+            try:
+                _mpu = float(_mpu) if _mpu not in (None, "") else 1.0
+            except (TypeError, ValueError):
+                _mpu = 1.0
+            if not _mpu or _mpu <= 0:
+                _mpu = 1.0
+            self._meters_per_unit = _mpu
+            self._units_per_meter = 1.0 / _mpu if _mpu > 0 else 1.0
+
             # Ensure server is running (bootstrap if needed)
             if not self.is_server_running():
                 if not self.start_server(scene_usd_path=scene_usd_path):
@@ -7422,6 +7437,8 @@ class GenieSimLocalFramework:
                         ),
                         "task_success": llm_metadata.get("task_success_source", "geometric_goal_region_v2"),
                         "quality_score": "weighted_composite_v2",
+                        "meters_per_unit": getattr(self, "_meters_per_unit", 1.0),
+                        "units_per_meter": getattr(self, "_units_per_meter", 1.0),
                         "server_ee_frames": f"{_server_ee_frame_count}/{len(frames)}",
                         "real_scene_state_frames": f"{_real_scene_state_count}/{len(frames)}",
                         "camera_capture_frames": f"{_camera_frame_count}/{len(frames)}",
@@ -8216,6 +8233,9 @@ class GenieSimLocalFramework:
                 task.get("robot_config", {}).get("base_position", [0, 0, 0]),
                 dtype=float,
             )
+            _mpu = getattr(self, "_meters_per_unit", 1.0)
+            if not isinstance(_mpu, (int, float)) or _mpu <= 0:
+                _mpu = 1.0
             _used_server_ee = False
             # Check if the server observation contains a real (dynamic) EE pose
             _server_ee = robot_state.get("ee_pose") or {}
@@ -8229,6 +8249,9 @@ class GenieSimLocalFramework:
                 else:
                     _ee_srv = None
                 if _ee_srv is not None:
+                    _ee_srv = [float(v) for v in _ee_srv]
+                    if _mpu != 1.0:
+                        _ee_srv = [v * _mpu for v in _ee_srv]
                     # Check if server EE is dynamic (differs from previous frame)
                     _prev_srv_ee = getattr(self, "_prev_server_ee_pos", None)
                     self._prev_server_ee_pos = _ee_srv
@@ -8269,13 +8292,17 @@ class GenieSimLocalFramework:
                         _fk_source = "direct"
                     if fk_solver is not None and fk_joint_positions is not None:
                         ee_pos, ee_quat = fk_solver._forward_kinematics(fk_joint_positions)
-                        _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
-                        frame_data["ee_pos"] = _ee
+                        _ee = (np.asarray(ee_pos, dtype=float) + _base_pos)
+                        if _mpu != 1.0:
+                            _ee = _ee * _mpu
+                        frame_data["ee_pos"] = _ee.tolist()
                         frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, "tolist") else ee_quat
                     elif getattr(self.config, "robot_type", "").lower() in _FRANKA_TYPES and fk_joint_positions is not None:
                         ee_pos, ee_quat = _franka_fk(fk_joint_positions)
-                        _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
-                        frame_data["ee_pos"] = _ee
+                        _ee = (np.asarray(ee_pos, dtype=float) + _base_pos)
+                        if _mpu != 1.0:
+                            _ee = _ee * _mpu
+                        frame_data["ee_pos"] = _ee.tolist()
                         frame_data["ee_quat"] = ee_quat
                 except Exception:
                     pass
@@ -8295,16 +8322,20 @@ class GenieSimLocalFramework:
                         try:
                             if fk_solver is not None:
                                 ee_pos, ee_quat = fk_solver._forward_kinematics(waypoint_joints)
-                                _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
-                                frame_data["ee_pos"] = _ee
+                                _ee = (np.asarray(ee_pos, dtype=float) + _base_pos)
+                                if _mpu != 1.0:
+                                    _ee = _ee * _mpu
+                                frame_data["ee_pos"] = _ee.tolist()
                                 frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, "tolist") else ee_quat
                                 _recent_ee_positions[-1] = frame_data["ee_pos"]
                                 _ee_static_fallback_used = True
                                 _fk_source = "direct_fallback"
                             elif getattr(self.config, "robot_type", "").lower() in _FRANKA_TYPES:
                                 ee_pos, ee_quat = _franka_fk(waypoint_joints)
-                                _ee = (np.asarray(ee_pos, dtype=float) + _base_pos).tolist()
-                                frame_data["ee_pos"] = _ee
+                                _ee = (np.asarray(ee_pos, dtype=float) + _base_pos)
+                                if _mpu != 1.0:
+                                    _ee = _ee * _mpu
+                                frame_data["ee_pos"] = _ee.tolist()
                                 frame_data["ee_quat"] = ee_quat
                                 _recent_ee_positions[-1] = frame_data["ee_pos"]
                                 _ee_static_fallback_used = True
@@ -8392,6 +8423,9 @@ class GenieSimLocalFramework:
 
             # --- Improvement A: Dynamic scene state + J: Grasp physics ---
             ee_pos_arr = np.array(frame_data["ee_pos"]) if frame_data.get("ee_pos") else None
+            _units_per_meter = getattr(self, "_units_per_meter", 1.0)
+            if not isinstance(_units_per_meter, (int, float)) or _units_per_meter <= 0:
+                _units_per_meter = 1.0
 
             # Update object poses from real scene_state every frame (not just frame 0).
             # On frame 0, also store initial poses for displacement calculation.
@@ -8413,7 +8447,8 @@ class GenieSimLocalFramework:
                     if _oid in _object_poses and step_idx > 0:
                         _tracked = _object_poses[_oid]
                         _div = float(np.linalg.norm(_pos - _tracked))
-                        if _div > 0.02:  # >2cm divergence
+                        _div_thresh = 0.02 * _units_per_meter  # >2cm divergence (scaled)
+                        if _div > _div_thresh:
                             logger.debug(
                                 "Object %s: real pose diverges from tracked by %.3fm at frame %d",
                                 _oid, _div, step_idx,
@@ -8437,7 +8472,8 @@ class GenieSimLocalFramework:
                     _obj_bbox = _get_obj_prop(_obj_type, "bbox", [0.10, 0.10, 0.10])
                     _bbox_diag = float(np.linalg.norm(_obj_bbox)) / 2.0 + 0.05  # half diagonal + 5cm reach
                     _grasp_threshold = max(0.08, min(_bbox_diag, 0.25))  # clamp [8cm, 25cm]
-                    if _dist < _grasp_threshold:
+                    _grasp_threshold_units = _grasp_threshold * _units_per_meter
+                    if _dist < _grasp_threshold_units:
                         _obj_width = _get_obj_prop(_obj_type, "graspable_width", 0.06)
                         if _obj_width <= _GRIPPER_MAX_APERTURE:
                             _attached_object_id = _oid
@@ -8466,7 +8502,8 @@ class GenieSimLocalFramework:
                             break
                         # Check if the pose actually changed from initial (server is live)
                         _init_pos = _initial_object_poses.get(_attached_object_id)
-                        if _init_pos is not None and float(np.linalg.norm(_real_pos - _init_pos)) > 0.005:
+                        _static_thresh = 0.005 * _units_per_meter
+                        if _init_pos is not None and float(np.linalg.norm(_real_pos - _init_pos)) > _static_thresh:
                             _attached_has_real_pose = True  # server reports actual movement
                         break
             if _attached_object_id is not None and ee_pos_arr is not None and not _attached_has_real_pose:
@@ -8841,6 +8878,77 @@ class GenieSimLocalFramework:
             except Exception as _sg_exc:
                 logger.warning("Savitzky-Golay smoothing failed (non-fatal): %s", _sg_exc)
 
+        # Ensure every frame has joint velocities/accelerations for effort backfill.
+        if frames:
+            _default_dt = 1.0 / _control_freq if _control_freq else (1.0 / 30.0)
+            for _fi, _frame in enumerate(frames):
+                _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+                _jp_list = _obs_rs.get("joint_positions", [])
+                if not isinstance(_jp_list, list) or len(_jp_list) < arm_dof:
+                    continue
+                _vel_list = _obs_rs.get("joint_velocities", [])
+                _acc_list = _obs_rs.get("joint_accelerations", [])
+                _need_vel = not isinstance(_vel_list, list) or len(_vel_list) < arm_dof
+                _need_acc = not isinstance(_acc_list, list) or len(_acc_list) < arm_dof
+                if not (_need_vel or _need_acc):
+                    continue
+                if _fi == 0:
+                    if _need_vel:
+                        _obs_rs["joint_velocities"] = [0.0] * len(_jp_list)
+                    if _need_acc:
+                        _obs_rs["joint_accelerations"] = [0.0] * len(_jp_list)
+                    continue
+                _prev_rs = frames[_fi - 1].get("observation", {}).get("robot_state", {})
+                _prev_jp = _prev_rs.get("joint_positions", [])
+                if not isinstance(_prev_jp, list) or len(_prev_jp) < arm_dof:
+                    if _need_vel:
+                        _obs_rs["joint_velocities"] = [0.0] * len(_jp_list)
+                    if _need_acc:
+                        _obs_rs["joint_accelerations"] = [0.0] * len(_jp_list)
+                    continue
+                _dt = _frame.get("dt")
+                if not _dt or _dt <= 0:
+                    _ts = _frame.get("timestamp")
+                    _prev_ts = frames[_fi - 1].get("timestamp")
+                    if _ts is not None and _prev_ts is not None:
+                        _dt = _ts - _prev_ts
+                if not _dt or _dt <= 0:
+                    _dt = _default_dt
+                _jp_arr = np.array(_jp_list, dtype=float)
+                _prev_jp_arr = np.array(_prev_jp, dtype=float)
+                _min_len = min(_jp_arr.size, _prev_jp_arr.size)
+                if _min_len == 0:
+                    if _need_vel:
+                        _obs_rs["joint_velocities"] = [0.0] * len(_jp_list)
+                    if _need_acc:
+                        _obs_rs["joint_accelerations"] = [0.0] * len(_jp_list)
+                    continue
+                _jv = (_jp_arr[:_min_len] - _prev_jp_arr[:_min_len]) / _dt
+                if _need_vel:
+                    _vel_list = _vel_list if isinstance(_vel_list, list) else []
+                    if len(_vel_list) < len(_jp_list):
+                        _vel_list = _vel_list + [0.0] * (len(_jp_list) - len(_vel_list))
+                    for _ji in range(_min_len):
+                        _vel_list[_ji] = float(_jv[_ji])
+                    _obs_rs["joint_velocities"] = _vel_list
+                if _need_acc:
+                    _prev_vel_list = _prev_rs.get("joint_velocities", [])
+                    _prev_vel_arr = (
+                        np.array(_prev_vel_list, dtype=float)
+                        if isinstance(_prev_vel_list, list)
+                        else None
+                    )
+                    if _prev_vel_arr is None or _prev_vel_arr.size < _min_len:
+                        _ja = np.zeros(_min_len, dtype=float)
+                    else:
+                        _ja = (_jv - _prev_vel_arr[:_min_len]) / _dt
+                    _acc_list = _acc_list if isinstance(_acc_list, list) else []
+                    if len(_acc_list) < len(_jp_list):
+                        _acc_list = _acc_list + [0.0] * (len(_jp_list) - len(_acc_list))
+                    for _ji in range(_min_len):
+                        _acc_list[_ji] = float(_ja[_ji])
+                    _obs_rs["joint_accelerations"] = _acc_list
+
         # Backfill joint efforts via inverse dynamics when PhysX didn't provide them
         _estimated_effort_count = 0
         if len(frames) >= 3:
@@ -8866,18 +8974,51 @@ class GenieSimLocalFramework:
                 _jp = np.array(_obs_rs.get("joint_positions", [])[:_id_dof], dtype=float)
                 _jv = np.array(_obs_rs.get("joint_velocities", [])[:_id_dof], dtype=float)
                 _ja = np.array(_obs_rs.get("joint_accelerations", [])[:_id_dof], dtype=float)
-                if _jp.size == _id_dof and _jv.size == _id_dof and _ja.size == _id_dof:
-                    _torque = _id_inertia * _ja + _id_damping * _jv + _id_gravity * np.cos(_jp)
-                    _efforts_list = _torque.tolist()
-                    # Pad to full joint count when available
-                    _full_len = len(_obs_rs.get("joint_positions", [])) or _id_dof
-                    if _full_len > _id_dof:
-                        _efforts_list = _efforts_list + [0.0] * (_full_len - _id_dof)
-                    _obs_rs["joint_efforts"] = _efforts_list
-                    if _obs_rs.get("joint_state"):
-                        _obs_rs["joint_state"]["efforts"] = _efforts_list
-                    frames[_fi]["efforts_source"] = "estimated_inverse_dynamics"
-                    _estimated_effort_count += 1
+                if _jp.size < _id_dof:
+                    _jp = np.pad(_jp, (0, _id_dof - _jp.size), mode="constant")
+                if _jv.size < _id_dof:
+                    _jv = np.pad(_jv, (0, _id_dof - _jv.size), mode="constant")
+                if _ja.size < _id_dof:
+                    _dt = frames[_fi].get("dt")
+                    if not _dt or _dt <= 0:
+                        _ts = frames[_fi].get("timestamp")
+                        _prev_ts = frames[_fi - 1].get("timestamp") if _fi > 0 else None
+                        if _ts is not None and _prev_ts is not None:
+                            _dt = _ts - _prev_ts
+                    if not _dt or _dt <= 0:
+                        _dt = 1.0 / _control_freq if _control_freq else (1.0 / 30.0)
+                    if _fi > 0:
+                        _prev_vel = (
+                            frames[_fi - 1]
+                            .get("observation", {})
+                            .get("robot_state", {})
+                            .get("joint_velocities", [])
+                        )
+                        _prev_vel_arr = (
+                            np.array(_prev_vel[:_id_dof], dtype=float)
+                            if isinstance(_prev_vel, list)
+                            else np.zeros(_id_dof, dtype=float)
+                        )
+                        if _prev_vel_arr.size == _id_dof:
+                            _ja = (_jv - _prev_vel_arr) / _dt
+                        else:
+                            _ja = np.zeros(_id_dof, dtype=float)
+                    else:
+                        _ja = np.zeros(_id_dof, dtype=float)
+                else:
+                    _ja = _ja[:_id_dof]
+                _torque = _id_inertia * _ja + _id_damping * _jv + _id_gravity * np.cos(_jp)
+                _efforts_list = _torque.tolist()
+                # Pad to full joint count when available
+                _full_len = len(_obs_rs.get("joint_positions", [])) or _id_dof
+                if _full_len > _id_dof:
+                    _efforts_list = _efforts_list + [0.0] * (_full_len - _id_dof)
+                _obs_rs["joint_efforts"] = _efforts_list
+                _joint_state = _obs_rs.get("joint_state")
+                if isinstance(_joint_state, dict):
+                    _joint_state["efforts"] = _efforts_list
+                frames[_fi]["efforts_source"] = "estimated_inverse_dynamics"
+                _estimated_effort_count += 1
             if _estimated_effort_count > 0:
                 logger.info(
                     "Backfilled joint efforts via inverse dynamics for %d/%d frames.",
@@ -11803,10 +11944,14 @@ Scene objects: {scene_summary}
                 _final_poses = frames[-1].get("_final_object_poses", {})
                 if _init_poses and _final_poses:
                     _any_moved = False
+                    _units_per_meter = getattr(self, "_units_per_meter", 1.0)
+                    if not isinstance(_units_per_meter, (int, float)) or _units_per_meter <= 0:
+                        _units_per_meter = 1.0
+                    _move_thresh = 0.01 * _units_per_meter
                     for _oid, _ip in _init_poses.items():
                         _fp = _final_poses.get(_oid)
                         if _fp is not None:
-                            if np.linalg.norm(np.array(_fp) - np.array(_ip)) > 0.01:
+                            if np.linalg.norm(np.array(_fp) - np.array(_ip)) > _move_thresh:
                                 _any_moved = True
                                 break
                     if not _any_moved:
