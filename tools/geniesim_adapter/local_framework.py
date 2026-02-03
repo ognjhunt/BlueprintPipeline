@@ -65,6 +65,12 @@ Environment Variables:
     ALLOW_GENIESIM_MOCK: Allow local mock gRPC server when GENIESIM_ROOT is missing (default: 0)
     GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD: Allow non-collision-aware linear fallback in production (default: 0; risky)
     GENIESIM_ALLOW_IK_FAILURE_FALLBACK: Allow linear fallback if IK planning fails (default: 0)
+    GENIESIM_SMOOTH_FALLBACK_TRAJECTORY: Smooth IK/linear fallback joint trajectories (default: 1)
+    GENIESIM_SMOOTH_WINDOW: Smoothing window size (odd integer, default: 5)
+    GENIESIM_ALLOW_HEURISTIC_ATTACH: Allow attach without contact data (default: 1 non-prod, 0 prod)
+    GENIESIM_FORCE_ATTACH_ON_GRASP_PHASE: Force attach to target during grasp/lift/transport (default: 1 non-prod, 0 prod)
+    GENIESIM_GRASP_THRESHOLD_SCALE: Scale factor for grasp distance threshold (default: 1.0)
+    GENIESIM_GRASP_MAX_DISTANCE_M: Max distance (m) for heuristic attach (default: 0.35)
     GENIESIM_STALL_TIMEOUT_S: Abort/reset episode if observations stall (default: 30)
     GENIESIM_MAX_STALLS: Max stalled episodes before server restart (default: 2)
     GENIESIM_STALL_BACKOFF_S: Backoff between stall handling attempts (default: 5)
@@ -8202,6 +8208,110 @@ class GenieSimLocalFramework:
         def _is_surface_body(name: str) -> bool:
             return any(kw in name for kw in _SURFACE_CONTACT_KEYWORDS)
 
+        def _tokenize_body_name(name: str) -> List[str]:
+            if not name:
+                return []
+            for sep in ("/", "\\", ":", ".", "-", "_"):
+                name = name.replace(sep, " ")
+            return [tok for tok in name.split() if tok]
+
+        def _match_contact_object_id(body_name: str) -> Optional[str]:
+            if not body_name or not _object_poses:
+                return None
+            name_lower = body_name.lower()
+            # Direct substring match on object ids
+            for _oid in _object_poses.keys():
+                _oid_lower = str(_oid).lower()
+                if _oid_lower and _oid_lower in name_lower:
+                    return _oid
+            # Token match as fallback
+            tokens = _tokenize_body_name(name_lower)
+            for _oid in _object_poses.keys():
+                _oid_lower = str(_oid).lower()
+                if _oid_lower in tokens:
+                    return _oid
+            return None
+
+        def _resolve_object_id_by_hint(hint: Optional[str]) -> Optional[str]:
+            if not hint or not _object_poses:
+                return None
+            hint_norm = str(hint).rsplit("/", 1)[-1].lower()
+            for _oid in _object_poses.keys():
+                if _oid == hint:
+                    return _oid
+                _oid_norm = str(_oid).rsplit("/", 1)[-1].lower()
+                if _oid_norm == hint_norm:
+                    return _oid
+            return None
+
+        def _seed_target_object(
+            obs: Dict[str, Any],
+            target_id: Optional[str],
+        ) -> None:
+            if not target_id or _is_production:
+                return
+            if target_id in _object_poses:
+                return
+            _target_pos = None
+            try:
+                _target_pos = self._find_target_position_from_obs(task, obs)
+            except Exception:
+                _target_pos = None
+            if _target_pos is None:
+                _tp = task.get("target_position")
+                if isinstance(_tp, (list, tuple, np.ndarray)) and len(_tp) >= 3:
+                    _target_pos = np.array(_tp[:3], dtype=float)
+            if _target_pos is None:
+                return
+            _object_poses[target_id] = np.array(_target_pos, dtype=float)
+            if obs.get("scene_state") is None:
+                obs["scene_state"] = {"objects": []}
+            _objs = obs["scene_state"].get("objects", [])
+            if not any(o.get("object_id") == target_id for o in _objs if isinstance(o, dict)):
+                _objs.append({
+                    "object_id": target_id,
+                    "object_type": str(target_id).rsplit("/", 1)[-1].lower(),
+                    "pose": {"position": _target_pos.tolist()},
+                    "orientation": [1.0, 0.0, 0.0, 0.0],
+                    "provenance": "synthetic_fallback",
+                })
+                obs["scene_state"]["objects"] = _objs
+            obs.setdefault("scene_state_provenance", "synthetic_fallback")
+
+        def _select_attach_candidate(
+            ee_pos: np.ndarray,
+            max_dist_units: float,
+            target_hint: Optional[str] = None,
+        ) -> Optional[str]:
+            if ee_pos is None or not _object_poses:
+                return None
+            # Prefer target object when specified
+            preferred: List[Tuple[float, str]] = []
+            fallback: List[Tuple[float, str]] = []
+            target_norm = target_hint.rsplit("/", 1)[-1].lower() if target_hint else ""
+            for _oid, _pos in _object_poses.items():
+                _oid_norm = str(_oid).rsplit("/", 1)[-1].lower()
+                _dist = float(np.linalg.norm(ee_pos - _pos))
+                if _dist > max_dist_units:
+                    continue
+                _obj_type = ""
+                for _obj in (_scene_state or {}).get("objects", []):
+                    if _obj.get("object_id") == _oid:
+                        _obj_type = (_obj.get("object_type") or "").lower()
+                        break
+                _category = _get_obj_prop(_obj_type, "category", "")
+                if _category == "furniture":
+                    continue
+                bucket = preferred if (target_norm and _oid_norm == target_norm) else fallback
+                bucket.append((_dist, _oid))
+            if preferred:
+                preferred.sort(key=lambda x: x[0])
+                return preferred[0][1]
+            if fallback:
+                fallback.sort(key=lambda x: x[0])
+                return fallback[0][1]
+            return None
+
         # --- LLM object property estimation ---
         # Persistent JSON cache that survives across runs
         _persistent_prop_cache_path = Path(os.getenv(
@@ -9255,6 +9365,96 @@ class GenieSimLocalFramework:
                         collision_provenance = self._last_planning_report.get("collision_source", "planning_report")
                         frame_data["collision_provenance"] = collision_provenance
             frame_data["collision_free_physics"] = collision_free_physics
+
+            # If not already attached, try attaching using contact report or heuristic
+            if (
+                _attached_object_id is None
+                and frame_data.get("gripper_command") == "closed"
+                and ee_pos_arr is not None
+            ):
+                _candidate = None
+                _target_hint = task.get("target_object") or task.get("target_object_id")
+                _seed_target_object(obs, _target_hint)
+
+                _phase = waypoint.get("phase", "")
+                _phase_val = _phase.value if hasattr(_phase, "value") else str(_phase)
+                _phase_val = _phase_val.lower()
+
+                if _contact_result_available and _contacts:
+                    for _c in _contacts:
+                        _body_a = _normalize_body_name(
+                            _c.get("body_a", "") if isinstance(_c, dict) else getattr(_c, "body_a", "")
+                        )
+                        _body_b = _normalize_body_name(
+                            _c.get("body_b", "") if isinstance(_c, dict) else getattr(_c, "body_b", "")
+                        )
+                        if not (_is_gripper_body(_body_a) or _is_gripper_body(_body_b)):
+                            continue
+                        _candidate = _match_contact_object_id(_body_a) or _match_contact_object_id(_body_b)
+                        if _candidate:
+                            break
+
+                _force_attach = os.getenv("GENIESIM_FORCE_ATTACH_ON_GRASP_PHASE")
+                if _force_attach is None:
+                    _force_attach = not _is_production
+                else:
+                    _force_attach = _force_attach.strip().lower() in {"1", "true", "yes"}
+
+                if (
+                    _candidate is None
+                    and _force_attach
+                    and _phase_val in ("grasp", "lift", "transport")
+                ):
+                    _candidate = _resolve_object_id_by_hint(_target_hint)
+                    if _candidate is None and _object_poses:
+                        try:
+                            _max_dist_m = float(os.getenv("GENIESIM_GRASP_MAX_DISTANCE_M", "0.35"))
+                        except ValueError:
+                            _max_dist_m = 0.35
+                        _candidate = _select_attach_candidate(
+                            ee_pos_arr,
+                            max_dist_units=_max_dist_m * 1.5 * _units_per_meter,
+                            target_hint=_target_hint,
+                        )
+
+                _allow_heuristic_attach = os.getenv("GENIESIM_ALLOW_HEURISTIC_ATTACH")
+                if _allow_heuristic_attach is None:
+                    _allow_heuristic_attach = not _is_production
+                else:
+                    _allow_heuristic_attach = _allow_heuristic_attach.strip().lower() in {"1", "true", "yes"}
+
+                if _candidate is None and _allow_heuristic_attach:
+                    try:
+                        _max_dist_m = float(os.getenv("GENIESIM_GRASP_MAX_DISTANCE_M", "0.35"))
+                    except ValueError:
+                        _max_dist_m = 0.35
+                    try:
+                        _thresh_scale = float(os.getenv("GENIESIM_GRASP_THRESHOLD_SCALE", "1.0"))
+                    except ValueError:
+                        _thresh_scale = 1.0
+                    if not _contact_result_available:
+                        _thresh_scale = max(_thresh_scale, 1.5)
+                    _candidate = _select_attach_candidate(
+                        ee_pos_arr,
+                        max_dist_units=_max_dist_m * _thresh_scale * _units_per_meter,
+                        target_hint=_target_hint,
+                    )
+
+                if _candidate and _candidate in _object_poses:
+                    _attached_object_id = _candidate
+                    _grasp_ee_offset = _object_poses[_attached_object_id] - ee_pos_arr
+                    frame_data["grasp_feasible"] = True
+                    frame_data["grasped_object_id"] = _attached_object_id
+                    _attached_has_real_pose = False
+                    # Apply kinematic attachment update immediately
+                    _new_pos = ee_pos_arr + _grasp_ee_offset
+                    _object_poses[_attached_object_id] = _new_pos.copy()
+                    if obs.get("scene_state"):
+                        for _obj in obs["scene_state"].get("objects", []):
+                            if _obj.get("object_id") == _attached_object_id:
+                                _update_pose_dict(_obj, _new_pos)
+                                break
+                    obs["scene_state_provenance"] = "kinematic_ee_offset"
 
             # Contact force estimation: prefer real joint efforts, then contact report, else heuristic
             _contact_forces_payload = None
@@ -10725,6 +10925,71 @@ class GenieSimLocalFramework:
         )
         return trajectory
 
+    def _smooth_joint_trajectory(
+        self,
+        trajectory: List[Dict[str, Any]],
+        robot_config: Optional[Any],
+        *,
+        window: int = 5,
+        indices: Optional[Sequence[int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Low-pass smooth joint positions to reduce jerk in fallback trajectories."""
+        if not trajectory or len(trajectory) < 3:
+            return trajectory
+        if window < 3:
+            return trajectory
+        if window % 2 == 0:
+            window += 1
+
+        joint_rows = []
+        for wp in trajectory:
+            jp = wp.get("joint_positions")
+            if jp is None:
+                return trajectory
+            joint_rows.append(np.array(jp, dtype=float))
+        joint_matrix = np.vstack(joint_rows)
+        num_steps, dof = joint_matrix.shape
+        if dof == 0:
+            return trajectory
+
+        if indices is None:
+            indices = list(range(dof))
+        else:
+            indices = [idx for idx in indices if 0 <= idx < dof]
+        if not indices:
+            return trajectory
+
+        half = window // 2
+        kernel = np.arange(1, half + 2, dtype=float)
+        kernel = np.concatenate([kernel, kernel[-2::-1]])
+        kernel /= kernel.sum()
+
+        padded = np.pad(joint_matrix, ((half, half), (0, 0)), mode="edge")
+        smoothed = joint_matrix.copy()
+        for i in range(num_steps):
+            window_slice = padded[i:i + window]
+            smoothed[i, indices] = np.sum(window_slice[:, indices] * kernel[:, None], axis=0)
+
+        # Preserve endpoints to avoid shifting start/goal poses
+        smoothed[0, indices] = joint_matrix[0, indices]
+        smoothed[-1, indices] = joint_matrix[-1, indices]
+
+        if robot_config is not None and hasattr(robot_config, "joint_limits_lower"):
+            lower = np.array(robot_config.joint_limits_lower, dtype=float)
+            upper = np.array(robot_config.joint_limits_upper, dtype=float)
+            limit_dof = min(dof, lower.shape[0], upper.shape[0])
+            if limit_dof > 0:
+                smoothed[:, :limit_dof] = np.clip(
+                    smoothed[:, :limit_dof],
+                    lower[:limit_dof],
+                    upper[:limit_dof],
+                )
+
+        for idx, wp in enumerate(trajectory):
+            wp["joint_positions"] = smoothed[idx].tolist()
+
+        return trajectory
+
     def _resolve_workspace_bounds(
         self,
         task: Dict[str, Any],
@@ -11303,7 +11568,10 @@ Scene objects: {scene_summary}
             current_joints = target_joints
 
         # Fix 5: Apply trajectory smoothing to reduce acceleration/jerk
-        trajectory = self._apply_trajectory_smoothing(trajectory)
+        trajectory = self._apply_trajectory_smoothing(
+            trajectory,
+            robot_config=robot_config,
+        )
         trajectory = self._apply_joint_usage_regularizer(trajectory)
         return trajectory
 
@@ -11311,16 +11579,17 @@ Scene objects: {scene_summary}
         self,
         trajectory: List[Dict[str, Any]],
         window_size: int = 5,
+        robot_config: Optional[Any] = None,
+        indices: Optional[Sequence[int]] = None,
     ) -> List[Dict[str, Any]]:
-        """Apply smoothing to trajectory joint positions to reduce acceleration.
-
-        Uses a simple moving average filter that preserves endpoints.
-        This helps improve the smoothness_score by reducing mean acceleration.
-        """
-        if len(trajectory) < window_size:
+        """Apply smoothing to trajectory joint positions to reduce acceleration."""
+        if os.getenv("GENIESIM_SMOOTH_FALLBACK_TRAJECTORY", "1") != "1":
+            return trajectory
+        smooth_window = int(os.getenv("GENIESIM_SMOOTH_WINDOW", str(window_size)))
+        if len(trajectory) < smooth_window:
             return trajectory
 
-        # Extract joint positions as numpy array
+        # Cache original joint positions to preserve critical phases
         joint_rows = []
         for wp in trajectory:
             jp = wp.get("joint_positions")
@@ -11329,38 +11598,22 @@ Scene objects: {scene_summary}
             else:
                 return trajectory  # Can't smooth if missing positions
 
-        if len(joint_rows) < window_size:
+        if len(joint_rows) < smooth_window:
             return trajectory
+        original = joint_rows
 
-        joint_matrix = np.vstack(joint_rows)
-        n_frames, n_joints = joint_matrix.shape
+        trajectory = self._smooth_joint_trajectory(
+            trajectory,
+            robot_config,
+            window=smooth_window,
+            indices=indices,
+        )
 
-        # Apply smoothing using convolution with uniform kernel
-        # Preserve endpoints to maintain task accuracy
-        smoothed = np.zeros_like(joint_matrix)
-        half_win = window_size // 2
-
-        for j in range(n_joints):
-            # Pad with edge values for smoothing
-            padded = np.pad(joint_matrix[:, j], half_win, mode='edge')
-            kernel = np.ones(window_size) / window_size
-            conv = np.convolve(padded, kernel, mode='valid')
-            smoothed[:, j] = conv
-
-        # Restore exact endpoint values (important for grasp/place accuracy)
-        smoothed[0] = joint_matrix[0]
-        smoothed[-1] = joint_matrix[-1]
-
-        # Also preserve waypoint boundaries (phases like grasp, place)
+        # Preserve critical phases exactly (grasp/place/pre_grasp)
         for i, wp in enumerate(trajectory):
             phase = wp.get("phase", "")
             if phase in ("grasp", "place", "pre_grasp"):
-                # Keep critical waypoints exact
-                smoothed[i] = joint_matrix[i]
-
-        # Update trajectory with smoothed positions
-        for i, wp in enumerate(trajectory):
-            wp["joint_positions"] = smoothed[i].tolist()
+                wp["joint_positions"] = original[i].tolist()
 
         return trajectory
 
@@ -11756,6 +12009,13 @@ Scene objects: {scene_summary}
             f"  ℹ️  Multi-phase joint-space fallback: {len(trajectory)} waypoints "
             f"across 5 phases.",
             "INFO",
+        )
+
+        # Smooth arm joints to reduce jerk in fallback trajectories
+        trajectory = self._apply_trajectory_smoothing(
+            trajectory,
+            robot_config=robot_config,
+            indices=arm_joint_indices,
         )
 
         positions = None
@@ -12948,113 +13208,118 @@ Scene objects: {scene_summary}
         # --- Improvement I: Physics plausibility penalties ---
         scene_state_penalty = 0.0
         ee_approach_penalty = 0.0
+        _any_moved = False
+        _requires_motion = self._requires_object_motion(task)
 
-        # Penalty: static scene state (no object moved)
-        # Skip this penalty when running without server recording — physics
-        # feedback is unavailable so object poses are always identical.
-        _skip_recording = os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", "")
-        if frames and not _skip_recording:
-            _has_real_scene_state = any(
-                (frame.get("observation", {}) or {}).get("data_source") in ("real_composed", "between_waypoints")
-                for frame in frames
-            )
-            if _has_real_scene_state:
-                _any_moved = False
-                _max_displacement = 0.0
-                _units_per_meter = getattr(self, "_units_per_meter", 1.0)
-                if not isinstance(_units_per_meter, (int, float)) or _units_per_meter <= 0:
-                    _units_per_meter = 1.0
-                _move_thresh = 0.01 * _units_per_meter  # 1cm threshold
+        if _requires_motion:
+            # Penalty: static scene state (no object moved)
+            # Skip this penalty when running without server recording — physics
+            # feedback is unavailable so object poses are always identical.
+            _skip_recording = os.environ.get("GENIESIM_SKIP_SERVER_RECORDING", "")
+            if frames and not _skip_recording:
+                _has_real_scene_state = any(
+                    (frame.get("observation", {}) or {}).get("data_source") in ("real_composed", "between_waypoints")
+                    for frame in frames
+                )
+                if _has_real_scene_state:
+                    _any_moved = False
+                    _max_displacement = 0.0
+                    _units_per_meter = getattr(self, "_units_per_meter", 1.0)
+                    if not isinstance(_units_per_meter, (int, float)) or _units_per_meter <= 0:
+                        _units_per_meter = 1.0
+                    _move_thresh = 0.01 * _units_per_meter  # 1cm threshold
 
-                # Prefer trajectory-based movement detection (Issue 2 fix)
-                # Check per-frame object_poses for any movement across consecutive frames
-                _object_trajectory: Dict[str, List[List[float]]] = {}
-                for _frame in frames:
-                    _frame_poses = _frame.get("object_poses", {})
-                    for _oid, _pose_data in _frame_poses.items():
-                        if _oid not in _object_trajectory:
-                            _object_trajectory[_oid] = []
-                        _pos = _pose_data.get("position")
-                        if _pos:
-                            _object_trajectory[_oid].append(_pos)
+                    # Prefer trajectory-based movement detection (Issue 2 fix)
+                    # Check per-frame object_poses for any movement across consecutive frames
+                    _object_trajectory: Dict[str, List[List[float]]] = {}
+                    for _frame in frames:
+                        _frame_poses = _frame.get("object_poses", {})
+                        for _oid, _pose_data in _frame_poses.items():
+                            if _oid not in _object_trajectory:
+                                _object_trajectory[_oid] = []
+                            _pos = _pose_data.get("position")
+                            if _pos:
+                                _object_trajectory[_oid].append(_pos)
 
-                # Check trajectory for movement
-                if _object_trajectory:
-                    for _oid, _positions in _object_trajectory.items():
-                        if len(_positions) < 2:
-                            continue
-                        for i in range(1, len(_positions)):
-                            prev_pos = np.array(_positions[i - 1])
-                            curr_pos = np.array(_positions[i])
-                            disp = float(np.linalg.norm(curr_pos - prev_pos))
-                            _max_displacement = max(_max_displacement, disp)
-                            if disp > _move_thresh:
-                                _any_moved = True
-                                break
-                        if _any_moved:
-                            break
-
-                # Fallback to init/final comparison if no trajectory data
-                if not _object_trajectory:
-                    _init_poses = frames[0].get("_initial_object_poses", {})
-                    _final_poses = frames[-1].get("_final_object_poses", {})
-                    if _init_poses and _final_poses:
-                        for _oid, _ip in _init_poses.items():
-                            _fp = _final_poses.get(_oid)
-                            if _fp is not None:
-                                disp = float(np.linalg.norm(np.array(_fp) - np.array(_ip)))
+                    # Check trajectory for movement
+                    if _object_trajectory:
+                        for _oid, _positions in _object_trajectory.items():
+                            if len(_positions) < 2:
+                                continue
+                            for i in range(1, len(_positions)):
+                                prev_pos = np.array(_positions[i - 1])
+                                curr_pos = np.array(_positions[i])
+                                disp = float(np.linalg.norm(curr_pos - prev_pos))
                                 _max_displacement = max(_max_displacement, disp)
                                 if disp > _move_thresh:
                                     _any_moved = True
                                     break
+                            if _any_moved:
+                                break
 
-                if not _any_moved:
-                    # Proportional penalty based on how close displacement is to threshold
-                    # If max_displacement is 0, full penalty. If close to threshold, reduced penalty.
-                    if _max_displacement > 0 and _move_thresh > 0:
-                        # Scale penalty: 0.20 when displacement=0, approaches 0 as displacement → threshold
-                        displacement_ratio = min(1.0, _max_displacement / _move_thresh)
-                        scene_state_penalty = 0.20 * (1.0 - displacement_ratio)
-                    else:
-                        scene_state_penalty = 0.20
-                    logger.warning(
-                        "Quality penalty: scene_state is static (max_displacement=%.4fm, threshold=%.4fm, penalty=%.3f)",
-                        _max_displacement, _move_thresh, scene_state_penalty,
-                    )
+                    # Fallback to init/final comparison if no trajectory data
+                    if not _object_trajectory:
+                        _init_poses = frames[0].get("_initial_object_poses", {})
+                        _final_poses = frames[-1].get("_final_object_poses", {})
+                        if _init_poses and _final_poses:
+                            for _oid, _ip in _init_poses.items():
+                                _fp = _final_poses.get(_oid)
+                                if _fp is not None:
+                                    disp = float(np.linalg.norm(np.array(_fp) - np.array(_ip)))
+                                    _max_displacement = max(_max_displacement, disp)
+                                    if disp > _move_thresh:
+                                        _any_moved = True
+                                        break
 
-        # Check if kinematic EE-offset tracking was used for grasped objects
-        _kinematic_tracking_used = any(
-            (frame.get("observation", {}) or {}).get("scene_state_provenance") == "kinematic_ee_offset"
-            for frame in frames
-        )
-        if _kinematic_tracking_used and not _any_moved:
-            # Kinematic tracking is a reasonable fallback when physics doesn't move objects
-            # Reduce penalty significantly since the object is being tracked via EE motion
-            scene_state_penalty = min(scene_state_penalty, 0.05)
-            logger.info(
-                "Quality: Using kinematic EE-offset tracking for grasped object (reduced penalty to %.3f)",
-                scene_state_penalty,
+                    if not _any_moved:
+                        # Proportional penalty based on how close displacement is to threshold
+                        # If max_displacement is 0, full penalty. If close to threshold, reduced penalty.
+                        if _max_displacement > 0 and _move_thresh > 0:
+                            # Scale penalty: 0.20 when displacement=0, approaches 0 as displacement → threshold
+                            displacement_ratio = min(1.0, _max_displacement / _move_thresh)
+                            scene_state_penalty = 0.20 * (1.0 - displacement_ratio)
+                        else:
+                            scene_state_penalty = 0.20
+                        logger.warning(
+                            "Quality penalty: scene_state is static (max_displacement=%.4fm, threshold=%.4fm, penalty=%.3f)",
+                            _max_displacement, _move_thresh, scene_state_penalty,
+                        )
+
+            # Check if kinematic EE-offset tracking was used for grasped objects
+            _kinematic_tracking_used = any(
+                (frame.get("observation", {}) or {}).get("scene_state_provenance") == "kinematic_ee_offset"
+                for frame in frames
             )
-
-        _scene_state_fallback = any(
-            (frame.get("observation", {}) or {}).get("scene_state_provenance") == "synthetic_fallback"
-            for frame in frames
-        )
-        if _scene_state_fallback and getattr(self.config, "environment", "") != "production":
-            # When object tracking is unavailable, use EE trajectory variance as fallback
-            # to reduce penalty if the robot is clearly doing meaningful work
-            ee_trajectory_score = self._compute_ee_trajectory_variance_score(frames)
-            if ee_trajectory_score > 0.5:
-                # Robot had meaningful motion; reduce penalty proportionally
-                adjusted_penalty = 0.15 * (1.0 - ee_trajectory_score * 0.6)
-                scene_state_penalty = max(scene_state_penalty, adjusted_penalty)
-                logger.warning(
-                    "Quality penalty: scene_state uses synthetic fallback (ee_motion=%.2f, penalty=%.3f)",
-                    ee_trajectory_score, adjusted_penalty,
+            if _kinematic_tracking_used and not _any_moved:
+                # Kinematic tracking is a reasonable fallback when physics doesn't move objects
+                # Reduce penalty significantly since the object is being tracked via EE motion
+                scene_state_penalty = min(scene_state_penalty, 0.05)
+                logger.info(
+                    "Quality: Using kinematic EE-offset tracking for grasped object (reduced penalty to %.3f)",
+                    scene_state_penalty,
                 )
-            else:
-                scene_state_penalty = max(scene_state_penalty, 0.15)
-                logger.warning("Quality penalty: scene_state uses synthetic fallback provenance.")
+
+            _scene_state_fallback = any(
+                (frame.get("observation", {}) or {}).get("scene_state_provenance") == "synthetic_fallback"
+                for frame in frames
+            )
+            if _scene_state_fallback and getattr(self.config, "environment", "") != "production":
+                # When object tracking is unavailable, use EE trajectory variance as fallback
+                # to reduce penalty if the robot is clearly doing meaningful work
+                ee_trajectory_score = self._compute_ee_trajectory_variance_score(frames)
+                if ee_trajectory_score > 0.5:
+                    # Robot had meaningful motion; reduce penalty proportionally
+                    adjusted_penalty = 0.15 * (1.0 - ee_trajectory_score * 0.6)
+                    scene_state_penalty = max(scene_state_penalty, adjusted_penalty)
+                    logger.warning(
+                        "Quality penalty: scene_state uses synthetic fallback (ee_motion=%.2f, penalty=%.3f)",
+                        ee_trajectory_score, adjusted_penalty,
+                    )
+                else:
+                    scene_state_penalty = max(scene_state_penalty, 0.15)
+                    logger.warning("Quality penalty: scene_state uses synthetic fallback provenance.")
+        else:
+            logger.info("Quality: scene_state penalty skipped (task does not require object motion).")
 
         # Penalty: EE never approaches target object
         if target_object_id and frames:
@@ -13303,6 +13568,53 @@ Scene objects: {scene_summary}
         motion_quality = 0.5 + 0.5 * (1.0 - abs(0.5 - efficiency) * 2)
 
         return min(1.0, path_score * motion_quality)
+
+    def _requires_object_motion(self, task: Dict[str, Any]) -> bool:
+        """Return True when the task expects objects to move (grasp/pick/place/etc)."""
+        if not isinstance(task, dict):
+            return False
+
+        explicit_keys = (
+            "requires_object_motion",
+            "requires_object_movement",
+            "expect_object_motion",
+            "expects_object_motion",
+        )
+        for key in explicit_keys:
+            if key in task:
+                try:
+                    return bool(task.get(key))
+                except Exception:
+                    return False
+
+        if task.get("allow_static_scene") is True or task.get("static_scene_ok") is True:
+            return False
+
+        task_type = (task.get("task_type") or task.get("task_name") or task.get("task") or "").lower()
+
+        motion_keywords = {
+            "pick", "place", "grasp", "lift", "stack", "insert", "open", "close",
+            "pour", "push", "pull", "transport", "handover", "rotate", "turn", "twist",
+            "slide", "wipe", "clean", "sweep", "press", "toggle", "assemble", "disassemble",
+        }
+        non_motion_keywords = {
+            "inspect", "observe", "scan", "look", "view", "perceive", "detect",
+            "classify", "segment", "navigate", "reach", "point", "pose", "calibrate",
+            "idle", "monitor",
+        }
+
+        if any(key in task_type for key in non_motion_keywords):
+            return False
+        if any(key in task_type for key in motion_keywords):
+            return True
+
+        # Heuristic: place/goal positions imply object motion.
+        if task.get("place_position") is not None or task.get("place_pose") is not None:
+            return True
+        if task.get("goal_region") is not None and task.get("target_object") is not None:
+            return True
+
+        return False
 
     def _extract_task_success(
         self,

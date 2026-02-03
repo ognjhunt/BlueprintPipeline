@@ -65,6 +65,40 @@ if [ -d "${PATCHES_DIR}" ]; then
   fi
 fi
 
+# Sync updated gRPC proto/stubs into the runtime (ensures new RPCs are registered)
+_GRPC_SRC_DIR="${REPO_ROOT}/tools/geniesim_adapter"
+_GRPC_PB2="${_GRPC_SRC_DIR}/geniesim_grpc_pb2.py"
+_GRPC_PB2_GRPC="${_GRPC_SRC_DIR}/geniesim_grpc_pb2_grpc.py"
+_GRPC_PROTO="${_GRPC_SRC_DIR}/geniesim_grpc.proto"
+if [ -f "${_GRPC_PB2}" ] && [ -f "${_GRPC_PB2_GRPC}" ]; then
+  echo "[geniesim] Syncing gRPC stubs/proto into GENIESIM_ROOT..."
+  _grpc_dirs="$(find "${GENIESIM_ROOT}" -type f \
+      \( -name "geniesim_grpc_pb2.py" -o -name "geniesim_grpc_pb2_grpc.py" -o -name "geniesim_grpc.proto" \) \
+      -print 2>/dev/null | xargs -r -n1 dirname | sort -u)"
+  _synced=0
+  if [ -n "${_grpc_dirs}" ]; then
+    while IFS= read -r _dir; do
+      [ -z "${_dir}" ] && continue
+      cp -f "${_GRPC_PB2}" "${_dir}/" || true
+      cp -f "${_GRPC_PB2_GRPC}" "${_dir}/" || true
+      [ -f "${_GRPC_PROTO}" ] && cp -f "${_GRPC_PROTO}" "${_dir}/" || true
+      _synced=$((_synced + 1))
+    done <<< "${_grpc_dirs}"
+  fi
+  _fallback_dir="${GENIESIM_ROOT}/source/data_collection/aimdk/protocol"
+  if [ "${_synced}" -eq 0 ] && [ -d "${_fallback_dir}" ]; then
+    cp -f "${_GRPC_PB2}" "${_fallback_dir}/" || true
+    cp -f "${_GRPC_PB2_GRPC}" "${_fallback_dir}/" || true
+    [ -f "${_GRPC_PROTO}" ] && cp -f "${_GRPC_PROTO}" "${_fallback_dir}/" || true
+    _synced=1
+  fi
+  if [ "${_synced}" -gt 0 ]; then
+    echo "[geniesim] ✓ gRPC stubs synced to ${_synced} location(s)"
+  else
+    echo "[geniesim] WARNING: gRPC stub sync skipped (no target dirs found)"
+  fi
+fi
+
 # Install pipeline Python dependencies into Isaac Sim's Python
 PIPELINE_REQS="${REPO_ROOT}/genie-sim-local-job/requirements.txt"
 if [ -f "${PIPELINE_REQS}" ]; then
