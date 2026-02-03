@@ -6487,6 +6487,7 @@ class GenieSimLocalFramework:
                 aligned_observations,
                 task=task,
                 episode_id=episode_id,
+                output_dir=output_dir,
             )
             _camera_frame_count = _frame_stats["camera_frame_count"]
             _real_scene_state_count = _frame_stats["real_scene_state_count"]
@@ -7363,6 +7364,9 @@ class GenieSimLocalFramework:
                 _f.pop("_initial_object_poses", None)
                 _f.pop("_final_object_poses", None)
 
+            # Set episode dir so VLM audit / sim-to-real can resolve .npy paths
+            self._current_episode_dir = output_dir if output_dir is not None else None
+
             # VLM-based quality audit (gated by ENABLE_VLM_QUALITY_AUDIT=1)
             vlm_audit = self._audit_episode_with_vlm(frames, task, quality_score)
             if vlm_audit and not vlm_audit.get("skipped"):
@@ -7654,6 +7658,7 @@ class GenieSimLocalFramework:
         *,
         task: Dict[str, Any],
         episode_id: str,
+        output_dir: Optional[Path] = None,
     ) -> List[Dict[str, Any]]:
         # Attempt to set up FK for end-effector pose computation
         fk_solver = None
@@ -8001,9 +8006,12 @@ class GenieSimLocalFramework:
             )
 
         # Set up frames directory for saving camera data as separate .npy files
-        _frames_dir = output_dir / f"{episode_id}_frames"
-        _frames_dir.mkdir(parents=True, exist_ok=True)
-        self._current_frames_dir = _frames_dir
+        if output_dir is not None:
+            _frames_dir = output_dir / f"{episode_id}_frames"
+            _frames_dir.mkdir(parents=True, exist_ok=True)
+            self._current_frames_dir = _frames_dir
+        else:
+            self._current_frames_dir = None
 
         for step_idx, (waypoint, obs) in enumerate(zip(trajectory, observations)):
             # Shallow-copy obs to avoid mutating shared references (aligned
@@ -8440,16 +8448,27 @@ class GenieSimLocalFramework:
                             frame_data["grasp_feasible"] = False
                         break
 
-            # Update attached object pose: prefer real scene_state (already updated
-            # above), fall back to kinematic EE-offset tracking if no real pose.
-            _attached_has_real_pose = (
-                _attached_object_id is not None
-                and obs.get("scene_state")
-                and any(
-                    _obj.get("object_id") == _attached_object_id
-                    for _obj in obs["scene_state"].get("objects", [])
-                )
-            )
+            # Update attached object pose: prefer real scene_state when the
+            # server is actually reporting changing poses.  When scene_state
+            # poses are static (same value every frame), fall back to kinematic
+            # EE-offset tracking so grasped objects follow the end-effector.
+            _attached_has_real_pose = False
+            if _attached_object_id is not None and obs.get("scene_state"):
+                for _obj in obs.get("scene_state", {}).get("objects", []):
+                    if _obj.get("object_id") == _attached_object_id:
+                        _p = _obj.get("pose", {})
+                        if "x" in _p:
+                            _real_pos = np.array([_p["x"], _p["y"], _p["z"]], dtype=float)
+                        elif "position" in _p:
+                            _pv = _p["position"]
+                            _real_pos = np.array([_pv.get("x",0), _pv.get("y",0), _pv.get("z",0)], dtype=float) if isinstance(_pv, dict) else np.array(_pv, dtype=float)
+                        else:
+                            break
+                        # Check if the pose actually changed from initial (server is live)
+                        _init_pos = _initial_object_poses.get(_attached_object_id)
+                        if _init_pos is not None and float(np.linalg.norm(_real_pos - _init_pos)) > 0.005:
+                            _attached_has_real_pose = True  # server reports actual movement
+                        break
             if _attached_object_id is not None and ee_pos_arr is not None and not _attached_has_real_pose:
                 _new_pos = ee_pos_arr + _grasp_ee_offset
                 _object_poses[_attached_object_id] = _new_pos.copy()
@@ -8698,6 +8717,26 @@ class GenieSimLocalFramework:
                             _vel_lim[:len(_VEL_LIMITS)] = _VEL_LIMITS
                         _jv_clamped = np.clip(_jv_clamped, -_vel_lim, _vel_lim)
                     obs_rs["joint_velocities"] = _jv_clamped.tolist()
+                    # Compute joint accelerations from real velocities (finite difference)
+                    if dt > 0:
+                        _prev_jv_real = np.array(
+                            prev.get("observation", {}).get("robot_state", {}).get("joint_velocities", []),
+                            dtype=float,
+                        )
+                        if _prev_jv_real.shape == _jv_clamped.shape and _prev_jv_real.size > 0:
+                            _ja_real = (_jv_clamped - _prev_jv_real) / dt
+                            if _ACC_LIMITS is not None:
+                                if _ja_real.size <= len(_ACC_LIMITS):
+                                    _acc_lim_r = _ACC_LIMITS[:_ja_real.size]
+                                else:
+                                    _acc_lim_r = np.full(_ja_real.size, _ACC_LIMITS[-1])
+                                    _acc_lim_r[:len(_ACC_LIMITS)] = _ACC_LIMITS
+                                _ja_real = np.clip(_ja_real, -_acc_lim_r, _acc_lim_r)
+                            obs_rs["joint_accelerations"] = _ja_real.tolist()
+                        else:
+                            obs_rs["joint_accelerations"] = [0.0] * _jv_clamped.size
+                    else:
+                        obs_rs["joint_accelerations"] = [0.0] * _jv_clamped.size
                 elif dt > 0:
                     jp_curr = np.array(obs_rs.get("joint_positions", []), dtype=float)
                     jp_prev = np.array(
@@ -8758,6 +8797,49 @@ class GenieSimLocalFramework:
                     # Mirror velocity fields to robot_state (Improvement C)
                     if "ee_vel" in frame:
                         obs_rs["ee_vel"] = frame["ee_vel"]
+
+        # Smooth velocities and accelerations with Savitzky-Golay filter when
+        # enough frames are available.  This reduces finite-difference noise and
+        # produces cleaner effort estimates downstream.
+        if len(frames) >= 7:
+            try:
+                from scipy.signal import savgol_filter as _savgol
+                _sg_window = min(7, len(frames) if len(frames) % 2 == 1 else len(frames) - 1)
+                if _sg_window >= 5:
+                    # Collect velocity matrix (N_frames x N_joints)
+                    _vel_matrix = []
+                    for _fr in frames:
+                        _vels = _fr.get("observation", {}).get("robot_state", {}).get("joint_velocities", [])
+                        _vel_matrix.append(np.array(_vels[:arm_dof], dtype=float) if len(_vels) >= arm_dof else None)
+                    if all(v is not None and v.size == arm_dof for v in _vel_matrix):
+                        _vel_arr = np.array([v for v in _vel_matrix])  # (N, arm_dof)
+                        _vel_smooth = _savgol(_vel_arr, _sg_window, 3, axis=0)
+                        _acc_smooth = _savgol(_vel_arr, _sg_window, 3, deriv=1, delta=frames[1]["timestamp"] - frames[0]["timestamp"], axis=0)
+                        if _ACC_LIMITS is not None:
+                            _acc_lim_sg = _ACC_LIMITS[:arm_dof] if arm_dof <= len(_ACC_LIMITS) else np.full(arm_dof, _ACC_LIMITS[-1])
+                            _acc_smooth = np.clip(_acc_smooth, -_acc_lim_sg, _acc_lim_sg)
+                        for _si, _fr in enumerate(frames):
+                            _obs_rs_sg = _fr.get("observation", {}).get("robot_state", {})
+                            # Replace arm-joint portion of velocities with smoothed values
+                            _existing_vel = _obs_rs_sg.get("joint_velocities", [])
+                            _smoothed_vel = list(_existing_vel)  # preserve full 34-joint array
+                            for _ji in range(min(arm_dof, len(_smoothed_vel))):
+                                _smoothed_vel[_ji] = float(_vel_smooth[_si, _ji])
+                            _obs_rs_sg["joint_velocities"] = _smoothed_vel
+                            # Replace arm-joint portion of accelerations
+                            _existing_acc = _obs_rs_sg.get("joint_accelerations", [])
+                            if isinstance(_existing_acc, list) and len(_existing_acc) >= arm_dof:
+                                _smoothed_acc = list(_existing_acc)
+                                for _ji in range(min(arm_dof, len(_smoothed_acc))):
+                                    _smoothed_acc[_ji] = float(_acc_smooth[_si, _ji])
+                                _obs_rs_sg["joint_accelerations"] = _smoothed_acc
+                            else:
+                                _obs_rs_sg["joint_accelerations"] = _acc_smooth[_si].tolist()
+                        logger.info("Applied Savitzky-Golay smoothing to velocities/accelerations (window=%d)", _sg_window)
+            except ImportError:
+                logger.debug("scipy not available — skipping Savitzky-Golay velocity smoothing")
+            except Exception as _sg_exc:
+                logger.warning("Savitzky-Golay smoothing failed (non-fatal): %s", _sg_exc)
 
         # Backfill joint efforts via inverse dynamics when PhysX didn't provide them
         _estimated_effort_count = 0
@@ -11140,6 +11222,7 @@ Scene objects: {scene_summary}
         sample_indices = [i for i in sample_indices if 0 <= i < n]
 
         # Extract RGB images from camera frames
+        _ep_dir = getattr(self, "_current_episode_dir", None)
         images = []
         for idx in sample_indices:
             frame = frames[idx]
@@ -11148,15 +11231,17 @@ Scene objects: {scene_summary}
             rgb = None
             for cam_id in ["wrist", "front", "overhead"]:
                 cam_data = camera_frames.get(cam_id)
-                if cam_data and cam_data.get("rgb") is not None:
-                    rgb = cam_data["rgb"]
-                    break
+                if cam_data and isinstance(cam_data, dict):
+                    rgb = load_camera_frame(cam_data, "rgb", ep_dir=_ep_dir)
+                    if rgb is not None:
+                        break
             if rgb is None:
                 # Try any camera
                 for cam_id, cam_data in camera_frames.items():
-                    if cam_data and cam_data.get("rgb") is not None:
-                        rgb = cam_data["rgb"]
-                        break
+                    if cam_data and isinstance(cam_data, dict):
+                        rgb = load_camera_frame(cam_data, "rgb", ep_dir=_ep_dir)
+                        if rgb is not None:
+                            break
             if rgb is not None:
                 images.append({"frame_idx": idx, "rgb": rgb})
 
@@ -11266,20 +11351,27 @@ Scene objects: {scene_summary}
         n = len(frames)
         sample_indices = sorted(set([0, n // 2, n - 1]))
 
+        _ep_dir = getattr(self, "_current_episode_dir", None)
         images = []
         for idx in sample_indices:
             frame = frames[idx]
             camera_frames = frame.get("observation", {}).get("camera_frames") or {}
+            _found = False
             for cam_id in ["wrist", "front", "overhead"]:
                 cam_data = camera_frames.get(cam_id)
-                if cam_data and cam_data.get("rgb") is not None:
-                    images.append(cam_data["rgb"])
-                    break
-            else:
-                for cam_data in camera_frames.values():
-                    if cam_data and cam_data.get("rgb") is not None:
-                        images.append(cam_data["rgb"])
+                if cam_data and isinstance(cam_data, dict):
+                    rgb = load_camera_frame(cam_data, "rgb", ep_dir=_ep_dir)
+                    if rgb is not None:
+                        images.append(rgb)
+                        _found = True
                         break
+            if not _found:
+                for cam_data in camera_frames.values():
+                    if cam_data and isinstance(cam_data, dict):
+                        rgb = load_camera_frame(cam_data, "rgb", ep_dir=_ep_dir)
+                        if rgb is not None:
+                            images.append(rgb)
+                            break
 
         if not images:
             return {"skipped": True, "reason": "no_rgb_frames"}
@@ -12133,6 +12225,17 @@ Scene objects: {scene_summary}
                 frames = episode.get("frames", [])
                 frame_count = len(frames)
                 ep_dir = ep_file.parent
+                # .npy refs are relative to the run directory, not the
+                # raw_episodes subdirectory.  Walk up to find the directory
+                # that actually contains the *_frames/ subdirs.
+                _candidate = ep_dir
+                for _ in range(4):
+                    if any(_candidate.glob("*_frames")):
+                        break
+                    _candidate = _candidate.parent
+                else:
+                    _candidate = ep_dir  # fallback
+                ep_dir = _candidate
 
                 # Collect camera frames for video export
                 camera_rgb_frames: Dict[str, List[np.ndarray]] = {}
