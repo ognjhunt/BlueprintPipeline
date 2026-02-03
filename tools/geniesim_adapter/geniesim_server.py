@@ -247,7 +247,48 @@ class GenieSimLocalServicer(SimObservationServiceServicer):
         return GetCheckerStatusRsp(msg=f"{checker}: ok")
 
     def get_contact_report(self, req: ContactReportReq, context) -> ContactReportRsp:
+        """Get real contact report from PhysX simulation if available."""
         del req
+        contacts = []
+        total_normal_force = 0.0
+        max_penetration = 0.0
+
+        try:
+            # Try to get real contacts from PhysX (follows isaac_sim_integration pattern)
+            from omni.physx import get_physx_interface
+            physx = get_physx_interface()
+
+            if physx is not None:
+                contact_data = physx.get_contact_report()
+                for contact in contact_data:
+                    # Match the pattern from isaac_sim_integration._get_contacts()
+                    force = float(contact.get("impulse", 0))
+                    penetration = abs(float(contact.get("separation", 0)))
+                    contacts.append(ContactPoint(
+                        body_a=str(contact.get("actor0", "")),
+                        body_b=str(contact.get("actor1", "")),
+                        normal_force=force,
+                        penetration_depth=penetration,
+                        position=list(contact.get("position", [0, 0, 0])),
+                        normal=list(contact.get("normal", [0, 0, 1])),
+                    ))
+                    total_normal_force += force
+                    max_penetration = max(max_penetration, penetration)
+
+                if contacts:
+                    return ContactReportRsp(
+                        contacts=contacts,
+                        total_normal_force=total_normal_force,
+                        max_penetration_depth=max_penetration,
+                    )
+
+        except ImportError:
+            # PhysX not available in this environment
+            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Contact report failed: {e}")
+
+        # Fallback: check for mock override
         mock_force = float(os.getenv("GENIESIM_MOCK_CONTACT_FORCE_N", "0.0"))
         if mock_force > 0.0:
             contact = ContactPoint(
@@ -263,6 +304,7 @@ class GenieSimLocalServicer(SimObservationServiceServicer):
                 total_normal_force=mock_force,
                 max_penetration_depth=0.001,
             )
+
         return ContactReportRsp(total_normal_force=0.0, max_penetration_depth=0.0)
 
 

@@ -1467,6 +1467,78 @@ class IsaacSimSensorCapture:
 
         return poses
 
+    def _enable_contact_reporting(
+        self, prim_paths: List[str], threshold: float = 0.1
+    ) -> int:
+        """
+        Enable PhysX contact reporting for specified prims.
+
+        This enables contact force data collection from the physics engine
+        for the given prims (e.g., gripper fingers, target objects).
+
+        Args:
+            prim_paths: List of USD prim paths to enable contact reporting on
+            threshold: Contact force threshold in Newtons (lower = more sensitive)
+
+        Returns:
+            Number of prims successfully enabled for contact reporting
+        """
+        enabled_count = 0
+
+        if self._omni is None:
+            self.log("Cannot enable contact reporting: Omniverse not available", "WARNING")
+            return enabled_count
+
+        try:
+            from pxr import PhysxSchema
+            from isaacsim.core.api.utils.stage import get_current_stage
+
+            stage = get_current_stage()
+            if stage is None:
+                self.log("Cannot enable contact reporting: no stage available", "WARNING")
+                return enabled_count
+
+            for prim_path in prim_paths:
+                try:
+                    prim = stage.GetPrimAtPath(prim_path)
+                    if not prim.IsValid():
+                        self.log(f"Prim not found for contact reporting: {prim_path}", "DEBUG")
+                        continue
+
+                    # Check if already has contact report API
+                    if prim.HasAPI(PhysxSchema.PhysxContactReportAPI):
+                        self.log(f"Contact reporting already enabled on {prim_path}", "DEBUG")
+                        enabled_count += 1
+                        continue
+
+                    # Apply PhysxContactReportAPI
+                    contact_api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+                    if contact_api:
+                        # Set threshold for contact detection (lower = more sensitive)
+                        threshold_attr = contact_api.GetThresholdAttr()
+                        if threshold_attr:
+                            threshold_attr.Set(threshold)
+                        self.log(
+                            f"Enabled contact reporting on {prim_path} (threshold={threshold}N)",
+                            "DEBUG",
+                        )
+                        enabled_count += 1
+                    else:
+                        self.log(
+                            f"Failed to apply PhysxContactReportAPI to {prim_path}",
+                            "WARNING",
+                        )
+
+                except Exception as e:
+                    self.log(f"Failed to enable contact reporting on {prim_path}: {e}", "WARNING")
+
+        except ImportError as e:
+            self.log(f"PhysxSchema not available for contact reporting: {e}", "WARNING")
+        except Exception as e:
+            self.log(f"Failed to enable contact reporting: {e}", "WARNING")
+
+        return enabled_count
+
     def _extract_usd_joint_state(self, joint_prim: Any) -> Dict[str, List[float]]:
         """Extract available joint DOF values from USD joint prim attributes."""
         positions: List[float] = []

@@ -170,6 +170,31 @@ def load_camera_frame(
     return None
 
 
+def validate_camera_array(data: Any, context: str = "") -> Optional[np.ndarray]:
+    """
+    Validate that data is a numpy array suitable for image processing.
+
+    Args:
+        data: The data to validate (should be numpy array from load_camera_frame)
+        context: Optional context string for logging
+
+    Returns:
+        The numpy array if valid, None otherwise
+    """
+    if data is None:
+        return None
+    if isinstance(data, np.ndarray):
+        return data
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(
+        "Camera data is not ndarray (%s): type=%s",
+        context or "unknown",
+        type(data).__name__,
+    )
+    return None
+
+
 def strip_camera_data(obs: Any) -> Any:
     """Remove bulky camera data from observation for parquet storage."""
     if not isinstance(obs, dict):
