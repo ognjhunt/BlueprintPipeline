@@ -279,26 +279,51 @@ def patch_file() -> None:
         print("[PATCH] ee_wrench already patched — skipping")
         sys.exit(0)
 
-    class_match = re.search(r"^class\\s+SimObservationServiceServicer\\b.*?:", content, re.MULTILINE)
+    # Try multiple class name patterns (Genie Sim may use different names across versions)
+    class_patterns = [
+        r"^class\s+(SimObservationServiceServicer)\b.*?:",
+        r"^class\s+(ObservationService)\b.*?:",
+        r"^class\s+(\w*Observation\w*Servicer?)\b.*?:",
+        r"^class\s+(\w*Service\w*)\(.*?pb2_grpc\.\w+\).*?:",  # Any class inheriting from grpc servicer
+    ]
+    class_match = None
+    matched_class = None
+    for pattern in class_patterns:
+        class_match = re.search(pattern, content, re.MULTILINE)
+        if class_match:
+            matched_class = class_match.group(1)
+            print(f"[PATCH] Found service class: {matched_class}")
+            break
     if not class_match:
-        print("[PATCH] SimObservationServiceServicer class not found — skipping")
+        # Last resort: find any class with get_observation method
+        obs_method = re.search(r"^(\s+)def get_observation\(self,", content, re.MULTILINE)
+        if obs_method:
+            # Search backward for class definition
+            before_method = content[:obs_method.start()]
+            class_match = list(re.finditer(r"^class\s+(\w+)\b.*?:", before_method, re.MULTILINE))
+            if class_match:
+                class_match = class_match[-1]  # Last class before the method
+                matched_class = class_match.group(1)
+                print(f"[PATCH] Found service class via get_observation: {matched_class}")
+    if not class_match:
+        print("[PATCH] Service class not found (tried SimObservationServiceServicer, ObservationService, etc.) — skipping")
         sys.exit(0)
 
     insert_start = class_match.end()
-    next_class = re.search(r"^class\\s+\\w+", content[insert_start:], re.MULTILINE)
+    next_class = re.search(r"^class\s+\w+", content[insert_start:], re.MULTILINE)
     insert_at = insert_start + next_class.start() if next_class else len(content)
 
     method_indent = "    "
-    method_match = re.search(r"^([ \\t]+)def\\s+\\w+\\(self", content[insert_start:insert_at], re.MULTILINE)
+    method_match = re.search(r"^([ \t]+)def\s+\w+\(self", content[insert_start:insert_at], re.MULTILINE)
     if method_match:
         method_indent = method_match.group(1)
 
-    indented_handler = "\\n".join(
+    indented_handler = "\n".join(
         (method_indent + line) if line.strip() else line
         for line in HANDLER.splitlines()
-    ) + "\\n"
+    ) + "\n"
 
-    patched = content[:insert_at].rstrip() + "\\n\\n" + indented_handler + content[insert_at:]
+    patched = content[:insert_at].rstrip() + "\n\n" + indented_handler + content[insert_at:]
 
     with open(GRPC_SERVER, "w") as f:
         f.write(patched)

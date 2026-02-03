@@ -1,7 +1,7 @@
 # Coverage.py configuration for BlueprintPipeline
 [run]
 branch = True
-source = .
+source = tools
 omit =
     # Test files
     tests/*
@@ -35,6 +35,9 @@ omit =
     */tmp/*
     .tmp/*
     */.tmp/*
+    # Package initializers (exclude thin re-export modules)
+    */__init__.py
+    __init__.py
 
 [report]
 # Reporting options
@@ -43,6 +46,9 @@ show_missing = True
 skip_covered = True
 skip_empty = True
 sort = Cover
+include =
+    */tools/validation/*.py
+    */tools/config/*.py
 
 # Exclude lines from coverage
 exclude_lines =

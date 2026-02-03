@@ -77,7 +77,7 @@ jobs:
             -v \
             -m "unit or (not gpu and not slow and not requires_secrets and not staging)" \
             --tb=short \
-            --cov=. \
+            --cov=tools \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
             --cov-report=html:htmlcov \
