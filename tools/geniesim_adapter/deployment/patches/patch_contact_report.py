@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Patch the Genie Sim server's grpc_server.py to add get_contact_report.
+Patch the Genie Sim server's grpc_server.py to add get_contact_report and joint efforts.
 
-This enables PhysX contact reporting via SimObservationService/get_contact_report.
+This enables:
+- PhysX contact reporting via SimObservationService/get_contact_report
+- Real joint effort capture in observations (not backfilled inverse dynamics)
+
 The patch is idempotent and safe to run multiple times.
 """
 import os
@@ -17,6 +20,7 @@ GRPC_SERVER = os.path.join(
 )
 
 PATCH_MARKER = "BlueprintPipeline contact_report patch"
+EFFORTS_PATCH_MARKER = "BlueprintPipeline joint_efforts patch"
 
 CONTACT_HANDLER = textwrap.dedent("""\
 
@@ -115,7 +119,8 @@ CONTACT_HANDLER = textwrap.dedent("""\
                 total_normal_force=total_force,
                 max_penetration_depth=max_penetration,
             )
-        except Exception:
+        except Exception as _err:
+            print(f"[CONTACT_REPORT] PhysX contact capture failed: {_err}")
             return ContactReportRsp(
                 contacts=[],
                 total_normal_force=0.0,
@@ -123,6 +128,60 @@ CONTACT_HANDLER = textwrap.dedent("""\
             )
     # --- END BlueprintPipeline contact_report patch ---
 """)
+
+# Joint efforts patch: Inject effort capture into get_observation handler
+EFFORTS_PATCH = textwrap.dedent("""\
+    # --- BEGIN BlueprintPipeline joint_efforts patch ---
+    # Capture real joint efforts from robot articulation
+    def _get_real_joint_efforts(self):
+        \"\"\"Get joint efforts from robot articulation (not inverse dynamics).\"\"\"
+        try:
+            if not hasattr(self, '_robot_articulation') or self._robot_articulation is None:
+                return None, "no_articulation"
+            robot = self._robot_articulation
+            efforts = None
+            source = "unavailable"
+            # Try multiple methods in order of preference
+            if hasattr(robot, "get_applied_joint_efforts"):
+                efforts = robot.get_applied_joint_efforts()
+                source = "physx_applied"
+            elif hasattr(robot, "get_measured_joint_efforts"):
+                efforts = robot.get_measured_joint_efforts()
+                source = "physx_measured"
+            elif hasattr(robot, "get_joint_efforts"):
+                efforts = robot.get_joint_efforts()
+                source = "physx_joint"
+            if efforts is not None:
+                return list(efforts), source
+            return None, source
+        except Exception as _e:
+            print(f"[JOINT_EFFORTS] Failed to get efforts: {_e}")
+            return None, f"error:{_e}"
+    # --- END BlueprintPipeline joint_efforts patch ---
+""")
+
+
+def verify_patch_applied(grpc_server_path: str = GRPC_SERVER) -> dict:
+    """Verify that patches have been applied to the server.
+
+    Returns:
+        dict with keys: contact_report_patched, joint_efforts_patched, server_found
+    """
+    result = {
+        "server_found": os.path.isfile(grpc_server_path),
+        "contact_report_patched": False,
+        "joint_efforts_patched": False,
+        "server_path": grpc_server_path,
+    }
+    if not result["server_found"]:
+        return result
+
+    with open(grpc_server_path, "r") as f:
+        content = f.read()
+
+    result["contact_report_patched"] = PATCH_MARKER in content
+    result["joint_efforts_patched"] = EFFORTS_PATCH_MARKER in content
+    return result
 
 
 def patch_file() -> None:
@@ -134,9 +193,15 @@ def patch_file() -> None:
     with open(GRPC_SERVER, "r") as f:
         content = f.read()
 
-    if PATCH_MARKER in content:
-        print("[PATCH] contact_report already patched — skipping")
+    contact_patched = PATCH_MARKER in content
+    efforts_patched = EFFORTS_PATCH_MARKER in content
+
+    if contact_patched and efforts_patched:
+        print("[PATCH] contact_report and joint_efforts already patched — skipping")
         sys.exit(0)
+
+    if contact_patched:
+        print("[PATCH] contact_report already patched — checking joint_efforts")
 
     # Try multiple class name patterns (Genie Sim may use different names across versions)
     class_patterns = [
@@ -189,6 +254,47 @@ def patch_file() -> None:
 
     print("[PATCH] Injected get_contact_report into grpc_server.py")
 
+    # Now patch joint efforts if needed
+    if not efforts_patched:
+        _patch_joint_efforts(GRPC_SERVER, method_indent)
+
+
+def _patch_joint_efforts(grpc_server_path: str, method_indent: str = "    ") -> None:
+    """Inject joint efforts helper method into the server."""
+    with open(grpc_server_path, "r") as f:
+        content = f.read()
+
+    if EFFORTS_PATCH_MARKER in content:
+        print("[PATCH] joint_efforts already patched — skipping")
+        return
+
+    # Find the end of the contact_report patch to insert after it
+    contact_end_marker = "# --- END BlueprintPipeline contact_report patch ---"
+    if contact_end_marker not in content:
+        print("[PATCH] Cannot find contact_report patch end marker — skipping joint_efforts")
+        return
+
+    insert_pos = content.index(contact_end_marker) + len(contact_end_marker)
+
+    # Indent the efforts patch
+    indented_efforts = "\n".join(
+        (method_indent + line) if line.strip() else line
+        for line in EFFORTS_PATCH.splitlines()
+    ) + "\n"
+
+    patched = content[:insert_pos] + "\n" + indented_efforts + content[insert_pos:]
+
+    with open(grpc_server_path, "w") as f:
+        f.write(patched)
+
+    print("[PATCH] Injected joint_efforts helper into grpc_server.py")
+
 
 if __name__ == "__main__":
     patch_file()
+
+    # Print verification status
+    status = verify_patch_applied()
+    print(f"[VERIFY] Server found: {status['server_found']}")
+    print(f"[VERIFY] Contact report patched: {status['contact_report_patched']}")
+    print(f"[VERIFY] Joint efforts patched: {status['joint_efforts_patched']}")

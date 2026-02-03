@@ -1,7 +1,7 @@
 {
-  "scene_id": "lightwheel_kitchen",
-  "source": "lightwheel_simready",
   "coordinate_frame": "y_up",
-  "meters_per_unit": 0.01,
-  "reconstruction_timestamp": "2025-01-27T00:00:00Z"
+  "meters_per_unit": 1.0,
+  "reconstruction_timestamp": "2025-01-27T00:00:00Z",
+  "scene_id": "lightwheel_kitchen",
+  "source": "lightwheel_simready"
 }

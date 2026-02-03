@@ -1642,7 +1642,8 @@ class IsaacSimSensorCapture:
 
                                 # Prefer RigidPrim.get_world_pose() for live PhysX state
                                 # (reads current simulation state, not USD time=0)
-                                if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                                _has_rigid_api = prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                                if _has_rigid_api:
                                     try:
                                         from isaacsim.core.api.prims import RigidPrim
                                         rigid = RigidPrim(prim_path)
@@ -1690,10 +1691,21 @@ class IsaacSimSensorCapture:
 
                                 # Fallback to USD xform if RigidPrim didn't work
                                 if position is None:
+                                    # Warn if object lacks RigidBodyAPI - pose will be from USD, not physics
+                                    if not _has_rigid_api:
+                                        self.log(
+                                            f"Object {obj_id} at {prim_path} lacks RigidBodyAPI; "
+                                            "pose will be from USD xform, not live PhysX state. "
+                                            "Object motion may not be tracked correctly.",
+                                            "WARNING",
+                                        )
                                     xformable = UsdGeom.Xformable(prim)
+                                    # Use Default() time code to get current simulation state
+                                    # instead of time=0 which would return initial pose
                                     world_transform = xformable.ComputeLocalToWorldTransform(
-                                        self._current_time_code if hasattr(self, '_current_time_code') else 0
+                                        Usd.TimeCode.Default()
                                     )
+                                    _pose_source = "usd_xform_no_rigid" if not _has_rigid_api else "usd_xform_default_time"
                                     translation = world_transform.ExtractTranslation()
                                     position = [
                                         float(translation[0]),
@@ -1707,7 +1719,7 @@ class IsaacSimSensorCapture:
                                         float(rotation.GetImaginary()[1]),
                                         float(rotation.GetImaginary()[2])
                                     ]
-                                    _pose_source = "usd_xform"
+                                    # _pose_source already set above when using Default() time
 
                                 # Apply stage units conversion to meters
                                 if _needs_unit_conversion:
@@ -2039,11 +2051,27 @@ class IsaacSimSensorCapture:
         return None
 
     def _handle_missing_contacts(self, reason: str) -> bool:
-        if _is_production_run():
-            raise RuntimeError(
-                "Contact capture unavailable in production mode: "
-                f"{reason}. Ensure PhysX contact reporting is available."
-            )
+        """Handle missing contact data with fail-fast gate.
+
+        Uses DataFidelityError from data_fidelity module when contacts are required.
+        """
+        try:
+            from data_fidelity import DataFidelityError, require_real_contacts
+            if require_real_contacts():
+                raise DataFidelityError(
+                    f"Contact capture unavailable: {reason}. "
+                    "PhysX contact reporting not enabled. "
+                    "Set REQUIRE_REAL_CONTACTS=false or DATA_FIDELITY_MODE=dev to allow missing contacts.",
+                    gate_name="contact_data",
+                    diagnostics={"reason": reason},
+                )
+        except ImportError:
+            # Fall back to original behavior if data_fidelity not available
+            if _is_production_run():
+                raise RuntimeError(
+                    "Contact capture unavailable in production mode: "
+                    f"{reason}. Ensure PhysX contact reporting is available."
+                )
         if self._require_contacts:
             raise RuntimeError(
                 "Contact capture required but unavailable: "

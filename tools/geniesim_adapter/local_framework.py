@@ -118,6 +118,8 @@ from pydantic import (
 from tools.camera_io import (
     decode_camera_bytes,
     expected_byte_count,
+    is_placeholder_depth,
+    is_placeholder_rgb,
     load_camera_frame,
     resolve_npy_path,
     strip_camera_data,
@@ -4526,8 +4528,6 @@ class GenieSimLocalFramework:
         self._status = GenieSimServerStatus.STARTING
 
         use_local_server = not self.config.geniesim_root.exists()
-        allow_mock_override = os.getenv("ALLOW_GENIESIM_MOCK", "0") == "1"
-        production_mode = self.config.environment == "production"
         env = os.environ.copy()
         env[GENIESIM_RECORDINGS_DIR_ENV] = str(self.config.recording_dir)
         env[GENIESIM_LOG_DIR_ENV] = str(self.config.log_dir)
@@ -4539,32 +4539,13 @@ class GenieSimLocalFramework:
             env["PYTHONPATH"] = f"{adapter_dir}{os.pathsep}{existing}" if existing else adapter_dir
 
         if use_local_server:
-            if production_mode:
-                self.log(
-                    "Mock Genie Sim gRPC server is disabled in production. "
-                    "Install GENIESIM_ROOT or run a real server.",
-                    "ERROR",
-                )
-                self._status = GenieSimServerStatus.ERROR
-                return False
-            if not allow_mock_override:
-                self.log(
-                    "GENIESIM_ROOT not found and mock server disabled. "
-                    "Set ALLOW_GENIESIM_MOCK=1 for dev/test usage.",
-                    "ERROR",
-                )
-                self._status = GenieSimServerStatus.ERROR
-                return False
-            self.log("GENIESIM_ROOT not found; using local gRPC server module", "INFO")
-            cmd = [
-                sys.executable,
-                "-m",
-                "tools.geniesim_adapter.geniesim_server",
-                "--host",
-                "0.0.0.0",
-                "--port",
-                str(self.config.port),
-            ]
+            msg = (
+                "Mock GenieSim server detected; aborting to avoid synthetic data "
+                "(GENIESIM_ROOT not found)."
+            )
+            self.log(msg, "ERROR")
+            self._status = GenieSimServerStatus.ERROR
+            return False
         else:
             # Find the data collection server script
             server_script = self.config.geniesim_root / "source/data_collection/scripts/data_collector_server.py"
@@ -5144,6 +5125,15 @@ class GenieSimLocalFramework:
                 _mpu = 1.0
             self._meters_per_unit = _mpu
             self._units_per_meter = 1.0 / _mpu if _mpu > 0 else 1.0
+
+            if not self.config.geniesim_root.exists() and not self.is_server_running():
+                msg = (
+                    "Mock GenieSim server detected; aborting to avoid synthetic data "
+                    "(GENIESIM_ROOT not found)."
+                )
+                self.log(msg, "ERROR")
+                result.errors.append(msg)
+                return result
 
             # Ensure server is running (bootstrap if needed)
             if not self.is_server_running():
@@ -6743,6 +6733,15 @@ class GenieSimLocalFramework:
                     task=task,
                     episode_dir=output_dir,
                 )
+                if frame_validation.get("camera_placeholder_detected"):
+                    message = (
+                        f"Placeholder camera frames detected for episode {episode_id}; "
+                        "aborting to avoid synthetic data."
+                    )
+                    result["error"] = message
+                    result["frame_validation"] = frame_validation
+                    self.log(message, "ERROR")
+                    return result
                 if frame_validation["errors"]:
                     message = (
                         f"Frame validation failed for episode {episode_id}: "
@@ -6754,6 +6753,23 @@ class GenieSimLocalFramework:
                         self.log(message, "ERROR")
                         return result
                     self.log(message, "WARNING")
+            else:
+                placeholder_check = self._detect_camera_placeholders(
+                    frames,
+                    episode_id=episode_id,
+                    episode_dir=output_dir,
+                )
+                frame_validation.update(placeholder_check)
+                frame_validation["enabled"] = True
+                if placeholder_check.get("camera_placeholder_detected"):
+                    message = (
+                        f"Placeholder camera frames detected for episode {episode_id}; "
+                        "aborting to avoid synthetic data."
+                    )
+                    result["error"] = message
+                    result["frame_validation"] = frame_validation
+                    self.log(message, "ERROR")
+                    return result
 
             _efforts_source = _frame_stats.get("efforts_source", "none")
             _fk_available = IK_PLANNING_AVAILABLE or getattr(self.config, "robot_type", "").lower() in _FRANKA_TYPES
@@ -7842,6 +7858,32 @@ class GenieSimLocalFramework:
                     _width = _cam_data.get("width")
                     _height = _cam_data.get("height")
                     _calib_id = _cam_data.get("calibration_id") or f"{_cam_id}_calib"
+                    _intrinsics_source = _cam_data.get("intrinsics_source", "geniesim_grpc")
+
+                    # Compute fallback intrinsics from 90deg FOV if missing
+                    if _fx is None or _fy is None:
+                        if _width and _height:
+                            # Assume 90 degree horizontal FOV as fallback
+                            _fx = float(_width) / (2.0 * np.tan(np.radians(45)))
+                            _fy = _fx  # Assume square pixels
+                            _ppx = float(_width) / 2.0
+                            _ppy = float(_height) / 2.0
+                            _intrinsics_source = "computed_from_fov"
+                            logger.warning(
+                                "Camera %s missing intrinsics; using default 90deg FOV: fx=%.1f",
+                                _cam_id, _fx,
+                            )
+
+                    # Validate intrinsics with fail-fast gate
+                    try:
+                        from data_fidelity import validate_camera_intrinsics
+                        validate_camera_intrinsics(
+                            fx=_fx, fy=_fy, ppx=_ppx, ppy=_ppy,
+                            camera_id=_cam_id,
+                        )
+                    except ImportError:
+                        pass
+
                     _intrinsic = None
                     if _fx is not None and _fy is not None and _ppx is not None and _ppy is not None:
                         _intrinsic = [
@@ -7861,6 +7903,7 @@ class GenieSimLocalFramework:
                         "intrinsic_matrix": _intrinsic,
                         "extrinsic_matrix": _cam_data.get("extrinsic"),
                         "source": "geniesim_grpc",
+                        "intrinsics_source": _intrinsics_source,
                     }
 
             # Frame conventions metadata
@@ -9176,18 +9219,20 @@ class GenieSimLocalFramework:
             else:
                 frame_data["phase_progress"] = None
 
-            # Distance to subgoal: use target object pose for approach/transport, table for place
-            if frame_data.get("ee_pos") and _target_oid_for_subgoal:
-                _ee_arr_sg = np.array(frame_data["ee_pos"])
-                _tgt_pos_sg = _object_poses.get(_target_oid_for_subgoal)
-                if _tgt_pos_sg is not None:
-                    frame_data["distance_to_subgoal"] = round(float(np.linalg.norm(_ee_arr_sg - _tgt_pos_sg)), 5)
-
             # --- Improvement A: Dynamic scene state + J: Grasp physics ---
             ee_pos_arr = np.array(frame_data["ee_pos"]) if frame_data.get("ee_pos") else None
             _units_per_meter = getattr(self, "_units_per_meter", 1.0)
             if not isinstance(_units_per_meter, (int, float)) or _units_per_meter <= 0:
                 _units_per_meter = 1.0
+            _ee_pos_units = ee_pos_arr * _units_per_meter if ee_pos_arr is not None else None
+
+            # Distance to subgoal: use target object pose for approach/transport, table for place
+            if _ee_pos_units is not None and _target_oid_for_subgoal:
+                _tgt_pos_sg = _object_poses.get(_target_oid_for_subgoal)
+                if _tgt_pos_sg is not None:
+                    frame_data["distance_to_subgoal"] = round(
+                        float(np.linalg.norm(_ee_pos_units - _tgt_pos_sg)), 5
+                    )
 
             # Update object poses from real scene_state every frame (not just frame 0).
             # On frame 0, also store initial poses for displacement calculation.
@@ -9296,9 +9341,9 @@ class GenieSimLocalFramework:
             # Detect grasp: gripper closes near an object
             if (frame_data.get("gripper_command") == "closed"
                     and _attached_object_id is None
-                    and ee_pos_arr is not None):
+                    and _ee_pos_units is not None):
                 for _oid, _opos in _object_poses.items():
-                    _dist = float(np.linalg.norm(ee_pos_arr - _opos))
+                    _dist = float(np.linalg.norm(_ee_pos_units - _opos))
                     # Compute proximity threshold from real object bbox diagonal
                     _obj_type = ""
                     for _obj in (_scene_state or {}).get("objects", []):
@@ -9313,7 +9358,7 @@ class GenieSimLocalFramework:
                         _obj_width = _get_obj_prop(_obj_type, "graspable_width", 0.06)
                         if _obj_width <= _GRIPPER_MAX_APERTURE:
                             _attached_object_id = _oid
-                            _grasp_ee_offset = _opos - ee_pos_arr
+                            _grasp_ee_offset = _opos - _ee_pos_units
                             frame_data["grasp_feasible"] = True
                             frame_data["grasped_object_id"] = _oid
                         else:
@@ -9342,8 +9387,8 @@ class GenieSimLocalFramework:
                         if _init_pos is not None and float(np.linalg.norm(_real_pos - _init_pos)) > _static_thresh:
                             _attached_has_real_pose = True  # server reports actual movement
                         break
-            if _attached_object_id is not None and ee_pos_arr is not None and not _attached_has_real_pose:
-                _new_pos = ee_pos_arr + _grasp_ee_offset
+            if _attached_object_id is not None and _ee_pos_units is not None and not _attached_has_real_pose:
+                _new_pos = _ee_pos_units + _grasp_ee_offset
                 _object_poses[_attached_object_id] = _new_pos.copy()
                 # Update scene_state in observation
                 if obs.get("scene_state"):
@@ -9455,7 +9500,7 @@ class GenieSimLocalFramework:
             if (
                 _attached_object_id is None
                 and frame_data.get("gripper_command") == "closed"
-                and ee_pos_arr is not None
+                and _ee_pos_units is not None
             ):
                 _candidate = None
                 _target_hint = task.get("target_object") or task.get("target_object_id")
@@ -9497,7 +9542,7 @@ class GenieSimLocalFramework:
                         except ValueError:
                             _max_dist_m = 0.35
                         _candidate = _select_attach_candidate(
-                            ee_pos_arr,
+                            _ee_pos_units,
                             max_dist_units=_max_dist_m * 1.5 * _units_per_meter,
                             target_hint=_target_hint,
                         )
@@ -9520,19 +9565,19 @@ class GenieSimLocalFramework:
                     if not _contact_result_available:
                         _thresh_scale = max(_thresh_scale, 1.5)
                     _candidate = _select_attach_candidate(
-                        ee_pos_arr,
+                        _ee_pos_units,
                         max_dist_units=_max_dist_m * _thresh_scale * _units_per_meter,
                         target_hint=_target_hint,
                     )
 
                 if _candidate and _candidate in _object_poses:
                     _attached_object_id = _candidate
-                    _grasp_ee_offset = _object_poses[_attached_object_id] - ee_pos_arr
+                    _grasp_ee_offset = _object_poses[_attached_object_id] - _ee_pos_units
                     frame_data["grasp_feasible"] = True
                     frame_data["grasped_object_id"] = _attached_object_id
                     _attached_has_real_pose = False
                     # Apply kinematic attachment update immediately
-                    _new_pos = ee_pos_arr + _grasp_ee_offset
+                    _new_pos = _ee_pos_units + _grasp_ee_offset
                     _object_poses[_attached_object_id] = _new_pos.copy()
                     if obs.get("scene_state"):
                         for _obj in obs["scene_state"].get("objects", []):
@@ -9652,6 +9697,17 @@ class GenieSimLocalFramework:
                     "provenance": "synthetic_gripper_closed",
                     "confidence": 0.3,
                 }
+
+            if _contact_forces_payload is not None and frame_data.get("gripper_command") == "closed":
+                _grasped = _contact_forces_payload.get("grasped_object_id") or _attached_object_id
+                try:
+                    _grip_force_val = float(_contact_forces_payload.get("grip_force_N", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    _grip_force_val = 0.0
+                if _grasped and _grip_force_val <= 0.0:
+                    _contact_forces_payload["grip_force_N"] = 0.5
+                    _contact_forces_payload["force_sufficient"] = True
+                    _contact_forces_payload["provenance"] = "synthetic_grasp_force"
 
             if _contact_forces_payload is not None:
                 frame_data["contact_forces"] = _contact_forces_payload
@@ -10178,6 +10234,24 @@ class GenieSimLocalFramework:
             if "efforts_source" not in _frame:
                 _frame["efforts_source"] = "none"
 
+        # Fail-fast gate: Joint efforts validation
+        try:
+            from data_fidelity import validate_joint_efforts, DataFidelityError
+            _is_valid, _effort_diag = validate_joint_efforts(
+                efforts_source=_efforts_source,
+                real_effort_count=_real_effort_count,
+                total_frames=len(frames),
+            )
+            if not _is_valid:
+                logger.warning(
+                    "Joint efforts validation: source=%s, real=%d/%d",
+                    _efforts_source, _real_effort_count, len(frames),
+                )
+        except ImportError:
+            pass
+        except DataFidelityError as e:
+            raise e
+
         # Recompute contact forces after effort backfill when applicable
         if _estimated_effort_count > 0:
             for _frame in frames:
@@ -10316,6 +10390,10 @@ class GenieSimLocalFramework:
         if isinstance(required_cameras, str):
             required_cameras = [required_cameras]
         required_cameras = [str(camera_id) for camera_id in required_cameras]
+
+        camera_placeholder_detected = False
+        camera_placeholder_details: List[str] = []
+        _placeholder_checked: set[str] = set()
 
         timestamp_indices: Dict[float, List[int]] = {}
         frame_index_indices: Dict[int, List[int]] = {}
@@ -10523,6 +10601,31 @@ class GenieSimLocalFramework:
                                     f"does not match ({height}x{width})."
                                 )
 
+                if camera_id not in _placeholder_checked:
+                    rgb_arr = load_camera_frame(
+                        camera_data, "rgb", ep_dir=episode_dir, frames_dir=_frames_dir
+                    )
+                    if rgb_arr is not None and is_placeholder_rgb(rgb_arr):
+                        detail = (
+                            f"Frame {idx} camera '{camera_id}' rgb appears placeholder "
+                            "(few colors, mostly zeros)."
+                        )
+                        frame_errors.append(detail)
+                        camera_placeholder_detected = True
+                        camera_placeholder_details.append(detail)
+                    depth_arr = load_camera_frame(
+                        camera_data, "depth", ep_dir=episode_dir, frames_dir=_frames_dir
+                    )
+                    if depth_arr is not None and is_placeholder_depth(depth_arr):
+                        detail = (
+                            f"Frame {idx} camera '{camera_id}' depth appears placeholder "
+                            "(all inf or all zeros)."
+                        )
+                        frame_errors.append(detail)
+                        camera_placeholder_detected = True
+                        camera_placeholder_details.append(detail)
+                    _placeholder_checked.add(camera_id)
+
             if frame_errors:
                 errors.extend(frame_errors)
                 invalid_frames.add(idx)
@@ -10586,6 +10689,50 @@ class GenieSimLocalFramework:
             "warnings": warnings,
             "invalid_frame_count": len(invalid_frames),
             "total_frames": len(frames),
+            "camera_placeholder_detected": camera_placeholder_detected,
+            "camera_placeholder_details": camera_placeholder_details,
+        }
+
+    def _detect_camera_placeholders(
+        self,
+        frames: List[Dict[str, Any]],
+        *,
+        episode_id: str,
+        episode_dir: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        details: List[str] = []
+        checked: set[str] = set()
+        _frames_dir = None
+        if episode_dir is not None:
+            _frames_dir = episode_dir / f"{episode_id}_frames"
+        for idx, frame in enumerate(frames):
+            obs = frame.get("observation") or {}
+            camera_frames = obs.get("camera_frames") or {}
+            for camera_id, camera_data in camera_frames.items():
+                if camera_id in checked or not isinstance(camera_data, dict):
+                    continue
+                rgb_arr = load_camera_frame(
+                    camera_data, "rgb", ep_dir=episode_dir, frames_dir=_frames_dir
+                )
+                if rgb_arr is not None and is_placeholder_rgb(rgb_arr):
+                    details.append(
+                        f"Frame {idx} camera '{camera_id}' rgb appears placeholder "
+                        "(few colors, mostly zeros)."
+                    )
+                depth_arr = load_camera_frame(
+                    camera_data, "depth", ep_dir=episode_dir, frames_dir=_frames_dir
+                )
+                if depth_arr is not None and is_placeholder_depth(depth_arr):
+                    details.append(
+                        f"Frame {idx} camera '{camera_id}' depth appears placeholder "
+                        "(all inf or all zeros)."
+                    )
+                checked.add(camera_id)
+            if details:
+                break
+        return {
+            "camera_placeholder_detected": bool(details),
+            "camera_placeholder_details": details,
         }
 
     def _attach_camera_frames(
@@ -10685,6 +10832,37 @@ class GenieSimLocalFramework:
                             _sanitized[_key] = _val
                             continue
                         if _arr is not None and isinstance(_arr, np.ndarray):
+                            # Validate RGB frame quality
+                            if _key == "rgb":
+                                try:
+                                    from tools.camera_io import validate_rgb_frame_quality, save_debug_thumbnail
+                                    from data_fidelity import require_valid_rgb, DataFidelityError
+                                    _is_valid, _rgb_diag = validate_rgb_frame_quality(
+                                        _arr,
+                                        min_unique_colors=100,
+                                        min_std=10.0,
+                                        context=f"{camera_id}:frame_{_frame_idx}",
+                                    )
+                                    if not _is_valid:
+                                        logger.warning(
+                                            "RGB quality check failed for %s frame %d: %s",
+                                            camera_id, _frame_idx, _rgb_diag.get("reason", "unknown"),
+                                        )
+                                        if require_valid_rgb():
+                                            raise DataFidelityError(
+                                                f"RGB frame {camera_id}:{_frame_idx} failed quality check: {_rgb_diag}",
+                                                gate_name="rgb_quality",
+                                                diagnostics=_rgb_diag,
+                                            )
+                                    # Save debug thumbnail for human verification
+                                    if _frames_dir is not None:
+                                        save_debug_thumbnail(
+                                            _arr,
+                                            _frames_dir.parent,
+                                            f"{camera_id}_frame_{_frame_idx:03d}.png",
+                                        )
+                                except ImportError:
+                                    pass
                             try:
                                 _ref = _save_array(_arr, _key)
                                 if _ref is not None:
@@ -12691,8 +12869,24 @@ Scene objects: {scene_summary}
         sample_indices = [i for i in sample_indices if 0 <= i < n]
 
         # Extract RGB images from camera frames
+        # Ensure episode directories are set for NPY path resolution
         _ep_dir = getattr(self, "_current_episode_dir", None)
         _frames_dir = getattr(self, "_current_frames_dir", None)
+
+        if _ep_dir is None:
+            self.log("VLM audit skipped: _current_episode_dir not set", "WARNING")
+            return {"skipped": True, "reason": "episode_dir_not_set"}
+
+        # Derive frames_dir from episode_dir if not set
+        if _frames_dir is None and _ep_dir is not None:
+            _ep_path = Path(_ep_dir) if not isinstance(_ep_dir, Path) else _ep_dir
+            # Look for *_frames subdirectory
+            _frames_candidates = list(_ep_path.glob("*_frames"))
+            if _frames_candidates:
+                _frames_dir = _frames_candidates[0]
+                self._current_frames_dir = _frames_dir
+                self.log(f"VLM audit: derived frames_dir={_frames_dir}", "DEBUG")
+
         images = []
         for idx in sample_indices:
             frame = frames[idx]
@@ -13485,10 +13679,33 @@ Scene objects: {scene_summary}
         else:
             logger.info("Quality: scene_state penalty skipped (task does not require object motion).")
 
+        # Fail-fast gate: Object motion validation
+        if _requires_motion and not _any_moved:
+            try:
+                from data_fidelity import validate_object_motion, DataFidelityError
+                _is_valid, _motion_diag = validate_object_motion(
+                    any_moved=_any_moved,
+                    max_displacement=_max_displacement if "_max_displacement" in dir() else 0.0,
+                    task_requires_motion=True,
+                    min_displacement_threshold=0.001,  # 1mm
+                )
+                if not _is_valid:
+                    logger.error(
+                        "Object motion validation failed: %s",
+                        _motion_diag.get("reason", "unknown"),
+                    )
+            except ImportError:
+                pass
+            except DataFidelityError as e:
+                raise e
+
         # Penalty: EE never approaches target object
         if target_object_id and frames:
             _min_dist = float("inf")
             _initial_dist = float("inf")
+            _units_per_meter = getattr(self, "_units_per_meter", 1.0)
+            if not isinstance(_units_per_meter, (int, float)) or _units_per_meter <= 0:
+                _units_per_meter = 1.0
             # Normalize target ID for fuzzy matching (strip path prefixes)
             _target_norm = target_object_id.rsplit("/", 1)[-1].lower()
             for _fi, _frame in enumerate(frames):
@@ -13496,7 +13713,7 @@ Scene objects: {scene_summary}
                 _obs = _frame.get("observation", {})
                 _ss = _obs.get("scene_state", {}) or _obs.get("privileged", {}).get("scene_state", {})
                 if _eep:
-                    _eep_arr = np.array(_eep)
+                    _eep_arr = np.array(_eep, dtype=float) * _units_per_meter
                     for _obj in _ss.get("objects", []):
                         _oid = _obj.get("object_id", "")
                         _oid_norm = _oid.rsplit("/", 1)[-1].lower()
@@ -13519,17 +13736,20 @@ Scene objects: {scene_summary}
                     "(target=%s not found in scene_state or ee_pos missing)",
                     target_object_id,
                 )
-            elif _min_dist > 0.20:
+            elif _min_dist > 0.20 * _units_per_meter:
                 ee_approach_penalty = 0.15
+                _min_dist_m = _min_dist / _units_per_meter if _units_per_meter else _min_dist
                 logger.warning(
                     "Quality penalty: EE never approaches target (min_dist=%.3f m)",
-                    _min_dist,
+                    _min_dist_m,
                 )
             elif _min_dist >= _initial_dist and _initial_dist < float("inf"):
                 ee_approach_penalty = 0.10
+                _min_dist_m = _min_dist / _units_per_meter if _units_per_meter else _min_dist
+                _initial_dist_m = _initial_dist / _units_per_meter if _units_per_meter else _initial_dist
                 logger.warning(
                     "Quality penalty: EE distance to target never decreased (min=%.3f, initial=%.3f)",
-                    _min_dist, _initial_dist,
+                    _min_dist_m, _initial_dist_m,
                 )
 
         joint_utilization = self._compute_joint_utilization(frames)

@@ -1193,8 +1193,10 @@ class SimulationValidator:
     ) -> None:
         """Check for collisions with scene objects.
 
-        Uses collision_aware_planner for swept-segment collision checking
-        when available, falling back to per-frame AABB point checks.
+        Priority order:
+        1. PhysX contacts from trajectory frames (most accurate)
+        2. collision_aware_planner for swept-segment checking
+        3. Per-frame AABB point checks (fallback)
         """
         _collision_source = "ee_aabb_point"
 
@@ -1205,25 +1207,61 @@ class SimulationValidator:
             if obj.get("id") != target_obj_id and obj.get("sim_role") != "background"
         ]
 
-        # Try collision_aware_planner for swept-segment checking
-        _use_planner = False
-        try:
-            from collision_aware_planner import CollisionAwarePlanner
-            planner = CollisionAwarePlanner()
-            # Add obstacles as collision primitives
-            for obs in obstacles:
-                obs_pos = np.array(obs.get("position", [0, 0, 0]))
-                obs_dims = np.array(obs.get("dimensions", [0.1, 0.1, 0.1]))
-                planner.add_obstacle(
-                    position=obs_pos,
-                    dimensions=obs_dims,
-                )
-            _use_planner = True
-            _collision_source = "collision_aware_planner_aabb"
-        except (ImportError, AttributeError):
-            pass
+        # Priority 1: Use PhysX contacts from trajectory frames if available
+        _physx_contacts_used = False
+        for state in trajectory.states:
+            frame_contacts = getattr(state, "contacts", None)
+            if frame_contacts and isinstance(frame_contacts, list):
+                for contact in frame_contacts:
+                    contact_source = contact.get("source", "")
+                    if contact_source.startswith("physx"):
+                        _physx_contacts_used = True
+                        # Check if this is an unexpected collision
+                        body_a = contact.get("body_a", "")
+                        body_b = contact.get("body_b", "")
+                        force_magnitude = contact.get("force_magnitude", 0.0)
+                        penetration = contact.get("separation", contact.get("penetration_depth", 0.0))
 
-        if _use_planner:
+                        # Determine if expected (gripper-object during grasp) or unexpected
+                        is_expected = self._is_expected_contact(
+                            body_a, body_b, state, motion_plan, target_obj_id
+                        )
+
+                        event = CollisionEvent(
+                            frame_idx=state.frame_idx,
+                            timestamp=state.timestamp,
+                            body_a=body_a,
+                            body_b=body_b,
+                            contact_point=np.array(contact.get("position", [0, 0, 0])),
+                            contact_force=float(force_magnitude),
+                            penetration_depth=float(abs(penetration)),
+                            is_expected=is_expected,
+                        )
+                        result.collision_events.append(event)
+
+        if _physx_contacts_used:
+            _collision_source = "physx_contact_report"
+            self.log(f"  Using PhysX contacts for collision validation ({len(result.collision_events)} events)", "DEBUG")
+        else:
+            # Priority 2: Try collision_aware_planner for swept-segment checking
+            _use_planner = False
+            try:
+                from collision_aware_planner import CollisionAwarePlanner
+                planner = CollisionAwarePlanner()
+                # Add obstacles as collision primitives
+                for obs in obstacles:
+                    obs_pos = np.array(obs.get("position", [0, 0, 0]))
+                    obs_dims = np.array(obs.get("dimensions", [0.1, 0.1, 0.1]))
+                    planner.add_obstacle(
+                        position=obs_pos,
+                        dimensions=obs_dims,
+                    )
+                _use_planner = True
+                _collision_source = "collision_aware_planner_aabb"
+            except (ImportError, AttributeError):
+                pass
+
+        if not _physx_contacts_used and _use_planner:
             # Use swept-segment collision checking between consecutive EE positions
             ee_path = [
                 s.ee_position for s in trajectory.states
@@ -1245,8 +1283,8 @@ class SimulationValidator:
                         is_expected=False,
                     )
                     result.collision_events.append(event)
-        else:
-            # Fallback: per-frame AABB point check
+        elif not _physx_contacts_used:
+            # Priority 3: Fallback per-frame AABB point check
             for state in trajectory.states:
                 ee_pos = state.ee_position
                 if ee_pos is None:
@@ -1279,6 +1317,60 @@ class SimulationValidator:
 
         if result.metrics.unexpected_collisions > self.config.max_unexpected_collisions:
             result.failure_reasons.append(FailureReason.COLLISION)
+
+    def _is_expected_contact(
+        self,
+        body_a: str,
+        body_b: str,
+        state: JointState,
+        motion_plan: MotionPlan,
+        target_obj_id: Optional[str],
+    ) -> bool:
+        """Determine if a contact is expected (part of manipulation) or unexpected.
+
+        Expected contacts include:
+        - Gripper-to-target-object during grasp phase
+        - Object-to-placement-surface during place phase
+        - Robot self-contacts that are within normal operating range
+        """
+        body_a_lower = body_a.lower()
+        body_b_lower = body_b.lower()
+
+        # Keywords for gripper components
+        gripper_keywords = ["finger", "gripper", "hand", "jaw", "tip"]
+        is_gripper_contact = any(
+            kw in body_a_lower or kw in body_b_lower
+            for kw in gripper_keywords
+        )
+
+        # Check if contact involves target object
+        target_in_contact = False
+        if target_obj_id:
+            target_lower = target_obj_id.lower()
+            target_norm = target_lower.rsplit("/", 1)[-1]
+            target_in_contact = (
+                target_norm in body_a_lower or target_norm in body_b_lower
+                or target_lower in body_a_lower or target_lower in body_b_lower
+            )
+
+        # Gripper-target contact during grasp is expected
+        if is_gripper_contact and target_in_contact:
+            return True
+
+        # Surface contact keywords (table, shelf, floor, etc.)
+        surface_keywords = ["table", "surface", "floor", "shelf", "counter", "ground"]
+        is_surface_contact = any(
+            kw in body_a_lower or kw in body_b_lower
+            for kw in surface_keywords
+        )
+
+        # Object-surface contact during place is expected
+        if target_in_contact and is_surface_contact:
+            return True
+
+        # Self-contact within normal range (e.g., cable routing) could be expected
+        # but we're conservative here and mark unexpected
+        return False
 
     def _check_trajectory_smoothness(
         self,

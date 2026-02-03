@@ -175,7 +175,16 @@ def load_camera_frame(
     )
     if isinstance(val, str) and val.endswith(".npy"):
         npy_path = resolve_npy_path(val, ep_dir=ep_dir, frames_dir=frames_dir)
-        if npy_path is None or not npy_path.exists():
+        if npy_path is None:
+            # Path could not be resolved - log warning and return None
+            # This prevents returning a string path that would cause .astype() errors
+            import logging
+            logging.getLogger(__name__).warning(
+                "NPY path '%s' cannot be resolved: ep_dir=%s, frames_dir=%s",
+                val, ep_dir, frames_dir,
+            )
+            return None
+        if not npy_path.exists():
             return None
         return np.load(npy_path)
     if isinstance(val, bytes):
@@ -222,6 +231,212 @@ def validate_camera_array(data: Any, context: str = "") -> Optional[np.ndarray]:
         type(data).__name__,
     )
     return None
+
+
+def validate_rgb_frame_quality(
+    rgb: np.ndarray,
+    *,
+    min_unique_colors: int = 100,
+    min_std: float = 10.0,
+    context: str = "",
+) -> Tuple[bool, dict]:
+    """
+    Validate that RGB frame is a real rendered image, not a placeholder.
+
+    Real renders have many unique colors and reasonable variance. Placeholders
+    (color bars, test patterns) have very few unique values.
+
+    Args:
+        rgb: RGB image array (H, W, 3) or (H, W, 4)
+        min_unique_colors: Minimum unique RGB triplets required (default: 100)
+        min_std: Minimum standard deviation required (default: 10.0)
+        context: Optional context string for diagnostics
+
+    Returns:
+        (is_valid, diagnostics_dict) where diagnostics contains:
+        - unique_colors: int
+        - std: float
+        - is_black: bool
+        - shape: tuple
+        - reason: str (if invalid)
+    """
+    diagnostics = {
+        "context": context,
+        "shape": None,
+        "unique_colors": 0,
+        "std": 0.0,
+        "is_black": True,
+        "is_valid": False,
+    }
+
+    if rgb is None or not isinstance(rgb, np.ndarray):
+        diagnostics["reason"] = "not_ndarray"
+        return False, diagnostics
+
+    diagnostics["shape"] = rgb.shape
+
+    if rgb.size == 0:
+        diagnostics["reason"] = "empty_array"
+        return False, diagnostics
+
+    # Check for black frame
+    nonzero_count = np.count_nonzero(rgb)
+    diagnostics["is_black"] = nonzero_count == 0
+
+    if diagnostics["is_black"]:
+        diagnostics["reason"] = "black_frame"
+        return False, diagnostics
+
+    # Check standard deviation
+    diagnostics["std"] = float(np.std(rgb.astype(float)))
+
+    # Count unique colors (RGB triplets)
+    try:
+        if rgb.ndim >= 3 and rgb.shape[-1] >= 3:
+            # Reshape to (N, 3) for RGB channels
+            flat = rgb.reshape(-1, rgb.shape[-1])[:, :3]
+            unique_colors = np.unique(flat, axis=0)
+            diagnostics["unique_colors"] = len(unique_colors)
+        else:
+            # Grayscale or unusual shape
+            unique_vals = np.unique(rgb)
+            diagnostics["unique_colors"] = len(unique_vals)
+    except Exception:
+        diagnostics["unique_colors"] = 0
+
+    # Determine validity
+    is_valid = (
+        diagnostics["unique_colors"] >= min_unique_colors
+        and diagnostics["std"] >= min_std
+        and not diagnostics["is_black"]
+    )
+    diagnostics["is_valid"] = is_valid
+
+    if not is_valid:
+        if diagnostics["unique_colors"] < min_unique_colors:
+            diagnostics["reason"] = f"too_few_colors ({diagnostics['unique_colors']} < {min_unique_colors})"
+        elif diagnostics["std"] < min_std:
+            diagnostics["reason"] = f"low_variance (std={diagnostics['std']:.2f} < {min_std})"
+        else:
+            diagnostics["reason"] = "unknown"
+
+    return is_valid, diagnostics
+
+
+def validate_frame_sequence_variety(
+    frames: list,
+    *,
+    min_diff_threshold: float = 5.0,
+) -> Tuple[bool, dict]:
+    """
+    Validate that frame sequence has variety (not static copies).
+
+    Compares consecutive frames to ensure they're not identical or nearly identical,
+    which would indicate capture failure or static placeholder data.
+
+    Args:
+        frames: List of numpy arrays (RGB frames)
+        min_diff_threshold: Minimum mean pixel difference between frames (default: 5.0)
+
+    Returns:
+        (is_valid, diagnostics_dict) where diagnostics contains:
+        - avg_frame_diff: float
+        - max_frame_diff: float
+        - num_frames: int
+        - is_static: bool
+    """
+    diagnostics = {
+        "num_frames": len(frames) if frames else 0,
+        "avg_frame_diff": 0.0,
+        "max_frame_diff": 0.0,
+        "is_static": False,
+        "is_valid": True,
+    }
+
+    if not frames or len(frames) < 2:
+        diagnostics["reason"] = "insufficient_frames"
+        return True, diagnostics  # Can't validate with < 2 frames
+
+    diffs = []
+    for i in range(1, len(frames)):
+        prev_frame = frames[i - 1]
+        curr_frame = frames[i]
+
+        if prev_frame is None or curr_frame is None:
+            continue
+        if not isinstance(prev_frame, np.ndarray) or not isinstance(curr_frame, np.ndarray):
+            continue
+        if prev_frame.shape != curr_frame.shape:
+            continue
+
+        try:
+            diff = np.mean(np.abs(curr_frame.astype(float) - prev_frame.astype(float)))
+            diffs.append(diff)
+        except Exception:
+            continue
+
+    if not diffs:
+        diagnostics["reason"] = "no_valid_comparisons"
+        return True, diagnostics
+
+    diagnostics["avg_frame_diff"] = float(np.mean(diffs))
+    diagnostics["max_frame_diff"] = float(np.max(diffs))
+    diagnostics["is_static"] = diagnostics["avg_frame_diff"] < min_diff_threshold
+
+    is_valid = not diagnostics["is_static"]
+    diagnostics["is_valid"] = is_valid
+
+    if not is_valid:
+        diagnostics["reason"] = f"static_sequence (avg_diff={diagnostics['avg_frame_diff']:.2f} < {min_diff_threshold})"
+
+    return is_valid, diagnostics
+
+
+def save_debug_thumbnail(
+    rgb: np.ndarray,
+    output_dir: Path,
+    filename: str,
+    *,
+    max_size: int = 256,
+) -> Optional[Path]:
+    """
+    Save a low-resolution thumbnail for human QA verification.
+
+    Args:
+        rgb: RGB image array
+        output_dir: Directory to save thumbnail
+        filename: Thumbnail filename (e.g., "frame_0001.png")
+        max_size: Maximum dimension for thumbnail (default: 256)
+
+    Returns:
+        Path to saved thumbnail, or None on failure
+    """
+    if rgb is None or not isinstance(rgb, np.ndarray):
+        return None
+
+    try:
+        from PIL import Image
+
+        # Create thumbnails directory if needed
+        thumb_dir = output_dir / "thumbnails"
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+
+        # Convert to PIL Image
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+
+        img = Image.fromarray(rgb)
+
+        # Resize to thumbnail
+        img.thumbnail((max_size, max_size))
+
+        # Save
+        thumb_path = thumb_dir / filename
+        img.save(thumb_path)
+
+        return thumb_path
+    except Exception:
+        return None
 
 
 def strip_camera_data(obs: Any) -> Any:
@@ -292,3 +507,46 @@ def coerce_rgb_frame(
         except Exception:
             return None
     return None
+
+
+def is_placeholder_rgb(data: Any) -> bool:
+    """Detect placeholder RGB frames (few colors, mostly zeros)."""
+    if data is None:
+        return False
+    if not isinstance(data, np.ndarray):
+        try:
+            data = np.asarray(data)
+        except Exception:
+            return False
+    if data.size == 0:
+        return False
+    zero_ratio = float(np.count_nonzero(data == 0)) / float(data.size)
+    if zero_ratio <= 0.70:
+        return False
+    try:
+        if data.ndim >= 3 and data.shape[-1] >= 3:
+            flat = data.reshape(-1, data.shape[-1])[:, :3]
+            unique_colors = np.unique(flat, axis=0)
+            return unique_colors.shape[0] <= 4
+        unique_vals = np.unique(data)
+        return unique_vals.size <= 4
+    except Exception:
+        return False
+
+
+def is_placeholder_depth(data: Any) -> bool:
+    """Detect placeholder depth frames (all inf or all zeros)."""
+    if data is None:
+        return False
+    if not isinstance(data, np.ndarray):
+        try:
+            data = np.asarray(data)
+        except Exception:
+            return False
+    if data.size == 0:
+        return False
+    if np.all(~np.isfinite(data)):
+        return True
+    if np.all(data == 0):
+        return True
+    return False

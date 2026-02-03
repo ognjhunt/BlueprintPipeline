@@ -1,508 +1,7 @@
 {
-  "version": "1.0.0",
-  "scene_id": "lightwheel_kitchen",
-  "scene": {
-    "coordinate_frame": "y_up",
-    "meters_per_unit": 0.01,
-    "environment_type": "kitchen",
-    "room": {
-    }
-  },
-  "objects": [
-    {
-      "id": "Refrigerator001",
-      "name": "Refrigerator",
-      "category": "refrigerator",
-      "sim_role": "static",
-      "transform": {
-        "position": {
-          "x": 2.0,
-          "y": 0.0,
-          "z": -2.5
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Refrigerator001/Refrigerator001.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 80.0
-      },
-      "semantics": {
-        "affordances": [
-          "Openable"
-        ]
-      },
-      "articulation": {
-        "required": false,
-        "disabled": true
-      }
-    },
-    {
-      "id": "Dishwasher054",
-      "name": "Dishwasher",
-      "category": "dishwasher",
-      "sim_role": "static",
-      "transform": {
-        "position": {
-          "x": -1.0,
-          "y": 0.0,
-          "z": -2.5
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Dishwasher054/Dishwasher054.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 50.0
-      },
-      "semantics": {
-        "affordances": [
-          "Openable"
-        ]
-      },
-      "articulation": {
-        "required": false,
-        "disabled": true
-      }
-    },
-    {
-      "id": "Microwave017",
-      "name": "Microwave",
-      "category": "microwave",
-      "sim_role": "static",
-      "transform": {
-        "position": {
-          "x": 0.5,
-          "y": 1.2,
-          "z": -2.5
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Microwave017/Microwave017.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 15.0
-      },
-      "semantics": {
-        "affordances": [
-          "Openable",
-          "Pressable"
-        ]
-      },
-      "articulation": {
-        "required": false,
-        "disabled": true
-      }
-    },
-    {
-      "id": "Sink054",
-      "name": "Sink",
-      "category": "sink",
-      "sim_role": "static",
-      "transform": {
-        "position": {
-          "x": 0.0,
-          "y": 0.9,
-          "z": -2.5
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Sink054/Sink054.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 20.0
-      },
-      "semantics": {
-        "affordances": [
-          "Turnable"
-        ]
-      }
-    },
-    {
-      "id": "Stovetop012",
-      "name": "Stovetop",
-      "category": "stovetop",
-      "sim_role": "interactive",
-      "transform": {
-        "position": {
-          "x": 1.0,
-          "y": 0.9,
-          "z": -2.5
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Stovetop012/Stovetop012.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 30.0
-      },
-      "semantics": {
-        "affordances": [
-          "Turnable"
-        ]
-      }
-    },
-    {
-      "id": "RangeHood015",
-      "name": "Range Hood",
-      "category": "range_hood",
-      "sim_role": "static",
-      "transform": {
-        "position": {
-          "x": 1.0,
-          "y": 2.0,
-          "z": -2.5
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_RangeHood015/RangeHood015.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 25.0
-      },
-      "semantics": {
-        "affordances": []
-      }
-    },
-    {
-      "id": "Kitchen_Cabinet001",
-      "name": "Kitchen Cabinet",
-      "category": "cabinet",
-      "sim_role": "static",
-      "transform": {
-        "position": {
-          "x": -0.5,
-          "y": 1.5,
-          "z": -2.5
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Kitchen_Cabinet001/Kitchen_Cabinet001.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 30.0
-      },
-      "semantics": {
-        "affordances": [
-          "Openable"
-        ]
-      },
-      "articulation": {
-        "required": false,
-        "disabled": true
-      }
-    },
-    {
-      "id": "Kitchen_Cabinet002",
-      "name": "Kitchen Cabinet 2",
-      "category": "cabinet",
-      "sim_role": "static",
-      "transform": {
-        "position": {
-          "x": 0.5,
-          "y": 1.5,
-          "z": -2.5
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Kitchen_Cabinet002/Kitchen_Cabinet002.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 30.0
-      },
-      "semantics": {
-        "affordances": [
-          "Openable"
-        ]
-      },
-      "articulation": {
-        "required": false,
-        "disabled": true
-      }
-    },
-    {
-      "id": "Table049",
-      "name": "Kitchen Table",
-      "category": "table",
-      "sim_role": "static",
-      "transform": {
-        "position": {
-          "x": 0.0,
-          "y": 0.0,
-          "z": 1.0
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Table049/Table049.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 40.0
-      },
-      "semantics": {
-        "affordances": []
-      }
-    },
-    {
-      "id": "WallStackOven004",
-      "name": "Wall Oven",
-      "category": "oven",
-      "sim_role": "static",
-      "transform": {
-        "position": {
-          "x": -2.0,
-          "y": 1.0,
-          "z": -2.5
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_WallStackOven004/WallStackOven004.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 60.0
-      },
-      "semantics": {
-        "affordances": [
-          "Openable"
-        ]
-      },
-      "articulation": {
-        "required": false,
-        "disabled": true
-      }
-    },
-    {
-      "id": "Toaster003",
-      "name": "Toaster",
-      "category": "toaster",
-      "sim_role": "manipulable_object",
-      "transform": {
-        "position": {
-          "x": 0.3,
-          "y": 0.95,
-          "z": -2.3
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Toaster003/Toaster003.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 2.0
-      },
-      "semantics": {
-        "affordances": [
-          "Graspable",
-          "Pressable"
-        ]
-      }
-    },
-    {
-      "id": "CoffeeMachine006",
-      "name": "Coffee Machine",
-      "category": "coffee_machine",
-      "sim_role": "interactive",
-      "transform": {
-        "position": {
-          "x": -0.3,
-          "y": 0.95,
-          "z": -2.3
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_CoffeeMachine006/CoffeeMachine006.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 5.0
-      },
-      "semantics": {
-        "affordances": [
-          "Pressable"
-        ]
-      }
-    },
-    {
-      "id": "Pot057",
-      "name": "Pot",
-      "category": "pot",
-      "sim_role": "manipulable_object",
-      "transform": {
-        "position": {
-          "x": 1.0,
-          "y": 0.95,
-          "z": -2.3
-        },
-        "scale": {
-          "x": 1.0,
-          "y": 1.0,
-          "z": 1.0
-        },
-        "rotation_quaternion": {
-          "w": 1.0,
-          "x": 0.0,
-          "y": 0.0,
-          "z": 0.0
-        }
-      },
-      "asset": {
-        "path": "assets/obj_Pot057/Pot057.usd",
-        "format": "usd"
-      },
-      "physics": {
-        "mass": 1.5
-      },
-      "semantics": {
-        "affordances": [
-          "Graspable",
-          "Containable"
-        ]
-      }
-    }
-  ],
   "metadata": {
     "articulation_disabled": {
+      "disabled_at": "2026-01-27T17:40:38.129070Z",
       "disabled_count": 6,
       "disabled_objects": [
         "Dishwasher054",
@@ -512,8 +11,509 @@
         "Refrigerator001",
         "WallStackOven004"
       ],
-      "disabled_at": "2026-01-27T17:40:38.129070Z",
       "reason": "DISABLE_ARTICULATED_ASSETS=true"
     }
-  }
+  },
+  "meters_per_unit": 1.0,
+  "objects": [
+    {
+      "articulation": {
+        "disabled": true,
+        "required": false
+      },
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Refrigerator001/Refrigerator001.usd"
+      },
+      "category": "refrigerator",
+      "id": "Refrigerator001",
+      "name": "Refrigerator",
+      "physics": {
+        "mass": 80.0
+      },
+      "semantics": {
+        "affordances": [
+          "Openable"
+        ]
+      },
+      "sim_role": "static",
+      "transform": {
+        "position": {
+          "x": 2.0,
+          "y": 0.0,
+          "z": -2.5
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "articulation": {
+        "disabled": true,
+        "required": false
+      },
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Dishwasher054/Dishwasher054.usd"
+      },
+      "category": "dishwasher",
+      "id": "Dishwasher054",
+      "name": "Dishwasher",
+      "physics": {
+        "mass": 50.0
+      },
+      "semantics": {
+        "affordances": [
+          "Openable"
+        ]
+      },
+      "sim_role": "static",
+      "transform": {
+        "position": {
+          "x": -1.0,
+          "y": 0.0,
+          "z": -2.5
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "articulation": {
+        "disabled": true,
+        "required": false
+      },
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Microwave017/Microwave017.usd"
+      },
+      "category": "microwave",
+      "id": "Microwave017",
+      "name": "Microwave",
+      "physics": {
+        "mass": 15.0
+      },
+      "semantics": {
+        "affordances": [
+          "Openable",
+          "Pressable"
+        ]
+      },
+      "sim_role": "static",
+      "transform": {
+        "position": {
+          "x": 0.5,
+          "y": 1.2,
+          "z": -2.5
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Sink054/Sink054.usd"
+      },
+      "category": "sink",
+      "id": "Sink054",
+      "name": "Sink",
+      "physics": {
+        "mass": 20.0
+      },
+      "semantics": {
+        "affordances": [
+          "Turnable"
+        ]
+      },
+      "sim_role": "static",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.9,
+          "z": -2.5
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Stovetop012/Stovetop012.usd"
+      },
+      "category": "stovetop",
+      "id": "Stovetop012",
+      "name": "Stovetop",
+      "physics": {
+        "mass": 30.0
+      },
+      "semantics": {
+        "affordances": [
+          "Turnable"
+        ]
+      },
+      "sim_role": "interactive",
+      "transform": {
+        "position": {
+          "x": 1.0,
+          "y": 0.9,
+          "z": -2.5
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_RangeHood015/RangeHood015.usd"
+      },
+      "category": "range_hood",
+      "id": "RangeHood015",
+      "name": "Range Hood",
+      "physics": {
+        "mass": 25.0
+      },
+      "semantics": {
+        "affordances": []
+      },
+      "sim_role": "static",
+      "transform": {
+        "position": {
+          "x": 1.0,
+          "y": 2.0,
+          "z": -2.5
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "articulation": {
+        "disabled": true,
+        "required": false
+      },
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Kitchen_Cabinet001/Kitchen_Cabinet001.usd"
+      },
+      "category": "cabinet",
+      "id": "Kitchen_Cabinet001",
+      "name": "Kitchen Cabinet",
+      "physics": {
+        "mass": 30.0
+      },
+      "semantics": {
+        "affordances": [
+          "Openable"
+        ]
+      },
+      "sim_role": "static",
+      "transform": {
+        "position": {
+          "x": -0.5,
+          "y": 1.5,
+          "z": -2.5
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "articulation": {
+        "disabled": true,
+        "required": false
+      },
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Kitchen_Cabinet002/Kitchen_Cabinet002.usd"
+      },
+      "category": "cabinet",
+      "id": "Kitchen_Cabinet002",
+      "name": "Kitchen Cabinet 2",
+      "physics": {
+        "mass": 30.0
+      },
+      "semantics": {
+        "affordances": [
+          "Openable"
+        ]
+      },
+      "sim_role": "static",
+      "transform": {
+        "position": {
+          "x": 0.5,
+          "y": 1.5,
+          "z": -2.5
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Table049/Table049.usd"
+      },
+      "category": "table",
+      "id": "Table049",
+      "name": "Kitchen Table",
+      "physics": {
+        "mass": 40.0
+      },
+      "semantics": {
+        "affordances": []
+      },
+      "sim_role": "static",
+      "transform": {
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 1.0
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "articulation": {
+        "disabled": true,
+        "required": false
+      },
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_WallStackOven004/WallStackOven004.usd"
+      },
+      "category": "oven",
+      "id": "WallStackOven004",
+      "name": "Wall Oven",
+      "physics": {
+        "mass": 60.0
+      },
+      "semantics": {
+        "affordances": [
+          "Openable"
+        ]
+      },
+      "sim_role": "static",
+      "transform": {
+        "position": {
+          "x": -2.0,
+          "y": 1.0,
+          "z": -2.5
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Toaster003/Toaster003.usd"
+      },
+      "category": "toaster",
+      "id": "Toaster003",
+      "name": "Toaster",
+      "physics": {
+        "mass": 2.0
+      },
+      "semantics": {
+        "affordances": [
+          "Graspable",
+          "Pressable"
+        ]
+      },
+      "sim_role": "manipulable_object",
+      "transform": {
+        "position": {
+          "x": 0.3,
+          "y": 0.95,
+          "z": -2.3
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_CoffeeMachine006/CoffeeMachine006.usd"
+      },
+      "category": "coffee_machine",
+      "id": "CoffeeMachine006",
+      "name": "Coffee Machine",
+      "physics": {
+        "mass": 5.0
+      },
+      "semantics": {
+        "affordances": [
+          "Pressable"
+        ]
+      },
+      "sim_role": "interactive",
+      "transform": {
+        "position": {
+          "x": -0.3,
+          "y": 0.95,
+          "z": -2.3
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    },
+    {
+      "asset": {
+        "format": "usd",
+        "path": "assets/obj_Pot057/Pot057.usd"
+      },
+      "category": "pot",
+      "id": "Pot057",
+      "name": "Pot",
+      "physics": {
+        "mass": 1.5
+      },
+      "semantics": {
+        "affordances": [
+          "Graspable",
+          "Containable"
+        ]
+      },
+      "sim_role": "manipulable_object",
+      "transform": {
+        "position": {
+          "x": 1.0,
+          "y": 0.95,
+          "z": -2.3
+        },
+        "rotation_quaternion": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "scale": {
+          "x": 1.0,
+          "y": 1.0,
+          "z": 1.0
+        }
+      }
+    }
+  ],
+  "scene": {
+    "coordinate_frame": "y_up",
+    "environment_type": "kitchen",
+    "meters_per_unit": 1.0,
+    "room": {}
+  },
+  "scene_id": "lightwheel_kitchen",
+  "version": "1.0.0"
 }

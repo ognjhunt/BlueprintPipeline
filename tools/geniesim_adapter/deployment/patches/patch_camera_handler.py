@@ -97,10 +97,39 @@ CAMERA_HANDLER = textwrap.dedent("""\
             if not camera_prim_path:
                 camera_prim_path = "/OmniverseKit_Persp"
 
-            # Compute camera extrinsics from USD (camera-to-world)
+            # Compute camera intrinsics and extrinsics from USD camera
             try:
                 cam_prim = stage.GetPrimAtPath(camera_prim_path)
                 if cam_prim and cam_prim.IsValid() and cam_prim.IsA(UsdGeom.Camera):
+                    camera = UsdGeom.Camera(cam_prim)
+
+                    # Extract intrinsics from USD camera attributes
+                    # Focal length is in scene units (usually mm for cameras)
+                    focal_length = camera.GetFocalLengthAttr().Get()
+                    h_aperture = camera.GetHorizontalApertureAttr().Get()
+                    v_aperture = camera.GetVerticalApertureAttr().Get()
+
+                    _intrinsics_source = "default_fov"
+                    if focal_length and h_aperture and h_aperture > 0:
+                        # fx = focal_length_mm * width_pixels / aperture_mm
+                        _fx = float(focal_length) * float(_w) / float(h_aperture)
+                        if v_aperture and v_aperture > 0:
+                            _fy = float(focal_length) * float(_h) / float(v_aperture)
+                        else:
+                            _fy = _fx  # Assume square pixels
+                        _intrinsics_source = "usd_camera"
+                        result["camera_info"]["fx"] = _fx
+                        result["camera_info"]["fy"] = _fy
+                        result["camera_info"]["ppx"] = float(_w) / 2.0
+                        result["camera_info"]["ppy"] = float(_h) / 2.0
+                        print(f"[PATCH] Camera {camera_prim_path}: focal_length={focal_length}, aperture=({h_aperture}, {v_aperture}), fx={_fx:.1f}, fy={_fy:.1f}")
+
+                    result["camera_info"]["intrinsics_source"] = _intrinsics_source
+                    result["camera_info"]["focal_length_mm"] = float(focal_length) if focal_length else None
+                    result["camera_info"]["h_aperture_mm"] = float(h_aperture) if h_aperture else None
+                    result["camera_info"]["v_aperture_mm"] = float(v_aperture) if v_aperture else None
+
+                    # Compute extrinsics (camera-to-world transform)
                     xformable = UsdGeom.Xformable(cam_prim)
                     if xformable:
                         from pxr import Usd
@@ -108,7 +137,8 @@ CAMERA_HANDLER = textwrap.dedent("""\
                         result["camera_info"]["extrinsic"] = np.array(cam_xform, dtype=np.float64).reshape(4, 4).tolist()
                         result["camera_info"]["calibration_id"] = f"{camera_prim_path}_calib"
             except Exception as _ext_err:
-                print(f"[PATCH] Failed to compute camera extrinsic: {_ext_err}")
+                print(f"[PATCH] Failed to compute camera intrinsics/extrinsics: {_ext_err}")
+                result["camera_info"]["intrinsics_source"] = "error"
 
             # Cache render products and annotators across calls
             cls = type(self)
