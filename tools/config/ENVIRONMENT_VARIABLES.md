@@ -398,6 +398,36 @@ export PIPELINE_ENV=production
 
 ---
 
+## Strict Realism Profile
+
+Use the strict realism profile to enforce fail-closed physics fidelity and disable all heuristic fallbacks. The
+profile lives at `configs/realism_strict.env` and is intended for production-quality data capture runs.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATA_FIDELITY_MODE` | `production` | Enables fail-fast data fidelity gates. |
+| `STRICT_REALISM` | `true` | Enforces realism gates in all environments. |
+| `REQUIRE_REAL_CONTACTS` | `true` | Require PhysX contact reports. |
+| `REQUIRE_REAL_EFFORTS` | `true` | Require real joint efforts (no inverse dynamics). |
+| `REQUIRE_VALID_RGB` | `true` | Require valid RGB frames (no placeholders). |
+| `REQUIRE_OBJECT_MOTION` | `true` | Require object motion for manipulation tasks. |
+| `REQUIRE_INTRINSICS` | `true` | Require camera intrinsics (no FOV fallback). |
+| `GENIESIM_PATCH_CHECK_STRICT` | `1` | Fail startup if required patches are missing. |
+| `GENIESIM_ALLOW_HEURISTIC_ATTACH` | `0` | Disallow heuristic object attachment. |
+| `GENIESIM_FORCE_ATTACH_ON_GRASP_PHASE` | `0` | Disallow forced attach during grasp phases. |
+| `GENIESIM_ALLOW_IK_FAILURE_FALLBACK` | `0` | Disallow IK failure fallbacks. |
+| `GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD` | `0` | Disallow linear fallback trajectories. |
+| `GENIESIM_SKIP_SERVER_RECORDING` | `0` | Require server recording for real scene state. |
+| `ALLOW_GENIESIM_MOCK` | `0` | Disable mock GenieSim backend. |
+| `USE_MOCK_CAPTURE` | `0` | Disable mock sensor capture. |
+
+**Example**:
+```bash
+source configs/realism_strict.env
+```
+
+---
+
 ### BP_QUALITY_* - Quality Gate Configuration
 
 Quality validation thresholds can be overridden via environment variables.

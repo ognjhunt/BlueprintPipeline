@@ -25,8 +25,91 @@ EFFORTS_PATCH_MARKER = "BlueprintPipeline joint_efforts patch"
 CONTACT_HANDLER = textwrap.dedent("""\
 
     # --- BEGIN BlueprintPipeline contact_report patch ---
+    _bp_contact_reporting_enabled = False
+
+    def _bp_enable_contact_reporting(self):
+        \"\"\"Enable PhysX ContactReportAPI on gripper links and scene objects.\"\"\"
+        if getattr(self, "_bp_contact_reporting_enabled", False):
+            return
+        try:
+            import os as _os
+            import omni.usd
+            from pxr import Usd, UsdPhysics, PhysxSchema
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                return
+
+            prim_paths = set()
+
+            # Try to resolve robot prim roots from known controller attributes
+            robot_roots = []
+            try:
+                server_fn = getattr(self, "server_function", None)
+                cmd = getattr(server_fn, "command_controller", None) or server_fn
+                robot = getattr(cmd, "robot", None)
+                for attr in ("robot_prim_path", "robot_root_path", "robot_root", "robot_path"):
+                    root = getattr(cmd, attr, None) or getattr(robot, attr, None)
+                    if root:
+                        robot_roots.append(str(root))
+            except Exception:
+                pass
+
+            # Discover gripper/finger links under robot roots
+            gripper_keywords = ("finger", "gripper", "hand", "leftfinger", "rightfinger")
+            for root in robot_roots:
+                prim = stage.GetPrimAtPath(root)
+                if not prim.IsValid():
+                    continue
+                for desc in Usd.PrimRange(prim):
+                    name = desc.GetName().lower()
+                    if not any(kw in name for kw in gripper_keywords):
+                        continue
+                    if desc.HasAPI(UsdPhysics.RigidBodyAPI) or desc.HasAPI(UsdPhysics.CollisionAPI):
+                        prim_paths.add(str(desc.GetPath()))
+
+            # Include scene objects under common paths
+            for prefix in ("/World/Scene", "/World/Objects", "/World"):
+                prim = stage.GetPrimAtPath(prefix)
+                if not prim.IsValid():
+                    continue
+                for desc in Usd.PrimRange(prim):
+                    if desc.HasAPI(UsdPhysics.RigidBodyAPI) or desc.HasAPI(UsdPhysics.CollisionAPI):
+                        prim_paths.add(str(desc.GetPath()))
+
+            if not prim_paths:
+                return
+
+            threshold = float(_os.getenv("PHYSX_CONTACT_REPORT_THRESHOLD_N", "0.1"))
+            enabled = 0
+            for prim_path in prim_paths:
+                try:
+                    prim = stage.GetPrimAtPath(prim_path)
+                    if not prim.IsValid():
+                        continue
+                    if prim.HasAPI(PhysxSchema.PhysxContactReportAPI):
+                        enabled += 1
+                        continue
+                    contact_api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+                    if contact_api:
+                        thr_attr = contact_api.GetThresholdAttr()
+                        if thr_attr:
+                            thr_attr.Set(threshold)
+                        enabled += 1
+                except Exception:
+                    continue
+            if enabled > 0:
+                self._bp_contact_reporting_enabled = True
+        except Exception:
+            return
+
     def get_contact_report(self, request, context):
         \"\"\"Return a PhysX contact report for the current simulation step.\"\"\"
+        # Ensure ContactReportAPI enabled before reading PhysX contacts
+        try:
+            self._bp_enable_contact_reporting()
+        except Exception:
+            pass
         try:
             try:
                 from aimdk.protocol import geniesim_grpc_pb2 as _pb2

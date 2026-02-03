@@ -124,6 +124,8 @@ from tools.camera_io import (
     resolve_npy_path,
     strip_camera_data,
     validate_camera_array,
+    validate_rgb_frame_quality,
+    validate_frame_sequence_variety,
 )
 
 # Add parent paths for imports
@@ -157,6 +159,11 @@ from tools.config.env import parse_bool_env
 from tools.quality.quality_config import load_quality_config, QualityConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _strict_realism_enabled() -> bool:
+    """Fail-closed realism gate for all environments."""
+    return parse_bool_env(os.getenv("STRICT_REALISM"), default=True)
 
 GENIESIM_RECORDINGS_DIR_ENV = "GENIESIM_RECORDINGS_DIR"
 GENIESIM_RECORDING_DIR_ENV = "GENIESIM_RECORDING_DIR"
@@ -3008,13 +3015,34 @@ class GenieSimGRPCClient:
             "rgb_encoding": "",
             "depth_encoding": "",
         }
-        # color_info (field 2) — CameraInfo: width(1,int32), height(2,int32)
+        # color_info (field 2) — CameraInfo: width(1,int32), height(2,int32), ppx(3,float), ppy(4,float), fx(5,float), fy(6,float)
         if 2 in fields:
             info_fields = self._parse_protobuf_fields(fields[2][0][1])
             if 1 in info_fields:
                 result["width"] = int.from_bytes(info_fields[1][0][1], "little")
             if 2 in info_fields:
                 result["height"] = int.from_bytes(info_fields[2][0][1], "little")
+            # float32 fields
+            if 3 in info_fields:
+                try:
+                    result["ppx"] = _struct.unpack("<f", info_fields[3][0][1])[0]
+                except Exception:
+                    pass
+            if 4 in info_fields:
+                try:
+                    result["ppy"] = _struct.unpack("<f", info_fields[4][0][1])[0]
+                except Exception:
+                    pass
+            if 5 in info_fields:
+                try:
+                    result["fx"] = _struct.unpack("<f", info_fields[5][0][1])[0]
+                except Exception:
+                    pass
+            if 6 in info_fields:
+                try:
+                    result["fy"] = _struct.unpack("<f", info_fields[6][0][1])[0]
+                except Exception:
+                    pass
         # color_image (field 3) — CompressedImage: format(2,string), data(3,bytes)
         if 3 in fields:
             img_fields = self._parse_protobuf_fields(fields[3][0][1])
@@ -4374,6 +4402,7 @@ class GenieSimLocalFramework:
         """
         self.config = config or GenieSimConfig.from_env()
         self.verbose = verbose
+        self._strict_realism = _strict_realism_enabled()
 
         self._apply_curobo_fallback_policy()
 
@@ -5023,6 +5052,102 @@ class GenieSimLocalFramework:
                 "WARNING",
             )
 
+    def _strict_realism_preflight(self) -> None:
+        """Run strict realism preflight checks once per server start."""
+        if not getattr(self, "_strict_realism", False):
+            return
+        if getattr(self, "_strict_preflight_done", False):
+            return
+        self._strict_preflight_done = True
+
+        errors: List[str] = []
+
+        # 1) Contact report RPC availability
+        try:
+            contact_result = self._client.get_contact_report(include_points=False, lock_timeout=2.0)
+            if not contact_result.available or not contact_result.success:
+                errors.append(
+                    f"contact_report unavailable: {contact_result.error or 'RPC unsupported'}"
+                )
+        except Exception as exc:
+            errors.append(f"contact_report exception: {exc}")
+
+        # 2) Joint efforts must be real and non-zero
+        try:
+            jp_result = self._client.get_joint_position(lock_timeout=5.0)
+            if not jp_result.available or not jp_result.success:
+                errors.append(f"joint_position unavailable: {jp_result.error or 'RPC failed'}")
+            efforts = getattr(self._client, "_latest_joint_efforts", [])
+            if not efforts or not any(abs(e) > 1e-6 for e in efforts):
+                errors.append("joint_efforts missing or all zeros; server patch required")
+        except Exception as exc:
+            errors.append(f"joint_efforts exception: {exc}")
+
+        # 3) Object pose must be non-zero (not identity fallback)
+        try:
+            obj_prims = (
+                getattr(self, "_scene_object_prims", [])
+                or getattr(self._client, "_scene_object_prims", [])
+            )
+            if obj_prims:
+                resolved = self._resolve_object_prim(obj_prims[0])
+                if resolved is None:
+                    errors.append("object_pose unresolved; server object_pose patch required")
+                else:
+                    _path, pose = resolved
+                    pos = pose.get("position") or {}
+                    if isinstance(pos, dict):
+                        pos_vals = [pos.get("x", 0.0), pos.get("y", 0.0), pos.get("z", 0.0)]
+                    else:
+                        pos_vals = list(pos) if isinstance(pos, (list, tuple)) else [0.0, 0.0, 0.0]
+                    if not any(abs(v) > 1e-6 for v in pos_vals):
+                        errors.append(
+                            f"object_pose for {_path} is zero; live physics pose required"
+                        )
+        except Exception as exc:
+            errors.append(f"object_pose exception: {exc}")
+
+        # 4) Camera intrinsics + non-placeholder frame
+        try:
+            cam_map = getattr(self._client, "_camera_prim_map", {}) or {}
+            cam_id = "wrist" if "wrist" in cam_map else (list(cam_map.keys())[0] if cam_map else None)
+            cam_data = None
+            if cam_id:
+                cam_data = self._client.get_camera_data(cam_id)
+            if cam_data is None and cam_map:
+                cam_data = self._client._get_camera_data_raw(list(cam_map.values())[0])
+            if cam_data is None:
+                errors.append("camera_data unavailable; server camera patch required")
+            else:
+                fx = cam_data.get("fx")
+                fy = cam_data.get("fy")
+                ppx = cam_data.get("ppx")
+                ppy = cam_data.get("ppy")
+                if fx is None or fy is None or ppx is None or ppy is None:
+                    errors.append("camera intrinsics missing in CamInfo")
+                rgb = cam_data.get("rgb")
+                if isinstance(rgb, (bytes, bytearray)):
+                    rgb = decode_camera_bytes(
+                        bytes(rgb),
+                        width=int(cam_data.get("width") or 0),
+                        height=int(cam_data.get("height") or 0),
+                        encoding=cam_data.get("rgb_encoding") or cam_data.get("encoding") or "",
+                        kind="rgb",
+                    )
+                if rgb is None:
+                    errors.append("camera RGB decode failed")
+                else:
+                    is_valid, diag = validate_rgb_frame_quality(rgb, context="preflight")
+                    if not is_valid:
+                        errors.append(f"camera RGB invalid: {diag.get('reason')}")
+        except Exception as exc:
+            errors.append(f"camera preflight exception: {exc}")
+
+        if errors:
+            msg = "Strict realism preflight failed:\n  - " + "\n  - ".join(errors)
+            self.log(msg, "ERROR")
+            raise RuntimeError(msg)
+
     # =========================================================================
     # Data Collection
     # =========================================================================
@@ -5299,6 +5424,8 @@ class GenieSimLocalFramework:
                         _scene_obj_prims.append(_prim)
             self._client._scene_object_prims = _scene_obj_prims
             self._client._scene_variation_object_prims = _scene_variation_prims
+            self._scene_object_prims = _scene_obj_prims
+            self._scene_variation_object_prims = _scene_variation_prims
             if _scene_obj_prims:
                 self.log(f"Scene object prims for real pose queries: {_scene_obj_prims}")
             else:
@@ -5308,6 +5435,9 @@ class GenieSimLocalFramework:
                     "Deferring variation prims until first successful pose lookup: "
                     f"{_scene_variation_prims}"
                 )
+
+            # Strict realism preflight (fail-closed)
+            self._strict_realism_preflight()
 
             # Build real object properties from scene_graph nodes, replacing
             # hardcoded lookup tables (_OBJECT_SIZES, _OBJECT_MASSES, etc.).
@@ -6719,6 +6849,24 @@ class GenieSimLocalFramework:
                 _save_partial(result["error"])
                 return result
 
+            # Strict realism gate: scene_state provenance must be PhysX for all frames
+            if self._strict_realism:
+                try:
+                    from data_fidelity import validate_scene_state_provenance
+                    _scene_state_prov = "physx_server" if _real_scene_state_count > 0 else "synthetic_fallback"
+                    validate_scene_state_provenance(
+                        scene_state_provenance=_scene_state_prov,
+                        real_scene_state_frames=_real_scene_state_count,
+                        total_frames=len(frames),
+                        required_source="physx_server",
+                        min_real_ratio=1.0,
+                    )
+                except ImportError:
+                    if _real_scene_state_count < len(frames):
+                        raise RuntimeError(
+                            "Scene_state provenance invalid in strict realism mode."
+                        )
+
             frame_validation = {
                 "enabled": False,
                 "errors": [],
@@ -7860,8 +8008,20 @@ class GenieSimLocalFramework:
                     _calib_id = _cam_data.get("calibration_id") or f"{_cam_id}_calib"
                     _intrinsics_source = _cam_data.get("intrinsics_source", "geniesim_grpc")
 
-                    # Compute fallback intrinsics from 90deg FOV if missing
-                    if _fx is None or _fy is None:
+                    # Compute fallback intrinsics from 90deg FOV if missing (non-strict only)
+                    if _fx is None or _fy is None or _ppx is None or _ppy is None:
+                        if self._strict_realism:
+                            try:
+                                from data_fidelity import DataFidelityError
+                                raise DataFidelityError(
+                                    f"Camera {_cam_id} missing intrinsics in strict realism mode.",
+                                    gate_name="camera_intrinsics_missing",
+                                    diagnostics={"camera_id": _cam_id},
+                                )
+                            except ImportError:
+                                raise RuntimeError(
+                                    f"Camera {_cam_id} missing intrinsics in strict realism mode."
+                                )
                         if _width and _height:
                             # Assume 90 degree horizontal FOV as fallback
                             _fx = float(_width) / (2.0 * np.tan(np.radians(45)))
@@ -8705,6 +8865,7 @@ class GenieSimLocalFramework:
         _ee_static_window = 5
         _ee_static_std = 1e-4
         _is_production = getattr(self.config, "environment", "") == "production"
+        _strict_realism = getattr(self, "_strict_realism", False)
         _collision_source_hint = (self._last_planning_report.get("collision_source") or "").lower()
         _contact_query_warned = False
 
@@ -8877,6 +9038,18 @@ class GenieSimLocalFramework:
             # Inject synthetic scene_state when empty (mock/skip-server mode).
             # In production, empty scene_state is an error — real data is required.
             _scene_state_missing = not obs.get("scene_state")
+            if _scene_state_missing and _strict_realism:
+                try:
+                    from data_fidelity import DataFidelityError
+                    raise DataFidelityError(
+                        f"Scene state missing at frame {step_idx} in strict realism mode.",
+                        gate_name="scene_state_missing",
+                        diagnostics={"frame_idx": step_idx, "episode_id": episode_id},
+                    )
+                except ImportError:
+                    raise RuntimeError(
+                        f"Scene state missing at frame {step_idx} in strict realism mode."
+                    )
             if _scene_state_missing and step_idx == 0 and _is_production:
                 logger.error(
                     "EMPTY_SCENE_STATE in production for episode %s frame %d. "
@@ -9388,6 +9561,18 @@ class GenieSimLocalFramework:
                             _attached_has_real_pose = True  # server reports actual movement
                         break
             if _attached_object_id is not None and _ee_pos_units is not None and not _attached_has_real_pose:
+                if _strict_realism:
+                    try:
+                        from data_fidelity import DataFidelityError
+                        raise DataFidelityError(
+                            "Attached object pose is static; PhysX scene_state required in strict mode.",
+                            gate_name="scene_state_static",
+                            diagnostics={"attached_object_id": _attached_object_id},
+                        )
+                    except ImportError:
+                        raise RuntimeError(
+                            "Attached object pose is static; PhysX scene_state required in strict mode."
+                        )
                 _new_pos = _ee_pos_units + _grasp_ee_offset
                 _object_poses[_attached_object_id] = _new_pos.copy()
                 # Update scene_state in observation
@@ -9458,6 +9643,18 @@ class GenieSimLocalFramework:
             if collision_provenance is None:
                 collision_provenance = "physx_joint_effort" if _has_real_efforts else "joint_limits_only"
             frame_data["collision_provenance"] = collision_provenance
+            if _strict_realism and collision_provenance != "physx_contact_report":
+                try:
+                    from data_fidelity import DataFidelityError
+                    raise DataFidelityError(
+                        f"Collision provenance invalid in strict mode: {collision_provenance}",
+                        gate_name="collision_provenance",
+                        diagnostics={"frame_idx": step_idx, "provenance": collision_provenance},
+                    )
+                except ImportError:
+                    raise RuntimeError(
+                        f"Collision provenance invalid in strict mode: {collision_provenance}"
+                    )
 
             # Hybrid collision metric: allow gripper-target and target-surface contacts
             collision_free_physics = None
@@ -9529,6 +9726,8 @@ class GenieSimLocalFramework:
                     _force_attach = not _is_production
                 else:
                     _force_attach = _force_attach.strip().lower() in {"1", "true", "yes"}
+                if _strict_realism:
+                    _force_attach = False
 
                 if (
                     _candidate is None
@@ -9552,6 +9751,8 @@ class GenieSimLocalFramework:
                     _allow_heuristic_attach = not _is_production
                 else:
                     _allow_heuristic_attach = _allow_heuristic_attach.strip().lower() in {"1", "true", "yes"}
+                if _strict_realism:
+                    _allow_heuristic_attach = False
 
                 if _candidate is None and _allow_heuristic_attach:
                     try:
@@ -9575,43 +9776,31 @@ class GenieSimLocalFramework:
                     _grasp_ee_offset = _object_poses[_attached_object_id] - _ee_pos_units
                     frame_data["grasp_feasible"] = True
                     frame_data["grasped_object_id"] = _attached_object_id
-                    _attached_has_real_pose = False
-                    # Apply kinematic attachment update immediately
-                    _new_pos = _ee_pos_units + _grasp_ee_offset
-                    _object_poses[_attached_object_id] = _new_pos.copy()
-                    if obs.get("scene_state"):
-                        for _obj in obs["scene_state"].get("objects", []):
-                            if _obj.get("object_id") == _attached_object_id:
-                                _update_pose_dict(_obj, _new_pos)
-                                break
-                    obs["scene_state_provenance"] = "kinematic_ee_offset"
+                    if not _strict_realism:
+                        _attached_has_real_pose = False
+                        # Apply kinematic attachment update immediately
+                        _new_pos = _ee_pos_units + _grasp_ee_offset
+                        _object_poses[_attached_object_id] = _new_pos.copy()
+                        if obs.get("scene_state"):
+                            for _obj in obs["scene_state"].get("objects", []):
+                                if _obj.get("object_id") == _attached_object_id:
+                                    _update_pose_dict(_obj, _new_pos)
+                                    break
+                        obs["scene_state_provenance"] = "kinematic_ee_offset"
 
-            # Contact force estimation: prefer real joint efforts, then contact report, else heuristic
+            # Contact force estimation: strict realism requires PhysX contact report
             _contact_forces_payload = None
-            if _has_real_efforts:
-                if gripper_indices:
-                    _gripper_efforts = [
-                        _real_efforts[idx] for idx in gripper_indices if idx < len(_real_efforts)
-                    ]
-                else:
-                    _gripper_efforts = _real_efforts[arm_dof:]  # gripper joint efforts
-                _grip_force_real = sum(abs(e) for e in _gripper_efforts)
-                if arm_indices:
-                    _arm_efforts = [
-                        _real_efforts[idx] for idx in arm_indices if idx < len(_real_efforts)
-                    ]
-                else:
-                    _arm_efforts = _real_efforts[:arm_dof]
-                _contact_forces_payload = {
-                    "grip_force_N": round(_grip_force_real, 4),
-                    "arm_torques_Nm": [round(e, 4) for e in _arm_efforts],
-                    "gripper_efforts_N": [round(e, 4) for e in _gripper_efforts],
-                    "grasped_object_id": _attached_object_id,
-                    "force_sufficient": _grip_force_real > 0.5,
-                    "provenance": "physx_joint_effort",
-                    "confidence": 0.9,
-                }
-            elif _contact_result_available:
+            if _strict_realism:
+                if not _contact_result_available:
+                    try:
+                        from data_fidelity import DataFidelityError
+                        raise DataFidelityError(
+                            "PhysX contact report unavailable in strict realism mode.",
+                            gate_name="contact_report",
+                            diagnostics={"frame_idx": step_idx},
+                        )
+                    except ImportError:
+                        raise RuntimeError("PhysX contact report unavailable in strict realism mode.")
                 _gripper_force = 0.0
                 _total_force = 0.0
                 for _c in _contacts:
@@ -9642,61 +9831,119 @@ class GenieSimLocalFramework:
                     "contact_details": _contacts[:5],
                     "grasped_object_id": _attached_object_id,
                     "provenance": "physx_contact_report",
-                    "confidence": 0.7,
+                    "confidence": 0.9,
+                    "available": True,
                 }
-            elif _attached_object_id is not None:
-                _obj_type = ""
-                for _obj in (_scene_state or {}).get("objects", []):
-                    if _obj.get("object_id") == _attached_object_id:
-                        _obj_type = (_obj.get("object_type") or "").lower()
-                        break
-                _mass = _get_obj_prop(_obj_type, "mass", 0.3)
-                _weight = _mass * 9.81
+            else:
+                if _has_real_efforts:
+                    if gripper_indices:
+                        _gripper_efforts = [
+                            _real_efforts[idx] for idx in gripper_indices if idx < len(_real_efforts)
+                        ]
+                    else:
+                        _gripper_efforts = _real_efforts[arm_dof:]  # gripper joint efforts
+                    _grip_force_real = sum(abs(e) for e in _gripper_efforts)
+                    if arm_indices:
+                        _arm_efforts = [
+                            _real_efforts[idx] for idx in arm_indices if idx < len(_real_efforts)
+                        ]
+                    else:
+                        _arm_efforts = _real_efforts[:arm_dof]
+                    _contact_forces_payload = {
+                        "grip_force_N": round(_grip_force_real, 4),
+                        "arm_torques_Nm": [round(e, 4) for e in _arm_efforts],
+                        "gripper_efforts_N": [round(e, 4) for e in _gripper_efforts],
+                        "grasped_object_id": _attached_object_id,
+                        "force_sufficient": _grip_force_real > 0.5,
+                        "provenance": "physx_joint_effort",
+                        "confidence": 0.9,
+                    }
+                elif _contact_result_available:
+                    _gripper_force = 0.0
+                    _total_force = 0.0
+                    for _c in _contacts:
+                        _body_a = _normalize_body_name(
+                            _c.get("body_a", "") if isinstance(_c, dict) else getattr(_c, "body_a", "")
+                        )
+                        _body_b = _normalize_body_name(
+                            _c.get("body_b", "") if isinstance(_c, dict) else getattr(_c, "body_b", "")
+                        )
+                        _nf = float(
+                            _c.get("normal_force_N")
+                            if isinstance(_c, dict) and _c.get("normal_force_N") is not None
+                            else (
+                                _c.get("normal_force", 0)
+                                if isinstance(_c, dict)
+                                else getattr(_c, "normal_force", 0)
+                            )
+                        )
+                        _total_force += abs(_nf)
+                        if _is_gripper_body(_body_a) or _is_gripper_body(_body_b):
+                            _gripper_force += abs(_nf)
+                    if _gripper_force <= 0.0 and _contact_payload:
+                        _gripper_force = float(_contact_payload.get("total_normal_force", 0.0) or 0.0)
+                    _contact_forces_payload = {
+                        "total_normal_force_N": round(_total_force, 4),
+                        "grip_force_N": round(_gripper_force, 4),
+                        "contact_count": len(_contacts),
+                        "contact_details": _contacts[:5],
+                        "grasped_object_id": _attached_object_id,
+                        "provenance": "physx_contact_report",
+                        "confidence": 0.7,
+                    }
+                elif _attached_object_id is not None:
+                    _obj_type = ""
+                    for _obj in (_scene_state or {}).get("objects", []):
+                        if _obj.get("object_id") == _attached_object_id:
+                            _obj_type = (_obj.get("object_type") or "").lower()
+                            break
+                    _mass = _get_obj_prop(_obj_type, "mass", 0.3)
+                    _weight = _mass * 9.81
 
-                _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
+                    _grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
 
-                _heuristic_confidence = 0.2
-                _confidence_factors = {"base": 0.2}
+                    _heuristic_confidence = 0.2
+                    _confidence_factors = {"base": 0.2}
 
-                if _contact_result_available:
-                    _heuristic_confidence += 0.25
-                    _confidence_factors["contact_report"] = 0.25
-                else:
-                    _confidence_factors["contact_report"] = 0.0
+                    if _contact_result_available:
+                        _heuristic_confidence += 0.25
+                        _confidence_factors["contact_report"] = 0.25
+                    else:
+                        _confidence_factors["contact_report"] = 0.0
 
-                if _attached_object_id is not None:
-                    _heuristic_confidence += 0.15
-                    _confidence_factors["grasp_detected"] = 0.15
-                else:
-                    _confidence_factors["grasp_detected"] = 0.0
+                    if _attached_object_id is not None:
+                        _heuristic_confidence += 0.15
+                        _confidence_factors["grasp_detected"] = 0.15
+                    else:
+                        _confidence_factors["grasp_detected"] = 0.0
 
-                if frame_data.get("gripper_command") == "closed" and gripper_openness < 0.3:
-                    _heuristic_confidence += 0.1
-                    _confidence_factors["gripper_closing"] = 0.1
-                else:
-                    _confidence_factors["gripper_closing"] = 0.0
+                    if frame_data.get("gripper_command") == "closed" and gripper_openness < 0.3:
+                        _heuristic_confidence += 0.1
+                        _confidence_factors["gripper_closing"] = 0.1
+                    else:
+                        _confidence_factors["gripper_closing"] = 0.0
 
-                _contact_forces_payload = {
-                    "weight_force_N": round(_weight, 2),
-                    "grip_force_N": round(_grip_force, 2),
-                    "force_sufficient": _grip_force >= _weight,
-                    "grasped_object_id": _attached_object_id,
-                    "provenance": "heuristic_grasp_model_v2",
-                    "confidence": round(min(0.7, _heuristic_confidence), 2),
-                    "confidence_factors": _confidence_factors,
-                }
+                    _contact_forces_payload = {
+                        "weight_force_N": round(_weight, 2),
+                        "grip_force_N": round(_grip_force, 2),
+                        "force_sufficient": _grip_force >= _weight,
+                        "grasped_object_id": _attached_object_id,
+                        "provenance": "heuristic_grasp_model_v2",
+                        "confidence": round(min(0.7, _heuristic_confidence), 2),
+                        "confidence_factors": _confidence_factors,
+                    }
 
-            # Fix 3: Synthesize contact_forces when gripper is closed but no other source available
-            # This prevents gate_penalty for grasp/contact inconsistency
-            if _contact_forces_payload is None and frame_data.get("gripper_command") == "closed":
-                _synth_grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
-                _contact_forces_payload = {
-                    "grip_force_N": round(_synth_grip_force, 2),
-                    "force_sufficient": _synth_grip_force > 5.0,
-                    "grasped_object_id": _attached_object_id,  # May be None during approach
-                    "provenance": "synthetic_gripper_closed",
-                    "confidence": 0.3,
-                }
+                # Fix 3: Synthesize contact_forces when gripper is closed but no other source available
+                # This prevents gate_penalty for grasp/contact inconsistency
+                if _contact_forces_payload is None and frame_data.get("gripper_command") == "closed":
+                    _synth_grip_force = (1.0 - gripper_openness) * _GRIPPER_MAX_FORCE
+                    _contact_forces_payload = {
+                        "grip_force_N": round(_synth_grip_force, 2),
+                        "force_sufficient": _synth_grip_force > 5.0,
+                        "grasped_object_id": _attached_object_id,  # May be None during approach
+                        "provenance": "synthetic_gripper_closed",
+                        "confidence": 0.3,
+                    }
 
             if _contact_forces_payload is not None and frame_data.get("gripper_command") == "closed":
                 _grasped = _contact_forces_payload.get("grasped_object_id") or _attached_object_id
@@ -9704,7 +9951,7 @@ class GenieSimLocalFramework:
                     _grip_force_val = float(_contact_forces_payload.get("grip_force_N", 0.0) or 0.0)
                 except (TypeError, ValueError):
                     _grip_force_val = 0.0
-                if _grasped and _grip_force_val <= 0.0:
+                if _grasped and _grip_force_val <= 0.0 and not _strict_realism:
                     _contact_forces_payload["grip_force_N"] = 0.5
                     _contact_forces_payload["force_sufficient"] = True
                     _contact_forces_payload["provenance"] = "synthetic_grasp_force"
@@ -9732,7 +9979,12 @@ class GenieSimLocalFramework:
                 _grasp_ee_offset = None
 
             # Decay contact forces over 3 frames after release (Fix 9)
-            if _release_decay_remaining > 0 and _attached_object_id is None and "contact_forces" not in frame_data:
+            if (
+                not _strict_realism
+                and _release_decay_remaining > 0
+                and _attached_object_id is None
+                and "contact_forces" not in frame_data
+            ):
                 _decay_frac = _release_decay_remaining / 3.0
                 _release_decay_remaining -= 1
                 frame_data["contact_forces"] = {
@@ -9747,6 +9999,16 @@ class GenieSimLocalFramework:
 
             # Ensure contact_forces schema is always present for downstream validators.
             if "contact_forces" not in frame_data:
+                if _strict_realism:
+                    try:
+                        from data_fidelity import DataFidelityError
+                        raise DataFidelityError(
+                            "contact_forces missing in strict realism mode.",
+                            gate_name="contact_forces_missing",
+                            diagnostics={"frame_idx": step_idx},
+                        )
+                    except ImportError:
+                        raise RuntimeError("contact_forces missing in strict realism mode.")
                 frame_data["contact_forces"] = {
                     "available": False,
                     "grip_force_N": 0.0,
@@ -10090,7 +10352,26 @@ class GenieSimLocalFramework:
 
         # Backfill joint efforts via inverse dynamics when PhysX didn't provide them
         _estimated_effort_count = 0
-        if len(frames) >= 3:
+        if _strict_realism:
+            _missing_effort_frames = 0
+            for _frame in frames:
+                _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+                _eff = _obs_rs.get("joint_efforts", [])
+                if not isinstance(_eff, list) or len(_eff) == 0 or not any(abs(e) > 1e-6 for e in _eff):
+                    _missing_effort_frames += 1
+            if _missing_effort_frames > 0:
+                try:
+                    from data_fidelity import DataFidelityError
+                    raise DataFidelityError(
+                        f"Joint efforts missing in {_missing_effort_frames}/{len(frames)} frames.",
+                        gate_name="joint_efforts_missing",
+                        diagnostics={"missing_frames": _missing_effort_frames, "total_frames": len(frames)},
+                    )
+                except ImportError:
+                    raise RuntimeError(
+                        f"Joint efforts missing in {_missing_effort_frames}/{len(frames)} frames."
+                    )
+        elif len(frames) >= 3:
             # Simplified inverse dynamics: τ = I·α + C·v + G
             _id_inertia = np.array([2.0, 2.0, 1.5, 1.5, 1.0, 1.0, 0.5])
             _id_damping = np.array([10.0, 10.0, 8.0, 8.0, 5.0, 5.0, 3.0])
@@ -10177,7 +10458,7 @@ class GenieSimLocalFramework:
         _efforts_consistency = 1.0
         _total_frames = len(frames)
         _efforts_forced_consistency = False
-        if _efforts_source == "mixed" and _total_frames > 0:
+        if _efforts_source == "mixed" and _total_frames > 0 and not _strict_realism:
             # Count frames by source
             _physx_frames = sum(1 for f in frames if f.get("efforts_source") == "physx")
             _estimated_frames = sum(1 for f in frames if f.get("efforts_source") == "estimated_inverse_dynamics")
@@ -10683,6 +10964,38 @@ class GenieSimLocalFramework:
         else:
             warnings.append("PNG validation skipped (PIL not available).")
 
+        # Frame sequence variety check (detect static/repeated frames)
+        try:
+            cam_ids = []
+            for frame in frames:
+                cam_frames = (frame.get("observation") or {}).get("camera_frames") or {}
+                if isinstance(cam_frames, dict):
+                    for cam_id in cam_frames.keys():
+                        if cam_id not in cam_ids:
+                            cam_ids.append(cam_id)
+                if cam_ids:
+                    break
+            if cam_ids:
+                cam_id = cam_ids[0]
+                sampled = []
+                for frame in frames[: min(10, len(frames))]:
+                    cam_frames = (frame.get("observation") or {}).get("camera_frames") or {}
+                    cam_data = cam_frames.get(cam_id) if isinstance(cam_frames, dict) else None
+                    if not isinstance(cam_data, dict):
+                        continue
+                    rgb_arr = load_camera_frame(
+                        cam_data, "rgb", ep_dir=episode_dir, frames_dir=_frames_dir
+                    )
+                    if rgb_arr is not None:
+                        sampled.append(rgb_arr)
+                is_valid, diag = validate_frame_sequence_variety(sampled)
+                if not is_valid:
+                    errors.append(
+                        f"Camera {cam_id} frame sequence appears static: {diag.get('reason')}"
+                    )
+        except Exception as exc:
+            warnings.append(f"Frame sequence variety check failed: {exc}")
+
         return {
             "enabled": True,
             "errors": errors,
@@ -10730,6 +11043,29 @@ class GenieSimLocalFramework:
                 checked.add(camera_id)
             if details:
                 break
+        # Frame sequence variety check (static sequences)
+        try:
+            if frames:
+                cam_frames = (frames[0].get("observation") or {}).get("camera_frames") or {}
+                if isinstance(cam_frames, dict) and cam_frames:
+                    cam_id = next(iter(cam_frames.keys()))
+                    sampled = []
+                    for frame in frames[: min(10, len(frames))]:
+                        cam_data = (frame.get("observation") or {}).get("camera_frames", {}).get(cam_id)
+                        if not isinstance(cam_data, dict):
+                            continue
+                        rgb_arr = load_camera_frame(
+                            cam_data, "rgb", ep_dir=episode_dir, frames_dir=_frames_dir
+                        )
+                        if rgb_arr is not None:
+                            sampled.append(rgb_arr)
+                    is_valid, diag = validate_frame_sequence_variety(sampled)
+                    if not is_valid:
+                        details.append(
+                            f"Camera '{cam_id}' frame sequence appears static: {diag.get('reason')}"
+                        )
+        except Exception:
+            pass
         return {
             "camera_placeholder_detected": bool(details),
             "camera_placeholder_details": details,
@@ -12902,6 +13238,10 @@ Scene objects: {scene_summary}
                         ep_dir=_ep_dir,
                         frames_dir=_frames_dir,
                     )
+                    if isinstance(rgb, str) and rgb.endswith(".npy"):
+                        _npy = resolve_npy_path(rgb, ep_dir=_ep_dir, frames_dir=_frames_dir)
+                        if _npy is not None and _npy.exists():
+                            rgb = np.load(_npy)
                     rgb = validate_camera_array(rgb, context=f"vlm_audit:{cam_id}:{idx}")
                     if rgb is not None:
                         break
@@ -12915,6 +13255,10 @@ Scene objects: {scene_summary}
                             ep_dir=_ep_dir,
                             frames_dir=_frames_dir,
                         )
+                        if isinstance(rgb, str) and rgb.endswith(".npy"):
+                            _npy = resolve_npy_path(rgb, ep_dir=_ep_dir, frames_dir=_frames_dir)
+                            if _npy is not None and _npy.exists():
+                                rgb = np.load(_npy)
                         rgb = validate_camera_array(rgb, context=f"vlm_audit:{cam_id}:{idx}")
                         if rgb is not None:
                             break
@@ -13051,6 +13395,10 @@ Scene objects: {scene_summary}
                         ep_dir=_ep_dir,
                         frames_dir=_frames_dir,
                     )
+                    if isinstance(rgb, str) and rgb.endswith(".npy"):
+                        _npy = resolve_npy_path(rgb, ep_dir=_ep_dir, frames_dir=_frames_dir)
+                        if _npy is not None and _npy.exists():
+                            rgb = np.load(_npy)
                     rgb = validate_camera_array(rgb, context=f"sim2real:{cam_id}:{idx}")
                     if rgb is not None:
                         images.append(rgb)
@@ -13065,6 +13413,10 @@ Scene objects: {scene_summary}
                             ep_dir=_ep_dir,
                             frames_dir=_frames_dir,
                         )
+                        if isinstance(rgb, str) and rgb.endswith(".npy"):
+                            _npy = resolve_npy_path(rgb, ep_dir=_ep_dir, frames_dir=_frames_dir)
+                            if _npy is not None and _npy.exists():
+                                rgb = np.load(_npy)
                         rgb = validate_camera_array(rgb, context=f"sim2real:unknown:{idx}")
                         if rgb is not None:
                             images.append(rgb)

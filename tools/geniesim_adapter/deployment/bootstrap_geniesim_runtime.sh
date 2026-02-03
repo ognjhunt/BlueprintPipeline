@@ -38,6 +38,7 @@ if [ -d "${PATCHES_DIR}" ]; then
     "${PATCHES_DIR}/patch_stage_diagnostics.py" \
     "${PATCHES_DIR}/patch_observation_cameras.py" \
     "${PATCHES_DIR}/patch_contact_report.py" \
+    "${PATCHES_DIR}/patch_joint_efforts_handler.py" \
     "${PATCHES_DIR}/patch_ee_wrench_handler.py" \
     "${PATCHES_DIR}/patch_grpc_server.py" \
     "${PATCHES_DIR}/_apply_safe_float.py" \

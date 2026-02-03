@@ -17,6 +17,8 @@ Usage:
 
 Environment Variables:
     DATA_FIDELITY_MODE: "production" (default) or "dev"
+    STRICT_REALISM: "true" (default) or "false"
+        When true, all realism gates are enforced in every environment.
     REQUIRE_REAL_CONTACTS: "true" (default) or "false"
     REQUIRE_REAL_EFFORTS: "true" (default) or "false"
     REQUIRE_VALID_RGB: "true" (default) or "false"
@@ -74,39 +76,95 @@ def is_production_mode() -> bool:
     return mode != "dev"
 
 
+def is_strict_realism() -> bool:
+    """Check if strict realism is enabled (enforce gates everywhere)."""
+    return _get_bool_env("STRICT_REALISM", default=True)
+
+
 def require_real_contacts() -> bool:
     """Check if real PhysX contacts are required."""
-    if not is_production_mode():
+    if not is_production_mode() and not is_strict_realism():
         return False
     return _get_bool_env("REQUIRE_REAL_CONTACTS", default=True)
 
 
 def require_real_efforts() -> bool:
     """Check if real joint efforts (not backfilled) are required."""
-    if not is_production_mode():
+    if not is_production_mode() and not is_strict_realism():
         return False
     return _get_bool_env("REQUIRE_REAL_EFFORTS", default=True)
 
 
 def require_valid_rgb() -> bool:
     """Check if RGB frame quality validation is required."""
-    if not is_production_mode():
+    if not is_production_mode() and not is_strict_realism():
         return False
     return _get_bool_env("REQUIRE_VALID_RGB", default=True)
 
 
 def require_object_motion() -> bool:
     """Check if object motion validation is required for manipulation tasks."""
-    if not is_production_mode():
+    if not is_production_mode() and not is_strict_realism():
         return False
     return _get_bool_env("REQUIRE_OBJECT_MOTION", default=True)
 
 
 def require_intrinsics() -> bool:
     """Check if camera intrinsics are required."""
-    if not is_production_mode():
+    if not is_production_mode() and not is_strict_realism():
         return False
     return _get_bool_env("REQUIRE_INTRINSICS", default=True)
+
+
+def validate_scene_state_provenance(
+    scene_state_provenance: str,
+    real_scene_state_frames: int,
+    total_frames: int,
+    *,
+    required_source: str = "physx_server",
+    min_real_ratio: float = 1.0,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Validate that scene_state is real and from PhysX for all frames.
+
+    Args:
+        scene_state_provenance: Provenance label for scene_state.
+        real_scene_state_frames: Number of frames with real scene_state.
+        total_frames: Total frame count.
+        required_source: Required provenance label.
+        min_real_ratio: Minimum real frame ratio (default 1.0).
+
+    Returns:
+        (is_valid, diagnostics_dict)
+
+    Raises:
+        DataFidelityError: If strict realism and scene_state not fully real.
+    """
+    ratio = real_scene_state_frames / total_frames if total_frames > 0 else 0.0
+    diagnostics = {
+        "scene_state_provenance": scene_state_provenance,
+        "real_scene_state_frames": real_scene_state_frames,
+        "total_frames": total_frames,
+        "real_ratio": ratio,
+        "required_source": required_source,
+        "min_real_ratio": min_real_ratio,
+    }
+
+    is_valid = (
+        scene_state_provenance == required_source
+        and ratio >= min_real_ratio
+    )
+
+    if not is_valid and (require_object_motion() or is_strict_realism()):
+        raise DataFidelityError(
+            f"Scene state provenance invalid. "
+            f"source={scene_state_provenance}, real_ratio={ratio:.2f} "
+            f"(required={required_source}, min_ratio={min_real_ratio:.2f}). "
+            f"Set STRICT_REALISM=false or REQUIRE_OBJECT_MOTION=false to allow fallback.",
+            gate_name="scene_state_provenance",
+            diagnostics=diagnostics,
+        )
+
+    return is_valid, diagnostics
 
 
 # =============================================================================

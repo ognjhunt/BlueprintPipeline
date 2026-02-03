@@ -116,6 +116,38 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
 """)
 
 PATCH_MARKER = "BlueprintPipeline object_pose patch"
+LIVE_TIME_MARKER = "BlueprintPipeline object_pose live_timecode patch"
+
+LIVE_TIMECODE_HELPER = textwrap.dedent("""\
+
+    # --- BEGIN BlueprintPipeline object_pose live_timecode patch ---
+    def _bp_live_timecode(self):
+        \"\"\"Return USD timecode for the current sim time (avoid time=0).\"\"\"
+        try:
+            import omni.usd
+            from pxr import Usd
+            ctx = omni.usd.get_context()
+            if hasattr(ctx, "get_time"):
+                _t = ctx.get_time()
+                if _t is not None:
+                    return Usd.TimeCode(_t)
+        except Exception:
+            pass
+        try:
+            import omni.timeline
+            from pxr import Usd
+            timeline = omni.timeline.get_timeline_interface()
+            if timeline is not None:
+                return Usd.TimeCode(timeline.get_current_time())
+        except Exception:
+            pass
+        try:
+            from pxr import Usd
+            return Usd.TimeCode.Default()
+        except Exception:
+            return None
+    # --- END BlueprintPipeline object_pose live_timecode patch ---
+""")
 
 
 def patch_file():
@@ -127,9 +159,8 @@ def patch_file():
     with open(COMMAND_CONTROLLER, "r") as f:
         content = f.read()
 
-    if PATCH_MARKER in content:
-        print("[PATCH] Object pose handler already patched — skipping")
-        sys.exit(0)
+    has_patch_marker = PATCH_MARKER in content
+    has_live_time = "def _bp_live_timecode" in content
 
     # 1. Add the helper method to the class (append like camera patch)
     method_indent = "    "  # default 4 spaces
@@ -137,12 +168,20 @@ def patch_file():
     if m:
         method_indent = m.group(1)
 
-    indented_helper = "\n".join(
-        (method_indent + line) if line.strip() else line
-        for line in OBJECT_POSE_HELPER.splitlines()
-    ) + "\n"
+    patched = content.rstrip()
+    if not has_patch_marker:
+        indented_helper = "\n".join(
+            (method_indent + line) if line.strip() else line
+            for line in OBJECT_POSE_HELPER.splitlines()
+        ) + "\n"
+        patched = patched + "\n\n" + indented_helper
 
-    patched = content.rstrip() + "\n\n" + indented_helper
+    if not has_live_time:
+        indented_live = "\n".join(
+            (method_indent + line) if line.strip() else line
+            for line in LIVE_TIMECODE_HELPER.splitlines()
+        ) + "\n"
+        patched = patched + "\n\n" + indented_live
 
     # 1b. Inject diagnostic logging after scene_usd_path assignment
     # This tells us whether the server's scene_usd_path resolves to a real file
@@ -184,29 +223,43 @@ def patch_file():
             match = m
             break
     resolver_injected = False
-    if match:
-        indent = match.group(2)
-        var_name = match.group(3)
-        original_line = match.group(1)
-        resolution_line = f"\n{indent}{var_name} = self._bp_resolve_prim_path({var_name})  # {PATCH_MARKER}"
-        patched = patched[:match.end(1)] + resolution_line + patched[match.end(1):]
-        print(f"[PATCH] Injected prim path resolution after {var_name} assignment")
-        resolver_injected = True
-    else:
-        print("[PATCH] WARNING: Could not find prim_path assignment in get_object_pose handler")
-        print("[PATCH] Falling back to wrapping stage.GetPrimAtPath(prim_path) calls")
-        fallback_pattern = re.compile(r"stage\.GetPrimAtPath\(\s*(prim_path)\s*\)")
-        patched, fallback_count = fallback_pattern.subn(
-            rf"stage.GetPrimAtPath(self._bp_resolve_prim_path(\1))  # {PATCH_MARKER}",
-            patched,
-        )
-        if fallback_count:
+    if "_bp_resolve_prim_path" not in patched:
+        if match:
+            indent = match.group(2)
+            var_name = match.group(3)
+            original_line = match.group(1)
+            resolution_line = f"\n{indent}{var_name} = self._bp_resolve_prim_path({var_name})  # {PATCH_MARKER}"
+            patched = patched[:match.end(1)] + resolution_line + patched[match.end(1):]
+            print(f"[PATCH] Injected prim path resolution after {var_name} assignment")
             resolver_injected = True
-            print(f"[PATCH] Wrapped {fallback_count} stage.GetPrimAtPath(prim_path) call(s)")
         else:
-            print("[PATCH] ERROR: No prim_path assignment or stage.GetPrimAtPath(prim_path) call found")
-            print("[PATCH] Cannot wire prim path resolution automatically")
-            sys.exit(1)
+            print("[PATCH] WARNING: Could not find prim_path assignment in get_object_pose handler")
+            print("[PATCH] Falling back to wrapping stage.GetPrimAtPath(prim_path) calls")
+            fallback_pattern = re.compile(r"stage\.GetPrimAtPath\(\s*(prim_path)\s*\)")
+            patched, fallback_count = fallback_pattern.subn(
+                rf"stage.GetPrimAtPath(self._bp_resolve_prim_path(\1))  # {PATCH_MARKER}",
+                patched,
+            )
+            if fallback_count:
+                resolver_injected = True
+                print(f"[PATCH] Wrapped {fallback_count} stage.GetPrimAtPath(prim_path) call(s)")
+            else:
+                print("[PATCH] ERROR: No prim_path assignment or stage.GetPrimAtPath(prim_path) call found")
+                print("[PATCH] Cannot wire prim path resolution automatically")
+                sys.exit(1)
+    else:
+        resolver_injected = True
+
+    # 3. Ensure live timecode is used for world transforms (avoid time=0).
+    timecode_pattern = re.compile(
+        r"(ComputeLocalToWorldTransform\()\s*Usd\.TimeCode\([^\)]*\)\s*(\))"
+    )
+    patched, timecode_count = timecode_pattern.subn(
+        rf"\1self._bp_live_timecode()\2  # {LIVE_TIME_MARKER}",
+        patched,
+    )
+    if timecode_count:
+        print(f"[PATCH] Updated {timecode_count} ComputeLocalToWorldTransform timecodes")
 
     if PATCH_MARKER not in patched:
         print("[PATCH] ERROR: PATCH_MARKER not found after patching")

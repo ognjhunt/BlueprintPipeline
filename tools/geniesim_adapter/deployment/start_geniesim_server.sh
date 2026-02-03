@@ -67,6 +67,16 @@ _check_patch_marker \
 _check_patch_marker \
   "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py" \
   "BlueprintPipeline contact_report patch"
+if ! rg --quiet --fixed-strings "BlueprintPipeline joint_efforts patch" "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py" \
+  && ! rg --quiet --fixed-strings "BlueprintPipeline joint_efforts handler patch" "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py"; then
+  _missing_patches+=("BlueprintPipeline joint_efforts patch (${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py)")
+fi
+_check_patch_marker \
+  "${GENIESIM_ROOT}/source/data_collection/server/command_controller.py" \
+  "BlueprintPipeline camera patch"
+_check_patch_marker \
+  "${GENIESIM_ROOT}/source/data_collection/server/command_controller.py" \
+  "BlueprintPipeline object_pose patch"
 
 if [ "${#_missing_patches[@]}" -gt 0 ]; then
   echo "[geniesim] WARNING: Missing expected BlueprintPipeline patch markers:" >&2
