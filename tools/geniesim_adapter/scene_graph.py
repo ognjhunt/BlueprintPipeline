@@ -39,7 +39,9 @@ if str(REPO_ROOT) not in sys.path:
 from tools.logging_config import init_logging
 from tools.config.production_mode import resolve_production_mode
 
-init_logging()
+# Avoid clobbering existing logging handlers (e.g., pytest caplog).
+if not logging.getLogger().handlers:
+    init_logging()
 logger = logging.getLogger(__name__)
 
 # Import validation utilities

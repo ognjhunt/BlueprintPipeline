@@ -38,6 +38,7 @@ if [ -d "${PATCHES_DIR}" ]; then
     "${PATCHES_DIR}/patch_stage_diagnostics.py" \
     "${PATCHES_DIR}/patch_observation_cameras.py" \
     "${PATCHES_DIR}/patch_contact_report.py" \
+    "${PATCHES_DIR}/patch_ee_wrench_handler.py" \
     "${PATCHES_DIR}/patch_grpc_server.py" \
     "${PATCHES_DIR}/_apply_safe_float.py" \
     "${PATCHES_DIR}/patch_xforms_safe_rotation.py" \
@@ -47,6 +48,21 @@ if [ -d "${PATCHES_DIR}" ]; then
       "${ISAAC_SIM_PATH}/python.sh" "${patch_script}" || echo "[geniesim] WARNING: ${patch_script} failed (non-fatal)"
     fi
   done
+
+  # Verify critical patches were applied
+  echo "[geniesim] Verifying patch application..."
+  _GRPC_SERVER="${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py"
+  _CMD_CTRL="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+  if grep -q "BlueprintPipeline contact_report patch" "${_GRPC_SERVER}" 2>/dev/null; then
+    echo "[geniesim] ✓ contact_report patch verified in grpc_server.py"
+  else
+    echo "[geniesim] WARNING: contact_report patch may not have been applied to grpc_server.py"
+  fi
+  if grep -q "BlueprintPipeline object_pose patch" "${_CMD_CTRL}" 2>/dev/null; then
+    echo "[geniesim] ✓ object_pose patch verified in command_controller.py"
+  else
+    echo "[geniesim] WARNING: object_pose patch may not have been applied to command_controller.py"
+  fi
 fi
 
 # Install pipeline Python dependencies into Isaac Sim's Python

@@ -17,10 +17,27 @@ from math import ceil
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
-import firebase_admin
-from firebase_admin import credentials, storage
-import google.auth
-from google.auth.credentials import AnonymousCredentials
+from types import SimpleNamespace
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, storage
+except ImportError:  # Optional dependency for local/test environments.
+    firebase_admin = SimpleNamespace(initialize_app=None, App=object)
+    credentials = SimpleNamespace(Certificate=None, ApplicationDefault=None)
+    storage = SimpleNamespace(bucket=None, Client=None)
+try:
+    import google.auth
+    from google.auth.credentials import AnonymousCredentials
+except Exception:  # Optional dependency when google is stubbed in tests.
+    class _StubGoogleAuth:
+        def default(self):
+            raise ImportError("google.auth is required for ADC credentials")
+
+    google = SimpleNamespace(auth=_StubGoogleAuth())
+
+    class AnonymousCredentials:  # type: ignore[no-redef]
+        pass
 
 from tools.error_handling.retry import retry_with_backoff
 
@@ -34,6 +51,39 @@ _LOCAL_UPLOAD_ROOT: Optional[Path] = None
 _DEFAULT_FIREBASE_UPLOAD_FILE_TIMEOUT_SECONDS = 300.0
 _DEFAULT_FIREBASE_UPLOAD_TOTAL_TIMEOUT_SECONDS = 3600.0
 _DEFAULT_FIREBASE_UPLOAD_RATE_LIMIT_PER_SEC = 0.0
+
+
+def _require_firebase_admin_init() -> None:
+    if hasattr(firebase_admin, "initialize_app"):
+        return
+    raise ImportError(
+        "firebase_admin is required for Firebase uploads. "
+        "Install firebase-admin or use FIREBASE_UPLOAD_MODE=local."
+    )
+
+
+def _require_firebase_certificate() -> None:
+    if hasattr(credentials, "Certificate"):
+        return
+    raise ImportError(
+        "firebase_admin credentials.Certificate is required for Firebase uploads."
+    )
+
+
+def _require_firebase_adc() -> None:
+    if hasattr(credentials, "ApplicationDefault"):
+        return
+    raise ImportError(
+        "firebase_admin credentials.ApplicationDefault is required for Firebase uploads."
+    )
+
+
+def _require_firebase_storage() -> None:
+    if hasattr(storage, "bucket") or hasattr(storage, "Client"):
+        return
+    raise ImportError(
+        "firebase_admin storage client is required for Firebase uploads."
+    )
 
 
 class _RateLimiter:
@@ -322,6 +372,7 @@ def init_firebase() -> firebase_admin.App:
         raise ValueError("FIREBASE_STORAGE_BUCKET is required to initialize Firebase storage")
 
     if emulator_endpoint:
+        _require_firebase_admin_init()
         _FIREBASE_APP = firebase_admin.initialize_app(
             options={"storageBucket": bucket_name},
         )
@@ -333,15 +384,19 @@ def init_firebase() -> firebase_admin.App:
             service_account_payload = json.loads(service_account_json)
         except json.JSONDecodeError as exc:
             raise ValueError("FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON") from exc
+        _require_firebase_certificate()
         cred = credentials.Certificate(service_account_payload)
     elif service_account_path:
         path = Path(service_account_path).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"FIREBASE_SERVICE_ACCOUNT_PATH not found: {path}")
+        _require_firebase_certificate()
         cred = credentials.Certificate(str(path))
     else:
+        _require_firebase_adc()
         cred = credentials.ApplicationDefault()
 
+    _require_firebase_admin_init()
     _FIREBASE_APP = firebase_admin.initialize_app(
         cred,
         {
@@ -353,6 +408,7 @@ def init_firebase() -> firebase_admin.App:
 
 
 def _get_storage_bucket():
+    _require_firebase_storage()
     emulator_endpoint = _get_emulator_endpoint()
     if emulator_endpoint:
         bucket_name = os.getenv("FIREBASE_STORAGE_BUCKET")

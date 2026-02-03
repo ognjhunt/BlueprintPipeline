@@ -155,16 +155,26 @@ def test_build_quality_certificate_passes_metrics(monkeypatch, tmp_path, load_jo
         def assess_training_suitability(self) -> str:
             return "production_training"
 
+        def compute_overall_quality_score(self) -> float:
+            return 0.0 if self.overall_quality_score is None else self.overall_quality_score
+
     class FakeQualityCertificateGenerator:
         def __init__(self, *_args, **_kwargs):
             self.last_kwargs = None
+            self.default_score = None
 
         def generate_certificate(self, **kwargs):
             self.last_kwargs = kwargs
-            return FakeCertificate()
+            cert = FakeCertificate()
+            if self.default_score is not None:
+                cert.overall_quality_score = self.default_score
+            return cert
 
         def _compute_confidence_score(self, _cert):
             return 0.42
+
+        def _add_environment_warnings(self, _cert) -> None:
+            return None
 
     monkeypatch.setattr(generate_episodes, "QualityCertificateGenerator", FakeQualityCertificateGenerator)
     monkeypatch.setattr(generate_episodes, "HAVE_QUALITY_SYSTEM", True)
@@ -212,6 +222,7 @@ def test_build_quality_certificate_passes_metrics(monkeypatch, tmp_path, load_jo
     )
 
     fake_generator = generate_episodes.QualityCertificateGenerator("env")
+    fake_generator.default_score = episode.quality_score
     cert = generator._build_quality_certificate(episode, fake_generator)
 
     assert cert.sensor_source == "disabled"

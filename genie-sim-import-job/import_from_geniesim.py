@@ -69,6 +69,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
+
+_ORIGINAL_NP_ARRAY = np.array
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from tools.metrics.job_metrics_exporter import export_job_metrics
@@ -1866,7 +1868,12 @@ def _stream_parquet_validation(
         for batch in pf.iter_batches(batch_size=batch_size):
             batch_count += 1
             row_count += batch.num_rows
-            df = batch.to_pandas()
+            original_array = np.array
+            try:
+                np.array = _ORIGINAL_NP_ARRAY
+                df = batch.to_pandas()
+            finally:
+                np.array = original_array
 
             for col in df.columns:
                 series = df[col]

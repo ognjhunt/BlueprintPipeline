@@ -36,15 +36,17 @@ logger = logging.getLogger(__name__)
 
 try:
     from pygltflib import GLTF2
+    _GLTF_IMPORT_ERROR = None
 except ImportError:
-    logger.error("ERROR: pygltflib is required. Install with: pip install pygltflib")
-    sys.exit(1)
+    GLTF2 = None  # type: ignore[assignment]
+    _GLTF_IMPORT_ERROR = "pygltflib is required. Install with: pip install pygltflib"
 
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils, Vt
+    _USD_IMPORT_ERROR = None
 except ImportError:
-    logger.error("ERROR: usd-core is required. Install with: pip install usd-core")
-    sys.exit(1)
+    Gf = Sdf = Usd = UsdGeom = UsdShade = UsdUtils = Vt = None  # type: ignore[assignment]
+    _USD_IMPORT_ERROR = "usd-core is required. Install with: pip install usd-core"
 
 
 # -----------------------------------------------------------------------------
@@ -729,6 +731,13 @@ def convert_glb_to_usd(
         True if successful, False otherwise
     """
     logger.info("[glb_to_usd] Converting %s -> %s", input_path, output_path)
+
+    if GLTF2 is None:
+        logger.error("[ERROR] %s", _GLTF_IMPORT_ERROR)
+        return False
+    if Usd is None:
+        logger.error("[ERROR] %s", _USD_IMPORT_ERROR)
+        return False
 
     # Load GLB
     try:

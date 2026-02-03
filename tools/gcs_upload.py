@@ -7,8 +7,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from google.api_core import exceptions as gcs_exceptions
-from google.api_core.retry import Retry
+try:
+    from google.api_core import exceptions as gcs_exceptions
+    from google.api_core.retry import Retry
+except Exception:  # Optional dependency for local/test stubs.
+    class _StubRetry:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        def __call__(self, func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+    class _StubExceptions:
+        class ServiceUnavailable(Exception):
+            pass
+
+        class TooManyRequests(Exception):
+            pass
+
+        class DeadlineExceeded(Exception):
+            pass
+
+    gcs_exceptions = _StubExceptions()
+    Retry = _StubRetry
 
 TRANSIENT_GCS_EXCEPTIONS = (
     gcs_exceptions.ServiceUnavailable,

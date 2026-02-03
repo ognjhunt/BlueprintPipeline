@@ -1,0 +1,101 @@
+{
+  "schema_version": "3.0",
+  "scene_id": "lightwheel_kitchen",
+  "environment_type": "kitchen",
+  "suggested_tasks": [
+    {
+      "task_type": "pick_place",
+      "target_object": "lightwheel_kitchen_obj_Toaster003",
+      "difficulty": "medium",
+      "priority": 4,
+      "goal_region": "Table049",
+      "description_hint": "Pick up the toaster (Toaster) and place it on a nearby surface in a kitchen environment"
+    },
+    {
+      "task_type": "pick_place",
+      "target_object": "lightwheel_kitchen_obj_Pot057",
+      "difficulty": "medium",
+      "priority": 4,
+      "goal_region": "Table049",
+      "description_hint": "Pick up the pot (Pot) and place it on a nearby surface in a kitchen environment"
+    },
+    {
+      "task_type": "organize",
+      "target_object": "lightwheel_kitchen_obj_Pot057",
+      "difficulty": "medium",
+      "priority": 2,
+      "description_hint": "Organize items into the pot (Pot) in a kitchen environment"
+    },
+    {
+      "task_type": "interact",
+      "target_object": "lightwheel_kitchen_obj_Stovetop012",
+      "difficulty": "medium",
+      "priority": 1,
+      "goal_region": "Table049",
+      "description_hint": "interact the stovetop"
+    },
+    {
+      "task_type": "interact",
+      "target_object": "lightwheel_kitchen_obj_CoffeeMachine006",
+      "difficulty": "medium",
+      "priority": 1,
+      "goal_region": "Table049",
+      "description_hint": "interact the coffee_machine"
+    },
+    {
+      "task_type": "pick_place",
+      "target_object": "lightwheel_kitchen_obj_variation_toaster",
+      "difficulty": "medium",
+      "priority": 1,
+      "goal_region": "Table049",
+      "description_hint": "pick place the toaster"
+    },
+    {
+      "task_type": "pick_place",
+      "target_object": "lightwheel_kitchen_obj_variation_pot",
+      "difficulty": "medium",
+      "priority": 1,
+      "goal_region": "Table049",
+      "description_hint": "pick place the pot"
+    }
+  ],
+  "robot_config": {
+    "type": "franka",
+    "base_position": [
+      0.25,
+      0.25,
+      0.75
+    ],
+    "workspace_bounds": [
+      [
+        -0.5,
+        -0.5,
+        0.0
+      ],
+      [
+        1.0,
+        1.0,
+        1.5
+      ]
+    ]
+  },
+  "metadata": {
+    "total_objects": 15,
+    "manipulable_objects": 4,
+    "articulated_objects": 0,
+    "task_types": [
+      "organize",
+      "interact",
+      "pick_place"
+    ],
+    "tasks_total_before_reachability_filter": 7,
+    "tasks_filtered_unreachable": 0,
+    "tasks_filtered_missing_position": 0,
+    "tasks_missing_position": 0,
+    "tasks_total_after_reachability_filter": 7,
+    "curobo_reachability_enabled": false,
+    "tasks_total_before_curobo_filter": 7,
+    "tasks_filtered_by_curobo": 0,
+    "tasks_total_after_curobo_filter": 7
+  }
+}
