@@ -17,6 +17,7 @@
           "goal_region": {"type": "string"},
           "difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]},
           "priority": {"type": "integer"},
+          "requires_object_motion": {"type": "boolean"},
           "description_hint": {"type": "string"},
           "constraints": {"type": "object"}
         },

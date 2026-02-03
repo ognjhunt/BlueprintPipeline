@@ -105,17 +105,24 @@ class SuggestedTask:
     difficulty: str = "medium"  # easy, medium, hard
     priority: int = 1  # Higher = more important
     description_hint: Optional[str] = None  # Hint for LLM task description
+    requires_object_motion: Optional[bool] = None
 
     # Constraints from BlueprintPipeline affordances
     constraints: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self, *, scene_id: Optional[str] = None) -> Dict[str, Any]:
         target_object = _namespaced_asset_id(scene_id, self.target_object)
+        requires_motion = (
+            self.requires_object_motion
+            if self.requires_object_motion is not None
+            else _infer_requires_object_motion(self.task_type, self.description_hint)
+        )
         result = {
             "task_type": self.task_type,
             "target_object": target_object,
             "difficulty": self.difficulty,
             "priority": self.priority,
+            "requires_object_motion": requires_motion,
         }
         if self.goal_region:
             result["goal_region"] = self.goal_region
@@ -159,6 +166,39 @@ class GenieSimTaskConfig:
 # =============================================================================
 # Task Type Mapping
 # =============================================================================
+
+def _infer_requires_object_motion(
+    task_type: str,
+    description_hint: Optional[str] = None,
+) -> bool:
+    """Infer whether a task expects object motion (fallback when explicit flag missing)."""
+    name = (task_type or "").lower()
+    hint = (description_hint or "").lower()
+    combined = f"{name} {hint}"
+
+    non_motion_keywords = {
+        "inspect", "observe", "scan", "look", "view", "perceive", "detect",
+        "classify", "segment", "navigate", "reach", "point", "pose", "calibrate",
+        "idle", "monitor",
+    }
+    motion_keywords = {
+        "pick", "place", "grasp", "lift", "stack", "insert", "open", "close",
+        "pour", "push", "pull", "transport", "handover", "rotate", "turn", "twist",
+        "slide", "wipe", "clean", "sweep", "press", "toggle", "assemble", "disassemble",
+        "hang", "fill", "organize",
+    }
+
+    if any(key in combined for key in non_motion_keywords):
+        return False
+    if any(key in combined for key in motion_keywords):
+        return True
+
+    # Known task types default to motion (manipulation tasks)
+    if name in DIFFICULTY_FACTORS:
+        return True
+
+    # Conservative fallback: unknown tasks default to no motion required
+    return False
 
 # Maps (sim_role, affordance) -> task_type
 TASK_TYPE_MAPPING = {
@@ -483,6 +523,7 @@ class TaskConfigGenerator:
                 difficulty=difficulty,
                 priority=self._calculate_priority(task_type, obj),
                 description_hint=description_hint,
+                requires_object_motion=_infer_requires_object_motion(task_type, description_hint),
                 constraints=constraints,
             )
             tasks.append(task)
@@ -497,6 +538,10 @@ class TaskConfigGenerator:
                 difficulty="medium",
                 priority=1,
                 description_hint=f"{default_type.replace('_', ' ')} the {category}",
+                requires_object_motion=_infer_requires_object_motion(
+                    default_type,
+                    f"{default_type.replace('_', ' ')} the {category}",
+                ),
             ))
 
         return tasks
@@ -718,6 +763,11 @@ class TaskConfigGenerator:
                 difficulty=t.get("difficulty", "medium"),
                 priority=min(int(t.get("priority", 1)), 5),
                 description_hint=t.get("description_hint"),
+                requires_object_motion=(
+                    t.get("requires_object_motion")
+                    if t.get("requires_object_motion") is not None
+                    else _infer_requires_object_motion(task_type, t.get("description_hint"))
+                ),
                 constraints=t.get("constraints", {}),
             ))
 
