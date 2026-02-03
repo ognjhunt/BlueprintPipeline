@@ -13,14 +13,40 @@ DEFAULT_QUALITY_CONFIG_PATH = REPO_ROOT / "genie-sim-import-job" / "quality_conf
 
 
 @dataclass(frozen=True)
+class DiversityDivisors:
+    """Robot-specific divisors for action/observation diversity scoring."""
+
+    action: float = 0.05
+    obs: float = 0.05
+
+
+@dataclass(frozen=True)
+class FrameCountScoring:
+    """Configuration for frame count scoring (gradual vs cliff)."""
+
+    min_frames_full_score: int = 10
+    min_frames_nonzero: int = 3
+    use_gradual_scoring: bool = True
+
+
+@dataclass(frozen=True)
 class QualityConfig:
     default_min_quality_score: float
     min_allowed: float
     max_allowed: float
     dimension_thresholds: Mapping[str, float] = field(default_factory=dict)
+    diversity_divisors: Mapping[str, DiversityDivisors] = field(default_factory=dict)
+    frame_count_scoring: FrameCountScoring = field(default_factory=FrameCountScoring)
     default_filter_low_quality: bool = True
     description: str = ""
     source_path: Optional[str] = None
+
+    def get_diversity_divisors(self, robot_type: str) -> DiversityDivisors:
+        """Get diversity divisors for a robot type, with fallback to default."""
+        robot_key = robot_type.lower() if robot_type else "default"
+        if robot_key in self.diversity_divisors:
+            return self.diversity_divisors[robot_key]
+        return self.diversity_divisors.get("default", DiversityDivisors())
 
 
 @dataclass(frozen=True)
@@ -29,6 +55,37 @@ class ResolvedQualitySettings:
     filter_low_quality: bool
     dimension_thresholds: Mapping[str, float]
     config: QualityConfig
+
+
+def _parse_diversity_divisors(
+    payload: Mapping[str, Any]
+) -> Mapping[str, DiversityDivisors]:
+    """Parse diversity_divisors from config payload."""
+    raw = payload.get("diversity_divisors", {})
+    if not isinstance(raw, Mapping):
+        return {"default": DiversityDivisors()}
+    result: dict[str, DiversityDivisors] = {}
+    for robot_key, divisors in raw.items():
+        if isinstance(divisors, Mapping):
+            result[str(robot_key).lower()] = DiversityDivisors(
+                action=float(divisors.get("action", 0.05)),
+                obs=float(divisors.get("obs", 0.05)),
+            )
+    if "default" not in result:
+        result["default"] = DiversityDivisors()
+    return result
+
+
+def _parse_frame_count_scoring(payload: Mapping[str, Any]) -> FrameCountScoring:
+    """Parse frame_count_scoring from config payload."""
+    raw = payload.get("frame_count_scoring", {})
+    if not isinstance(raw, Mapping):
+        return FrameCountScoring()
+    return FrameCountScoring(
+        min_frames_full_score=int(raw.get("min_frames_full_score", 10)),
+        min_frames_nonzero=int(raw.get("min_frames_nonzero", 3)),
+        use_gradual_scoring=bool(raw.get("use_gradual_scoring", True)),
+    )
 
 
 def _parse_dimension_thresholds(payload: Mapping[str, Any]) -> Mapping[str, float]:
@@ -64,6 +121,8 @@ def load_quality_config(
         min_allowed=float(payload["min_allowed"]),
         max_allowed=float(payload["max_allowed"]),
         dimension_thresholds=_parse_dimension_thresholds(payload),
+        diversity_divisors=_parse_diversity_divisors(payload),
+        frame_count_scoring=_parse_frame_count_scoring(payload),
         default_filter_low_quality=default_filter_low_quality,
         description=str(payload.get("description", "")),
         source_path=str(path),

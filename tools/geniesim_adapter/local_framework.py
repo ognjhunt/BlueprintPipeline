@@ -152,6 +152,7 @@ from tools.geniesim_adapter.config import (
 from tools.error_handling.retry import RetryConfig, calculate_delay
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.config.env import parse_bool_env
+from tools.quality.quality_config import load_quality_config, QualityConfig
 
 logger = logging.getLogger(__name__)
 
@@ -13228,21 +13229,50 @@ Scene objects: {scene_summary}
                     "Quality check: task success heuristic not satisfied (grasp/release milestones)."
                 )
 
-        frame_count_score = 1.0 if total_frames >= 10 else 0.5
+        # Frame count scoring — configurable via quality_config.json
+        # Load quality config for frame count and diversity settings
+        try:
+            _quality_config = load_quality_config()
+            _frame_cfg = _quality_config.frame_count_scoring
+        except Exception as _cfg_err:
+            logger.warning("Failed to load quality config, using defaults: %s", _cfg_err)
+            _frame_cfg = None
 
-        # Diversity divisors — robot-specific hardcoded values (Gemini LLM calibration removed)
-        _DIVERSITY_DIVISORS = {
-            "franka": (0.05, 0.05),
-            "panda": (0.05, 0.05),
-            "g1": (0.08, 0.08),
-            "ur5": (0.04, 0.04),
-            "ur10": (0.04, 0.04),
-        }
+        if _frame_cfg and _frame_cfg.use_gradual_scoring:
+            # Gradual scoring: linear interpolation between min_frames_nonzero and min_frames_full_score
+            _min_full = _frame_cfg.min_frames_full_score
+            _min_nonzero = _frame_cfg.min_frames_nonzero
+            if total_frames >= _min_full:
+                frame_count_score = 1.0
+            elif total_frames >= _min_nonzero:
+                # Linear interpolation from 0.3 to 1.0
+                frame_count_score = 0.3 + 0.7 * (total_frames - _min_nonzero) / max(1, _min_full - _min_nonzero)
+            else:
+                frame_count_score = 0.0
+        else:
+            # Legacy cliff behavior
+            frame_count_score = 1.0 if total_frames >= 10 else 0.5
+
+        # Diversity divisors — loaded from quality_config.json (configurable)
         _robot_type = getattr(self.config, "robot_type", "franka") if hasattr(self, "config") else "franka"
-        _action_divisor, _obs_divisor = _DIVERSITY_DIVISORS.get(
-            _robot_type.lower() if _robot_type else "franka", (0.05, 0.05)
-        )
-        _diversity_calibration_source = "hardcoded_robot_specific"
+        if _quality_config:
+            _div_cfg = _quality_config.get_diversity_divisors(_robot_type)
+            _action_divisor = _div_cfg.action
+            _obs_divisor = _div_cfg.obs
+            _diversity_calibration_source = "quality_config"
+        else:
+            # Fallback to hardcoded values if config load failed
+            _DIVERSITY_DIVISORS = {
+                "franka": (0.05, 0.05),
+                "panda": (0.05, 0.05),
+                "g1": (0.08, 0.08),
+                "ur5": (0.04, 0.04),
+                "ur10": (0.04, 0.04),
+            }
+            _action_divisor, _obs_divisor = _DIVERSITY_DIVISORS.get(
+                _robot_type.lower() if _robot_type else "franka", (0.05, 0.05)
+            )
+            _diversity_calibration_source = "hardcoded_fallback"
 
         # Action diversity: measure how much the actions change across frames.
         # A trajectory where all actions are identical is low quality.
@@ -13372,18 +13402,52 @@ Scene objects: {scene_summary}
                                         break
 
                     if not _any_moved:
-                        # Proportional penalty based on how close displacement is to threshold
-                        # If max_displacement is 0, full penalty. If close to threshold, reduced penalty.
-                        if _max_displacement > 0 and _move_thresh > 0:
-                            # Scale penalty: 0.20 when displacement=0, approaches 0 as displacement → threshold
-                            displacement_ratio = min(1.0, _max_displacement / _move_thresh)
-                            scene_state_penalty = 0.20 * (1.0 - displacement_ratio)
+                        # Enhanced partial motion credit: separately track vertical (lift) and lateral motion
+                        # Lift-only scenarios (object picked up but not moved laterally) deserve partial credit
+                        _max_lift = 0.0
+                        _max_lateral = 0.0
+                        _lift_thresh = 0.05 * _units_per_meter  # 5cm lift threshold
+
+                        # Compute lift and lateral separately from trajectory
+                        for _oid, _positions in _object_trajectory.items():
+                            if len(_positions) >= 2:
+                                _init_z = _positions[0][2] if len(_positions[0]) > 2 else 0.0
+                                for _pos in _positions[1:]:
+                                    if len(_pos) > 2:
+                                        _lift = _pos[2] - _init_z  # Z displacement (lift)
+                                        _max_lift = max(_max_lift, _lift)
+                                    _lateral = np.linalg.norm(np.array(_pos[:2]) - np.array(_positions[0][:2]))
+                                    _max_lateral = max(_max_lateral, _lateral)
+
+                        # Also check init/final poses for lift
+                        if not _object_trajectory:
+                            _init_poses = frames[0].get("_initial_object_poses", {})
+                            _final_poses = frames[-1].get("_final_object_poses", {})
+                            for _oid, _ip in _init_poses.items():
+                                _fp = _final_poses.get(_oid)
+                                if _fp is not None and len(_ip) > 2 and len(_fp) > 2:
+                                    _max_lift = max(_max_lift, _fp[2] - _ip[2])
+                                    _max_lateral = max(_max_lateral, np.linalg.norm(np.array(_fp[:2]) - np.array(_ip[:2])))
+
+                        # Proportional penalty with partial credit for lift and lateral separately
+                        # 30% weight for lift, 70% weight for lateral movement
+                        _lift_credit = min(1.0, _max_lift / _lift_thresh) * 0.30 if _lift_thresh > 0 else 0.0
+                        _lateral_credit = min(1.0, _max_lateral / _move_thresh) * 0.70 if _move_thresh > 0 else 0.0
+                        _progress_ratio = _lift_credit + _lateral_credit
+
+                        # Scale penalty based on progress (max 0.20 down to 0 with full progress)
+                        scene_state_penalty = 0.20 * max(0.0, 1.0 - _progress_ratio)
+
+                        if _progress_ratio > 0:
+                            logger.info(
+                                "Quality: Partial object motion detected (lift=%.4fm, lateral=%.4fm, progress=%.2f, penalty=%.3f)",
+                                _max_lift, _max_lateral, _progress_ratio, scene_state_penalty,
+                            )
                         else:
-                            scene_state_penalty = 0.20
-                        logger.warning(
-                            "Quality penalty: scene_state is static (max_displacement=%.4fm, threshold=%.4fm, penalty=%.3f)",
-                            _max_displacement, _move_thresh, scene_state_penalty,
-                        )
+                            logger.warning(
+                                "Quality penalty: scene_state is static (max_displacement=%.4fm, threshold=%.4fm, penalty=%.3f)",
+                                _max_displacement, _move_thresh, scene_state_penalty,
+                            )
 
             # Check if kinematic EE-offset tracking was used for grasped objects
             _kinematic_tracking_used = any(
@@ -13595,8 +13659,9 @@ Scene objects: {scene_summary}
             utilization_penalty, _gate_penalty,
             _final,
         )
-        # Store breakdown for inclusion in episode metadata
+        # Store breakdown for inclusion in episode metadata with diagnostic details
         self._last_quality_breakdown = {
+            # Component scores
             "data_completeness": round(data_completeness_score, 4),
             "action_validity": round(action_validity_score, 4),
             "action_diversity": round(action_diversity_score, 4),
@@ -13605,6 +13670,7 @@ Scene objects: {scene_summary}
             "frame_count": round(frame_count_score, 4),
             "camera_completeness": round(camera_completeness, 4),
             "ee_completeness": round(ee_completeness, 4),
+            # Bonuses and penalties
             "smoothness_bonus": round(smoothness_bonus, 4),
             "collision_bonus": round(collision_bonus, 4),
             "scene_state_penalty": round(scene_state_penalty, 4),
@@ -13612,6 +13678,30 @@ Scene objects: {scene_summary}
             "utilization_penalty": round(utilization_penalty, 4),
             "gate_penalty": round(_gate_penalty, 4),
             "final_score": round(_final, 4),
+            # Diagnostic details for post-hoc analysis
+            "diagnostics": {
+                "total_frames": total_frames,
+                "robot_type": _robot_type if "_robot_type" in dir() else None,
+                "diversity_divisors": {
+                    "action": _action_divisor if "_action_divisor" in dir() else None,
+                    "obs": _obs_divisor if "_obs_divisor" in dir() else None,
+                    "source": _diversity_calibration_source if "_diversity_calibration_source" in dir() else None,
+                },
+                "frame_count_scoring": {
+                    "use_gradual": (_frame_cfg.use_gradual_scoring if "_frame_cfg" in dir() and _frame_cfg else False),
+                    "min_full": (_frame_cfg.min_frames_full_score if "_frame_cfg" in dir() and _frame_cfg else 10),
+                },
+                "grasp_release": {
+                    "grasp_frame": grasp_frame_index,
+                    "release_frame": release_frame_index,
+                },
+                "object_motion": {
+                    "max_displacement": round(_max_displacement, 4) if "_max_displacement" in dir() else None,
+                    "max_lift": round(_max_lift, 4) if "_max_lift" in dir() else None,
+                    "max_lateral": round(_max_lateral, 4) if "_max_lateral" in dir() else None,
+                    "any_moved": _any_moved if "_any_moved" in dir() else None,
+                },
+            },
         }
         return _final
 

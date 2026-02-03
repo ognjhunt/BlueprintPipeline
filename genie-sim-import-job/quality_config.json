@@ -26,6 +26,19 @@
     "unavailable": 0.0
   },
   "max_heuristic_frame_ratio": 0.3,
+  "diversity_divisors": {
+    "franka": {"action": 0.05, "obs": 0.05},
+    "panda": {"action": 0.05, "obs": 0.05},
+    "g1": {"action": 0.08, "obs": 0.08},
+    "ur5": {"action": 0.04, "obs": 0.04},
+    "ur10": {"action": 0.04, "obs": 0.04},
+    "default": {"action": 0.05, "obs": 0.05}
+  },
+  "frame_count_scoring": {
+    "min_frames_full_score": 10,
+    "min_frames_nonzero": 3,
+    "use_gradual_scoring": true
+  },
   "schema": {
     "default_min_quality_score": "float (0-1) minimum overall quality score used when MIN_QUALITY_SCORE is unset",
     "min_allowed": "float lower bound for MIN_QUALITY_SCORE env overrides",
@@ -40,6 +53,12 @@
     },
     "provenance_scoring": "Maps provenance labels to quality multipliers (1.0 = fully real, 0.0 = missing)",
     "max_heuristic_frame_ratio": "float (0-1) max fraction of frames with heuristic data before episode fails quality gate",
+    "diversity_divisors": "Robot-specific divisors for action/observation diversity scoring. Higher values = more lenient scoring.",
+    "frame_count_scoring": {
+      "min_frames_full_score": "int: minimum frames for 1.0 score (default 10)",
+      "min_frames_nonzero": "int: minimum frames for non-zero score (default 3)",
+      "use_gradual_scoring": "bool: if true, use linear interpolation instead of cliff"
+    },
     "notes": "Per-dimension thresholds are enforced only when the episode metadata includes matching quality_components entries."
   },
   "description": "Minimum acceptable quality score for Genie Sim imports. Override via MIN_QUALITY_SCORE if within allowed range (0.5 - 0.95). Per-dimension thresholds apply when matching quality_components are present in episode metadata."
