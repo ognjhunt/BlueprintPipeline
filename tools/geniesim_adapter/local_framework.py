@@ -725,6 +725,77 @@ DEFAULT_SUCCESS_SCHEMA = {
 }
 
 
+def _normalize_joint_arrays(
+    joint_positions: Optional[List[float]],
+    joint_velocities: Optional[List[float]] = None,
+    joint_efforts: Optional[List[float]] = None,
+    joint_accelerations: Optional[List[float]] = None,
+    joint_names: Optional[List[str]] = None,
+) -> Tuple[
+    Optional[List[float]],
+    Optional[List[float]],
+    Optional[List[float]],
+    Optional[List[float]],
+    Optional[List[str]],
+]:
+    """Normalize per-joint arrays to arm-only length (len(joint_positions))."""
+    if not isinstance(joint_positions, list):
+        return joint_positions, joint_velocities, joint_efforts, joint_accelerations, joint_names
+    target_len = len(joint_positions)
+
+    def _trim_pad(seq: Optional[List[Any]], fill: float = 0.0) -> Optional[List[Any]]:
+        if seq is None:
+            return None
+        if not isinstance(seq, list):
+            return seq
+        if len(seq) >= target_len:
+            return seq[:target_len]
+        return seq + [fill] * (target_len - len(seq))
+
+    joint_velocities = _trim_pad(joint_velocities, 0.0)
+    joint_efforts = _trim_pad(joint_efforts, 0.0)
+    joint_accelerations = _trim_pad(joint_accelerations, 0.0)
+    if isinstance(joint_names, list):
+        joint_names = joint_names[:target_len]
+    return joint_positions[:target_len], joint_velocities, joint_efforts, joint_accelerations, joint_names
+
+
+def _normalize_robot_state_joints(robot_state: Dict[str, Any]) -> None:
+    """Ensure robot_state joint arrays are consistent arm-only lengths."""
+    if not isinstance(robot_state, dict):
+        return
+    joint_positions = robot_state.get("joint_positions")
+    if not isinstance(joint_positions, list) or not joint_positions:
+        return
+    joint_state = robot_state.get("joint_state") if isinstance(robot_state.get("joint_state"), dict) else None
+    joint_names = joint_state.get("names") if isinstance(joint_state, dict) else None
+    joint_positions, joint_velocities, joint_efforts, joint_accelerations, joint_names = _normalize_joint_arrays(
+        joint_positions,
+        robot_state.get("joint_velocities"),
+        robot_state.get("joint_efforts"),
+        robot_state.get("joint_accelerations"),
+        joint_names,
+    )
+    robot_state["joint_positions"] = joint_positions
+    if joint_velocities is not None:
+        robot_state["joint_velocities"] = joint_velocities
+    if joint_efforts is not None:
+        robot_state["joint_efforts"] = joint_efforts
+    if joint_accelerations is not None:
+        robot_state["joint_accelerations"] = joint_accelerations
+    for key in ("commanded_joint_positions", "tracking_error"):
+        if isinstance(robot_state.get(key), list):
+            robot_state[key] = robot_state[key][:len(joint_positions)]
+    if isinstance(joint_state, dict):
+        joint_state["positions"] = joint_positions
+        if joint_names is not None:
+            joint_state["names"] = joint_names
+        if isinstance(joint_state.get("velocities"), list) and joint_velocities is not None:
+            joint_state["velocities"] = joint_velocities
+        if isinstance(joint_state.get("efforts"), list) and joint_efforts is not None:
+            joint_state["efforts"] = joint_efforts
+
+
 class GenieSimServerStatus(str, Enum):
     """Status of the Genie Sim server."""
     NOT_RUNNING = "not_running"
@@ -732,6 +803,10 @@ class GenieSimServerStatus(str, Enum):
     READY = "ready"
     BUSY = "busy"
     ERROR = "error"
+
+
+class _CameraDataRequiredError(RuntimeError):
+    """Raised when required camera data is missing during export."""
 
 
 class CommandType(int, Enum):
@@ -2442,6 +2517,15 @@ class GenieSimGRPCClient:
                 joint_velocities = getattr(self, "_latest_joint_velocities", [])
                 joint_efforts = getattr(self, "_latest_joint_efforts", [])
                 used_joint_cache = True
+
+        # Normalize joint arrays to arm-only lengths for downstream consistency.
+        joint_positions, joint_velocities, joint_efforts, _, joint_names = _normalize_joint_arrays(
+            joint_positions,
+            joint_velocities,
+            joint_efforts,
+            None,
+            joint_names,
+        )
 
         # --- 2. Real EE pose ---
         ee_pose = {}
@@ -9604,6 +9688,17 @@ class GenieSimLocalFramework:
                     "confidence": 0.1,
                 }
 
+            # Ensure contact_forces schema is always present for downstream validators.
+            if "contact_forces" not in frame_data:
+                frame_data["contact_forces"] = {
+                    "available": False,
+                    "grip_force_N": 0.0,
+                    "force_sufficient": False,
+                    "grasped_object_id": None,
+                    "provenance": "unavailable",
+                    "confidence": 0.0,
+                }
+
             # Update ALL tracked object poses in scene_state (not just attached)
             if _scene_state and _object_poses:
                 for _obj in _scene_state.get("objects", []):
@@ -10128,6 +10223,11 @@ class GenieSimLocalFramework:
             _eff = _obs_rs.get("joint_efforts", [])
             if not isinstance(_eff, list) or len(_eff) == 0 or not any(abs(e) > 1e-6 for e in _eff):
                 _effort_missing_count += 1
+
+        # Final normalization pass: keep joint arrays arm-only and consistent.
+        for _frame in frames:
+            _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+            _normalize_robot_state_joints(_obs_rs)
 
         # Store initial/final object poses on first/last frame for success verification
         if frames:
@@ -13862,6 +13962,14 @@ Scene objects: {scene_summary}
                         if rgb_arr is not None:
                             camera_rgb_frames.setdefault(cam_id, []).append(rgb_arr)
 
+                require_camera_data = os.getenv("REQUIRE_CAMERA_DATA", "false").lower() == "true"
+                total_rgb_frames = sum(len(v) for v in camera_rgb_frames.values())
+                if require_camera_data and total_rgb_frames == 0:
+                    raise _CameraDataRequiredError(
+                        f"Camera data required but none found for episode {episode_id}. "
+                        "Set REQUIRE_CAMERA_DATA=false to bypass."
+                    )
+
                 # Write video files per camera
                 _have_imageio = False
                 try:
@@ -13948,6 +14056,8 @@ Scene objects: {scene_summary}
                 total_frames += frame_count
                 frame_counts[episode_id] = frame_count
 
+            except _CameraDataRequiredError:
+                raise
             except Exception as e:
                 self.log(f"Failed to export {ep_file.name}: {e}", "WARNING")
                 skipped_count += 1
@@ -14083,6 +14193,12 @@ Scene objects: {scene_summary}
                     json.dump(stats_payload, f, indent=2)
             except Exception as exc:
                 self.log(f"Failed to compute LeRobot v3 stats: {exc}", "WARNING")
+
+        if os.getenv("LEROBOT_INCLUDE_RAW_EPISODES", "0") == "1":
+            raw_dir = lerobot_root / "raw_episodes"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            for ep_file in episode_files:
+                shutil.copy2(ep_file, raw_dir / ep_file.name)
 
         self.log(f"Exported {exported_count} episodes, skipped {skipped_count}")
 

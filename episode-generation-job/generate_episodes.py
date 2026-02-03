@@ -380,6 +380,9 @@ class GeneratedEpisode:
     # Quality certificate (new)
     quality_certificate: Optional[Any] = None  # QualityCertificate when available
 
+    # Modality missing summary (camera/contact/ee/etc.)
+    modality_missing: Dict[str, Any] = field(default_factory=dict)
+
     # Legacy
     validation_errors: List[str] = field(default_factory=list)
 
@@ -1586,37 +1589,112 @@ class EpisodeGenerator:
         Checks both explicit camera_capture_warnings AND whether any RGB
         images were actually captured (sensor_data.rgb_images non-empty).
         """
+        require_full = (self.config.data_pack_tier or "").lower() == "full"
+        require_camera = parse_bool_env(
+            os.getenv("REQUIRE_CAMERA_DATA"),
+            default=resolve_production_mode() or require_full,
+        )
+        if not require_camera:
+            return
+
+        tier = (self.config.data_pack_tier or "core").lower()
+        require_depth = tier in ("plus", "full")
+        require_segmentation = tier in ("plus", "full")
+        missing_threshold = float(os.getenv("REQUIRE_MODALITY_MISSING_THRESHOLD", "0.1"))
+
         for episode in episodes:
-            warnings = []
-            if episode.sensor_data is not None:
-                warnings = getattr(episode.sensor_data, "camera_capture_warnings", [])
-
-                rgb_errors = episode.sensor_data.validate_rgb_frames()
-                depth_errors = episode.sensor_data.validate_depth_frames()
-                if rgb_errors:
-                    warnings.extend(rgb_errors)
-                if depth_errors:
-                    warnings.extend(depth_errors)
-
-                # Check if any frames actually have RGB data
-                _frame_data_list = getattr(episode.sensor_data, "frames", [])
-                _rgb_frame_count = 0
-                for _fd in _frame_data_list:
-                    if hasattr(_fd, "rgb_images") and _fd.rgb_images:
-                        _rgb_frame_count += 1
-                if _frame_data_list and _rgb_frame_count == 0:
-                    warnings.append(
-                        f"Zero frames have valid RGB images out of "
-                        f"{len(_frame_data_list)} captured frames"
-                    )
-
-            if warnings:
-                episode.validation_errors.extend(warnings)
+            blocking_errors: List[str] = []
+            if episode.sensor_data is None:
+                blocking_errors.append("Missing sensor data (no episode sensor_data).")
+                episode.validation_errors.extend(blocking_errors)
                 episode.is_valid = False
                 episode.quality_score = min(episode.quality_score, 0.0)
                 self.log(
                     f"Episode {episode.episode_id} filtered due to camera issues: "
-                    f"{'; '.join(warnings)}",
+                    f"{'; '.join(blocking_errors)}",
+                    "WARNING",
+                )
+                continue
+
+            frames = getattr(episode.sensor_data, "frames", []) or []
+            total_frames = len(frames)
+            if total_frames == 0:
+                blocking_errors.append("No sensor frames captured.")
+                episode.validation_errors.extend(blocking_errors)
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                self.log(
+                    f"Episode {episode.episode_id} filtered due to camera issues: "
+                    f"{'; '.join(blocking_errors)}",
+                    "WARNING",
+                )
+                continue
+
+            required_rgb = set(episode.sensor_data._required_camera_ids(require_rgb=True))
+            required_depth = (
+                set(episode.sensor_data._required_camera_ids(require_depth=True))
+                if require_depth else set()
+            )
+
+            missing_rgb_frames = 0
+            missing_depth_frames = 0
+            missing_seg_frames = 0
+
+            for frame in frames:
+                if required_rgb:
+                    if any(cam_id not in frame.rgb_images for cam_id in required_rgb):
+                        missing_rgb_frames += 1
+                if require_depth and required_depth:
+                    if any(cam_id not in frame.depth_maps for cam_id in required_depth):
+                        missing_depth_frames += 1
+                if require_segmentation and required_rgb:
+                    # Segmentation satisfied if either semantic or instance mask present
+                    missing_seg = False
+                    for cam_id in required_rgb:
+                        if cam_id in frame.semantic_masks or cam_id in frame.instance_masks:
+                            continue
+                        missing_seg = True
+                        break
+                    if missing_seg:
+                        missing_seg_frames += 1
+
+            rgb_missing_ratio = missing_rgb_frames / max(1, total_frames)
+            depth_missing_ratio = missing_depth_frames / max(1, total_frames) if require_depth else 0.0
+            seg_missing_ratio = missing_seg_frames / max(1, total_frames) if require_segmentation else 0.0
+
+            episode.modality_missing["camera"] = {
+                "total_frames": total_frames,
+                "missing_rgb_frames": missing_rgb_frames,
+                "missing_depth_frames": missing_depth_frames,
+                "missing_segmentation_frames": missing_seg_frames,
+                "rgb_missing_ratio": round(rgb_missing_ratio, 4),
+                "depth_missing_ratio": round(depth_missing_ratio, 4),
+                "segmentation_missing_ratio": round(seg_missing_ratio, 4),
+            }
+
+            if rgb_missing_ratio >= missing_threshold:
+                blocking_errors.append(
+                    f"RGB missing in {missing_rgb_frames}/{total_frames} frames "
+                    f"({rgb_missing_ratio:.0%})"
+                )
+            if require_depth and depth_missing_ratio >= missing_threshold:
+                blocking_errors.append(
+                    f"Depth missing in {missing_depth_frames}/{total_frames} frames "
+                    f"({depth_missing_ratio:.0%})"
+                )
+            if require_segmentation and seg_missing_ratio >= missing_threshold:
+                blocking_errors.append(
+                    f"Segmentation missing in {missing_seg_frames}/{total_frames} frames "
+                    f"({seg_missing_ratio:.0%})"
+                )
+
+            if blocking_errors:
+                episode.validation_errors.extend(blocking_errors)
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                self.log(
+                    f"Episode {episode.episode_id} filtered due to camera issues: "
+                    f"{'; '.join(blocking_errors)}",
                     "WARNING",
                 )
 
@@ -1746,7 +1824,7 @@ class EpisodeGenerator:
         """Fail episodes missing required camera calibration metadata."""
         require_calibration = parse_bool_env(
             os.getenv("REQUIRE_CAMERA_CALIBRATION"),
-            default=resolve_production_mode(),
+            default=resolve_production_mode() or (self.config.data_pack_tier or "").lower() == "full",
         )
         if not require_calibration:
             return
@@ -1799,11 +1877,50 @@ class EpisodeGenerator:
                         episode.is_valid = False
                         episode.quality_score = min(episode.quality_score, 0.0)
 
+    def _apply_privileged_state_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
+        """Fail episodes missing privileged state when required."""
+        require_privileged = parse_bool_env(
+            os.getenv("REQUIRE_PRIVILEGED_STATE"),
+            default=resolve_production_mode() or (self.config.data_pack_tier or "").lower() == "full",
+        )
+        if not require_privileged:
+            return
+
+        missing_threshold = float(os.getenv("REQUIRE_MODALITY_MISSING_THRESHOLD", "0.1"))
+
+        for episode in episodes:
+            if episode.sensor_data is None:
+                episode.validation_errors.append("Privileged state missing (no sensor data).")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            frames = getattr(episode.sensor_data, "frames", []) or []
+            if not frames:
+                episode.validation_errors.append("Privileged state missing (no frames).")
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                continue
+
+            missing_frames = sum(1 for frame in frames if not getattr(frame, "privileged_state", None))
+            missing_ratio = missing_frames / max(1, len(frames))
+            episode.modality_missing["privileged"] = {
+                "total_frames": len(frames),
+                "missing_frames": missing_frames,
+                "missing_ratio": round(missing_ratio, 4),
+            }
+            if missing_ratio >= missing_threshold:
+                episode.validation_errors.append(
+                    f"Privileged state missing in {missing_frames}/{len(frames)} frames "
+                    f"({missing_ratio:.0%})."
+                )
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
     def _apply_ee_wrench_quality_gates(self, episodes: List[GeneratedEpisode]) -> None:
         """Fail episodes missing EE wrench data when required."""
         require_ee = parse_bool_env(
             os.getenv("REQUIRE_EE_WRENCH"),
-            default=resolve_production_mode(),
+            default=resolve_production_mode() or (self.config.data_pack_tier or "").lower() == "full",
         )
         if not require_ee:
             return
@@ -1842,7 +1959,14 @@ class EpisodeGenerator:
 
             with_wrench = sum(1 for frame in frames if _frame_has_wrench(frame))
             coverage = with_wrench / max(1, len(frames))
-            if coverage < 0.9:
+            missing_threshold = float(os.getenv("REQUIRE_MODALITY_MISSING_THRESHOLD", "0.1"))
+            min_coverage = max(0.0, 1.0 - missing_threshold)
+            episode.modality_missing["ee_wrench"] = {
+                "total_frames": len(frames),
+                "missing_frames": len(frames) - with_wrench,
+                "missing_ratio": round(1.0 - coverage, 4),
+            }
+            if coverage < min_coverage:
                 episode.validation_errors.append(
                     f"EE wrench missing in {1.0 - coverage:.0%} of frames."
                 )
@@ -1910,7 +2034,7 @@ class EpisodeGenerator:
         """Fail episodes missing object physics metadata when required."""
         require_physics = parse_bool_env(
             os.getenv("REQUIRE_OBJECT_PHYSICS"),
-            default=resolve_production_mode(),
+            default=resolve_production_mode() or (self.config.data_pack_tier or "").lower() == "full",
         )
         if not require_physics:
             return
@@ -1948,7 +2072,7 @@ class EpisodeGenerator:
         """Fail episodes with missing contacts during grasp phases when required."""
         require_contacts = parse_bool_env(
             os.getenv("REQUIRE_CONTACTS"),
-            default=resolve_production_mode(),
+            default=resolve_production_mode() or (self.config.data_pack_tier or "").lower() == "full",
         )
         if not require_contacts:
             return
@@ -1957,12 +2081,38 @@ class EpisodeGenerator:
             missing_contact_frames, missing_grasp_frames, total_frames = (
                 self._summarize_contact_availability(episode)
             )
-            if missing_grasp_frames > 0:
+            if total_frames <= 0:
+                warning = "Contact capture unavailable (no frames)."
+                episode.validation_errors.append(warning)
+                episode.is_valid = False
+                episode.quality_score = min(episode.quality_score, 0.0)
+                self.log(
+                    f"Episode {episode.episode_id} filtered due to missing contacts: {warning}",
+                    "WARNING",
+                )
+                continue
+
+            missing_ratio = missing_contact_frames / max(1, total_frames)
+            episode.modality_missing["contact"] = {
+                "total_frames": total_frames,
+                "missing_frames": missing_contact_frames,
+                "missing_ratio": round(missing_ratio, 4),
+                "missing_grasp_frames": missing_grasp_frames,
+            }
+
+            missing_threshold = float(os.getenv("REQUIRE_MODALITY_MISSING_THRESHOLD", "0.1"))
+            if missing_ratio >= missing_threshold:
                 warning = (
-                    "Contact capture unavailable during grasp phases in "
-                    f"{missing_grasp_frames}/{total_frames} frames. "
+                    "Contact capture unavailable in "
+                    f"{missing_contact_frames}/{total_frames} frames "
+                    f"({missing_ratio:.0%}). "
                     "Set REQUIRE_CONTACTS=false to allow missing contacts."
                 )
+                if missing_grasp_frames > 0:
+                    warning += (
+                        f" Missing contact data during grasp phases in "
+                        f"{missing_grasp_frames}/{total_frames} frames."
+                    )
                 episode.validation_errors.append(warning)
                 episode.is_valid = False
                 episode.quality_score = min(episode.quality_score, 0.0)
@@ -2087,6 +2237,7 @@ class EpisodeGenerator:
         self._enforce_physics_backed_qc(validated_episodes)
         self._apply_camera_capture_quality_gates(validated_episodes)
         self._apply_camera_calibration_quality_gates(validated_episodes)
+        self._apply_privileged_state_quality_gates(validated_episodes)
         self._apply_contact_availability_quality_gates(validated_episodes)
         self._apply_ee_wrench_quality_gates(validated_episodes)
         self._apply_humanoid_sensor_quality_gates(validated_episodes)
@@ -3327,6 +3478,43 @@ class EpisodeGenerator:
                     f"{missing_grasp_frames}/{total_frames} frame(s)."
                 )
             cert.add_warning(warning)
+
+        camera_missing = episode.modality_missing.get("camera", {})
+        if camera_missing:
+            cert.add_warning(
+                "Camera coverage: "
+                f"rgb_missing_ratio={camera_missing.get('rgb_missing_ratio')}, "
+                f"depth_missing_ratio={camera_missing.get('depth_missing_ratio')}, "
+                f"seg_missing_ratio={camera_missing.get('segmentation_missing_ratio')}"
+            )
+
+        ee_missing = episode.modality_missing.get("ee_wrench", {})
+        if ee_missing:
+            cert.add_warning(
+                "EE wrench coverage: "
+                f"missing_ratio={ee_missing.get('missing_ratio')} "
+                f"({ee_missing.get('missing_frames')}/{ee_missing.get('total_frames')})"
+            )
+
+        contact_missing = episode.modality_missing.get("contact", {})
+        if contact_missing:
+            cert.add_warning(
+                "Contact coverage: "
+                f"missing_ratio={contact_missing.get('missing_ratio')} "
+                f"({contact_missing.get('missing_frames')}/{contact_missing.get('total_frames')})"
+            )
+
+        privileged_missing = episode.modality_missing.get("privileged", {})
+        if privileged_missing:
+            cert.add_warning(
+                "Privileged state coverage: "
+                f"missing_ratio={privileged_missing.get('missing_ratio')} "
+                f"({privileged_missing.get('missing_frames')}/{privileged_missing.get('total_frames')})"
+            )
+
+        if not episode.is_valid:
+            cert.training_suitability = "development_only"
+            cert.recommended_use = "testing"
 
         return cert
 

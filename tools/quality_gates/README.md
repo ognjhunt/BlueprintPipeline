@@ -41,6 +41,16 @@ if you need multiple recipients).
 Email delivery relies on standard provider configuration (e.g. `SENDGRID_API_KEY`
 or SMTP settings) as described in `notification_service.py`.
 
+## Offline dataset audit (no Isaac Sim required)
+Use the offline audit to catch missing modalities and schema regressions
+without running the simulation pipeline:
+
+```bash
+python tools/quality_gates/offline_dataset_audit.py --paths downloaded_episodes local_runs --data-tier full --output audit_report.json
+```
+
+The command exits non-zero when any episode fails required modality thresholds.
+
 ## Genie Sim kinematic reachability gate
 `geniesim_kinematic_reachability` validates that task target poses in
 `task_config.json` are reachable by the configured robot IK solver. Configure

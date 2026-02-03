@@ -234,10 +234,15 @@ def strip_camera_data(obs: Any) -> Any:
         stripped_cf = {}
         for cam_id, cam_data in cf.items():
             if isinstance(cam_data, dict):
-                stripped_cf[cam_id] = {
+                stripped = {
                     k: v for k, v in cam_data.items()
                     if k not in ("rgb", "depth")
                 }
+                for key in ("rgb", "depth"):
+                    val = cam_data.get(key)
+                    if isinstance(val, str) and val.lower().endswith((".npy", ".npz", ".png", ".jpg", ".jpeg", ".exr")):
+                        stripped[key] = val
+                stripped_cf[cam_id] = stripped
             else:
                 stripped_cf[cam_id] = cam_data
         obs["camera_frames"] = stripped_cf

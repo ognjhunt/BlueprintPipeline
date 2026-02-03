@@ -526,6 +526,8 @@ class QualityCertificate:
 
     def assess_training_suitability(self) -> str:
         """Assess training suitability based on quality and source."""
+        if not self.validation_passed:
+            return "testing"
         # Production data with high quality
         # LABS-BLOCKER-002 FIX: Uses unified quality thresholds from quality_constants.py
         if (
