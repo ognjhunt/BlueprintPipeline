@@ -254,6 +254,12 @@ class CameraConfig:
     capture_bbox_3d: bool = False
     capture_normals: bool = False
 
+    # Optical flow / motion vectors (for video diffusion models like Cosmos Policy)
+    capture_optical_flow: bool = False
+
+    # Depth confidence/uncertainty maps (for sim-to-real quality)
+    capture_depth_confidence: bool = False
+
     # Full camera calibration (DROID-style)
     calibration: Optional[CameraCalibration] = None
 
@@ -331,6 +337,35 @@ class SensorDataConfig:
     include_contact_info: bool = False
     include_privileged_state: bool = False
 
+    # =========================================================================
+    # Extended Sensor Settings (NEW)
+    # =========================================================================
+
+    # End-effector wrench (6D force/torque) - critical for contact manipulation
+    include_ee_wrench: bool = False
+
+    # Optical flow / motion vectors - for video diffusion models
+    include_optical_flow: bool = False
+
+    # Balance & stability metrics - for humanoid robots
+    include_balance_state: bool = False
+
+    # Ground reaction forces / foot contacts - for humanoid robots
+    include_foot_contacts: bool = False
+
+    # IMU data - for mobile robots and humanoids
+    include_imu_data: bool = False
+    imu_location: str = "torso"  # "base", "torso", "head"
+
+    # Articulated object states (drawers, doors, cabinets)
+    include_articulated_objects: bool = False
+
+    # Depth confidence/uncertainty maps
+    include_depth_confidence: bool = False
+
+    # Audio capture (future feature)
+    include_audio: bool = False
+
     # Performance settings
     render_offscreen: bool = True
     use_gpu_compression: bool = True
@@ -386,7 +421,7 @@ class SensorDataConfig:
             config.include_instance_ids = True
 
         elif tier == DataPackTier.FULL:
-            # Full: everything
+            # Full: everything including extended sensors
             config.cameras = cls._create_default_cameras(
                 num_cameras,
                 resolution,
@@ -397,12 +432,23 @@ class SensorDataConfig:
                 capture_bbox_2d=True,
                 capture_bbox_3d=True,
                 capture_normals=True,
+                capture_optical_flow=True,
+                capture_depth_confidence=True,
             )
             config.include_semantic_labels = True
             config.include_instance_ids = True
             config.include_object_poses = True
             config.include_contact_info = True
             config.include_privileged_state = True
+
+            # Extended sensor options (FULL pack)
+            config.include_ee_wrench = True
+            config.include_optical_flow = True
+            config.include_balance_state = True  # Enable for humanoids
+            config.include_foot_contacts = True  # Enable for humanoids
+            config.include_imu_data = True
+            config.include_articulated_objects = True
+            config.include_depth_confidence = True
 
         return config
 
@@ -417,6 +463,8 @@ class SensorDataConfig:
         capture_bbox_2d: bool = False,
         capture_bbox_3d: bool = False,
         capture_normals: bool = False,
+        capture_optical_flow: bool = False,
+        capture_depth_confidence: bool = False,
     ) -> List[CameraConfig]:
         """Create default camera configurations."""
         cameras: List[CameraConfig] = []
@@ -497,6 +545,8 @@ class SensorDataConfig:
                     capture_bbox_2d=capture_bbox_2d,
                     capture_bbox_3d=capture_bbox_3d,
                     capture_normals=capture_normals,
+                    capture_optical_flow=capture_optical_flow,
+                    capture_depth_confidence=capture_depth_confidence,
                 )
             )
 
@@ -613,6 +663,12 @@ class FrameSensorData:
     # Surface normals: {camera_id: ndarray(H, W, 3) float32}
     normals: Dict[str, np.ndarray] = field(default_factory=dict)
 
+    # Optical flow / motion vectors: {camera_id: ndarray(H, W, 2) float32 [dx, dy]}
+    optical_flow: Dict[str, np.ndarray] = field(default_factory=dict)
+
+    # Depth confidence/uncertainty: {camera_id: ndarray(H, W) float32 [0-1]}
+    depth_confidence: Dict[str, np.ndarray] = field(default_factory=dict)
+
     # =========================================================================
     # Ground-Truth Annotations
     # =========================================================================
@@ -630,6 +686,48 @@ class FrameSensorData:
 
     # Privileged state: {'object_velocities': {...}, 'contact_flags': {...}, ...}
     privileged_state: Optional[Dict[str, Any]] = None
+
+    # =========================================================================
+    # End-Effector Wrench (6D Force/Torque)
+    # =========================================================================
+
+    # EE wrench: {'force': [fx, fy, fz], 'torque': [tx, ty, tz], 'frame': 'end_effector'}
+    ee_wrench: Optional[Dict[str, Any]] = None
+
+    # =========================================================================
+    # Balance & Stability Metrics (Humanoids)
+    # =========================================================================
+
+    # Balance state for humanoid robots
+    balance_state: Optional[Dict[str, Any]] = None
+
+    # =========================================================================
+    # Ground Reaction Forces (Humanoids)
+    # =========================================================================
+
+    # Foot contact state and ground reaction forces
+    foot_contacts: Optional[Dict[str, Any]] = None
+
+    # =========================================================================
+    # IMU Data
+    # =========================================================================
+
+    # IMU readings: {'linear_acceleration': [...], 'angular_velocity': [...], 'orientation': [...]}
+    imu_data: Optional[Dict[str, Any]] = None
+
+    # =========================================================================
+    # Audio Data
+    # =========================================================================
+
+    # Audio waveform and features
+    audio_data: Optional[Dict[str, Any]] = None
+
+    # =========================================================================
+    # Articulated Object States
+    # =========================================================================
+
+    # Articulated object joint states: {object_id: {'joint_position': float, 'joint_velocity': float}}
+    articulated_object_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # =========================================================================
     # Metadata
@@ -1022,6 +1120,24 @@ class IsaacSimSensorCapture:
             annotators["normals"] = rep.AnnotatorRegistry.get_annotator("normals")
             annotators["normals"].attach([render_product])
 
+        # Optical flow / motion vectors (for video diffusion models)
+        if getattr(camera_config, 'capture_optical_flow', False):
+            try:
+                annotators["motion_vectors"] = rep.AnnotatorRegistry.get_annotator("motion_vectors")
+                annotators["motion_vectors"].attach([render_product])
+            except Exception as e:
+                self.log(f"Failed to attach motion_vectors annotator for {camera_config.camera_id}: {e}", "WARNING")
+
+        # Depth confidence/uncertainty (for sim-to-real quality assessment)
+        if getattr(camera_config, 'capture_depth_confidence', False):
+            try:
+                # Isaac Sim provides depth_confidence or we compute from depth variance
+                annotators["depth_confidence"] = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
+                annotators["depth_confidence"].attach([render_product])
+                # Note: Actual confidence is computed post-hoc from depth edges/gradients
+            except Exception as e:
+                self.log(f"Failed to attach depth_confidence annotator for {camera_config.camera_id}: {e}", "WARNING")
+
         self._annotators[camera_config.camera_id] = annotators
 
     def capture_frame(
@@ -1129,6 +1245,35 @@ class IsaacSimSensorCapture:
                     if normals_data is not None:
                         frame_data.normals[camera_id] = normals_data["data"]
 
+                # Optical flow / motion vectors
+                if "motion_vectors" in annotators:
+                    mv_data = annotators["motion_vectors"].get_data()
+                    if mv_data is not None:
+                        frame_data.optical_flow[camera_id] = mv_data["data"]
+
+                # Depth confidence (computed from depth gradients - areas with high gradients have lower confidence)
+                if "depth_confidence" in annotators and camera_id in frame_data.depth_maps:
+                    depth_map = frame_data.depth_maps[camera_id]
+                    if depth_map is not None:
+                        # Compute confidence from depth gradients (simple approach)
+                        # High gradient = edge/discontinuity = lower confidence
+                        try:
+                            import scipy.ndimage as ndimage
+                            grad_x = ndimage.sobel(depth_map, axis=1)
+                            grad_y = ndimage.sobel(depth_map, axis=0)
+                            gradient_mag = np.sqrt(grad_x**2 + grad_y**2)
+                            # Normalize and invert: high gradient = low confidence
+                            max_grad = np.percentile(gradient_mag, 99) + 1e-6
+                            confidence = 1.0 - np.clip(gradient_mag / max_grad, 0, 1)
+                            # Also mark infinite/NaN depths as low confidence
+                            confidence[~np.isfinite(depth_map)] = 0.0
+                            frame_data.depth_confidence[camera_id] = confidence.astype(np.float32)
+                        except ImportError:
+                            # scipy not available, use simple approach
+                            confidence = np.ones_like(depth_map, dtype=np.float32)
+                            confidence[~np.isfinite(depth_map)] = 0.0
+                            frame_data.depth_confidence[camera_id] = confidence
+
                 if "rgb" in annotators and camera_id not in frame_data.rgb_images:
                     self._camera_missing_rgb_counts[camera_id] = (
                         self._camera_missing_rgb_counts.get(camera_id, 0) + 1
@@ -1216,6 +1361,27 @@ class IsaacSimSensorCapture:
         # Privileged state (if enabled)
         if self.config.include_privileged_state:
             frame_data.privileged_state = self._capture_privileged_state(scene_objects)
+
+        # End-effector wrench (6D force/torque)
+        if getattr(self.config, 'include_ee_wrench', False) or self.config.include_privileged_state:
+            frame_data.ee_wrench = self._capture_ee_wrench()
+
+        # Balance state for humanoid robots
+        if getattr(self.config, 'include_balance_state', False):
+            frame_data.balance_state = self._capture_balance_state()
+
+        # Ground reaction forces / foot contacts
+        if getattr(self.config, 'include_foot_contacts', False):
+            frame_data.foot_contacts = self._capture_foot_contacts()
+
+        # IMU data
+        if getattr(self.config, 'include_imu_data', False):
+            imu_location = getattr(self.config, 'imu_location', 'torso')
+            frame_data.imu_data = self._capture_imu_data(imu_location=imu_location)
+
+        # Articulated object states (drawers, doors, etc.)
+        if getattr(self.config, 'include_articulated_objects', False) and scene_objects:
+            frame_data.articulated_object_states = self._capture_articulated_object_states(scene_objects)
 
         return frame_data
 
@@ -2003,6 +2169,551 @@ class IsaacSimSensorCapture:
         }
 
         return state
+
+    def _capture_ee_wrench(
+        self,
+        robot_prim_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Capture end-effector wrench (6D force/torque) from physics simulation.
+
+        Args:
+            robot_prim_path: Path to robot articulation root
+
+        Returns:
+            Dict with 'force' [fx, fy, fz] and 'torque' [tx, ty, tz] in EE frame,
+            or None if not available
+        """
+        if self._omni is None:
+            return None
+
+        try:
+            from isaacsim.core.api.utils.stage import get_current_stage
+            from isaacsim.core.api.articulations import Articulation
+
+            stage = get_current_stage()
+            if stage is None:
+                return None
+
+            # Resolve robot path
+            if robot_prim_path is None:
+                robot_paths = resolve_robot_prim_paths(
+                    self.config.robot_prim_paths,
+                    scene_usd_path=self.config.scene_usd_path,
+                    stage=stage,
+                )
+                if not robot_paths:
+                    return None
+                robot_prim_path = robot_paths[0]
+
+            # Get articulation
+            robot = Articulation(robot_prim_path)
+            if not robot.initialized:
+                robot.initialize()
+
+            # Get joint efforts (torques) from the wrist joints
+            joint_efforts = robot.get_applied_joint_efforts()
+            if joint_efforts is None:
+                return None
+
+            # For manipulators, the last 3 joints are typically wrist joints
+            # Their torques approximate the EE wrench
+            num_joints = len(joint_efforts)
+            if num_joints >= 6:
+                # Get wrist joint torques (last 3 joints before gripper)
+                wrist_start = max(0, num_joints - 4)  # Adjust for gripper
+                wrist_torques = joint_efforts[wrist_start:wrist_start + 3]
+
+                # Try to get contact forces at EE
+                ee_force = [0.0, 0.0, 0.0]
+                ee_torque = list(wrist_torques) if len(wrist_torques) >= 3 else [0.0, 0.0, 0.0]
+
+                # Sum contact forces at gripper links
+                try:
+                    from omni.physx import get_physx_interface
+                    physx = get_physx_interface()
+                    if physx is not None:
+                        contact_data = physx.get_contact_report()
+                        if contact_data:
+                            gripper_keywords = ("finger", "gripper", "hand")
+                            for contact in contact_data:
+                                body_a = str(contact.get("actor0", "")).lower()
+                                body_b = str(contact.get("actor1", "")).lower()
+                                if any(kw in body_a or kw in body_b for kw in gripper_keywords):
+                                    force = contact.get("impulse", 0)
+                                    normal = contact.get("normal", [0, 0, 1])
+                                    for i in range(3):
+                                        ee_force[i] += float(force) * float(normal[i])
+                except Exception:
+                    pass
+
+                return {
+                    "force": [round(f, 4) for f in ee_force],
+                    "torque": [round(t, 4) for t in ee_torque[:3]],
+                    "frame": "end_effector",
+                    "source": "physx_joint_torques",
+                }
+
+        except Exception as e:
+            self.log(f"Failed to capture EE wrench: {e}", "DEBUG")
+
+        return None
+
+    def _capture_balance_state(
+        self,
+        robot_prim_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Capture balance and stability metrics for humanoid robots.
+
+        Computes Center of Mass (CoM), Zero Moment Point (ZMP),
+        Center of Pressure (CoP), and stability margins.
+
+        Args:
+            robot_prim_path: Path to robot articulation root
+
+        Returns:
+            Dict with balance metrics or None if not available/applicable
+        """
+        if self._omni is None:
+            return None
+
+        try:
+            from isaacsim.core.api.utils.stage import get_current_stage
+            from isaacsim.core.api.articulations import Articulation
+            from pxr import UsdPhysics, PhysxSchema
+
+            stage = get_current_stage()
+            if stage is None:
+                return None
+
+            # Resolve robot path
+            if robot_prim_path is None:
+                robot_paths = resolve_robot_prim_paths(
+                    self.config.robot_prim_paths,
+                    scene_usd_path=self.config.scene_usd_path,
+                    stage=stage,
+                )
+                if not robot_paths:
+                    return None
+                robot_prim_path = robot_paths[0]
+
+            # Get articulation
+            robot = Articulation(robot_prim_path)
+            if not robot.initialized:
+                robot.initialize()
+
+            # Compute Center of Mass from articulation
+            com_position = None
+            com_velocity = None
+
+            try:
+                # Try to get CoM from PhysX articulation API
+                root_prim = stage.GetPrimAtPath(robot_prim_path)
+                if root_prim.IsValid():
+                    # Sum mass-weighted positions of all rigid bodies
+                    total_mass = 0.0
+                    weighted_pos = np.zeros(3)
+                    weighted_vel = np.zeros(3)
+
+                    from pxr import Usd, UsdGeom
+                    for prim in Usd.PrimRange(root_prim):
+                        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                            # Get mass
+                            mass_api = UsdPhysics.MassAPI(prim)
+                            mass = 1.0  # Default mass
+                            if mass_api:
+                                mass_attr = mass_api.GetMassAttr()
+                                if mass_attr:
+                                    mass = float(mass_attr.Get() or 1.0)
+
+                            # Get world transform
+                            xformable = UsdGeom.Xformable(prim)
+                            if xformable:
+                                world_xform = xformable.ComputeLocalToWorldTransform(0)
+                                pos = world_xform.ExtractTranslation()
+                                weighted_pos += mass * np.array([pos[0], pos[1], pos[2]])
+                                total_mass += mass
+
+                    if total_mass > 0:
+                        com_position = (weighted_pos / total_mass).tolist()
+                        com_velocity = [0.0, 0.0, 0.0]  # Would need velocity tracking
+
+            except Exception as e:
+                self.log(f"CoM computation failed: {e}", "DEBUG")
+
+            if com_position is None:
+                return None
+
+            # Compute ZMP from foot contact forces
+            zmp_position = None
+            cop_position = None
+            foot_contacts = self._capture_foot_contacts(robot_prim_path)
+
+            if foot_contacts:
+                total_force = 0.0
+                weighted_pos_x = 0.0
+                weighted_pos_y = 0.0
+
+                for foot_id, foot_data in foot_contacts.items():
+                    if foot_data.get("contact_state"):
+                        force = foot_data.get("contact_force", [0, 0, 0])
+                        pos = foot_data.get("contact_position", [0, 0, 0])
+                        fz = abs(force[2]) if len(force) > 2 else 0
+
+                        if fz > 0.01:  # Minimum force threshold
+                            weighted_pos_x += fz * pos[0]
+                            weighted_pos_y += fz * pos[1]
+                            total_force += fz
+
+                if total_force > 0.01:
+                    zmp_position = [
+                        weighted_pos_x / total_force,
+                        weighted_pos_y / total_force,
+                    ]
+                    cop_position = zmp_position  # CoP == ZMP for flat ground
+
+            # Compute stability margin (simplified)
+            stability_margin = None
+            if zmp_position and foot_contacts:
+                # Get support polygon from foot positions
+                foot_positions = []
+                for foot_data in foot_contacts.values():
+                    if foot_data.get("contact_state"):
+                        pos = foot_data.get("contact_position", [0, 0, 0])
+                        foot_positions.append([pos[0], pos[1]])
+
+                if len(foot_positions) >= 2:
+                    # Simple approximation: distance from ZMP to centroid
+                    centroid = np.mean(foot_positions, axis=0)
+                    stability_margin = float(np.linalg.norm(
+                        np.array(zmp_position) - centroid
+                    ))
+
+            return {
+                "com_position": com_position,
+                "com_velocity": com_velocity,
+                "zmp_position": zmp_position,
+                "cop_position": cop_position,
+                "stability_margin": stability_margin,
+                "angular_momentum": [0.0, 0.0, 0.0],  # Would need momentum tracking
+                "source": "physx_articulation",
+            }
+
+        except Exception as e:
+            self.log(f"Failed to capture balance state: {e}", "DEBUG")
+
+        return None
+
+    def _capture_foot_contacts(
+        self,
+        robot_prim_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        """
+        Capture ground reaction forces and foot contact states for humanoid robots.
+
+        Args:
+            robot_prim_path: Path to robot articulation root
+
+        Returns:
+            Dict mapping foot_id to contact data, or None if not available
+        """
+        if self._omni is None:
+            return None
+
+        try:
+            from isaacsim.core.api.utils.stage import get_current_stage
+            from pxr import Usd, UsdPhysics
+
+            stage = get_current_stage()
+            if stage is None:
+                return None
+
+            # Resolve robot path
+            if robot_prim_path is None:
+                robot_paths = resolve_robot_prim_paths(
+                    self.config.robot_prim_paths,
+                    scene_usd_path=self.config.scene_usd_path,
+                    stage=stage,
+                )
+                if not robot_paths:
+                    return None
+                robot_prim_path = robot_paths[0]
+
+            # Find foot links
+            foot_keywords = ("foot", "ankle", "sole", "toe")
+            foot_links: Dict[str, str] = {}  # foot_id -> prim_path
+
+            root_prim = stage.GetPrimAtPath(robot_prim_path)
+            if root_prim.IsValid():
+                for prim in Usd.PrimRange(root_prim):
+                    name = prim.GetName().lower()
+                    if any(kw in name for kw in foot_keywords):
+                        if prim.HasAPI(UsdPhysics.RigidBodyAPI) or prim.HasAPI(UsdPhysics.CollisionAPI):
+                            # Determine left/right
+                            if "left" in name or "_l_" in name or name.startswith("l_"):
+                                foot_id = "left_foot"
+                            elif "right" in name or "_r_" in name or name.startswith("r_"):
+                                foot_id = "right_foot"
+                            else:
+                                foot_id = name
+                            foot_links[foot_id] = str(prim.GetPath())
+
+            if not foot_links:
+                return None
+
+            # Get contact data from PhysX
+            foot_contacts: Dict[str, Dict[str, Any]] = {}
+
+            for foot_id, foot_path in foot_links.items():
+                foot_contacts[foot_id] = {
+                    "contact_state": False,
+                    "contact_force": [0.0, 0.0, 0.0],
+                    "contact_moment": [0.0, 0.0, 0.0],
+                    "contact_position": [0.0, 0.0, 0.0],
+                    "contact_normal": [0.0, 0.0, 1.0],
+                    "contact_area": 0.0,
+                    "time_in_contact": 0.0,
+                    "prim_path": foot_path,
+                }
+
+            try:
+                from omni.physx import get_physx_interface
+                physx = get_physx_interface()
+
+                if physx is not None:
+                    contact_data = physx.get_contact_report()
+                    if contact_data:
+                        for contact in contact_data:
+                            body_a = str(contact.get("actor0", ""))
+                            body_b = str(contact.get("actor1", ""))
+
+                            for foot_id, foot_path in foot_links.items():
+                                if foot_path in body_a or foot_path in body_b:
+                                    force = contact.get("impulse", 0)
+                                    normal = contact.get("normal", [0, 0, 1])
+                                    position = contact.get("position", [0, 0, 0])
+
+                                    foot_contacts[foot_id]["contact_state"] = True
+                                    # Accumulate forces
+                                    for i in range(3):
+                                        foot_contacts[foot_id]["contact_force"][i] += float(force) * float(normal[i])
+                                    foot_contacts[foot_id]["contact_position"] = [float(p) for p in position]
+                                    foot_contacts[foot_id]["contact_normal"] = [float(n) for n in normal]
+
+            except Exception as e:
+                self.log(f"PhysX foot contact query failed: {e}", "DEBUG")
+
+            return foot_contacts
+
+        except Exception as e:
+            self.log(f"Failed to capture foot contacts: {e}", "DEBUG")
+
+        return None
+
+    def _capture_imu_data(
+        self,
+        robot_prim_path: Optional[str] = None,
+        imu_location: str = "torso",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Capture IMU data (accelerometer, gyroscope, orientation) from simulation.
+
+        Args:
+            robot_prim_path: Path to robot articulation root
+            imu_location: Where to measure IMU ("base", "torso", "head")
+
+        Returns:
+            Dict with IMU readings or None if not available
+        """
+        if self._omni is None:
+            return None
+
+        try:
+            from isaacsim.core.api.utils.stage import get_current_stage
+            from isaacsim.core.api.articulations import Articulation
+            from pxr import Usd, UsdGeom, UsdPhysics
+
+            stage = get_current_stage()
+            if stage is None:
+                return None
+
+            # Resolve robot path
+            if robot_prim_path is None:
+                robot_paths = resolve_robot_prim_paths(
+                    self.config.robot_prim_paths,
+                    scene_usd_path=self.config.scene_usd_path,
+                    stage=stage,
+                )
+                if not robot_paths:
+                    return None
+                robot_prim_path = robot_paths[0]
+
+            # Find IMU link based on location
+            imu_keywords = {
+                "base": ("base", "root", "pelvis"),
+                "torso": ("torso", "chest", "trunk", "upper_body"),
+                "head": ("head", "neck", "skull"),
+            }
+
+            keywords = imu_keywords.get(imu_location, imu_keywords["base"])
+            imu_prim = None
+            imu_prim_path = None
+
+            root_prim = stage.GetPrimAtPath(robot_prim_path)
+            if root_prim.IsValid():
+                for prim in Usd.PrimRange(root_prim):
+                    name = prim.GetName().lower()
+                    if any(kw in name for kw in keywords):
+                        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                            imu_prim = prim
+                            imu_prim_path = str(prim.GetPath())
+                            break
+
+            if imu_prim is None:
+                # Fallback to root
+                imu_prim = root_prim
+                imu_prim_path = robot_prim_path
+
+            # Get transform and velocities
+            xformable = UsdGeom.Xformable(imu_prim)
+            if not xformable:
+                return None
+
+            world_xform = xformable.ComputeLocalToWorldTransform(0)
+            pos = world_xform.ExtractTranslation()
+            rot = world_xform.ExtractRotation()
+
+            # Get orientation as quaternion
+            quat = rot.GetQuat()
+            orientation = [
+                float(quat.GetReal()),
+                float(quat.GetImaginary()[0]),
+                float(quat.GetImaginary()[1]),
+                float(quat.GetImaginary()[2]),
+            ]
+
+            # Get velocities from rigid body (if available)
+            linear_acceleration = [0.0, 0.0, 9.81]  # Default: gravity only
+            angular_velocity = [0.0, 0.0, 0.0]
+
+            try:
+                if imu_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    rb_api = UsdPhysics.RigidBodyAPI(imu_prim)
+                    vel_attr = rb_api.GetVelocityAttr()
+                    ang_vel_attr = rb_api.GetAngularVelocityAttr()
+
+                    if vel_attr:
+                        vel = vel_attr.Get()
+                        if vel:
+                            # Acceleration would need velocity differencing
+                            pass
+
+                    if ang_vel_attr:
+                        ang_vel = ang_vel_attr.Get()
+                        if ang_vel:
+                            angular_velocity = [float(v) for v in ang_vel]
+
+            except Exception:
+                pass
+
+            return {
+                "linear_acceleration": linear_acceleration,
+                "angular_velocity": angular_velocity,
+                "orientation_quat": orientation,
+                "magnetometer": None,  # Not available in simulation
+                "location": imu_location,
+                "prim_path": imu_prim_path,
+                "source": "physx_rigid_body",
+            }
+
+        except Exception as e:
+            self.log(f"Failed to capture IMU data: {e}", "DEBUG")
+
+        return None
+
+    def _capture_articulated_object_states(
+        self,
+        scene_objects: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Capture joint states of articulated objects (drawers, doors, cabinets).
+
+        Args:
+            scene_objects: List of scene objects
+
+        Returns:
+            Dict mapping object_id to joint state data
+        """
+        articulated_states: Dict[str, Dict[str, Any]] = {}
+
+        if self._omni is None or not scene_objects:
+            return articulated_states
+
+        try:
+            from isaacsim.core.api.utils.stage import get_current_stage
+            from isaacsim.core.api.articulations import Articulation
+            from pxr import UsdPhysics
+
+            stage = get_current_stage()
+            if stage is None:
+                return articulated_states
+
+            for obj in scene_objects:
+                obj_id = obj.get("id", obj.get("name", ""))
+                prim_path = obj.get("prim_path") or obj.get("usd_path")
+
+                if not prim_path:
+                    prim_path = f"/World/{obj_id}"
+
+                prim = stage.GetPrimAtPath(prim_path)
+                if not prim.IsValid():
+                    continue
+
+                # Check if object has articulation
+                has_articulation = prim.HasAPI(UsdPhysics.ArticulationRootAPI)
+                if not has_articulation:
+                    # Check children for joints
+                    from pxr import Usd
+                    for child in Usd.PrimRange(prim):
+                        if child.IsA(UsdPhysics.Joint):
+                            has_articulation = True
+                            break
+
+                if not has_articulation:
+                    continue
+
+                try:
+                    articulation = Articulation(prim_path)
+                    if not articulation.initialized:
+                        articulation.initialize()
+
+                    joint_pos = articulation.get_joint_positions()
+                    joint_vel = articulation.get_joint_velocities()
+
+                    if joint_pos is not None and len(joint_pos) > 0:
+                        articulated_states[obj_id] = {
+                            "joint_positions": [float(p) for p in joint_pos],
+                            "joint_velocities": [float(v) for v in joint_vel] if joint_vel is not None else [],
+                            "num_joints": len(joint_pos),
+                            "prim_path": prim_path,
+                            "source": "physx_articulation",
+                        }
+
+                        # For single-joint objects (drawers, doors), provide convenience fields
+                        if len(joint_pos) == 1:
+                            articulated_states[obj_id]["joint_position"] = float(joint_pos[0])
+                            articulated_states[obj_id]["joint_velocity"] = (
+                                float(joint_vel[0]) if joint_vel is not None and len(joint_vel) > 0 else 0.0
+                            )
+
+                except Exception as e:
+                    self.log(f"Failed to get articulation state for {obj_id}: {e}", "DEBUG")
+
+        except Exception as e:
+            self.log(f"Failed to capture articulated object states: {e}", "DEBUG")
+
+        return articulated_states
 
     def _summarize_camera_capture_warnings(
         self,

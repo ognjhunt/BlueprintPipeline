@@ -46,6 +46,7 @@ class OutputFormat(Enum):
     ROSBAG = "rosbag"  # ROS bag format (legacy systems)
     RAW = "raw"  # Raw files (images, JSON, etc.)
     COSMOS_POLICY = "cosmos_policy"  # NVIDIA Cosmos Policy (video diffusion policy)
+    GYMNASIUM = "gymnasium"  # Gymnasium/OpenAI Gym format (RL training)
 
 
 @dataclass
@@ -329,6 +330,67 @@ class JointDynamicsConfig:
 
 
 @dataclass
+class ExtendedSensorConfig:
+    """
+    Configuration for extended sensor data (NEW).
+
+    These sensors are critical for:
+    - Video diffusion models (optical flow)
+    - Humanoid robots (balance, GRF, foot contacts)
+    - Contact-rich manipulation (EE wrench)
+    - Articulated object manipulation (drawer/door states)
+    """
+
+    # End-effector wrench (6D force/torque) - critical for contact manipulation
+    include_ee_wrench: bool = False
+
+    # Optical flow / motion vectors - for video diffusion models (Cosmos Policy)
+    include_optical_flow: bool = False
+
+    # Depth confidence/uncertainty maps - for sim-to-real quality
+    include_depth_confidence: bool = False
+
+    # Balance & stability metrics (CoM, ZMP, CoP) - for humanoid robots
+    include_balance_state: bool = False
+
+    # Ground reaction forces / foot contacts - for humanoid robots
+    include_foot_contacts: bool = False
+
+    # Articulated object states (drawers, doors, cabinets)
+    include_articulated_objects: bool = False
+
+    # Language annotations (task instructions, paraphrases)
+    include_language_annotations: bool = False
+
+
+@dataclass
+class HumanoidSensorConfig:
+    """
+    Configuration for humanoid-specific sensors.
+
+    For robots like G1, GR1, H1, NEO, Digit, Phoenix, Figure 01.
+    """
+
+    # Enable humanoid-specific sensors
+    enabled: bool = False
+
+    # Balance state (CoM, ZMP, CoP, stability margin)
+    capture_balance_state: bool = True
+
+    # Ground reaction forces (GRF) per foot
+    capture_grf: bool = True
+
+    # Foot contact states (stance/swing, contact position)
+    capture_foot_contacts: bool = True
+
+    # Torso IMU (orientation, angular velocity, acceleration)
+    capture_torso_imu: bool = True
+
+    # Pelvis state (for floating base control)
+    capture_pelvis_state: bool = True
+
+
+@dataclass
 class CameraCalibrationConfig:
     """
     Configuration for camera calibration data export.
@@ -518,6 +580,20 @@ class DataPackConfig:
 
     # Point cloud generation
     point_cloud_config: PointCloudConfig = field(default_factory=PointCloudConfig)
+
+    # =========================================================================
+    # NEW: P0 - Extended Sensors (Video Diffusion, Humanoids, Contact-Rich)
+    # =========================================================================
+
+    # Extended sensor configuration (optical flow, depth confidence, etc.)
+    extended_sensor_config: ExtendedSensorConfig = field(
+        default_factory=ExtendedSensorConfig
+    )
+
+    # Humanoid-specific sensors (balance, GRF, foot contacts)
+    humanoid_sensor_config: HumanoidSensorConfig = field(
+        default_factory=HumanoidSensorConfig
+    )
 
     # =========================================================================
     # Export format helpers
@@ -1150,6 +1226,73 @@ def create_full_pack(
                 "include_frame": True,
             },
         ),
+        # NEW: Optical flow / motion vectors (for video diffusion models)
+        DataStreamConfig(
+            stream_id="optical_flow",
+            stream_type="optical_flow",
+            enabled=True,
+            format="npz",
+            per_camera=True,
+            metadata={
+                "format": "flow_xy",  # (H, W, 2) float32
+                "include_confidence": True,
+            },
+        ),
+        # NEW: Depth confidence maps
+        DataStreamConfig(
+            stream_id="depth_confidence",
+            stream_type="depth_confidence",
+            enabled=True,
+            format="npz",
+            per_camera=True,
+            metadata={
+                "range": [0.0, 1.0],
+                "computation": "gradient_based",
+            },
+        ),
+        # NEW: Balance state (for humanoid robots)
+        DataStreamConfig(
+            stream_id="balance_state",
+            stream_type="balance_state",
+            enabled=True,
+            format="parquet",
+            metadata={
+                "includes": ["com_position", "com_velocity", "zmp_position", "cop_position", "stability_margin"],
+            },
+        ),
+        # NEW: Foot contacts / ground reaction forces (for humanoid robots)
+        DataStreamConfig(
+            stream_id="foot_contacts",
+            stream_type="foot_contacts",
+            enabled=True,
+            format="parquet",
+            metadata={
+                "includes": ["contact_state", "contact_force", "contact_position", "contact_normal"],
+                "per_foot": True,
+            },
+        ),
+        # NEW: Articulated object states (drawers, doors, cabinets)
+        DataStreamConfig(
+            stream_id="articulated_objects",
+            stream_type="articulated_object_state",
+            enabled=True,
+            format="parquet",
+            metadata={
+                "includes": ["joint_position", "joint_velocity"],
+                "per_object": True,
+            },
+        ),
+        # NEW: Language annotations (task instructions, paraphrases)
+        DataStreamConfig(
+            stream_id="language_annotations",
+            stream_type="annotation",
+            enabled=True,
+            format="json",
+            metadata={
+                "type": "language",
+                "includes": ["task_instruction", "subtask_instructions", "paraphrase_variations"],
+            },
+        ),
     ]
 
     # Add IMU stream for mobile robots
@@ -1258,8 +1401,27 @@ def create_full_pack(
             include_colors=True,
             include_normals=True,
         ),
-        # P1: Additional export formats
-        additional_formats=[OutputFormat.RLDS, OutputFormat.HDF5],
+        # P0: Extended sensors (video diffusion, contact-rich manipulation)
+        extended_sensor_config=ExtendedSensorConfig(
+            include_ee_wrench=True,
+            include_optical_flow=True,
+            include_depth_confidence=True,
+            include_balance_state=True,  # For humanoids
+            include_foot_contacts=True,  # For humanoids
+            include_articulated_objects=True,
+            include_language_annotations=True,
+        ),
+        # P0: Humanoid-specific sensors (for G1, H1, GR1, etc.)
+        humanoid_sensor_config=HumanoidSensorConfig(
+            enabled=enable_mobile_robot_sensors,  # Enable when mobile robot sensors requested
+            capture_balance_state=True,
+            capture_grf=True,
+            capture_foot_contacts=True,
+            capture_torso_imu=True,
+            capture_pelvis_state=True,
+        ),
+        # P1: Additional export formats (including Gymnasium for RL training)
+        additional_formats=[OutputFormat.RLDS, OutputFormat.HDF5, OutputFormat.GYMNASIUM],
     )
 
 
