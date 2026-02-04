@@ -69,13 +69,31 @@ def patch_file():
             _articulation = None
             # Try multiple access paths to find the articulation object
             _server_fn = getattr(self, "server_function", None)
-            _cmd = getattr(_server_fn, "command_controller", None) if _server_fn else None
+            print(f"[JOINT_EFFORTS] DEBUG: server_fn={_server_fn is not None}, type={type(_server_fn).__name__ if _server_fn else 'None'}")
 
-            # Path 1: command_controller.ui_builder.articulation (most common)
-            if _cmd is not None:
+            # Path 0: DIRECT - server_function IS the CommandController, which has ui_builder.articulation
+            # This is the correct path based on server architecture analysis
+            if _articulation is None and _server_fn is not None:
+                _ui = getattr(_server_fn, "ui_builder", None)
+                if _ui is not None:
+                    _articulation = getattr(_ui, "articulation", None)
+                    if _articulation is not None:
+                        print(f"[JOINT_EFFORTS] Found articulation via server_function.ui_builder.articulation")
+                    else:
+                        print(f"[JOINT_EFFORTS] Path 0: ui_builder exists but articulation is None (not initialized yet?)")
+                else:
+                    print(f"[JOINT_EFFORTS] Path 0: server_function has no ui_builder attr")
+
+            # Legacy paths below kept for fallback compatibility
+            _cmd = _server_fn  # server_function IS the CommandController (not server_function.command_controller)
+
+            # Path 1: command_controller.ui_builder.articulation (same as Path 0, kept for clarity)
+            if _articulation is None and _cmd is not None:
                 _ui_builder = getattr(_cmd, "ui_builder", None)
                 if _ui_builder is not None:
                     _articulation = getattr(_ui_builder, "articulation", None)
+                    if _articulation is not None:
+                        print(f"[JOINT_EFFORTS] Found articulation via cmd.ui_builder.articulation")
 
             # Path 2: command_controller.articulation (fallback)
             if _articulation is None and _cmd is not None:
@@ -196,8 +214,7 @@ def patch_file():
                     _efforts = _articulation.get_joint_efforts()
 
                 if _efforts is not None:
-                    # Handle both numpy arrays and lists
-                    import numpy as np
+                    # Handle both numpy arrays and lists (np is already imported at module level)
                     if hasattr(_efforts, "flatten"):
                         _efforts_list = _efforts.flatten().tolist()
                     else:
