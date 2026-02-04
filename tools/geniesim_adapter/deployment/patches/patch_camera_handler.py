@@ -34,6 +34,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
     _bp_depth_annotators = {}
     _bp_warmup_done = set()
     _bp_cameras_logged = False
+    _bp_total_frames_rendered = {}  # Track total frames per camera since creation
 
     def handle_get_camera_data(self):
         \"\"\"Handle GET_CAMERA_DATA (Command=1) — render current frame.
@@ -153,23 +154,50 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 cls._bp_depth_annotators[camera_prim_path] = depth_annot
                 print(f"[PATCH] Created render product for {camera_prim_path}")
 
+                # Initial prime: run extra frames immediately after render product creation
+                # to bootstrap the Replicator pipeline (shaders, textures, lighting)
+                _initial_prime = int(_os.environ.get("CAMERA_INITIAL_PRIME_STEPS", "15"))
+                if _initial_prime > 0:
+                    print(f"[PATCH] Initial priming camera {camera_prim_path} ({_initial_prime} frames)...")
+                    for _ in range(_initial_prime):
+                        rep.orchestrator.step()
+                    cls._bp_total_frames_rendered[camera_prim_path] = _initial_prime
+                    print(f"[PATCH] Initial prime complete for {camera_prim_path}")
+                else:
+                    cls._bp_total_frames_rendered[camera_prim_path] = 0
+
             rp = cls._bp_render_products[camera_prim_path]
             rgb_annot = cls._bp_rgb_annotators[camera_prim_path]
             depth_annot = cls._bp_depth_annotators[camera_prim_path]
 
             # Warm-up: Replicator annotators need several frames before
             # returning valid data.  Run extra steps on first use.
-            # When CAMERA_REWARMUP_ON_RESET=1, re-warm cameras every call
-            # to handle render pipeline staleness after physics resets.
-            if _os.environ.get("CAMERA_REWARMUP_ON_RESET", "0") == "1":
-                cls._bp_warmup_done.discard(camera_prim_path)
-            if camera_prim_path not in cls._bp_warmup_done:
-                _warmup_steps = int(_os.environ.get("CAMERA_WARMUP_STEPS", "5"))
-                print(f"[PATCH] Warming up camera {camera_prim_path} ({_warmup_steps} frames)...")
+            # Warmup logic with cumulative frame tracking to ensure render pipeline
+            # gets enough total frames across retries.
+            _rewarmup_on_reset = _os.environ.get("CAMERA_REWARMUP_ON_RESET", "0") == "1"
+            _cumulative_target = int(_os.environ.get("CAMERA_CUMULATIVE_WARMUP_TARGET", "30"))
+            _warmup_steps = int(_os.environ.get("CAMERA_WARMUP_STEPS", "5"))
+
+            _total_rendered = cls._bp_total_frames_rendered.get(camera_prim_path, 0)
+            _needs_warmup = False
+
+            if _rewarmup_on_reset:
+                # Always do warmup on rewarm mode, but track cumulative total
+                _needs_warmup = True
+            elif camera_prim_path not in cls._bp_warmup_done:
+                # First-time warmup (non-rewarm mode)
+                _needs_warmup = True
+            elif _total_rendered < _cumulative_target:
+                # Haven't reached cumulative target yet
+                _needs_warmup = True
+
+            if _needs_warmup:
+                print(f"[PATCH] Warming up camera {camera_prim_path} ({_warmup_steps} frames, total={_total_rendered})...")
                 for _ in range(_warmup_steps):
                     rep.orchestrator.step()
+                cls._bp_total_frames_rendered[camera_prim_path] = _total_rendered + _warmup_steps
                 cls._bp_warmup_done.add(camera_prim_path)
-                print(f"[PATCH] Camera warmup complete for {camera_prim_path}")
+                print(f"[PATCH] Camera warmup complete for {camera_prim_path} (total={cls._bp_total_frames_rendered[camera_prim_path]})")
 
             _min_colors = int(_os.environ.get("CAMERA_QUALITY_MIN_COLORS", "100"))
             _min_std = float(_os.environ.get("CAMERA_QUALITY_MIN_STD", "10"))
@@ -196,6 +224,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     return 0, 0.0
 
             rep.orchestrator.step()
+            cls._bp_total_frames_rendered[camera_prim_path] = cls._bp_total_frames_rendered.get(camera_prim_path, 0) + 1
 
             rgb_data = rgb_annot.get_data()
             if rgb_data is not None:
@@ -210,6 +239,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 while (_uniq < _min_colors or _std < _min_std) and _retry < _max_retries:
                     for _ in range(_retry_steps):
                         rep.orchestrator.step()
+                    cls._bp_total_frames_rendered[camera_prim_path] = cls._bp_total_frames_rendered.get(camera_prim_path, 0) + _retry_steps
                     _retry += 1
                     rgb_data = rgb_annot.get_data()
                     if rgb_data is None:
@@ -311,9 +341,49 @@ def patch_file():
     with open(COMMAND_CONTROLLER, "r") as f:
         content = f.read()
 
+    force_repatch = "--force" in sys.argv or os.environ.get("FORCE_REPATCH", "0") == "1"
     if PATCH_MARKER in content:
-        print("[PATCH] Camera handler already patched — skipping")
-        sys.exit(0)
+        if force_repatch:
+            # Remove old patch to re-apply updated version
+            print("[PATCH] Force re-patching: removing old camera handler...")
+            # Remove everything from BEGIN marker to END marker (inclusive)
+            begin_marker = "# --- BEGIN BlueprintPipeline camera patch ---"
+            end_marker = "# --- END BlueprintPipeline camera patch ---"
+            begin_idx = content.find(begin_marker)
+            end_idx = content.find(end_marker)
+            if begin_idx != -1 and end_idx != -1:
+                # Find start of line containing begin marker
+                line_start = content.rfind("\n", 0, begin_idx)
+                if line_start == -1:
+                    line_start = 0
+                else:
+                    line_start += 1
+                # Find end of line containing end marker
+                line_end = content.find("\n", end_idx)
+                if line_end == -1:
+                    line_end = len(content)
+                content = content[:line_start] + content[line_end + 1:]
+                print("[PATCH] Old camera handler removed")
+            # Also remove the dispatch code in on_command_step
+            dispatch_marker = "# BlueprintPipeline camera patch"
+            if dispatch_marker in content:
+                lines = content.split("\n")
+                filtered = []
+                skip_until_return = False
+                for line in lines:
+                    if dispatch_marker in line:
+                        skip_until_return = True
+                        continue
+                    if skip_until_return:
+                        if line.strip() == "return":
+                            skip_until_return = False
+                            continue
+                    filtered.append(line)
+                content = "\n".join(filtered)
+                print("[PATCH] Old dispatch code removed")
+        else:
+            print("[PATCH] Camera handler already patched — skipping (use --force to re-apply)")
+            sys.exit(0)
 
     # 1. Add the handler method inside the class.
     # Detect the indentation used for method definitions (e.g. "    def ").
