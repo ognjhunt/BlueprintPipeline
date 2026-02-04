@@ -205,6 +205,20 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
 
             target_lower = target_name.lower()
 
+            # Strip scene prefix for matching: "obj_lightwheel_kitchen_obj_Table049" -> "Table049"
+            # Pattern: obj_{scene_id}_obj_{base_name} OR {scene_id}_obj_{base_name}
+            base_name = target_name
+            if "_obj_" in target_name:
+                # Take everything after the LAST "_obj_" as the base name
+                base_name = target_name.rsplit("_obj_", 1)[-1]
+
+            # USD uses obj_BaseName format for scene objects
+            target_with_obj = f"obj_{base_name}" if not base_name.startswith("obj_") else base_name
+
+            # Create set of names to match against (case-sensitive and lowercase)
+            match_names = {target_name, target_lower, base_name, base_name.lower(),
+                           target_with_obj, target_with_obj.lower()}
+
             # Collect candidates: exact name match and substring match
             exact_candidates = []
             substring_candidates = []
@@ -212,10 +226,12 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
             for prim in stage.Traverse():
                 prim_path = str(prim.GetPath())
                 prim_name = prim_path.rstrip("/").rsplit("/", 1)[-1]
+                prim_name_lower = prim_name.lower()
 
-                if prim_name == target_name:
+                # Check if prim name matches any of our target variants
+                if prim_name in match_names or prim_name_lower in match_names:
                     exact_candidates.append((prim_path, prim))
-                elif target_lower in prim_name.lower():
+                elif any(m in prim_name_lower for m in [base_name.lower(), target_with_obj.lower()]):
                     substring_candidates.append((prim_path, prim))
 
             # Score and pick best from exact matches first, then substring
@@ -227,9 +243,14 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                         s += 100
                 except Exception:
                     pass
-                # Prefer prims under /World/
-                if path.startswith("/World/"):
+                # Prefer prims under /World/Scene/ (where scene objects live)
+                if "/World/Scene/" in path:
+                    s += 75
+                elif path.startswith("/World/"):
                     s += 50
+                # Prefer paths containing "obj_" (scene objects follow this convention)
+                if "/obj_" in path:
+                    s += 25
                 # Prefer shorter paths (less deeply nested)
                 s -= path.count("/")
                 return s
@@ -240,9 +261,9 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                 scored = sorted(candidates, key=lambda c: _score(c[0], c[1]), reverse=True)
                 best_path, best_prim = scored[0]
                 if len(scored) > 1:
-                    print(f"[PATCH] Prim path {label} candidates for '{target_name}': "
+                    print(f"[PATCH] Prim path {label} candidates for '{target_name}' (base='{base_name}'): "
                           f"{[c[0] for c in scored[:5]]}")
-                print(f"[PATCH] Resolved prim path ({label}): {requested_path} -> {best_path}")
+                print(f"[PATCH] Resolved prim path ({label}): {requested_path} -> {best_path} (via base_name='{base_name}')")
 
                 # CRITICAL: Extract and cache transform NOW while stage is valid
                 pos, rot = self._bp_extract_transform(best_prim, best_path)
