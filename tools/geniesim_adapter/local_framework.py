@@ -5090,7 +5090,7 @@ class GenieSimLocalFramework:
                 or getattr(self._client, "_scene_object_prims", [])
             )
             if obj_prims:
-                resolved = self._resolve_object_prim(obj_prims[0])
+                resolved = self._client._resolve_object_prim(obj_prims[0])
                 if resolved is None:
                     errors.append("object_pose unresolved; server object_pose patch required")
                 else:
@@ -5119,14 +5119,25 @@ class GenieSimLocalFramework:
             if cam_data is None:
                 errors.append("camera_data unavailable; server camera patch required")
             else:
-                fx = cam_data.get("fx")
-                fy = cam_data.get("fy")
-                ppx = cam_data.get("ppx")
-                ppy = cam_data.get("ppy")
+                # Handle nested camera_info structure from patch_camera_handler.py
+                cam_info = cam_data.get("camera_info") or cam_data
+                fx = cam_info.get("fx")
+                fy = cam_info.get("fy")
+                ppx = cam_info.get("ppx")
+                ppy = cam_info.get("ppy")
+                # Propagate width/height from camera_info if not at top level
+                if "width" not in cam_data and "width" in cam_info:
+                    cam_data["width"] = cam_info["width"]
+                if "height" not in cam_data and "height" in cam_info:
+                    cam_data["height"] = cam_info["height"]
                 if fx is None or fy is None or ppx is None or ppy is None:
                     errors.append("camera intrinsics missing in CamInfo")
                 rgb = cam_data.get("rgb")
-                if isinstance(rgb, (bytes, bytearray)):
+                # Handle numpy arrays directly (from patch_camera_handler.py)
+                if rgb is not None and hasattr(rgb, "shape"):
+                    # Already a numpy array — no decode needed
+                    pass
+                elif isinstance(rgb, (bytes, bytearray)):
                     rgb = decode_camera_bytes(
                         bytes(rgb),
                         width=int(cam_data.get("width") or 0),

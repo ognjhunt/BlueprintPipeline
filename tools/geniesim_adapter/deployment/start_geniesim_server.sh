@@ -53,7 +53,7 @@ _check_patch_marker() {
   local _file_path="$1"
   local _marker="$2"
 
-  if ! rg --quiet --fixed-strings "${_marker}" "${_file_path}"; then
+  if ! grep -qF "${_marker}" "${_file_path}" 2>/dev/null; then
     _missing_patches+=("${_marker} (${_file_path})")
   fi
 }
@@ -67,8 +67,8 @@ _check_patch_marker \
 _check_patch_marker \
   "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py" \
   "BlueprintPipeline contact_report patch"
-if ! rg --quiet --fixed-strings "BlueprintPipeline joint_efforts patch" "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py" \
-  && ! rg --quiet --fixed-strings "BlueprintPipeline joint_efforts handler patch" "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py"; then
+if ! grep -qF "BlueprintPipeline joint_efforts patch" "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py" 2>/dev/null \
+  && ! grep -qF "BlueprintPipeline joint_efforts handler patch" "${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py" 2>/dev/null; then
   _missing_patches+=("BlueprintPipeline joint_efforts patch (${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py)")
 fi
 _check_patch_marker \

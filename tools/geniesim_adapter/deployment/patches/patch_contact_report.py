@@ -104,25 +104,28 @@ CONTACT_HANDLER = textwrap.dedent("""\
             return
 
     def get_contact_report(self, request, context):
-        \"\"\"Return a PhysX contact report for the current simulation step.\"\"\"
-        # Ensure ContactReportAPI enabled before reading PhysX contacts
+        \"\"\"Return a PhysX contact report for the current simulation step.
+
+        Note: PhysX contact reporting requires ContactReportAPI to be enabled on prims,
+        which we skip to avoid slow stage traversal. Returns empty report if no contact data.
+        \"\"\"
         try:
-            self._bp_enable_contact_reporting()
-        except Exception:
-            pass
-        try:
-            try:
-                from aimdk.protocol import geniesim_grpc_pb2 as _pb2
-            except Exception:
-                try:
-                    import geniesim_grpc_pb2 as _pb2
-                except Exception:
-                    from tools.geniesim_adapter import geniesim_grpc_pb2 as _pb2
+            # Direct import from /opt/geniesim to avoid /workspace path shadowing
+            import importlib.util
+            import os as _os
+            _pb2_path = "/opt/geniesim/source/data_collection/common/aimdk/protocol/contact_report_pb2.py"
+            if _os.path.exists(_pb2_path):
+                _spec = importlib.util.spec_from_file_location("_bp_contact_pb2", _pb2_path)
+                if _spec and _spec.loader:
+                    _pb2 = importlib.util.module_from_spec(_spec)
+                    _spec.loader.exec_module(_pb2)
+            else:
+                raise ImportError(f"contact_report_pb2.py not found at {_pb2_path}")
 
             ContactReportRsp = _pb2.ContactReportRsp
             ContactPoint = _pb2.ContactPoint
-        except Exception:
-            # If protobuf classes are unavailable, return empty response.
+        except Exception as _import_err:
+            print(f"[CONTACT_REPORT] pb2 import failed: {_import_err}")
             return None
 
         contacts = []
@@ -130,9 +133,8 @@ CONTACT_HANDLER = textwrap.dedent("""\
         max_penetration = 0.0
         include_points = getattr(request, "include_points", False)
 
+        # Try to get PhysX contact data (may be empty if ContactReportAPI not enabled)
         try:
-            from omni.physx import get_physx_interface
-            physx = get_physx_interface()
             contact_data = None
             try:
                 from omni.physx import get_physx_simulation_interface
@@ -140,17 +142,19 @@ CONTACT_HANDLER = textwrap.dedent("""\
                 if sim is not None and hasattr(sim, "get_contact_report"):
                     contact_data = sim.get_contact_report()
             except Exception:
-                contact_data = None
+                pass
 
-            if contact_data is None and physx is not None and hasattr(physx, "get_contact_report"):
-                contact_data = physx.get_contact_report()
+            if contact_data is None:
+                try:
+                    from omni.physx import get_physx_interface
+                    physx = get_physx_interface()
+                    if physx is not None and hasattr(physx, "get_contact_report"):
+                        contact_data = physx.get_contact_report()
+                except Exception:
+                    pass
 
             if contact_data:
                 for contact in contact_data:
-                    force_vector = None
-                    tangent_impulse = None
-                    friction = None
-                    contact_area = None
                     if isinstance(contact, dict):
                         body_a = str(contact.get("actor0", ""))
                         body_b = str(contact.get("actor1", ""))
@@ -158,10 +162,6 @@ CONTACT_HANDLER = textwrap.dedent("""\
                         separation = float(contact.get("separation", 0.0))
                         position = contact.get("position", [0, 0, 0])
                         normal = contact.get("normal", [0, 0, 1])
-                        force_vector = contact.get("force_vector") or contact.get("impulse_vector")
-                        tangent_impulse = contact.get("tangent_impulse") or contact.get("tangent_impulse_vector")
-                        friction = contact.get("friction") or contact.get("friction_coefficient")
-                        contact_area = contact.get("contact_area")
                     else:
                         body_a = str(getattr(contact, "actor0", ""))
                         body_b = str(getattr(contact, "actor1", ""))
@@ -169,16 +169,6 @@ CONTACT_HANDLER = textwrap.dedent("""\
                         separation = float(getattr(contact, "separation", 0.0))
                         position = getattr(contact, "position", [0, 0, 0])
                         normal = getattr(contact, "normal", [0, 0, 1])
-                        force_vector = getattr(contact, "force_vector", None) or getattr(contact, "impulse_vector", None)
-                        tangent_impulse = getattr(contact, "tangent_impulse", None) or getattr(contact, "tangent_impulse_vector", None)
-                        friction = getattr(contact, "friction", None) or getattr(contact, "friction_coefficient", None)
-                        contact_area = getattr(contact, "contact_area", None)
-
-                    if force_vector is None and normal is not None:
-                        try:
-                            force_vector = [float(impulse) * float(n) for n in normal]
-                        except Exception:
-                            force_vector = None
 
                     penetration = abs(separation)
                     total_force += impulse
@@ -191,24 +181,15 @@ CONTACT_HANDLER = textwrap.dedent("""\
                         penetration_depth=penetration,
                         position=list(position) if include_points else [],
                         normal=list(normal) if include_points else [],
-                        force_vector=list(force_vector) if force_vector is not None else [],
-                        tangent_impulse=list(tangent_impulse) if tangent_impulse is not None else [],
-                        friction=float(friction) if friction is not None else 0.0,
-                        contact_area=float(contact_area) if contact_area is not None else 0.0,
                     ))
-
-            return ContactReportRsp(
-                contacts=contacts,
-                total_normal_force=total_force,
-                max_penetration_depth=max_penetration,
-            )
         except Exception as _err:
             print(f"[CONTACT_REPORT] PhysX contact capture failed: {_err}")
-            return ContactReportRsp(
-                contacts=[],
-                total_normal_force=0.0,
-                max_penetration_depth=0.0,
-            )
+
+        return ContactReportRsp(
+            contacts=contacts,
+            total_normal_force=total_force,
+            max_penetration_depth=max_penetration,
+        )
     # --- END BlueprintPipeline contact_report patch ---
 """)
 

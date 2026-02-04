@@ -81,7 +81,7 @@ ENV PATH=${CUDA_HOME}/bin:${PATH}
 # TORCH_CUDA_ARCH_LIST is required because no GPU is visible during docker build.
 # 7.0=V100, 7.5=T4/RTX20xx, 8.0=A100, 8.6=RTX30xx/A40, 8.9=L4/RTX40xx, 9.0=H100
 ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
-ARG CUROBO_REF=v0.7.2
+ARG CUROBO_REF=v0.7.7
 RUN git clone --depth 1 --branch ${CUROBO_REF} https://github.com/NVlabs/curobo.git /opt/curobo \
     && cd /opt/curobo \
     && ${ISAAC_SIM_PATH}/python.sh -m pip install -e . --no-build-isolation \
@@ -99,6 +99,15 @@ ENV GENIESIM_SKIP_ROS_RECORDING=1
 # Build with: --build-arg CACHE_BUST_PATCHES=$(date +%s) to force re-apply
 ARG CACHE_BUST_PATCHES=1
 COPY tools/geniesim_adapter/deployment/patches/ /tmp/patches/
+# Copy minimal proto file and regenerate pb2 with container's protobuf version for compatibility
+# This creates contact_report_pb2.py with ContactReportReq/Rsp and EEWrenchReq/Rsp
+COPY tools/geniesim_adapter/contact_report.proto /tmp/contact_report.proto
+RUN ${ISAAC_SIM_PATH}/python.sh -m pip install grpcio-tools 2>/dev/null || true \
+    && ${ISAAC_SIM_PATH}/python.sh -m grpc_tools.protoc \
+        -I/tmp \
+        --python_out=/opt/geniesim/source/data_collection/common/aimdk/protocol \
+        /tmp/contact_report.proto \
+    && rm /tmp/contact_report.proto
 RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_camera_handler.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_object_pose_handler.py \
@@ -110,6 +119,10 @@ RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_xforms_safe_rotation.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_articulation_guard.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_autoplay.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_contact_report.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_joint_efforts_handler.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_grpc_generic_handler.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_get_observation.py \
     && rm -rf /tmp/patches
 
 # ----- Bake ROS 2 environment for rclpy -----

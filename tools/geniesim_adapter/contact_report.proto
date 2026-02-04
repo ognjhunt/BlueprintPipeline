@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package aimdk.protocol;
+
+// Minimal proto for contact report - no external dependencies
+
+message ContactPoint {
+    string body_a = 1;
+    string body_b = 2;
+    float normal_force = 3;
+    float penetration_depth = 4;
+    repeated float position = 5;
+    repeated float normal = 6;
+    repeated float force_vector = 7;
+    repeated float tangent_impulse = 8;
+    float friction = 9;
+    float contact_area = 10;
+}
+
+message ContactReportReq {
+    bool include_points = 1;
+}
+
+message ContactReportRsp {
+    repeated ContactPoint contacts = 1;
+    float total_normal_force = 2;
+    float max_penetration_depth = 3;
+}
+
+message EEWrenchReq {
+    bool is_right = 1;
+}
+
+message EEWrenchRsp {
+    repeated float force = 1;  // 3-element force vector [fx, fy, fz]
+    repeated float torque = 2;  // 3-element torque vector [tx, ty, tz]
+    bool available = 3;
+    string error = 4;
+}
