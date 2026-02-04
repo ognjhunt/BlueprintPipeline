@@ -2620,6 +2620,19 @@ class GenieSimGRPCClient:
                     continue
                 resolved = self._resolve_object_prim(obj_id)
                 if resolved is None:
+                    # Try manifest transform fallback for static objects
+                    manifest_pose = self._get_manifest_transform_fallback(obj_id)
+                    if manifest_pose is not None:
+                        logger.info(f"[OBS] Using manifest fallback for {obj_id}: {manifest_pose}")
+                        scene_objects.append({
+                            "object_id": obj_id,
+                            "prim_path": f"/World/Scene/obj_{obj_id}",  # synthetic path
+                            "pose": manifest_pose,
+                            "source": "manifest_fallback",
+                        })
+                        _record_success(obj_id)
+                        self._resolved_any_object_pose = True
+                        continue
                     _consecutive_failures += 1
                     _record_failure(obj_id)
                     if obj_id in variation_ids:
@@ -2662,6 +2675,26 @@ class GenieSimGRPCClient:
                     continue
                 resolved = self._resolve_object_prim(obj_id)
                 if resolved is None:
+                    # Try manifest transform fallback for static objects
+                    manifest_pose = self._get_manifest_transform_fallback(obj_id)
+                    if manifest_pose is not None:
+                        synthetic_path = f"/World/Scene/obj_{obj_id}"
+                        logger.info(f"[OBS] Using manifest fallback for static {obj_id}: {manifest_pose}")
+                        self._static_object_pose_cache[obj_id] = {
+                            "pose": manifest_pose,
+                            "prim_path": synthetic_path,
+                            "timestamp": now_ts,
+                            "source": "manifest_fallback",
+                        }
+                        scene_objects.append({
+                            "object_id": obj_id,
+                            "prim_path": synthetic_path,
+                            "pose": manifest_pose,
+                            "source": "manifest_fallback",
+                        })
+                        _record_success(obj_id)
+                        self._resolved_any_object_pose = True
+                        continue
                     _record_failure(obj_id)
                     continue
                 resolved_path, obj_pose = resolved
@@ -2980,6 +3013,59 @@ class GenieSimGRPCClient:
             )
             _unique = _unique[:_max_candidates]
         return _unique
+
+    def _get_manifest_transform_fallback(self, obj_id: str) -> Optional[Dict[str, Any]]:
+        """Get object pose from manifest transforms when server returns zeros.
+
+        This is used as a fallback for static scene objects whose transforms
+        are defined in the scene manifest but the simulation server fails to
+        return valid poses (due to stage context issues).
+        """
+        manifest_transforms = getattr(self, "_manifest_transforms", {})
+        if not manifest_transforms:
+            return None
+
+        # Try exact match first
+        transform = manifest_transforms.get(obj_id)
+
+        # Try stripping scene prefixes (e.g., "lightwheel_kitchen_obj_Table049" -> "Table049")
+        if transform is None and "_obj_" in obj_id:
+            base_name = obj_id.split("_obj_")[-1]
+            transform = manifest_transforms.get(base_name)
+
+        # Try stripping all prefixes to get base object name
+        if transform is None:
+            # Handle IDs like "lightwheel_kitchen_obj_Table049"
+            parts = obj_id.split("_")
+            for i in range(len(parts)):
+                candidate = "_".join(parts[i:])
+                if candidate in manifest_transforms:
+                    transform = manifest_transforms[candidate]
+                    break
+
+        if transform is None:
+            return None
+
+        # Convert manifest transform format to pose format
+        # Manifest format: {"position": {"x": 0, "y": 0, "z": 1}, "rotation_quaternion": {"w": 1, ...}}
+        # Pose format: {"position": {"x": 0, "y": 0, "z": 1}, "rotation": {...} or similar}
+        pos = transform.get("position", {})
+        rot = transform.get("rotation_quaternion", {})
+
+        return {
+            "position": {
+                "x": float(pos.get("x", 0)),
+                "y": float(pos.get("y", 0)),
+                "z": float(pos.get("z", 0)),
+            },
+            "rotation": {
+                "w": float(rot.get("w", 1)),
+                "x": float(rot.get("x", 0)),
+                "y": float(rot.get("y", 0)),
+                "z": float(rot.get("z", 0)),
+            },
+            "source": "manifest_fallback",
+        }
 
     def _resolve_object_prim(
         self,
@@ -4710,6 +4796,9 @@ class GenieSimLocalFramework:
                     }
                     if "is_variation_asset" in obj:
                         node["is_variation_asset"] = obj.get("is_variation_asset")
+                    # Store manifest transform for fallback when server returns zeros
+                    if "transform" in obj:
+                        node["manifest_transform"] = obj.get("transform")
                     nodes.append(node)
         if not nodes:
             nodes = list(task_config.get("nodes") or [])
@@ -4784,6 +4873,19 @@ class GenieSimLocalFramework:
                 if goal.lower().startswith("variation_"):
                     _add_alias(goal, goal.split("variation_", 1)[-1])
 
+        # Build manifest transforms lookup for fallback when server returns zeros
+        manifest_transforms: Dict[str, Dict[str, Any]] = {}
+        for node in nodes:
+            asset_id = node.get("asset_id") or ""
+            transform = node.get("manifest_transform")
+            if asset_id and transform:
+                manifest_transforms[asset_id] = transform
+                # Also add aliases
+                if "_obj_" in asset_id:
+                    alias = asset_id.split("_obj_")[-1]
+                    if alias not in manifest_transforms:
+                        manifest_transforms[alias] = transform
+
         return {
             "nodes": nodes,
             "dynamic_ids": sorted(dynamic_ids),
@@ -4791,6 +4893,7 @@ class GenieSimLocalFramework:
             "variation_ids": sorted(variation_ids),
             "object_sim_roles": object_sim_roles,
             "object_prim_aliases": object_prim_aliases,
+            "manifest_transforms": manifest_transforms,
         }
 
     # =========================================================================
@@ -5750,6 +5853,8 @@ class GenieSimLocalFramework:
             self._client._scene_variation_object_ids = _scene_variation_ids
             self._client._object_sim_roles = _scene_meta["object_sim_roles"]
             self._client._object_prim_aliases = _scene_meta["object_prim_aliases"]
+            # Store manifest transforms for fallback when server returns zeros
+            self._client._manifest_transforms = _scene_meta.get("manifest_transforms", {})
 
             _scene_object_ids = list(dict.fromkeys(_scene_dynamic_ids + _scene_static_ids))
             self._client._scene_object_prims = _scene_object_ids
