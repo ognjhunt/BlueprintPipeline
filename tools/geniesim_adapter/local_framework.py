@@ -2949,11 +2949,15 @@ class GenieSimGRPCClient:
                 names.append(value)
 
         names: List[str] = []
-        _add_name(names, prim_path)
+        # Prioritize stripped/base names first (most likely to match USD prims)
+        if "_obj_" in prim_path:
+            # Extract base name after the LAST _obj_ (e.g., "lightwheel_kitchen_obj_Table049" -> "Table049")
+            base_name = prim_path.rsplit("_obj_", 1)[-1]
+            _add_name(names, base_name)
         if "/" in prim_path:
             _add_name(names, prim_path.rstrip("/").rsplit("/", 1)[-1])
-        if "_obj_" in prim_path:
-            _add_name(names, prim_path.split("_obj_")[-1])
+        # Add original prim_path after the stripped variants
+        _add_name(names, prim_path)
         for alias in self._object_prim_aliases.get(prim_path, []):
             _add_name(names, alias)
         if prim_path.lower().startswith("variation_"):
