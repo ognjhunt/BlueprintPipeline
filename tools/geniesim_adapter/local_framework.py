@@ -5444,6 +5444,58 @@ class GenieSimLocalFramework:
         else:
             self.log("Server restart attempt not available or failed", "WARNING")
 
+        # Setup default lighting for camera rendering
+        self._setup_default_lighting()
+
+    def _setup_default_lighting(self) -> None:
+        """Add default dome light to the scene for proper camera rendering.
+
+        Without lighting, camera images are black/uniform which fails strict
+        realism preflight checks. This sets up a warm dome light similar to
+        Isaac Lab's default environment.
+        """
+        if not getattr(self, "_lighting_setup_done", False):
+            self._lighting_setup_done = False
+
+        if self._lighting_setup_done:
+            self.log("Default lighting already set up — skipping")
+            return
+
+        # Check if lighting is disabled via env var
+        if os.environ.get("GENIESIM_SKIP_DEFAULT_LIGHTING", "0") == "1":
+            self.log("Default lighting disabled via GENIESIM_SKIP_DEFAULT_LIGHTING")
+            return
+
+        self.log("Setting up default dome light for camera rendering...")
+
+        # Default dome light configuration matching Isaac Lab environment
+        dome_light_config = {
+            "light_type": "dome",
+            "light_prim": "/World/DefaultDomeLight",
+            "light_intensity": float(os.environ.get("GENIESIM_DOME_LIGHT_INTENSITY", "3000.0")),
+            "light_temperature": float(os.environ.get("GENIESIM_DOME_LIGHT_TEMPERATURE", "6500.0")),
+            "light_texture": os.environ.get("GENIESIM_DOME_LIGHT_TEXTURE", ""),
+        }
+
+        try:
+            result = self._client._send_command(
+                command=CommandType.SET_LIGHT,
+                payload={"lights": [dome_light_config]},
+            )
+            if result.success:
+                self.log(
+                    f"Default dome light set up: intensity={dome_light_config['light_intensity']}, "
+                    f"temperature={dome_light_config['light_temperature']}K"
+                )
+                self._lighting_setup_done = True
+            else:
+                self.log(
+                    f"Failed to set up default lighting: {result.error}",
+                    "WARNING",
+                )
+        except Exception as e:
+            self.log(f"Exception setting up default lighting: {e}", "WARNING")
+
     def _reinit_robot_after_restart(self) -> None:
         """Re-run init_robot using the saved parameters from the initial setup.
 
@@ -5460,6 +5512,8 @@ class GenieSimLocalFramework:
             )
             return
         self.log("Re-initializing robot on restarted server...")
+        # Reset lighting flag so it gets re-applied after restart
+        self._lighting_setup_done = False
         self._init_robot_on_server(
             robot_cfg_file=params["robot_cfg_file"],
             base_pose=params["base_pose"],
