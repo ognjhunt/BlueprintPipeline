@@ -32,6 +32,7 @@ GRPC_SERVER = os.path.join(
 PATCH_MARKER = "BlueprintPipeline grpc_server patch"
 EE_POSE_MARKER = "BlueprintPipeline ee_pose grpc patch"
 EE_RSP_MARKER = "BlueprintPipeline ee_rsp grpc patch"
+CAMERA_BYTES_MARKER = "BlueprintPipeline camera_bytes grpc patch"
 
 
 def _find_matching_paren(text, start):
@@ -333,6 +334,40 @@ def patch_file():
             content = content.replace(old_ee_rot_rsp, new_ee_rot_rsp, 1)
             changes += 1
             print("[PATCH] Fixed ee_pose rotation rsp assignment")
+
+    # ── Camera bytes fix (handle numpy arrays OR already-bytes) ──
+
+    if CAMERA_BYTES_MARKER not in content:
+        # Fix 10: get_camera_data — rgb_camera and depth_camera might already be bytes
+        # The original code is:
+        #     if rgb_camera is not None:
+        #         rsp.color_image.data = rgb_camera.tobytes()
+        # We replace the entire if block to handle bytes or numpy array
+        old_rgb_block = "if rgb_camera is not None:\n            rsp.color_image.data = rgb_camera.tobytes()"
+        new_rgb_block = (
+            "# " + CAMERA_BYTES_MARKER + " — handle bytes or numpy array\n"
+            "        if isinstance(rgb_camera, bytes):\n"
+            "            rsp.color_image.data = rgb_camera\n"
+            "        elif rgb_camera is not None:\n"
+            "            rsp.color_image.data = rgb_camera.tobytes()"
+        )
+        if old_rgb_block in content:
+            content = content.replace(old_rgb_block, new_rgb_block, 1)
+            changes += 1
+            print("[PATCH] Fixed rgb_camera block to handle bytes")
+
+        old_depth_block = "if depth_camera is not None:\n            rsp.depth_image.data = depth_camera.tobytes()"
+        new_depth_block = (
+            "# " + CAMERA_BYTES_MARKER + " — handle bytes or numpy array\n"
+            "        if isinstance(depth_camera, bytes):\n"
+            "            rsp.depth_image.data = depth_camera\n"
+            "        elif depth_camera is not None:\n"
+            "            rsp.depth_image.data = depth_camera.tobytes()"
+        )
+        if old_depth_block in content:
+            content = content.replace(old_depth_block, new_depth_block, 1)
+            changes += 1
+            print("[PATCH] Fixed depth_camera block to handle bytes")
 
     # ── Write result ──
 

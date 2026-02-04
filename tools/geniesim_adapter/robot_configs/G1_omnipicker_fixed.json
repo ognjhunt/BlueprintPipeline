@@ -1,0 +1,85 @@
+{
+  "robot_name": "G1",
+  "robot_type": "G1_omnipicker_fixed",
+  "robot_prim_path": "/G1",
+  "articulation_root": "/G1",
+  "num_joints": 34,
+  "camera_prim_map": {
+    "wrist": "/G1/gripper_r_base_link/Right_Camera",
+    "head": "/G1/head_link2/Head_Camera",
+    "left_wrist": "/G1/gripper_l_base_link/Left_Camera"
+  },
+  "camera_intrinsics": {
+    "wrist": {
+      "width": 848,
+      "height": 480,
+      "fx": 424.0,
+      "fy": 424.0,
+      "ppx": 424.0,
+      "ppy": 240.0
+    },
+    "head": {
+      "width": 1280,
+      "height": 720,
+      "fx": 640.0,
+      "fy": 640.0,
+      "ppx": 640.0,
+      "ppy": 360.0
+    },
+    "left_wrist": {
+      "width": 848,
+      "height": 480,
+      "fx": 424.0,
+      "fy": 424.0,
+      "ppx": 424.0,
+      "ppy": 240.0
+    }
+  },
+  "joint_names": [
+    "left_hip_roll_joint",
+    "left_hip_yaw_joint",
+    "left_hip_pitch_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_roll_joint",
+    "right_hip_yaw_joint",
+    "right_hip_pitch_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+    "torso_joint",
+    "head_yaw_joint",
+    "head_pitch_joint",
+    "head_roll_joint",
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_pitch_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_pitch_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+    "idx30_gripper_r_inner_joint1",
+    "idx31_gripper_l_inner_joint1",
+    "idx32_gripper_r_inner_joint2",
+    "idx33_gripper_l_inner_joint2"
+  ],
+  "gripper_joints": [
+    "idx30_gripper_r_inner_joint1",
+    "idx31_gripper_l_inner_joint1",
+    "idx32_gripper_r_inner_joint2",
+    "idx33_gripper_l_inner_joint2"
+  ],
+  "default_ee_frame": "/G1/gripper_r_base_link",
+  "ee_frames": {
+    "right": "/G1/gripper_r_base_link",
+    "left": "/G1/gripper_l_base_link"
+  }
+}

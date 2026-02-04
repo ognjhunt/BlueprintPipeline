@@ -5658,7 +5658,10 @@ class GenieSimLocalFramework:
             else:
                 _cam_map: Dict[str, str] = {}
                 _robot_cfg_dir = Path(__file__).resolve().parent / "robot_configs"
+                # Look for robot config files - prioritize the actual server config name
+                # (G1_omnipicker_fixed) over legacy names (franka_panda)
                 _robot_cfg_names = [
+                    robot_cfg_file.replace(".json", ""),  # Server config name first (e.g., G1_omnipicker_fixed)
                     robot_type,
                     robot_type.replace("-", "_"),
                     f"{robot_type}_panda" if robot_type == "franka" else robot_type,
@@ -5670,14 +5673,20 @@ class GenieSimLocalFramework:
                         import json as _json
                         with open(_cfg_path) as _f:
                             _loaded_robot_cfg = _json.load(_f)
+                        self.log(f"Loaded robot config from: {_cfg_path}")
                         break
-                if _loaded_robot_cfg and _loaded_robot_cfg.get("camera"):
-                    _cam_prims = list(_loaded_robot_cfg["camera"].keys())
-                    _logical_names = ["wrist", "overhead", "side"]
-                    for _i, _prim in enumerate(_cam_prims):
-                        if _i < len(_logical_names):
-                            _cam_map[_logical_names[_i]] = _prim
-                    self.log(f"Camera prim map (from robot config): {_cam_map}")
+                if _loaded_robot_cfg:
+                    # Support both "camera_prim_map" (new format) and "camera" (legacy format)
+                    if _loaded_robot_cfg.get("camera_prim_map"):
+                        _cam_map = dict(_loaded_robot_cfg["camera_prim_map"])
+                        self.log(f"Camera prim map (from robot config camera_prim_map): {_cam_map}")
+                    elif _loaded_robot_cfg.get("camera"):
+                        _cam_prims = list(_loaded_robot_cfg["camera"].keys())
+                        _logical_names = ["wrist", "overhead", "side"]
+                        for _i, _prim in enumerate(_cam_prims):
+                            if _i < len(_logical_names):
+                                _cam_map[_logical_names[_i]] = _prim
+                        self.log(f"Camera prim map (from robot config camera): {_cam_map}")
                 if not _cam_map:
                     _cam_map = {
                         "wrist": "/G1/gripper_r_base_link/Right_Camera",
