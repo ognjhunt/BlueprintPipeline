@@ -70,13 +70,20 @@ DIAGNOSTICS_CODE = textwrap.dedent("""\
     # --- END BlueprintPipeline stage diagnostics patch ---
 """)
 
-# Call the diagnostics after init_robot completes (template — indented at runtime)
+# Call the diagnostics and capture scene stage after init_robot completes (template — indented at runtime)
 INIT_HOOK_LINES = [
-    "# BlueprintPipeline stage diagnostics hook",
+    "# BlueprintPipeline stage diagnostics and scene capture hook",
     "try:",
     "    self._bp_log_stage_contents()",
     "except Exception as _diag_e:",
     '    print(f"[DIAG] Stage diagnostics hook failed: {_diag_e}")',
+    "# Capture scene stage for object pose queries (from patch_object_pose_handler)",
+    "try:",
+    "    if hasattr(self, '_bp_capture_scene_stage'):",
+    "        self._bp_capture_scene_stage()",
+    "        print('[DIAG] Scene stage captured for object pose queries')",
+    "except Exception as _cap_e:",
+    '    print(f"[DIAG] Scene stage capture failed: {_cap_e}")',
 ]
 
 PATCH_MARKER = "BlueprintPipeline stage diagnostics patch"

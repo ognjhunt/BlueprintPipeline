@@ -28,8 +28,154 @@ COMMAND_CONTROLLER = os.path.join(
 OBJECT_POSE_HELPER = textwrap.dedent("""\
 
     # --- BEGIN BlueprintPipeline object_pose patch ---
+    # Class-level transform cache and scene stage reference
+    _bp_transform_cache = {}     # {prim_path: {"position": [...], "rotation": [...], "timestamp": float}}
+    _bp_cache_ttl_s = 0.05       # 50ms TTL for dynamic objects (20Hz refresh rate)
+    _bp_scene_stage = None       # Cached reference to the scene stage
+    _bp_scene_stage_id = None    # Stage identifier to detect context switches
+
+    def _bp_capture_scene_stage(self):
+        \"\"\"Capture and cache a reference to the scene stage after init_robot.
+
+        This stage reference is used for all object pose queries to avoid
+        context switching issues where omni.usd.get_context().get_stage()
+        returns a different stage (e.g., the render stage).
+        \"\"\"
+        try:
+            import omni.usd
+            stage = omni.usd.get_context().get_stage()
+            if stage is not None:
+                cls = type(self)
+                cls._bp_scene_stage = stage
+                try:
+                    cls._bp_scene_stage_id = str(stage.GetRootLayer().identifier)
+                except Exception:
+                    cls._bp_scene_stage_id = "unknown"
+                # Log available scene prims for diagnostics
+                world_prims = [str(p.GetPath()) for p in stage.Traverse()
+                              if str(p.GetPath()).startswith("/World/")]
+                print(f"[PATCH] Captured scene stage: {cls._bp_scene_stage_id}")
+                print(f"[PATCH] World prims available: {len(world_prims)}")
+                if world_prims[:10]:
+                    print(f"[PATCH] First 10 World prims: {world_prims[:10]}")
+        except Exception as e:
+            print(f"[PATCH] Failed to capture scene stage: {e}")
+
+    def _bp_get_scene_stage(self):
+        \"\"\"Get the scene stage, using cached reference if available and valid.\"\"\"
+        cls = type(self)
+        cached_stage = getattr(cls, '_bp_scene_stage', None)
+        cached_id = getattr(cls, '_bp_scene_stage_id', None)
+
+        if cached_stage is not None:
+            try:
+                # Verify the stage is still valid by checking layer identifier
+                current_id = str(cached_stage.GetRootLayer().identifier)
+                if current_id == cached_id:
+                    return cached_stage
+            except Exception:
+                pass  # Stage invalid, fall through to get fresh one
+
+        # Fall back to current context stage
+        try:
+            import omni.usd
+            return omni.usd.get_context().get_stage()
+        except Exception:
+            return None
+
+    def _bp_extract_transform(self, prim, prim_path):
+        \"\"\"Extract world transform from a prim and cache it.
+
+        Returns (position, rotation) tuple or (None, None) on failure.
+        \"\"\"
+        try:
+            import time
+            from pxr import UsdGeom, Usd, Gf
+
+            if not prim.IsA(UsdGeom.Xformable):
+                return None, None
+
+            xformable = UsdGeom.Xformable(prim)
+            timecode = self._bp_live_timecode() or Usd.TimeCode.Default()
+            world_xform = xformable.ComputeLocalToWorldTransform(timecode)
+
+            # Extract position (translation) from the matrix
+            translation = world_xform.ExtractTranslation()
+            position = [float(translation[0]), float(translation[1]), float(translation[2])]
+
+            # Extract rotation as quaternion from the matrix
+            # Get the 3x3 rotation matrix and convert to quaternion
+            rotation_matrix = Gf.Matrix3d(
+                world_xform[0][0], world_xform[0][1], world_xform[0][2],
+                world_xform[1][0], world_xform[1][1], world_xform[1][2],
+                world_xform[2][0], world_xform[2][1], world_xform[2][2],
+            )
+            # Orthonormalize to handle scale/shear
+            rotation = rotation_matrix.GetOrthonormalized()
+            quat = Gf.Rotation(rotation).GetQuaternion()
+            quat_normalized = quat.GetNormalized()
+            rotation = [
+                float(quat_normalized.GetReal()),
+                float(quat_normalized.GetImaginary()[0]),
+                float(quat_normalized.GetImaginary()[1]),
+                float(quat_normalized.GetImaginary()[2]),
+            ]
+
+            # Cache the transform
+            cls = type(self)
+            cls._bp_transform_cache[prim_path] = {
+                "position": position,
+                "rotation": rotation,
+                "timestamp": time.time(),
+                "timecode": float(timecode.GetValue()) if hasattr(timecode, 'GetValue') else 0.0,
+            }
+
+            return position, rotation
+        except Exception as e:
+            print(f"[PATCH] Transform extraction failed for {prim_path}: {e}")
+            return None, None
+
+    def _bp_get_cached_transform(self, prim_path):
+        \"\"\"Get cached transform for a prim path, refreshing if stale.
+
+        Returns (position, rotation) tuple or (None, None) if not cached.
+        \"\"\"
+        import time
+        cls = type(self)
+        cache = cls._bp_transform_cache.get(prim_path)
+        if cache is None:
+            return None, None
+
+        # Check TTL for dynamic objects
+        age = time.time() - cache["timestamp"]
+        if age > cls._bp_cache_ttl_s:
+            # Stale cache - try to refresh
+            self._bp_refresh_transform(prim_path)
+            cache = cls._bp_transform_cache.get(prim_path)
+            if cache is None:
+                return None, None
+
+        return cache["position"], cache["rotation"]
+
+    def _bp_refresh_transform(self, prim_path):
+        \"\"\"Refresh the cached transform for a prim using the scene stage.\"\"\"
+        try:
+            stage = self._bp_get_scene_stage()
+            if stage is None:
+                return
+
+            prim = stage.GetPrimAtPath(prim_path)
+            if prim and prim.IsValid():
+                self._bp_extract_transform(prim, prim_path)
+        except Exception as e:
+            print(f"[PATCH] Transform refresh failed for {prim_path}: {e}")
+
     def _bp_resolve_prim_path(self, requested_path):
-        \"\"\"Resolve a prim path by fuzzy matching against the USD stage.
+        \"\"\"Resolve a prim path by fuzzy matching and cache its transform.
+
+        CRITICAL: This function extracts the world transform at resolution time
+        because the USD context may change before the transform is used.
+        The cached transform is stored in _bp_transform_cache.
 
         If the exact path exists, return it.  Otherwise, search for prims
         whose name (last path component) matches the requested path's name,
@@ -38,15 +184,18 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
         match is found.
         \"\"\"
         try:
-            import omni.usd
             from pxr import UsdGeom
-            stage = omni.usd.get_context().get_stage()
+
+            # Use cached scene stage if available
+            stage = self._bp_get_scene_stage()
             if stage is None:
                 return requested_path
 
             # Exact match
             prim = stage.GetPrimAtPath(requested_path)
             if prim and prim.IsValid():
+                # CRITICAL: Extract and cache transform NOW while stage is valid
+                self._bp_extract_transform(prim, requested_path)
                 return requested_path
 
             # Extract target name (last path component)
@@ -89,11 +238,17 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                 if not candidates:
                     continue
                 scored = sorted(candidates, key=lambda c: _score(c[0], c[1]), reverse=True)
-                best_path = scored[0][0]
+                best_path, best_prim = scored[0]
                 if len(scored) > 1:
                     print(f"[PATCH] Prim path {label} candidates for '{target_name}': "
                           f"{[c[0] for c in scored[:5]]}")
                 print(f"[PATCH] Resolved prim path ({label}): {requested_path} -> {best_path}")
+
+                # CRITICAL: Extract and cache transform NOW while stage is valid
+                pos, rot = self._bp_extract_transform(best_prim, best_path)
+                if pos is not None:
+                    print(f"[PATCH] Cached transform for {best_path}: pos={pos[:2]}...")
+
                 return best_path
 
             # Dump stage hierarchy for debugging (first call only)
