@@ -3023,7 +3023,16 @@ class GenieSimGRPCClient:
         """
         manifest_transforms = getattr(self, "_manifest_transforms", {})
         if not manifest_transforms:
+            # Log once that manifest transforms are not available
+            if not getattr(self, "_manifest_fallback_warned", False):
+                logger.warning("[OBS] Manifest transforms not available for fallback")
+                self._manifest_fallback_warned = True
             return None
+
+        # Log available manifest keys once for debugging
+        if not getattr(self, "_manifest_keys_logged", False):
+            logger.info(f"[OBS] Manifest transform keys: {list(manifest_transforms.keys())[:10]}...")
+            self._manifest_keys_logged = True
 
         # Try exact match first
         transform = manifest_transforms.get(obj_id)
@@ -3032,6 +3041,8 @@ class GenieSimGRPCClient:
         if transform is None and "_obj_" in obj_id:
             base_name = obj_id.split("_obj_")[-1]
             transform = manifest_transforms.get(base_name)
+            if transform is not None:
+                logger.debug(f"[OBS] Manifest fallback matched via _obj_ strip: {obj_id} -> {base_name}")
 
         # Try stripping all prefixes to get base object name
         if transform is None:
@@ -3041,6 +3052,7 @@ class GenieSimGRPCClient:
                 candidate = "_".join(parts[i:])
                 if candidate in manifest_transforms:
                     transform = manifest_transforms[candidate]
+                    logger.debug(f"[OBS] Manifest fallback matched via part strip: {obj_id} -> {candidate}")
                     break
 
         if transform is None:
@@ -4767,8 +4779,10 @@ class GenieSimLocalFramework:
         nodes: List[Dict[str, Any]] = []
         if scene_config:
             nodes = list(scene_config.get("nodes") or [])
+            logger.info(f"[META] scene_config has {len(nodes)} nodes, objects={len(scene_config.get('objects') or [])}")
             if not nodes:
                 objects = scene_config.get("objects") or []
+                logger.info(f"[META] Processing {len(objects)} objects from scene_config")
                 for obj in objects:
                     asset = obj.get("asset") or {}
                     asset_path = (
@@ -4885,6 +4899,7 @@ class GenieSimLocalFramework:
                     alias = asset_id.split("_obj_")[-1]
                     if alias not in manifest_transforms:
                         manifest_transforms[alias] = transform
+        logger.info(f"[META] Built manifest_transforms with {len(manifest_transforms)} entries: {list(manifest_transforms.keys())[:10]}")
 
         return {
             "nodes": nodes,
@@ -5854,7 +5869,10 @@ class GenieSimLocalFramework:
             self._client._object_sim_roles = _scene_meta["object_sim_roles"]
             self._client._object_prim_aliases = _scene_meta["object_prim_aliases"]
             # Store manifest transforms for fallback when server returns zeros
-            self._client._manifest_transforms = _scene_meta.get("manifest_transforms", {})
+            _manifest_transforms = _scene_meta.get("manifest_transforms", {})
+            self._client._manifest_transforms = _manifest_transforms
+            if _manifest_transforms:
+                self.log(f"Loaded {len(_manifest_transforms)} manifest transforms for pose fallback: {list(_manifest_transforms.keys())[:5]}...")
 
             _scene_object_ids = list(dict.fromkeys(_scene_dynamic_ids + _scene_static_ids))
             self._client._scene_object_prims = _scene_object_ids
