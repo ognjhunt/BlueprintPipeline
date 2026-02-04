@@ -89,6 +89,103 @@ def patch_file():
             if _articulation is None:
                 _articulation = getattr(self, "articulation", None)
 
+            # Path 5: Via robot object (pattern from patch_contact_report.py)
+            if _articulation is None and _cmd is not None:
+                _robot = getattr(_cmd, "robot", None)
+                if _robot is not None:
+                    _articulation = getattr(_robot, "articulation", None)
+                    if _articulation is None:
+                        # Try via device controller
+                        _dc = getattr(_robot, "dc", None) or getattr(_robot, "_dc", None)
+                        if _dc is not None:
+                            _articulation = getattr(_dc, "articulation", None)
+
+            # Path 6: Via ui_builder._articulation (private attr)
+            if _articulation is None and _cmd is not None:
+                _ui_builder = getattr(_cmd, "ui_builder", None)
+                if _ui_builder is not None:
+                    _articulation = getattr(_ui_builder, "_articulation", None)
+
+            # Path 7: Via Isaac Sim ArticulationView API - find articulation by prim path
+            if _articulation is None:
+                try:
+                    import omni.usd
+                    stage = omni.usd.get_context().get_stage()
+                    if stage is not None:
+                        # Try to find robot prim path from known attributes
+                        _robot_paths = []
+                        for attr in ("robot_prim_path", "robot_root_path", "robot_root", "robot_path"):
+                            _rp = getattr(_cmd, attr, None) if _cmd else None
+                            if not _rp and _server_fn:
+                                _rp = getattr(_server_fn, attr, None)
+                            if _rp:
+                                _robot_paths.append(str(_rp))
+
+                        # Also check robot object for prim path
+                        if _cmd is not None:
+                            _robot = getattr(_cmd, "robot", None)
+                            if _robot is not None:
+                                for attr in ("prim_path", "robot_prim_path", "root_path"):
+                                    _rp = getattr(_robot, attr, None)
+                                    if _rp:
+                                        _robot_paths.append(str(_rp))
+
+                        # Common robot paths as fallback
+                        if not _robot_paths:
+                            _robot_paths = ["/World/Robot", "/World/G1", "/G1", "/Robot", "/World/Franka", "/Franka"]
+
+                        for _rp in _robot_paths:
+                            prim = stage.GetPrimAtPath(_rp)
+                            if prim and prim.IsValid():
+                                try:
+                                    from omni.isaac.core.articulations import ArticulationView
+                                    _articulation = ArticulationView(_rp, name=f"bp_effort_view_{_rp.replace('/', '_')}")
+                                    if _articulation is not None and hasattr(_articulation, "is_valid") and _articulation.is_valid():
+                                        print(f"[JOINT_EFFORTS] Found articulation via ArticulationView at {_rp}")
+                                        break
+                                    else:
+                                        _articulation = None
+                                except Exception as _art_err:
+                                    print(f"[JOINT_EFFORTS] ArticulationView failed for {_rp}: {_art_err}")
+                                    _articulation = None
+                except Exception as _stage_err:
+                    print(f"[JOINT_EFFORTS] Stage-based articulation search failed: {_stage_err}")
+
+            # Path 8: Try to find articulation via omni.isaac.core.World singleton
+            if _articulation is None:
+                try:
+                    from omni.isaac.core import World
+                    _world = World.instance()
+                    if _world is not None:
+                        # Try to get robot from scene
+                        _scene = getattr(_world, "scene", None)
+                        if _scene is not None:
+                            # Try common robot names
+                            for _name in ("robot", "g1", "franka", "ur5", "panda"):
+                                _robot_obj = _scene.get_object(_name)
+                                if _robot_obj is not None:
+                                    _articulation = getattr(_robot_obj, "articulation", None) or _robot_obj
+                                    if _articulation is not None:
+                                        print(f"[JOINT_EFFORTS] Found articulation via World.scene.get_object('{_name}')")
+                                        break
+                except Exception as _world_err:
+                    pass  # World singleton may not be available
+
+            # Debug: Log available attributes if articulation not found
+            if _articulation is None:
+                _debug_info = []
+                if _server_fn:
+                    _attrs = [a for a in dir(_server_fn) if not a.startswith('_')][:15]
+                    _debug_info.append(f"server_function attrs: {_attrs}")
+                if _cmd:
+                    _attrs = [a for a in dir(_cmd) if not a.startswith('_')][:15]
+                    _debug_info.append(f"command_controller attrs: {_attrs}")
+                    _ui = getattr(_cmd, "ui_builder", None)
+                    if _ui:
+                        _attrs = [a for a in dir(_ui) if not a.startswith('_')][:15]
+                        _debug_info.append(f"ui_builder attrs: {_attrs}")
+                print(f"[JOINT_EFFORTS] Debug - {'; '.join(_debug_info)}")
+
             if _articulation is not None:
                 # Try different effort APIs (Isaac Sim version dependent)
                 if hasattr(_articulation, "get_applied_joint_efforts"):
@@ -99,7 +196,12 @@ def patch_file():
                     _efforts = _articulation.get_joint_efforts()
 
                 if _efforts is not None:
-                    _efforts_list = list(_efforts)
+                    # Handle both numpy arrays and lists
+                    import numpy as np
+                    if hasattr(_efforts, "flatten"):
+                        _efforts_list = _efforts.flatten().tolist()
+                    else:
+                        _efforts_list = list(_efforts)
                     _effort_map = {}
                     for _idx, _state in enumerate(rsp.states):
                         if _idx < len(_efforts_list):
@@ -115,7 +217,9 @@ def patch_file():
             else:
                 print("[JOINT_EFFORTS] articulation not found via any access path")
         except Exception as _eff_err:
+            import traceback
             print(f"[JOINT_EFFORTS] Failed to capture efforts: {_eff_err}")
+            traceback.print_exc()
         # --- END BlueprintPipeline joint_efforts_capture patch ---
         return rsp'''
 

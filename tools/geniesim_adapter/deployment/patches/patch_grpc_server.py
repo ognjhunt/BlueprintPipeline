@@ -33,6 +33,8 @@ PATCH_MARKER = "BlueprintPipeline grpc_server patch"
 EE_POSE_MARKER = "BlueprintPipeline ee_pose grpc patch"
 EE_RSP_MARKER = "BlueprintPipeline ee_rsp grpc patch"
 CAMERA_BYTES_MARKER = "BlueprintPipeline camera_bytes grpc patch"
+CAMERA_INTRINSICS_MARKER = "BlueprintPipeline camera_intrinsics grpc patch"
+CAMERA_ENCODING_MARKER = "BlueprintPipeline camera_encoding grpc patch"
 
 
 def _find_matching_paren(text, start):
@@ -368,6 +370,129 @@ def patch_file():
             content = content.replace(old_depth_block, new_depth_block, 1)
             changes += 1
             print("[PATCH] Fixed depth_camera block to handle bytes")
+
+    # ── Camera intrinsics fix (populate fx, fy, ppx, ppy in response) ──
+
+    if CAMERA_INTRINSICS_MARKER not in content:
+        # Find where camera_info.width and camera_info.height are set and add intrinsics after
+        # Pattern: rsp.camera_info.height = camera_info["height"]
+        # or: rsp.camera_info.height = camera_info.get("height", ...)
+        intrinsics_patterns = [
+            # Pattern 1: Direct dict access
+            (
+                'rsp.camera_info.height = camera_info["height"]',
+                'rsp.camera_info.height = camera_info["height"]\n'
+                '        # ' + CAMERA_INTRINSICS_MARKER + '\n'
+                '        rsp.camera_info.fx = float(camera_info.get("fx", camera_info.get("width", 1280)))\n'
+                '        rsp.camera_info.fy = float(camera_info.get("fy", camera_info.get("height", 720)))\n'
+                '        rsp.camera_info.ppx = float(camera_info.get("ppx", camera_info.get("width", 1280) / 2.0))\n'
+                '        rsp.camera_info.ppy = float(camera_info.get("ppy", camera_info.get("height", 720) / 2.0))'
+            ),
+            # Pattern 2: Using .get() method
+            (
+                'rsp.camera_info.height = camera_info.get("height"',
+                None  # Will use regex for this
+            ),
+        ]
+
+        # Try direct pattern replacement first
+        old_height, new_height = intrinsics_patterns[0]
+        if old_height in content:
+            content = content.replace(old_height, new_height, 1)
+            changes += 1
+            print("[PATCH] Added camera intrinsics (fx, fy, ppx, ppy) after height assignment")
+        else:
+            # Try regex pattern for .get() style
+            intrinsics_regex = re.compile(
+                r'([ \t]*)(rsp\.camera_info\.height\s*=\s*camera_info\.get\([^)]+\))',
+                re.MULTILINE
+            )
+            m = intrinsics_regex.search(content)
+            if m:
+                indent = m.group(1)
+                replacement = (
+                    m.group(0) + '\n'
+                    f'{indent}# {CAMERA_INTRINSICS_MARKER}\n'
+                    f'{indent}rsp.camera_info.fx = float(camera_info.get("fx", camera_info.get("width", 1280)))\n'
+                    f'{indent}rsp.camera_info.fy = float(camera_info.get("fy", camera_info.get("height", 720)))\n'
+                    f'{indent}rsp.camera_info.ppx = float(camera_info.get("ppx", camera_info.get("width", 1280) / 2.0))\n'
+                    f'{indent}rsp.camera_info.ppy = float(camera_info.get("ppy", camera_info.get("height", 720) / 2.0))'
+                )
+                content = content[:m.start()] + replacement + content[m.end():]
+                changes += 1
+                print("[PATCH] Added camera intrinsics (fx, fy, ppx, ppy) via regex")
+            else:
+                # Try finding after color_info (alternative field name)
+                color_info_regex = re.compile(
+                    r'([ \t]*)(rsp\.color_info\.height\s*=\s*[^\n]+)',
+                    re.MULTILINE
+                )
+                m = color_info_regex.search(content)
+                if m:
+                    indent = m.group(1)
+                    replacement = (
+                        m.group(0) + '\n'
+                        f'{indent}# {CAMERA_INTRINSICS_MARKER}\n'
+                        f'{indent}rsp.color_info.fx = float(camera_info.get("fx", camera_info.get("width", 1280)) if isinstance(camera_info, dict) else 1280)\n'
+                        f'{indent}rsp.color_info.fy = float(camera_info.get("fy", camera_info.get("height", 720)) if isinstance(camera_info, dict) else 720)\n'
+                        f'{indent}rsp.color_info.ppx = float(camera_info.get("ppx", camera_info.get("width", 1280) / 2.0) if isinstance(camera_info, dict) else 640.0)\n'
+                        f'{indent}rsp.color_info.ppy = float(camera_info.get("ppy", camera_info.get("height", 720) / 2.0) if isinstance(camera_info, dict) else 360.0)'
+                    )
+                    content = content[:m.start()] + replacement + content[m.end():]
+                    changes += 1
+                    print("[PATCH] Added camera intrinsics to color_info via regex")
+                else:
+                    print("[PATCH] WARNING: Could not find camera_info/color_info height assignment pattern for intrinsics")
+
+    # ── Camera encoding fix (set color_image.format and depth_image.format) ──
+
+    if CAMERA_ENCODING_MARKER not in content:
+        # Find where color_image.data is set and add format before it
+        # Pattern: rsp.color_image.data = ...
+        encoding_patterns = [
+            # Pattern 1: After the bytes marker patch (most likely)
+            (
+                '# ' + CAMERA_BYTES_MARKER + ' — handle bytes or numpy array\n'
+                '        if isinstance(rgb_camera, bytes):\n'
+                '            rsp.color_image.data = rgb_camera',
+                '# ' + CAMERA_BYTES_MARKER + ' — handle bytes or numpy array\n'
+                '        # ' + CAMERA_ENCODING_MARKER + '\n'
+                '        _rgb_enc = current_camera.get("rgb_encoding", "") if isinstance(current_camera, dict) else ""\n'
+                '        if not _rgb_enc:\n'
+                '            _rgb_enc = current_camera.get("encoding", "raw_rgb_uint8") if isinstance(current_camera, dict) else "raw_rgb_uint8"\n'
+                '        rsp.color_image.format = _rgb_enc\n'
+                '        if isinstance(rgb_camera, bytes):\n'
+                '            rsp.color_image.data = rgb_camera'
+            ),
+        ]
+
+        old_enc, new_enc = encoding_patterns[0]
+        if old_enc in content:
+            content = content.replace(old_enc, new_enc, 1)
+            changes += 1
+            print("[PATCH] Added camera encoding format assignment")
+        else:
+            # Try regex for original pattern (before bytes marker patch)
+            enc_regex = re.compile(
+                r'([ \t]*)(if rgb_camera is not None:\s*\n\s*rsp\.color_image\.data\s*=)',
+                re.MULTILINE
+            )
+            m = enc_regex.search(content)
+            if m:
+                indent = m.group(1)
+                replacement = (
+                    f'{indent}# {CAMERA_ENCODING_MARKER}\n'
+                    f'{indent}_rgb_enc = current_camera.get("rgb_encoding", "") if isinstance(current_camera, dict) else ""\n'
+                    f'{indent}if not _rgb_enc:\n'
+                    f'{indent}    _rgb_enc = current_camera.get("encoding", "raw_rgb_uint8") if isinstance(current_camera, dict) else "raw_rgb_uint8"\n'
+                    f'{indent}rsp.color_image.format = _rgb_enc\n'
+                    f'{m.group(0)}'
+                )
+                content = content[:m.start()] + replacement + content[m.end():]
+                changes += 1
+                print("[PATCH] Added camera encoding format via regex")
+            else:
+                print("[PATCH] WARNING: Could not find color_image.data assignment pattern for encoding")
 
     # ── Write result ──
 

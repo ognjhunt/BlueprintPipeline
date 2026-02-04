@@ -4168,54 +4168,52 @@ class GenieSimGRPCClient:
                 )
             return None
 
-        width = int(image_info.get("width") or 0)
-        height = int(image_info.get("height") or 0)
-        encoding = (image_info.get("encoding") or "").lower()
+        cam_payload = dict(image_info)
+        cam_info = cam_payload.get("camera_info")
+        if isinstance(cam_info, dict):
+            for key in ("width", "height", "fx", "fy", "ppx", "ppy", "extrinsic", "calibration_id"):
+                if cam_payload.get(key) in (None, "", 0) and key in cam_info:
+                    cam_payload[key] = cam_info[key]
+
+        if cam_payload.get("rgb") is None and "rgb_data" in cam_payload:
+            cam_payload["rgb"] = cam_payload.get("rgb_data")
+        if cam_payload.get("depth") is None and "depth_data" in cam_payload:
+            cam_payload["depth"] = cam_payload.get("depth_data")
+
+        width = int(cam_payload.get("width") or 0)
+        height = int(cam_payload.get("height") or 0)
+        encoding = (cam_payload.get("encoding") or "").lower()
+        rgb_encoding = cam_payload.get("rgb_encoding") or cam_payload.get("encoding") or ""
+        depth_encoding = cam_payload.get("depth_encoding") or cam_payload.get("encoding") or ""
+
+        from tools.camera_io import load_camera_frame
+
+        rgb_image = load_camera_frame(cam_payload, "rgb")
+        depth_image = load_camera_frame(cam_payload, "depth")
 
         if width <= 0 or height <= 0:
-            logger.warning(
-                "Invalid camera dimensions for '%s' (width=%s, height=%s).",
-                camera_id,
-                width,
-                height,
-            )
-            return {
-                "camera_id": camera_id,
-                "rgb": None,
-                "depth": None,
-                "width": width,
-                "height": height,
-                "encoding": encoding,
-                "timestamp": image_info.get("timestamp"),
-            }
-
-        def _safe_b64decode(field: str) -> Optional[bytes]:
-            payload = image_info.get(field)
-            if not payload:
-                return b""
-            try:
-                return base64.b64decode(payload)
-            except (binascii.Error, ValueError):
+            if rgb_image is not None and hasattr(rgb_image, "shape"):
+                height = int(rgb_image.shape[0])
+                width = int(rgb_image.shape[1]) if rgb_image.ndim > 1 else width
+            elif depth_image is not None and hasattr(depth_image, "shape"):
+                height = int(depth_image.shape[0])
+                width = int(depth_image.shape[1]) if depth_image.ndim > 1 else width
+            else:
                 logger.warning(
-                    "Failed to decode camera '%s' field '%s'.",
+                    "Invalid camera dimensions for '%s' (width=%s, height=%s).",
                     camera_id,
-                    field,
+                    width,
+                    height,
                 )
-                return None
-
-        rgb_bytes = _safe_b64decode("rgb_data")
-        depth_bytes = _safe_b64decode("depth_data")
-
-        rgb_image = (
-            self._decode_rgb_data(rgb_bytes, width, height, encoding)
-            if rgb_bytes is not None
-            else None
-        )
-        depth_image = (
-            self._decode_depth_data(depth_bytes, width, height, encoding)
-            if depth_bytes is not None
-            else None
-        )
+                return {
+                    "camera_id": camera_id,
+                    "rgb": None,
+                    "depth": None,
+                    "width": width,
+                    "height": height,
+                    "encoding": encoding,
+                    "timestamp": cam_payload.get("timestamp"),
+                }
 
         return {
             "camera_id": camera_id,
@@ -4224,15 +4222,15 @@ class GenieSimGRPCClient:
             "width": width,
             "height": height,
             "encoding": encoding,
-            "rgb_encoding": encoding,
-            "depth_encoding": encoding,
-            "timestamp": image_info.get("timestamp"),
-            "fx": image_info.get("fx"),
-            "fy": image_info.get("fy"),
-            "ppx": image_info.get("ppx"),
-            "ppy": image_info.get("ppy"),
-            "extrinsic": image_info.get("extrinsic"),
-            "calibration_id": image_info.get("calibration_id"),
+            "rgb_encoding": rgb_encoding,
+            "depth_encoding": depth_encoding,
+            "timestamp": cam_payload.get("timestamp"),
+            "fx": cam_payload.get("fx"),
+            "fy": cam_payload.get("fy"),
+            "ppx": cam_payload.get("ppx"),
+            "ppy": cam_payload.get("ppy"),
+            "extrinsic": cam_payload.get("extrinsic"),
+            "calibration_id": cam_payload.get("calibration_id"),
         }
 
     @staticmethod
@@ -5409,8 +5407,18 @@ class GenieSimLocalFramework:
             cam_data = None
             if cam_id:
                 cam_data = self._client.get_camera_data(cam_id)
-            if cam_data is None and cam_map:
-                cam_data = self._client._get_camera_data_raw(list(cam_map.values())[0])
+            # Fallback to raw if cam_data is None OR if intrinsics are missing/zero
+            if cam_map:
+                _need_raw_fallback = cam_data is None
+                if not _need_raw_fallback and cam_data:
+                    # Check if intrinsics are missing or zero (protobuf default)
+                    _ci = cam_data.get("camera_info") or cam_data
+                    _fx = _ci.get("fx")
+                    _fy = _ci.get("fy")
+                    if _fx is None or _fy is None or _fx == 0 or _fy == 0:
+                        _need_raw_fallback = True
+                if _need_raw_fallback:
+                    cam_data = self._client._get_camera_data_raw(list(cam_map.values())[0])
             if cam_data is None:
                 errors.append("camera_data unavailable; server camera patch required")
             else:
@@ -5425,7 +5433,8 @@ class GenieSimLocalFramework:
                     cam_data["width"] = cam_info["width"]
                 if "height" not in cam_data and "height" in cam_info:
                     cam_data["height"] = cam_info["height"]
-                if fx is None or fy is None or ppx is None or ppy is None:
+                # Check for missing OR zero intrinsics (protobuf default is 0)
+                if fx is None or fy is None or ppx is None or ppy is None or fx == 0 or fy == 0:
                     errors.append("camera intrinsics missing in CamInfo")
                 rgb = cam_data.get("rgb")
                 # Handle numpy arrays directly (from patch_camera_handler.py)
