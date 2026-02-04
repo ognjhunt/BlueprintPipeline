@@ -224,11 +224,15 @@ def patch_file():
                         if _idx < len(_efforts_list):
                             _effort_map[_state.name] = float(_efforts_list[_idx])
                     _populated = 0
+                    _sample_efforts = []
                     for _state in rsp.states:
                         if _state.name in _effort_map:
                             _state.effort = _effort_map[_state.name]
                             _populated += 1
-                    print(f"[JOINT_EFFORTS] Populated efforts for {_populated}/{len(rsp.states)} joints")
+                            if len(_sample_efforts) < 5:
+                                _sample_efforts.append(f"{_state.name}={_state.effort:.4f}")
+                    _nonzero = sum(1 for e in _efforts_list[:len(rsp.states)] if abs(e) > 1e-6)
+                    print(f"[JOINT_EFFORTS] Populated efforts for {_populated}/{len(rsp.states)} joints, non-zero: {_nonzero}, sample: {_sample_efforts}")
                 else:
                     print("[JOINT_EFFORTS] articulation found but effort APIs returned None")
             else:

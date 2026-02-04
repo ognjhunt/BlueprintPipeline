@@ -35,6 +35,8 @@ EE_RSP_MARKER = "BlueprintPipeline ee_rsp grpc patch"
 CAMERA_BYTES_MARKER = "BlueprintPipeline camera_bytes grpc patch"
 CAMERA_INTRINSICS_MARKER = "BlueprintPipeline camera_intrinsics grpc patch"
 CAMERA_ENCODING_MARKER = "BlueprintPipeline camera_encoding grpc patch"
+CAMERA_DICT_GUARD_MARKER = "BlueprintPipeline camera_dict_guard grpc patch"
+CAMERA_INFO_MARKER = "BlueprintPipeline grpc_camera_info patch"
 
 
 def _find_matching_paren(text, start):
@@ -59,8 +61,8 @@ def patch_file():
     with open(GRPC_SERVER, "r") as f:
         content = f.read()
 
-    # Check if fully patched (base + EE pose)
-    if PATCH_MARKER in content and EE_POSE_MARKER in content:
+    # Check if fully patched (base + EE pose + camera dict guard)
+    if PATCH_MARKER in content and EE_POSE_MARKER in content and CAMERA_DICT_GUARD_MARKER in content:
         print("[PATCH] grpc_server.py already fully patched — skipping")
         sys.exit(0)
 
@@ -336,6 +338,33 @@ def patch_file():
             content = content.replace(old_ee_rot_rsp, new_ee_rot_rsp, 1)
             changes += 1
             print("[PATCH] Fixed ee_pose rotation rsp assignment")
+
+    # ── Camera dict guard fix (guard against non-dict current_camera) ──
+    # The camera handler can return a string (error message) instead of dict
+    # which causes "string indices must be integers" error when accessing ["rgb"]
+
+    if CAMERA_DICT_GUARD_MARKER not in content:
+        # Fix 9.5: Wrap rgb_camera and depth_camera assignments with dict check
+        # Look for: rgb_camera = current_camera["rgb"]
+        old_rgb_assign = 'rgb_camera = current_camera["rgb"]'
+        new_rgb_assign = (
+            '# ' + CAMERA_DICT_GUARD_MARKER + '\n'
+            '        rgb_camera = current_camera.get("rgb") if isinstance(current_camera, dict) else None'
+        )
+        if old_rgb_assign in content:
+            content = content.replace(old_rgb_assign, new_rgb_assign, 1)
+            changes += 1
+            print("[PATCH] Added dict guard for rgb_camera assignment")
+
+        old_depth_assign = 'depth_camera = current_camera["depth"]'
+        new_depth_assign = (
+            '# ' + CAMERA_DICT_GUARD_MARKER + ' — depth\n'
+            '        depth_camera = current_camera.get("depth") if isinstance(current_camera, dict) else None'
+        )
+        if old_depth_assign in content:
+            content = content.replace(old_depth_assign, new_depth_assign, 1)
+            changes += 1
+            print("[PATCH] Added dict guard for depth_camera assignment")
 
     # ── Camera bytes fix (handle numpy arrays OR already-bytes) ──
 
