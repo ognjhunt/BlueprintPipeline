@@ -3003,6 +3003,20 @@ class LocalPipelineRunner:
             lines.append('')
 
         lines.append('    }')
+
+        # Add default dome light for camera rendering
+        # Without lighting, cameras capture black/uniform images
+        skip_lighting = os.environ.get("USD_SKIP_DEFAULT_LIGHTING", "0") == "1"
+        if not skip_lighting:
+            dome_intensity = float(os.environ.get("USD_DOME_LIGHT_INTENSITY", "3000.0"))
+            dome_color_temp = float(os.environ.get("USD_DOME_LIGHT_COLOR_TEMP", "6500.0"))
+            lines.append('')
+            lines.append('    def DomeLight "DefaultDomeLight" {')
+            lines.append(f'        float inputs:intensity = {dome_intensity}')
+            lines.append(f'        float inputs:colorTemperature = {dome_color_temp}')
+            lines.append('        bool inputs:enableColorTemperature = true')
+            lines.append('    }')
+
         lines.append('}')
 
         return '\n'.join(lines)

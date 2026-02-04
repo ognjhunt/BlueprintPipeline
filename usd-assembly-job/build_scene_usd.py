@@ -40,7 +40,7 @@ from tools.asset_catalog import AssetCatalogClient
 logger = logging.getLogger(__name__)
 
 try:
-    from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
     import pxr
 except ImportError:
     logger.error("ERROR: usd-core is required. Install with: pip install usd-core")
@@ -779,6 +779,43 @@ class SceneBuilder:
             prim.CreateAttribute("roomMax", Sdf.ValueTypeNames.Double3).Set(
                 Gf.Vec3d(*room_max)
             )
+
+    def add_default_lighting(self) -> None:
+        """Add default dome light for camera rendering.
+
+        Without lighting, cameras in the simulation will capture black/uniform images.
+        This creates a neutral dome light that provides ambient illumination for
+        realistic rendering.
+
+        The light intensity and color temperature can be configured via environment
+        variables:
+          - USD_DOME_LIGHT_INTENSITY (default: 3000.0)
+          - USD_DOME_LIGHT_COLOR_TEMP (default: 6500.0 Kelvin, daylight)
+          - USD_SKIP_DEFAULT_LIGHTING (set to "1" to skip)
+        """
+        skip_lighting = os.environ.get("USD_SKIP_DEFAULT_LIGHTING", "0") == "1"
+        if skip_lighting:
+            logger.info("[USD] Skipping default lighting (USD_SKIP_DEFAULT_LIGHTING=1)")
+            return
+
+        try:
+            intensity = float(os.environ.get("USD_DOME_LIGHT_INTENSITY", "3000.0"))
+            color_temp = float(os.environ.get("USD_DOME_LIGHT_COLOR_TEMP", "6500.0"))
+
+            # Create dome light at /World/DefaultDomeLight
+            dome_light = UsdLux.DomeLight.Define(self.stage, "/World/DefaultDomeLight")
+            dome_light.CreateIntensityAttr(intensity)
+            dome_light.CreateColorTemperatureAttr(color_temp)
+            # Enable color temperature mode
+            dome_light.CreateEnableColorTemperatureAttr(True)
+
+            logger.info(
+                "[USD] Added default dome light: intensity=%.1f, color_temp=%.0fK",
+                intensity,
+                color_temp,
+            )
+        except Exception as e:
+            logger.warning("[USD] Failed to add default dome light: %s", e)
 
     def add_scene_shell_geometry(self, room_box: Dict) -> None:
         """
@@ -1794,6 +1831,9 @@ def build_scene(
             logger.warning(
                 "[USD] WARNING: No room_box data in layout, skipping scene shell geometry"
             )
+
+        # Add default dome light for camera rendering
+        builder.add_default_lighting()
 
     with timed_phase("prim creation"):
         builder.add_cameras(cameras)
