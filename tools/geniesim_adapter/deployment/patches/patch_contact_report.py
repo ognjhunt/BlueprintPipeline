@@ -205,16 +205,135 @@ EFFORTS_PATCH = textwrap.dedent("""\
             robot = self._robot_articulation
             efforts = None
             source = "unavailable"
-            # Try multiple methods in order of preference
-            if hasattr(robot, "get_applied_joint_efforts"):
-                efforts = robot.get_applied_joint_efforts()
-                source = "physx_applied"
-            elif hasattr(robot, "get_measured_joint_efforts"):
-                efforts = robot.get_measured_joint_efforts()
-                source = "physx_measured"
-            elif hasattr(robot, "get_joint_efforts"):
-                efforts = robot.get_joint_efforts()
-                source = "physx_joint"
+
+            def _efforts_nontrivial(vals):
+                try:
+                    _vals = vals.flatten().tolist() if hasattr(vals, "flatten") else list(vals)
+                    return any(abs(float(v)) > 1e-6 for v in _vals)
+                except Exception:
+                    return False
+
+            # Ensure PhysX has computed efforts if API requires it
+            try:
+                if hasattr(robot, "compute_joint_efforts"):
+                    robot.compute_joint_efforts()
+            except Exception as _compute_err:
+                print(f"[JOINT_EFFORTS] compute_joint_efforts failed: {_compute_err}")
+
+            # Measured joint forces -> torque magnitude
+            if efforts is None and hasattr(robot, "get_measured_joint_forces"):
+                try:
+                    _forces = robot.get_measured_joint_forces()
+                    if _forces is not None:
+                        if hasattr(_forces, "shape") and len(_forces.shape) >= 2 and _forces.shape[-1] >= 6:
+                            try:
+                                import numpy as _np
+                                efforts = _np.linalg.norm(_forces[..., 3:6], axis=-1)
+                            except Exception:
+                                efforts = []
+                                for _row in _forces:
+                                    try:
+                                        _tor = _row[3:6]
+                                        efforts.append(sum(abs(float(x)) for x in _tor))
+                                    except Exception:
+                                        efforts.append(0.0)
+                        else:
+                            efforts = _forces
+                        if efforts is not None and _efforts_nontrivial(efforts):
+                            source = "physx_measured_forces"
+                        else:
+                            efforts = None
+                except Exception:
+                    efforts = None
+
+            # Measured efforts
+            if efforts is None and hasattr(robot, "get_measured_joint_efforts"):
+                try:
+                    efforts = robot.get_measured_joint_efforts()
+                    if efforts is not None and _efforts_nontrivial(efforts):
+                        source = "physx_measured"
+                    else:
+                        efforts = None
+                except Exception:
+                    efforts = None
+
+            # Applied efforts
+            if efforts is None and hasattr(robot, "get_applied_joint_efforts"):
+                try:
+                    efforts = robot.get_applied_joint_efforts()
+                    if efforts is not None and _efforts_nontrivial(efforts):
+                        source = "physx_applied"
+                    else:
+                        efforts = None
+                except Exception:
+                    efforts = None
+
+            # Direct joint efforts
+            if efforts is None and hasattr(robot, "get_joint_efforts"):
+                try:
+                    efforts = robot.get_joint_efforts()
+                    if efforts is not None and _efforts_nontrivial(efforts):
+                        source = "physx_joint"
+                    else:
+                        efforts = None
+                except Exception:
+                    efforts = None
+
+            # Dynamic-control fallback
+            if efforts is None:
+                try:
+                    from omni.isaac.dynamic_control import _dynamic_control
+                    _dc = _dynamic_control.acquire_dynamic_control_interface()
+                    _art_handle = None
+                    for _attr in ("_articulation", "articulation", "handle"):
+                        _art_handle = getattr(robot, _attr, None)
+                        if _art_handle:
+                            break
+                    if _art_handle is None:
+                        _prim_path = getattr(robot, "prim_path", None) or getattr(robot, "prim", None)
+                        if _prim_path:
+                            _art_handle = _dc.get_articulation(_prim_path)
+                    if _art_handle:
+                        _dof_states = _dc.get_articulation_dof_states(
+                            _art_handle, _dynamic_control.STATE_ALL
+                        )
+                        _eff_list = []
+                        if hasattr(_dof_states, "dtype") and getattr(_dof_states.dtype, "names", None):
+                            if "effort" in _dof_states.dtype.names:
+                                _eff_list = [float(x) for x in _dof_states["effort"].tolist()]
+                        else:
+                            for _ds in _dof_states:
+                                if hasattr(_ds, "effort"):
+                                    _eff_list.append(float(_ds.effort))
+                                elif isinstance(_ds, dict) and "effort" in _ds:
+                                    _eff_list.append(float(_ds["effort"]))
+                                else:
+                                    try:
+                                        _eff_list.append(float(_ds[2]))
+                                    except Exception:
+                                        _eff_list.append(0.0)
+                        if _eff_list and _efforts_nontrivial(_eff_list):
+                            efforts = _eff_list
+                            source = "dynamic_control"
+                except Exception:
+                    efforts = None
+
+            # Gravity compensation fallback
+            if efforts is None:
+                try:
+                    if hasattr(robot, "get_coriolis_and_centrifugal_forces"):
+                        _coriolis = robot.get_coriolis_and_centrifugal_forces()
+                        if _coriolis is not None and _efforts_nontrivial(_coriolis):
+                            efforts = _coriolis
+                            source = "coriolis_and_centrifugal"
+                    elif hasattr(robot, "get_generalized_gravity_forces"):
+                        _gravity = robot.get_generalized_gravity_forces()
+                        if _gravity is not None and _efforts_nontrivial(_gravity):
+                            efforts = _gravity
+                            source = "generalized_gravity"
+                except Exception:
+                    efforts = None
+
             if efforts is not None:
                 return list(efforts), source
             return None, source

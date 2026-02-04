@@ -205,13 +205,142 @@ def patch_file():
                 print(f"[JOINT_EFFORTS] Debug - {'; '.join(_debug_info)}")
 
             if _articulation is not None:
+                _effort_source = "unavailable"
+                def _efforts_nontrivial(vals):
+                    try:
+                        _vals = vals.flatten().tolist() if hasattr(vals, "flatten") else list(vals)
+                        return any(abs(float(v)) > 1e-6 for v in _vals[:len(rsp.states)])
+                    except Exception:
+                        return False
+
+                # Ensure PhysX has computed efforts if API requires it
+                try:
+                    if hasattr(_articulation, "compute_joint_efforts"):
+                        _articulation.compute_joint_efforts()
+                except Exception as _compute_err:
+                    print(f"[JOINT_EFFORTS] compute_joint_efforts failed: {_compute_err}")
+
                 # Try different effort APIs (Isaac Sim version dependent)
-                if hasattr(_articulation, "get_applied_joint_efforts"):
-                    _efforts = _articulation.get_applied_joint_efforts()
-                elif hasattr(_articulation, "get_measured_joint_efforts"):
-                    _efforts = _articulation.get_measured_joint_efforts()
-                elif hasattr(_articulation, "get_joint_efforts"):
-                    _efforts = _articulation.get_joint_efforts()
+                # Priority order: measured forces (includes gravity), then measured efforts, then applied efforts
+
+                # First, try get_measured_joint_forces which includes gravity effects (6D wrench per joint)
+                if _efforts is None and hasattr(_articulation, "get_measured_joint_forces"):
+                    try:
+                        _forces = _articulation.get_measured_joint_forces()
+                        if _forces is not None:
+                            # Extract effort magnitude from torque vector [tx, ty, tz]
+                            if hasattr(_forces, "shape") and len(_forces.shape) >= 2 and _forces.shape[-1] >= 6:
+                                try:
+                                    import numpy as _np
+                                    _efforts = _np.linalg.norm(_forces[..., 3:6], axis=-1)
+                                except Exception:
+                                    _efforts = []
+                                    for _row in _forces:
+                                        try:
+                                            _tor = _row[3:6]
+                                            _efforts.append(sum(abs(float(x)) for x in _tor))
+                                        except Exception:
+                                            _efforts.append(0.0)
+                            else:
+                                _efforts = _forces
+                            if _efforts is not None and _efforts_nontrivial(_efforts):
+                                _effort_source = "measured_joint_forces"
+                            else:
+                                _efforts = None  # Try next API
+                    except Exception as _mf_err:
+                        print(f"[JOINT_EFFORTS] get_measured_joint_forces failed: {_mf_err}")
+                        _efforts = None
+
+                # Try get_measured_joint_efforts which should include external torques
+                if _efforts is None and hasattr(_articulation, "get_measured_joint_efforts"):
+                    try:
+                        _efforts = _articulation.get_measured_joint_efforts()
+                        if _efforts is not None and _efforts_nontrivial(_efforts):
+                            _effort_source = "measured_joint_efforts"
+                        else:
+                            _efforts = None  # Try next API
+                    except Exception:
+                        _efforts = None
+
+                # Try get_applied_joint_efforts (user-commanded torques only)
+                if _efforts is None and hasattr(_articulation, "get_applied_joint_efforts"):
+                    try:
+                        _efforts = _articulation.get_applied_joint_efforts()
+                        if _efforts is not None and _efforts_nontrivial(_efforts):
+                            _effort_source = "applied_joint_efforts"
+                        else:
+                            _efforts = None  # Try next API
+                    except Exception:
+                        _efforts = None
+
+                # Fallback: try get_joint_efforts
+                if _efforts is None and hasattr(_articulation, "get_joint_efforts"):
+                    try:
+                        _efforts = _articulation.get_joint_efforts()
+                        if _efforts is not None and _efforts_nontrivial(_efforts):
+                            _effort_source = "joint_efforts"
+                        else:
+                            _efforts = None
+                    except Exception:
+                        _efforts = None
+
+                # Dynamic-control fallback (DOF efforts)
+                if _efforts is None:
+                    try:
+                        from omni.isaac.dynamic_control import _dynamic_control
+                        _dc = _dynamic_control.acquire_dynamic_control_interface()
+                        _art_handle = None
+                        for _attr in ("_articulation", "articulation", "handle"):
+                            _art_handle = getattr(_articulation, _attr, None)
+                            if _art_handle:
+                                break
+                        if _art_handle is None:
+                            _prim_path = getattr(_articulation, "prim_path", None) or getattr(_articulation, "prim", None)
+                            if _prim_path:
+                                _art_handle = _dc.get_articulation(_prim_path)
+                        if _art_handle:
+                            _dof_states = _dc.get_articulation_dof_states(
+                                _art_handle, _dynamic_control.STATE_ALL
+                            )
+                            _eff_list = []
+                            if hasattr(_dof_states, "dtype") and getattr(_dof_states.dtype, "names", None):
+                                if "effort" in _dof_states.dtype.names:
+                                    _eff_list = [float(x) for x in _dof_states["effort"].tolist()]
+                            else:
+                                for _ds in _dof_states:
+                                    if hasattr(_ds, "effort"):
+                                        _eff_list.append(float(_ds.effort))
+                                    elif isinstance(_ds, dict) and "effort" in _ds:
+                                        _eff_list.append(float(_ds["effort"]))
+                                    else:
+                                        try:
+                                            _eff_list.append(float(_ds[2]))
+                                        except Exception:
+                                            _eff_list.append(0.0)
+                            if _eff_list and _efforts_nontrivial(_eff_list):
+                                _efforts = _eff_list
+                                _effort_source = "dynamic_control"
+                    except Exception as _dc_err:
+                        print(f"[JOINT_EFFORTS] dynamic_control fallback failed: {_dc_err}")
+                        _efforts = None
+
+                # Last resort: Compute gravity compensation torques using inverse dynamics
+                if _efforts is None:
+                    try:
+                        # Try to compute gravity compensation using coriolis_and_gravity
+                        if hasattr(_articulation, "get_coriolis_and_centrifugal_forces"):
+                            _coriolis = _articulation.get_coriolis_and_centrifugal_forces()
+                            if _coriolis is not None and _efforts_nontrivial(_coriolis):
+                                _efforts = _coriolis
+                                _effort_source = "coriolis_and_centrifugal"
+                        elif hasattr(_articulation, "get_generalized_gravity_forces"):
+                            _gravity = _articulation.get_generalized_gravity_forces()
+                            if _gravity is not None and _efforts_nontrivial(_gravity):
+                                _efforts = _gravity
+                                _effort_source = "generalized_gravity"
+                    except Exception as _grav_err:
+                        print(f"[JOINT_EFFORTS] Gravity compensation fallback failed: {_grav_err}")
+                        _efforts = None
 
                 if _efforts is not None:
                     # Handle both numpy arrays and lists (np is already imported at module level)
@@ -232,7 +361,7 @@ def patch_file():
                             if len(_sample_efforts) < 5:
                                 _sample_efforts.append(f"{_state.name}={_state.effort:.4f}")
                     _nonzero = sum(1 for e in _efforts_list[:len(rsp.states)] if abs(e) > 1e-6)
-                    print(f"[JOINT_EFFORTS] Populated efforts for {_populated}/{len(rsp.states)} joints, non-zero: {_nonzero}, sample: {_sample_efforts}")
+                    print(f"[JOINT_EFFORTS] Source={_effort_source}; populated {_populated}/{len(rsp.states)}; non-zero: {_nonzero}; sample: {_sample_efforts}")
                 else:
                     print("[JOINT_EFFORTS] articulation found but effort APIs returned None")
             else:

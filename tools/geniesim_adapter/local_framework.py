@@ -3175,6 +3175,7 @@ class GenieSimGRPCClient:
 
     def _parse_camera_data_response(self, data: bytes) -> Optional[Dict[str, Any]]:
         """Parse GetCameraDataResponse: field 2=color_info, field 3=color_image, field 5=depth_image."""
+        import struct as _struct
         fields = self._parse_protobuf_fields(data)
         result: Dict[str, Any] = {
             "rgb": b"",
@@ -3184,6 +3185,19 @@ class GenieSimGRPCClient:
             "rgb_encoding": "",
             "depth_encoding": "",
         }
+        def _decode_float(_fields: Dict[int, List[Tuple[int, bytes]]], _field_num: int) -> Optional[float]:
+            entries = _fields.get(_field_num)
+            if not entries:
+                return None
+            for _wire_type, _raw in entries:
+                try:
+                    if _wire_type == 5 and len(_raw) >= 4:
+                        return _struct.unpack("<f", _raw[:4])[0]
+                    if _wire_type == 1 and len(_raw) >= 8:
+                        return _struct.unpack("<d", _raw[:8])[0]
+                except Exception:
+                    continue
+            return None
         # color_info (field 2) — CameraInfo: width(1,int32), height(2,int32), ppx(3,float), ppy(4,float), fx(5,float), fy(6,float)
         if 2 in fields:
             info_fields = self._parse_protobuf_fields(fields[2][0][1])
@@ -3191,27 +3205,19 @@ class GenieSimGRPCClient:
                 result["width"] = int.from_bytes(info_fields[1][0][1], "little")
             if 2 in info_fields:
                 result["height"] = int.from_bytes(info_fields[2][0][1], "little")
-            # float32 fields
-            if 3 in info_fields:
-                try:
-                    result["ppx"] = _struct.unpack("<f", info_fields[3][0][1])[0]
-                except Exception:
-                    pass
-            if 4 in info_fields:
-                try:
-                    result["ppy"] = _struct.unpack("<f", info_fields[4][0][1])[0]
-                except Exception:
-                    pass
-            if 5 in info_fields:
-                try:
-                    result["fx"] = _struct.unpack("<f", info_fields[5][0][1])[0]
-                except Exception:
-                    pass
-            if 6 in info_fields:
-                try:
-                    result["fy"] = _struct.unpack("<f", info_fields[6][0][1])[0]
-                except Exception:
-                    pass
+            # float32/float64 fields
+            _ppx = _decode_float(info_fields, 3)
+            if _ppx is not None:
+                result["ppx"] = _ppx
+            _ppy = _decode_float(info_fields, 4)
+            if _ppy is not None:
+                result["ppy"] = _ppy
+            _fx = _decode_float(info_fields, 5)
+            if _fx is not None:
+                result["fx"] = _fx
+            _fy = _decode_float(info_fields, 6)
+            if _fy is not None:
+                result["fy"] = _fy
         # color_image (field 3) — CompressedImage: format(2,string), data(3,bytes)
         if 3 in fields:
             img_fields = self._parse_protobuf_fields(fields[3][0][1])
@@ -5349,6 +5355,8 @@ class GenieSimLocalFramework:
         self._strict_preflight_done = True
 
         errors: List[str] = []
+        _max_retries = int(os.getenv("GENIESIM_STRICT_PREFLIGHT_RETRIES", "5"))
+        _retry_delay = float(os.getenv("GENIESIM_STRICT_PREFLIGHT_DELAY_S", "0.5"))
 
         # 1) Contact report RPC availability
         try:
@@ -5362,11 +5370,21 @@ class GenieSimLocalFramework:
 
         # 2) Joint efforts must be real and non-zero
         try:
-            jp_result = self._client.get_joint_position(lock_timeout=5.0)
-            if not jp_result.available or not jp_result.success:
-                errors.append(f"joint_position unavailable: {jp_result.error or 'RPC failed'}")
-            efforts = getattr(self._client, "_latest_joint_efforts", [])
-            if not efforts or not any(abs(e) > 1e-6 for e in efforts):
+            _jp_error = None
+            _efforts_ok = False
+            for _attempt in range(max(1, _max_retries)):
+                jp_result = self._client.get_joint_position(lock_timeout=5.0)
+                if not jp_result.available or not jp_result.success:
+                    _jp_error = jp_result.error or "RPC failed"
+                efforts = getattr(self._client, "_latest_joint_efforts", [])
+                if efforts and any(abs(e) > 1e-6 for e in efforts):
+                    _efforts_ok = True
+                    break
+                if _attempt < _max_retries - 1:
+                    time.sleep(_retry_delay)
+            if _jp_error and not _efforts_ok:
+                errors.append(f"joint_position unavailable: {_jp_error}")
+            if not _efforts_ok:
                 errors.append("joint_efforts missing or all zeros; server patch required")
         except Exception as exc:
             errors.append(f"joint_efforts exception: {exc}")
@@ -5405,56 +5423,67 @@ class GenieSimLocalFramework:
             cam_map = getattr(self._client, "_camera_prim_map", {}) or {}
             cam_id = "wrist" if "wrist" in cam_map else (list(cam_map.keys())[0] if cam_map else None)
             cam_data = None
-            if cam_id:
-                cam_data = self._client.get_camera_data(cam_id)
-            # Fallback to raw if cam_data is None OR if intrinsics are missing/zero
-            if cam_map:
-                _need_raw_fallback = cam_data is None
-                if not _need_raw_fallback and cam_data:
-                    # Check if intrinsics are missing or zero (protobuf default)
-                    _ci = cam_data.get("camera_info") or cam_data
-                    _fx = _ci.get("fx")
-                    _fy = _ci.get("fy")
-                    if _fx is None or _fy is None or _fx == 0 or _fy == 0:
-                        _need_raw_fallback = True
-                if _need_raw_fallback:
-                    cam_data = self._client._get_camera_data_raw(list(cam_map.values())[0])
-            if cam_data is None:
-                errors.append("camera_data unavailable; server camera patch required")
-            else:
-                # Handle nested camera_info structure from patch_camera_handler.py
-                cam_info = cam_data.get("camera_info") or cam_data
-                fx = cam_info.get("fx")
-                fy = cam_info.get("fy")
-                ppx = cam_info.get("ppx")
-                ppy = cam_info.get("ppy")
-                # Propagate width/height from camera_info if not at top level
-                if "width" not in cam_data and "width" in cam_info:
-                    cam_data["width"] = cam_info["width"]
-                if "height" not in cam_data and "height" in cam_info:
-                    cam_data["height"] = cam_info["height"]
-                # Check for missing OR zero intrinsics (protobuf default is 0)
-                if fx is None or fy is None or ppx is None or ppy is None or fx == 0 or fy == 0:
-                    errors.append("camera intrinsics missing in CamInfo")
-                rgb = cam_data.get("rgb")
-                # Handle numpy arrays directly (from patch_camera_handler.py)
-                if rgb is not None and hasattr(rgb, "shape"):
-                    # Already a numpy array — no decode needed
-                    pass
-                elif isinstance(rgb, (bytes, bytearray)):
-                    rgb = decode_camera_bytes(
-                        bytes(rgb),
-                        width=int(cam_data.get("width") or 0),
-                        height=int(cam_data.get("height") or 0),
-                        encoding=cam_data.get("rgb_encoding") or cam_data.get("encoding") or "",
-                        kind="rgb",
-                    )
-                if rgb is None:
-                    errors.append("camera RGB decode failed")
+            cam_ok = False
+            cam_error = None
+            for _attempt in range(max(1, _max_retries)):
+                _need_raw_fallback = False
+                if cam_id:
+                    cam_data = self._client.get_camera_data(cam_id)
+                if cam_map:
+                    _need_raw_fallback = cam_data is None
+                    if not _need_raw_fallback and cam_data:
+                        _ci = cam_data.get("camera_info") or cam_data
+                        _fx = _ci.get("fx")
+                        _fy = _ci.get("fy")
+                        if _fx is None or _fy is None or _fx == 0 or _fy == 0:
+                            _need_raw_fallback = True
+                    if _need_raw_fallback:
+                        cam_data = self._client._get_camera_data_raw(list(cam_map.values())[0])
+                if cam_data is None:
+                    cam_error = "camera_data unavailable; server camera patch required"
                 else:
-                    is_valid, diag = validate_rgb_frame_quality(rgb, context="preflight")
-                    if not is_valid:
-                        errors.append(f"camera RGB invalid: {diag.get('reason')}")
+                    cam_info = cam_data.get("camera_info") or cam_data
+                    fx = cam_info.get("fx")
+                    fy = cam_info.get("fy")
+                    ppx = cam_info.get("ppx")
+                    ppy = cam_info.get("ppy")
+                    if "width" not in cam_data and "width" in cam_info:
+                        cam_data["width"] = cam_info["width"]
+                    if "height" not in cam_data and "height" in cam_info:
+                        cam_data["height"] = cam_info["height"]
+                    if fx is None or fy is None or ppx is None or ppy is None or fx == 0 or fy == 0:
+                        if _attempt == _max_retries - 1:
+                            enc = cam_data.get("rgb_encoding") or cam_data.get("encoding") or ""
+                            self.log(
+                                f"Camera intrinsics missing (fx={fx}, fy={fy}, ppx={ppx}, ppy={ppy}, "
+                                f"w={cam_data.get('width')}, h={cam_data.get('height')}, "
+                                f"encoding={enc}, raw_fallback={_need_raw_fallback})",
+                                "WARNING",
+                            )
+                        cam_error = "camera intrinsics missing in CamInfo"
+                    rgb = cam_data.get("rgb")
+                    if rgb is not None and hasattr(rgb, "shape"):
+                        pass
+                    elif isinstance(rgb, (bytes, bytearray)):
+                        rgb = decode_camera_bytes(
+                            bytes(rgb),
+                            width=int(cam_data.get("width") or 0),
+                            height=int(cam_data.get("height") or 0),
+                            encoding=cam_data.get("rgb_encoding") or cam_data.get("encoding") or "",
+                            kind="rgb",
+                        )
+                    if rgb is None:
+                        cam_error = "camera RGB decode failed"
+                    else:
+                        is_valid, diag = validate_rgb_frame_quality(rgb, context="preflight")
+                        if is_valid:
+                            cam_ok = True
+                            break
+                        cam_error = f"camera RGB invalid: {diag.get('reason')}"
+                if _attempt < _max_retries - 1:
+                    time.sleep(_retry_delay)
+            if not cam_ok and cam_error:
+                errors.append(cam_error)
         except Exception as exc:
             errors.append(f"camera preflight exception: {exc}")
 

@@ -171,6 +171,30 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 cls._bp_warmup_done.add(camera_prim_path)
                 print(f"[PATCH] Camera warmup complete for {camera_prim_path}")
 
+            _min_colors = int(_os.environ.get("CAMERA_QUALITY_MIN_COLORS", "100"))
+            _min_std = float(_os.environ.get("CAMERA_QUALITY_MIN_STD", "10"))
+            _max_retries = int(_os.environ.get("CAMERA_QUALITY_MAX_RETRIES", "3"))
+            _retry_steps = int(_os.environ.get("CAMERA_QUALITY_RETRY_STEPS", "2"))
+
+            def _bp_rgb_quality(_arr):
+                if _arr is None:
+                    return 0, 0.0
+                try:
+                    _h, _w = _arr.shape[:2]
+                    _step_h = max(1, _h // 64)
+                    _step_w = max(1, _w // 64)
+                    _small = _arr[::_step_h, ::_step_w]
+                    if _small.ndim >= 3 and _small.shape[-1] >= 3:
+                        _flat = _small.reshape(-1, _small.shape[-1])[:, :3]
+                        _uniq = np.unique(_flat, axis=0)
+                        _unique_colors = len(_uniq)
+                    else:
+                        _unique_colors = len(np.unique(_small))
+                    _std = float(np.std(_small.astype(float)))
+                    return _unique_colors, _std
+                except Exception:
+                    return 0, 0.0
+
             rep.orchestrator.step()
 
             rgb_data = rgb_annot.get_data()
@@ -181,6 +205,24 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 h, w = result["rgb"].shape[:2]
                 result["camera_info"]["width"] = w
                 result["camera_info"]["height"] = h
+                _uniq, _std = _bp_rgb_quality(result["rgb"])
+                _retry = 0
+                while (_uniq < _min_colors or _std < _min_std) and _retry < _max_retries:
+                    for _ in range(_retry_steps):
+                        rep.orchestrator.step()
+                    _retry += 1
+                    rgb_data = rgb_annot.get_data()
+                    if rgb_data is None:
+                        continue
+                    if hasattr(rgb_data, "numpy"):
+                        rgb_data = rgb_data.numpy()
+                    result["rgb"] = np.asarray(rgb_data, dtype=np.uint8)
+                    h, w = result["rgb"].shape[:2]
+                    result["camera_info"]["width"] = w
+                    result["camera_info"]["height"] = h
+                    _uniq, _std = _bp_rgb_quality(result["rgb"])
+                if _retry:
+                    print(f"[PATCH] Camera {camera_prim_path} quality retry={_retry} unique={_uniq} std={_std:.2f}")
 
             depth_data = depth_annot.get_data()
             if depth_data is not None:
@@ -241,6 +283,16 @@ CAMERA_HANDLER = textwrap.dedent("""\
             flat_result["depth"] = bytes(_h * _w * 4)  # float32 = 4 bytes
             flat_result["depth_shape"] = [_h, _w]
             flat_result["depth_dtype"] = "float32"
+
+        _depth_dtype = str(flat_result.get("depth_dtype", "float32")).lower()
+        if "float32" in _depth_dtype:
+            flat_result["depth_encoding"] = "raw_depth_float32"
+        elif "float16" in _depth_dtype:
+            flat_result["depth_encoding"] = "raw_depth_float16"
+        elif "uint16" in _depth_dtype:
+            flat_result["depth_encoding"] = "raw_depth_uint16"
+        else:
+            flat_result["depth_encoding"] = "raw_depth"
 
         print(f"[PATCH] Camera data prepared: rgb={len(flat_result['rgb'])} bytes, depth={len(flat_result['depth'])} bytes, fx={flat_result['fx']:.1f}, fy={flat_result['fy']:.1f}")
         self.data_to_send = flat_result

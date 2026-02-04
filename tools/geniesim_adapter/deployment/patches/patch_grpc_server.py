@@ -403,31 +403,50 @@ def patch_file():
     # ── Camera intrinsics fix (populate fx, fy, ppx, ppy in response) ──
 
     if CAMERA_INTRINSICS_MARKER not in content:
-        # Find where camera_info.width and camera_info.height are set and add intrinsics after
-        # Pattern: rsp.camera_info.height = camera_info["height"]
-        # or: rsp.camera_info.height = camera_info.get("height", ...)
+        def _intrinsics_block(indent: str, target: str) -> str:
+            return (
+                f'{indent}# {CAMERA_INTRINSICS_MARKER}\n'
+                f'{indent}_ci = camera_info if isinstance(camera_info, dict) else (current_camera if isinstance(current_camera, dict) else {{}})\n'
+                f'{indent}_w = _ci.get("width")\n'
+                f'{indent}_h = _ci.get("height")\n'
+                f'{indent}if not _w:\n'
+                f'{indent}    _w = getattr(rsp.{target}, "width", 1280)\n'
+                f'{indent}if not _h:\n'
+                f'{indent}    _h = getattr(rsp.{target}, "height", 720)\n'
+                f'{indent}_fx = _ci.get("fx", _w)\n'
+                f'{indent}_fy = _ci.get("fy", _h)\n'
+                f'{indent}_ppx = _ci.get("ppx", float(_w) / 2.0)\n'
+                f'{indent}_ppy = _ci.get("ppy", float(_h) / 2.0)\n'
+                f'{indent}rsp.{target}.fx = _bp_safe_float(_fx, float(_w))\n'
+                f'{indent}rsp.{target}.fy = _bp_safe_float(_fy, float(_h))\n'
+                f'{indent}rsp.{target}.ppx = _bp_safe_float(_ppx, float(_w) / 2.0)\n'
+                f'{indent}rsp.{target}.ppy = _bp_safe_float(_ppy, float(_h) / 2.0)\n'
+                f'{indent}if isinstance(current_camera, dict) and isinstance(_ci, dict):\n'
+                f'{indent}    _src = _ci.get("intrinsics_source")\n'
+                f'{indent}    if _src and "intrinsics_source" not in current_camera:\n'
+                f'{indent}        current_camera["intrinsics_source"] = _src'
+            )
+
+        # Find where camera_info.height is set and add intrinsics after
+        # Pattern: rsp.camera_info.height = camera_info["height"] or .get(...)
         intrinsics_patterns = [
-            # Pattern 1: Direct dict access
             (
                 'rsp.camera_info.height = camera_info["height"]',
-                'rsp.camera_info.height = camera_info["height"]\n'
-                '        # ' + CAMERA_INTRINSICS_MARKER + '\n'
-                '        rsp.camera_info.fx = float(camera_info.get("fx", camera_info.get("width", 1280)))\n'
-                '        rsp.camera_info.fy = float(camera_info.get("fy", camera_info.get("height", 720)))\n'
-                '        rsp.camera_info.ppx = float(camera_info.get("ppx", camera_info.get("width", 1280) / 2.0))\n'
-                '        rsp.camera_info.ppy = float(camera_info.get("ppy", camera_info.get("height", 720) / 2.0))'
+                None,
             ),
-            # Pattern 2: Using .get() method
             (
                 'rsp.camera_info.height = camera_info.get("height"',
-                None  # Will use regex for this
+                None,
             ),
         ]
 
         # Try direct pattern replacement first
-        old_height, new_height = intrinsics_patterns[0]
-        if old_height in content:
-            content = content.replace(old_height, new_height, 1)
+        if intrinsics_patterns[0][0] in content:
+            replacement = (
+                'rsp.camera_info.height = camera_info["height"]\n'
+                + _intrinsics_block("        ", "camera_info")
+            )
+            content = content.replace(intrinsics_patterns[0][0], replacement, 1)
             changes += 1
             print("[PATCH] Added camera intrinsics (fx, fy, ppx, ppy) after height assignment")
         else:
@@ -441,11 +460,7 @@ def patch_file():
                 indent = m.group(1)
                 replacement = (
                     m.group(0) + '\n'
-                    f'{indent}# {CAMERA_INTRINSICS_MARKER}\n'
-                    f'{indent}rsp.camera_info.fx = float(camera_info.get("fx", camera_info.get("width", 1280)))\n'
-                    f'{indent}rsp.camera_info.fy = float(camera_info.get("fy", camera_info.get("height", 720)))\n'
-                    f'{indent}rsp.camera_info.ppx = float(camera_info.get("ppx", camera_info.get("width", 1280) / 2.0))\n'
-                    f'{indent}rsp.camera_info.ppy = float(camera_info.get("ppy", camera_info.get("height", 720) / 2.0))'
+                    + _intrinsics_block(indent, "camera_info")
                 )
                 content = content[:m.start()] + replacement + content[m.end():]
                 changes += 1
@@ -461,11 +476,7 @@ def patch_file():
                     indent = m.group(1)
                     replacement = (
                         m.group(0) + '\n'
-                        f'{indent}# {CAMERA_INTRINSICS_MARKER}\n'
-                        f'{indent}rsp.color_info.fx = float(camera_info.get("fx", camera_info.get("width", 1280)) if isinstance(camera_info, dict) else 1280)\n'
-                        f'{indent}rsp.color_info.fy = float(camera_info.get("fy", camera_info.get("height", 720)) if isinstance(camera_info, dict) else 720)\n'
-                        f'{indent}rsp.color_info.ppx = float(camera_info.get("ppx", camera_info.get("width", 1280) / 2.0) if isinstance(camera_info, dict) else 640.0)\n'
-                        f'{indent}rsp.color_info.ppy = float(camera_info.get("ppy", camera_info.get("height", 720) / 2.0) if isinstance(camera_info, dict) else 360.0)'
+                        + _intrinsics_block(indent, "color_info")
                     )
                     content = content[:m.start()] + replacement + content[m.end():]
                     changes += 1
