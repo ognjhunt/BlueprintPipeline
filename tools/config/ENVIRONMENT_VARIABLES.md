@@ -762,6 +762,11 @@ Genie Sim runs locally using the gRPC host/port configuration below for client-s
 | `GENIESIM_STALL_TIMEOUT_S` | float | 30 | Abort/reset an episode if observation progress stalls longer than this timeout (seconds). |
 | `GENIESIM_MAX_STALLS` | int | 2 | Max stalled episodes before the local framework restarts the Genie Sim server. |
 | `GENIESIM_STALL_BACKOFF_S` | float | 5 | Backoff (seconds) to wait after a stall or restart before resuming data collection. |
+| `GENIESIM_OBJECT_PRIM_OVERRIDES_JSON` | str | unset | JSON mapping of logical object IDs to exact USD prim paths (applied before fuzzy resolution). |
+| `GENIESIM_OBJECT_POSE_MAX_FAILURES` | int | 3 | Consecutive object pose failures before applying backoff. |
+| `GENIESIM_OBJECT_POSE_BACKOFF_S` | float | 30 | Backoff window (seconds) before retrying failed object pose lookups. |
+| `GENIESIM_OBJECT_POSE_STATIC_TTL_S` | float | 0 | TTL for cached static object poses (seconds); `0` caches forever. |
+| `GENIESIM_OBJECT_PRIM_INDEX_MAX` | int | 0 | Append `_N` suffix candidates up to this index when resolving prims (e.g., `_1`, `_2`). |
 | `GENIESIM_RECORDINGS_DIR` | path | `/tmp/geniesim_recordings` | Output directory for Genie Sim recordings (avoid temp paths in production). |
 | `GENIESIM_RECORDING_DIR` | path | (legacy) | Deprecated alias for `GENIESIM_RECORDINGS_DIR`. |
 | `GENIESIM_LOG_DIR` | path | `/tmp/geniesim_logs` | Output directory for Genie Sim server logs (avoid temp paths in production). |

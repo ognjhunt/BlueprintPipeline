@@ -199,7 +199,51 @@ CAMERA_HANDLER = textwrap.dedent("""\
         except Exception as e:
             print(f"[PATCH] Camera capture failed (returning black frame): {e}")
 
-        self.data_to_send = result
+        # Serialize numpy arrays to bytes for gRPC transport and flatten structure
+        _rgb_arr = result.get("rgb")
+        _depth_arr = result.get("depth")
+        _cam_info = result.get("camera_info", {})
+
+        # Flatten camera_info to top level and serialize images to bytes
+        flat_result = {
+            "width": _cam_info.get("width", _w),
+            "height": _cam_info.get("height", _h),
+            "fx": _cam_info.get("fx", _fx),
+            "fy": _cam_info.get("fy", _fy),
+            "ppx": _cam_info.get("ppx", _ppx),
+            "ppy": _cam_info.get("ppy", _ppy),
+            "intrinsics_source": _cam_info.get("intrinsics_source", "default"),
+            "extrinsic": _cam_info.get("extrinsic"),
+            "calibration_id": _cam_info.get("calibration_id", ""),
+            "camera_prim_path": camera_prim_path,
+            # Keep nested camera_info for backward compatibility
+            "camera_info": _cam_info,
+        }
+
+        # Serialize RGB to bytes
+        if _rgb_arr is not None and hasattr(_rgb_arr, "tobytes"):
+            flat_result["rgb"] = _rgb_arr.tobytes()
+            flat_result["rgb_shape"] = list(_rgb_arr.shape)
+            flat_result["rgb_dtype"] = str(_rgb_arr.dtype)
+            flat_result["rgb_encoding"] = "raw_rgb_uint8"
+        else:
+            flat_result["rgb"] = bytes(_h * _w * 3)
+            flat_result["rgb_shape"] = [_h, _w, 3]
+            flat_result["rgb_dtype"] = "uint8"
+            flat_result["rgb_encoding"] = "raw_rgb_uint8"
+
+        # Serialize depth to bytes
+        if _depth_arr is not None and hasattr(_depth_arr, "tobytes"):
+            flat_result["depth"] = _depth_arr.tobytes()
+            flat_result["depth_shape"] = list(_depth_arr.shape)
+            flat_result["depth_dtype"] = str(_depth_arr.dtype)
+        else:
+            flat_result["depth"] = bytes(_h * _w * 4)  # float32 = 4 bytes
+            flat_result["depth_shape"] = [_h, _w]
+            flat_result["depth_dtype"] = "float32"
+
+        print(f"[PATCH] Camera data prepared: rgb={len(flat_result['rgb'])} bytes, depth={len(flat_result['depth'])} bytes, fx={flat_result['fx']:.1f}, fy={flat_result['fy']:.1f}")
+        self.data_to_send = flat_result
     # --- END BlueprintPipeline camera patch ---
 """)
 

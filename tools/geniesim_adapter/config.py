@@ -32,6 +32,9 @@ GENIESIM_TASK_CONFIDENCE_THRESHOLD_ENV = "GENIESIM_TASK_CONFIDENCE_THRESHOLD"
 GENIESIM_TASK_SIZE_SMALL_THRESHOLD_ENV = "GENIESIM_TASK_SIZE_SMALL_THRESHOLD"
 GENIESIM_TASK_SIZE_LARGE_THRESHOLD_ENV = "GENIESIM_TASK_SIZE_LARGE_THRESHOLD"
 GENIESIM_TASK_MAX_PER_OBJECT_ENV = "GENIESIM_TASK_MAX_PER_OBJECT"
+GENIESIM_OBJECT_POSE_TIMEOUT_S_ENV = "GENIESIM_OBJECT_POSE_TIMEOUT_S"
+GENIESIM_OBJECT_POSE_MAX_CANDIDATES_ENV = "GENIESIM_OBJECT_POSE_MAX_CANDIDATES"
+GENIESIM_OBJECT_POSE_EARLY_FAIL_ENV = "GENIESIM_OBJECT_POSE_EARLY_FAIL"
 
 DEFAULT_GENIESIM_HOST = "localhost"
 DEFAULT_GENIESIM_PORT = 50051
@@ -50,6 +53,9 @@ DEFAULT_TASK_CONFIDENCE_THRESHOLD = 0.8
 DEFAULT_TASK_SIZE_SMALL_THRESHOLD = 0.05
 DEFAULT_TASK_SIZE_LARGE_THRESHOLD = 0.3
 DEFAULT_TASK_MAX_PER_OBJECT = 3
+DEFAULT_GENIESIM_OBJECT_POSE_TIMEOUT_S = 5.0
+DEFAULT_GENIESIM_OBJECT_POSE_MAX_CANDIDATES = 3
+DEFAULT_GENIESIM_OBJECT_POSE_EARLY_FAIL = 2
 
 
 def get_geniesim_host(env: Optional[Mapping[str, str]] = None) -> str:
@@ -273,4 +279,37 @@ def get_geniesim_task_max_per_object(env: Optional[Mapping[str, str]] = None) ->
         default=DEFAULT_TASK_MAX_PER_OBJECT,
         min_value=1,
         name=GENIESIM_TASK_MAX_PER_OBJECT_ENV,
+    )
+
+
+def get_geniesim_object_pose_timeout_s(env: Optional[Mapping[str, str]] = None) -> float:
+    """Return the timeout for object pose queries (shorter to avoid DEADLINE_EXCEEDED accumulation)."""
+    source = env or os.environ
+    return parse_float_env(
+        source.get(GENIESIM_OBJECT_POSE_TIMEOUT_S_ENV),
+        default=DEFAULT_GENIESIM_OBJECT_POSE_TIMEOUT_S,
+        min_value=0.1,
+        name=GENIESIM_OBJECT_POSE_TIMEOUT_S_ENV,
+    )
+
+
+def get_geniesim_object_pose_max_candidates(env: Optional[Mapping[str, str]] = None) -> int:
+    """Return the max number of candidate prim paths to try for object pose resolution."""
+    source = env or os.environ
+    return parse_int_env(
+        source.get(GENIESIM_OBJECT_POSE_MAX_CANDIDATES_ENV),
+        default=DEFAULT_GENIESIM_OBJECT_POSE_MAX_CANDIDATES,
+        min_value=1,
+        name=GENIESIM_OBJECT_POSE_MAX_CANDIDATES_ENV,
+    )
+
+
+def get_geniesim_object_pose_early_fail(env: Optional[Mapping[str, str]] = None) -> int:
+    """Return the number of consecutive object pose failures before skipping remaining objects."""
+    source = env or os.environ
+    return parse_int_env(
+        source.get(GENIESIM_OBJECT_POSE_EARLY_FAIL_ENV),
+        default=DEFAULT_GENIESIM_OBJECT_POSE_EARLY_FAIL,
+        min_value=1,
+        name=GENIESIM_OBJECT_POSE_EARLY_FAIL_ENV,
     )

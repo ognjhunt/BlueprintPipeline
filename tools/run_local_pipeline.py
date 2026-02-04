@@ -3855,6 +3855,16 @@ class LocalPipelineRunner:
             scene_manifest = _load_json(merged_manifest_path, "Genie Sim merged scene manifest")
         else:
             scene_manifest = {"scene_graph": scene_graph}
+        # Ensure scene graph nodes are available for local runs (object metadata + aliases)
+        if "nodes" not in scene_manifest:
+            _sg = scene_manifest.get("scene_graph") or scene_graph
+            if isinstance(_sg, dict) and _sg.get("nodes"):
+                scene_manifest["nodes"] = _sg.get("nodes")
+        # Propagate meters_per_unit if missing at top-level
+        if "meters_per_unit" not in scene_manifest:
+            _sg = scene_manifest.get("scene_graph") or scene_graph
+            if isinstance(_sg, dict) and _sg.get("meters_per_unit") is not None:
+                scene_manifest["meters_per_unit"] = _sg.get("meters_per_unit")
 
         output_dirs: Dict[str, Path] = {}
         robot_failures: Dict[str, Dict[str, Any]] = {}

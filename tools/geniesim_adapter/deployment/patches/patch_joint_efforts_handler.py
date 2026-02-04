@@ -66,26 +66,54 @@ def patch_file():
         # Capture real joint efforts from robot articulation
         try:
             _efforts = None
-            _robot = None
+            _articulation = None
+            # Try multiple access paths to find the articulation object
             _server_fn = getattr(self, "server_function", None)
-            _cmd = getattr(_server_fn, "command_controller", None) or _server_fn
-            _robot = getattr(_cmd, "robot", None)
-            if _robot is not None:
-                if hasattr(_robot, "get_applied_joint_efforts"):
-                    _efforts = _robot.get_applied_joint_efforts()
-                elif hasattr(_robot, "get_measured_joint_efforts"):
-                    _efforts = _robot.get_measured_joint_efforts()
-                elif hasattr(_robot, "get_joint_efforts"):
-                    _efforts = _robot.get_joint_efforts()
-            if _efforts is not None:
-                _efforts_list = list(_efforts)
-                _effort_map = {}
-                for _idx, _state in enumerate(rsp.states):
-                    if _idx < len(_efforts_list):
-                        _effort_map[_state.name] = float(_efforts_list[_idx])
-                for _state in rsp.states:
-                    if _state.name in _effort_map:
-                        _state.effort = _effort_map[_state.name]
+            _cmd = getattr(_server_fn, "command_controller", None) if _server_fn else None
+
+            # Path 1: command_controller.ui_builder.articulation (most common)
+            if _cmd is not None:
+                _ui_builder = getattr(_cmd, "ui_builder", None)
+                if _ui_builder is not None:
+                    _articulation = getattr(_ui_builder, "articulation", None)
+
+            # Path 2: command_controller.articulation (fallback)
+            if _articulation is None and _cmd is not None:
+                _articulation = getattr(_cmd, "articulation", None)
+
+            # Path 3: server_function.articulation (fallback)
+            if _articulation is None and _server_fn is not None:
+                _articulation = getattr(_server_fn, "articulation", None)
+
+            # Path 4: direct self.articulation (fallback)
+            if _articulation is None:
+                _articulation = getattr(self, "articulation", None)
+
+            if _articulation is not None:
+                # Try different effort APIs (Isaac Sim version dependent)
+                if hasattr(_articulation, "get_applied_joint_efforts"):
+                    _efforts = _articulation.get_applied_joint_efforts()
+                elif hasattr(_articulation, "get_measured_joint_efforts"):
+                    _efforts = _articulation.get_measured_joint_efforts()
+                elif hasattr(_articulation, "get_joint_efforts"):
+                    _efforts = _articulation.get_joint_efforts()
+
+                if _efforts is not None:
+                    _efforts_list = list(_efforts)
+                    _effort_map = {}
+                    for _idx, _state in enumerate(rsp.states):
+                        if _idx < len(_efforts_list):
+                            _effort_map[_state.name] = float(_efforts_list[_idx])
+                    _populated = 0
+                    for _state in rsp.states:
+                        if _state.name in _effort_map:
+                            _state.effort = _effort_map[_state.name]
+                            _populated += 1
+                    print(f"[JOINT_EFFORTS] Populated efforts for {_populated}/{len(rsp.states)} joints")
+                else:
+                    print("[JOINT_EFFORTS] articulation found but effort APIs returned None")
+            else:
+                print("[JOINT_EFFORTS] articulation not found via any access path")
         except Exception as _eff_err:
             print(f"[JOINT_EFFORTS] Failed to capture efforts: {_eff_err}")
         # --- END BlueprintPipeline joint_efforts_capture patch ---

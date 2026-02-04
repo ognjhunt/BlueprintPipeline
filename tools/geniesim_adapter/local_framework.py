@@ -149,6 +149,9 @@ from tools.geniesim_adapter.config import (
     get_geniesim_grpc_retry_max_s,
     get_geniesim_grpc_timeout_s,
     get_geniesim_host,
+    get_geniesim_object_pose_early_fail,
+    get_geniesim_object_pose_max_candidates,
+    get_geniesim_object_pose_timeout_s,
     get_geniesim_port,
     get_geniesim_readiness_timeout_s,
     get_geniesim_trajectory_fps,
@@ -1379,6 +1382,12 @@ class GenieSimGRPCClient:
         # Map logical camera names to robot-specific USD prim paths.
         # Populated after init_robot from the robot config's camera dict.
         self._camera_prim_map: Dict[str, str] = {}
+        # Scene object metadata (populated by GenieSimLocalFramework)
+        self._scene_object_ids_dynamic: List[str] = []
+        self._scene_object_ids_static: List[str] = []
+        self._scene_variation_object_ids: List[str] = []
+        self._object_sim_roles: Dict[str, str] = {}
+        self._object_prim_aliases: Dict[str, List[str]] = {}
         self._joint_names: List[str] = []
         self._latest_joint_positions: List[float] = []
         self._grpc_unavailable_logged: set[str] = set()
@@ -1387,6 +1396,9 @@ class GenieSimGRPCClient:
         self._first_trajectory_call = True  # first trajectory waypoint uses longer timeout
         self._curobo_initialized = False  # tracks if cuRobo has completed lazy init
         self._abort_event: Optional[_threading.Event] = None  # set by episode runner
+        self._static_object_pose_cache: Dict[str, Dict[str, Any]] = {}
+        self._object_pose_failures: Dict[str, Dict[str, Any]] = {}
+        self._object_prim_overrides_cache: Optional[Dict[str, str]] = None
         self._first_call_timeout = float(os.environ.get("GENIESIM_FIRST_CALL_TIMEOUT_S", "300"))
         self._circuit_breaker = CircuitBreaker(
             f"geniesim-grpc-{self.host}:{self.port}",
@@ -2548,28 +2560,123 @@ class GenieSimGRPCClient:
 
         # --- 3. Real object poses via SimObjectService ---
         scene_objects = []
-        # Use the task_config object prims if available
-        object_prims = list(getattr(self, "_scene_object_prims", []))
-        if getattr(self, "_resolved_any_object_pose", False):
-            object_prims.extend(getattr(self, "_scene_variation_object_prims", []))
-        if object_prims and self._channel is not None:
-            for prim_path in object_prims:
-                resolved = self._resolve_object_prim(prim_path)
+        object_dynamic_ids = list(getattr(self, "_scene_object_ids_dynamic", []))
+        object_static_ids = list(getattr(self, "_scene_object_ids_static", []))
+        if not object_dynamic_ids and not object_static_ids:
+            object_dynamic_ids = list(getattr(self, "_scene_object_prims", []))
+        variation_ids = list(getattr(self, "_scene_variation_object_ids", []))
+        if not variation_ids:
+            variation_ids = list(getattr(self, "_scene_variation_object_prims", []))
+        if getattr(self, "_resolved_any_object_pose", False) and variation_ids:
+            object_dynamic_ids.extend(variation_ids)
+        # Deduplicate while preserving order
+        object_dynamic_ids = list(dict.fromkeys(object_dynamic_ids))
+        object_static_ids = list(dict.fromkeys(object_static_ids))
+
+        now_ts = _time.time()
+        _consecutive_failures = 0
+        _early_fail_threshold = get_geniesim_object_pose_early_fail()
+        try:
+            max_failures = int(os.environ.get("GENIESIM_OBJECT_POSE_MAX_FAILURES", "3") or 3)
+        except ValueError:
+            max_failures = 3
+        try:
+            backoff_s = float(os.environ.get("GENIESIM_OBJECT_POSE_BACKOFF_S", "30") or 30.0)
+        except ValueError:
+            backoff_s = 30.0
+        try:
+            static_ttl_s = float(os.environ.get("GENIESIM_OBJECT_POSE_STATIC_TTL_S", "0") or 0.0)
+        except ValueError:
+            static_ttl_s = 0.0
+
+        def _should_skip(obj_id: str) -> bool:
+            info = self._object_pose_failures.get(obj_id) or {}
+            next_ts = info.get("next_retry_ts") or 0.0
+            return bool(next_ts and now_ts < next_ts)
+
+        def _record_failure(obj_id: str) -> None:
+            info = self._object_pose_failures.get(obj_id, {"count": 0, "next_retry_ts": 0.0})
+            count = int(info.get("count", 0)) + 1
+            if count >= max_failures:
+                info["next_retry_ts"] = now_ts + backoff_s
+                count = 0
+            info["count"] = count
+            self._object_pose_failures[obj_id] = info
+
+        def _record_success(obj_id: str) -> None:
+            if obj_id in self._object_pose_failures:
+                self._object_pose_failures.pop(obj_id, None)
+
+        if (object_dynamic_ids or object_static_ids) and self._channel is not None:
+            # Dynamic objects: query every observation
+            for obj_id in object_dynamic_ids:
+                if _consecutive_failures >= _early_fail_threshold:
+                    logger.warning(
+                        f"[OBS] Early termination: {_consecutive_failures} consecutive object pose failures. "
+                        "Skipping remaining dynamic objects."
+                    )
+                    break
+                if _should_skip(obj_id):
+                    continue
+                resolved = self._resolve_object_prim(obj_id)
                 if resolved is None:
-                    if prim_path in getattr(self, "_scene_variation_object_prims", []):
+                    _consecutive_failures += 1
+                    _record_failure(obj_id)
+                    if obj_id in variation_ids:
                         if not hasattr(self, "_unresolved_variation_objects"):
                             self._unresolved_variation_objects: Set[str] = set()
-                        self._unresolved_variation_objects.add(prim_path)
+                        self._unresolved_variation_objects.add(obj_id)
                     continue
+                _consecutive_failures = 0
                 resolved_path, obj_pose = resolved
                 scene_objects.append({
-                    "object_id": prim_path,
+                    "object_id": obj_id,
+                    "prim_path": resolved_path,
                     "pose": obj_pose,
                 })
+                _record_success(obj_id)
                 logger.info(f"[OBS] Got real object pose for {resolved_path}: {obj_pose}")
-                if prim_path in getattr(self, "_scene_variation_object_prims", []):
+                if obj_id in variation_ids:
                     if hasattr(self, "_unresolved_variation_objects"):
-                        self._unresolved_variation_objects.discard(prim_path)
+                        self._unresolved_variation_objects.discard(obj_id)
+
+            # Static objects: cache and refresh based on TTL
+            for obj_id in object_static_ids:
+                cache = self._static_object_pose_cache.get(obj_id)
+                cache_ok = False
+                if cache:
+                    if static_ttl_s <= 0:
+                        cache_ok = True
+                    else:
+                        cached_ts = float(cache.get("timestamp", 0.0))
+                        if now_ts - cached_ts <= static_ttl_s:
+                            cache_ok = True
+                if cache_ok:
+                    scene_objects.append({
+                        "object_id": obj_id,
+                        "prim_path": cache.get("prim_path"),
+                        "pose": cache.get("pose") or {},
+                    })
+                    continue
+                if _should_skip(obj_id):
+                    continue
+                resolved = self._resolve_object_prim(obj_id)
+                if resolved is None:
+                    _record_failure(obj_id)
+                    continue
+                resolved_path, obj_pose = resolved
+                self._static_object_pose_cache[obj_id] = {
+                    "pose": obj_pose,
+                    "prim_path": resolved_path,
+                    "timestamp": now_ts,
+                }
+                scene_objects.append({
+                    "object_id": obj_id,
+                    "prim_path": resolved_path,
+                    "pose": obj_pose,
+                })
+                _record_success(obj_id)
+                logger.info(f"[OBS] Got real object pose for {resolved_path}: {obj_pose}")
 
         if hasattr(self, "_unresolved_variation_objects") and self._unresolved_variation_objects:
             if not hasattr(self, "_variation_warning_logged"):
@@ -2782,37 +2889,97 @@ class GenieSimGRPCClient:
         if prim_path in self._resolved_prim_cache:
             return [self._resolved_prim_cache[prim_path]]
 
-        # The Genie Sim server loads scene objects under /World/Scene/obj_{name}, so try that FIRST.
-        _bare_name = prim_path.rsplit("/", 1)[-1] if "/" in prim_path else prim_path
-        candidates = [
-            f"/World/Scene/obj_{_bare_name}",
-            f"/World/Scene/{_bare_name}",
-            prim_path,
-        ]
-        if not prim_path.startswith("/World/"):
-            candidates.append(f"/World/{prim_path}")
-        if prim_path.startswith("/World/"):
-            _bare = prim_path[len("/World/"):]
-            candidates.append(f"/{_bare}")
-            candidates.append(f"/Root/{_bare}")
-        if not prim_path.startswith("/"):
-            candidates.append(f"/{prim_path}")
+        # Load explicit overrides (if provided)
+        overrides = self._object_prim_overrides_cache
+        if overrides is None:
+            overrides = {}
+            raw = os.environ.get("GENIESIM_OBJECT_PRIM_OVERRIDES_JSON", "")
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        overrides = {str(k): str(v) for k, v in parsed.items()}
+                    else:
+                        logger.warning("GENIESIM_OBJECT_PRIM_OVERRIDES_JSON must be a JSON dict")
+                except Exception as exc:
+                    logger.warning("Failed to parse GENIESIM_OBJECT_PRIM_OVERRIDES_JSON: %s", exc)
+            self._object_prim_overrides_cache = overrides
 
-        # Try without numeric suffix (e.g., Pot057 -> Pot) for fuzzy matching
+        candidates: List[str] = []
+        if overrides and prim_path in overrides:
+            candidates.append(overrides[prim_path])
+
+        def _add_name(names: List[str], value: Optional[str]) -> None:
+            if not value:
+                return
+            if value not in names:
+                names.append(value)
+
+        names: List[str] = []
+        _add_name(names, prim_path)
+        if "/" in prim_path:
+            _add_name(names, prim_path.rstrip("/").rsplit("/", 1)[-1])
+        if "_obj_" in prim_path:
+            _add_name(names, prim_path.split("_obj_")[-1])
+        for alias in self._object_prim_aliases.get(prim_path, []):
+            _add_name(names, alias)
+        if prim_path.lower().startswith("variation_"):
+            _add_name(names, prim_path.split("variation_", 1)[-1])
+
+        # Add numeric-suffix-stripped and lowercase variants
         import re
-        _base_name = re.sub(r'\d+$', '', _bare_name)
-        if _base_name and _base_name != _bare_name:
-            candidates.append(f"/World/Scene/obj_{_base_name}")
-            candidates.append(f"/World/Scene/{_base_name}")
-            candidates.append(f"/World/{_base_name}")
+        base_names: List[str] = []
+        for name in list(names):
+            if "/" in name:
+                continue
+            base = re.sub(r"\d+$", "", name)
+            if base and base != name:
+                base_names.append(base)
+            lower = name.lower()
+            if lower != name:
+                base_names.append(lower)
+        for name in base_names:
+            _add_name(names, name)
 
-        # Try lowercase variants for case-insensitive matching
-        _lower_name = _bare_name.lower()
-        if _lower_name != _bare_name:
-            candidates.append(f"/World/Scene/obj_{_lower_name}")
-            candidates.append(f"/World/{_lower_name}")
+        # Optional suffix indices (e.g., _1, _2) for replicated prims
+        try:
+            index_max = int(os.environ.get("GENIESIM_OBJECT_PRIM_INDEX_MAX", "0") or 0)
+        except ValueError:
+            index_max = 0
+        if index_max > 0:
+            indexed: List[str] = []
+            for name in names:
+                if "/" in name:
+                    continue
+                for i in range(1, index_max + 1):
+                    indexed.append(f"{name}_{i}")
+            for name in indexed:
+                _add_name(names, name)
 
-        return list(dict.fromkeys(candidates))
+        # Build candidate prim paths for each name
+        for name in names:
+            if not name:
+                continue
+            if name.startswith("/"):
+                candidates.append(name)
+                if name.startswith("/World/"):
+                    _bare = name[len("/World/"):]
+                    candidates.append(f"/{_bare}")
+                    candidates.append(f"/Root/{_bare}")
+                continue
+            candidates.append(f"/World/Scene/obj_{name}")
+            candidates.append(f"/World/Scene/{name}")
+            candidates.append(f"/World/{name}")
+
+        # Deduplicate and limit candidates to avoid timeout accumulation
+        _unique = list(dict.fromkeys(candidates))
+        _max_candidates = get_geniesim_object_pose_max_candidates()
+        if len(_unique) > _max_candidates:
+            logger.debug(
+                f"[OBS] Limiting prim candidates for {prim_path} from {len(_unique)} to {_max_candidates}"
+            )
+            _unique = _unique[:_max_candidates]
+        return _unique
 
     def _resolve_object_prim(
         self,
@@ -2861,13 +3028,15 @@ class GenieSimGRPCClient:
         payload = b"\x0a" + self._encode_varint(len(prim_bytes)) + prim_bytes
 
         method = "/aimdk.protocol.SimObjectService/get_object_pose"
+        # Use shorter timeout for object pose queries to avoid DEADLINE_EXCEEDED accumulation
+        _pose_timeout = get_geniesim_object_pose_timeout_s()
         try:
             call = self._channel.unary_unary(
                 method,
                 request_serializer=lambda x: x,
                 response_deserializer=lambda x: x,
             )
-            raw_response = call(payload, timeout=self.timeout)
+            raw_response = call(payload, timeout=_pose_timeout)
             # Parse GetObjectPoseRsp manually
             # Field 2 is SE3RpyPose (object_pose)
             pose = self._parse_object_pose_response(raw_response)
@@ -4499,6 +4668,127 @@ class GenieSimLocalFramework:
         else:
             logger.info("[GENIESIM-LOCAL] %s", msg, extra=extra)
 
+    def _build_object_metadata_from_scene_config(
+        self,
+        task_config: Dict[str, Any],
+        scene_config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build object metadata from scene_config or task_config."""
+        nodes: List[Dict[str, Any]] = []
+        if scene_config:
+            nodes = list(scene_config.get("nodes") or [])
+            if not nodes:
+                objects = scene_config.get("objects") or []
+                for obj in objects:
+                    asset = obj.get("asset") or {}
+                    asset_path = (
+                        asset.get("path")
+                        or obj.get("asset_path")
+                        or obj.get("usd_path")
+                        or ""
+                    )
+                    asset_id = (
+                        obj.get("id")
+                        or obj.get("asset_id")
+                        or obj.get("name")
+                        or ""
+                    )
+                    if not asset_id:
+                        continue
+                    node = {
+                        "asset_id": asset_id,
+                        "usd_path": asset_path,
+                        "bp_metadata": {
+                            "category": obj.get("category") or "",
+                            "sim_role": obj.get("sim_role") or "",
+                        },
+                        "properties": obj.get("physics") or {},
+                    }
+                    if "is_variation_asset" in obj:
+                        node["is_variation_asset"] = obj.get("is_variation_asset")
+                    nodes.append(node)
+        if not nodes:
+            nodes = list(task_config.get("nodes") or [])
+
+        dynamic_ids: set = set()
+        static_ids: set = set()
+        variation_ids: set = set()
+        object_sim_roles: Dict[str, str] = {}
+        object_prim_aliases: Dict[str, List[str]] = {}
+
+        def _add_alias(asset_id: str, alias: Optional[str]) -> None:
+            if not asset_id or not alias:
+                return
+            alias_clean = str(alias).rstrip("/").rsplit("/", 1)[-1]
+            if not alias_clean:
+                return
+            existing = object_prim_aliases.setdefault(asset_id, [])
+            if alias_clean not in existing:
+                existing.append(alias_clean)
+
+        for node in nodes:
+            asset_id = (
+                node.get("asset_id")
+                or node.get("id")
+                or node.get("name")
+                or ""
+            )
+            if not asset_id:
+                continue
+            sim_role = (
+                (node.get("bp_metadata") or {}).get("sim_role")
+                or node.get("sim_role")
+                or ""
+            )
+            object_sim_roles[asset_id] = str(sim_role)
+            is_variation = bool(node.get("is_variation_asset")) or asset_id.lower().startswith("variation_")
+            if is_variation:
+                variation_ids.add(asset_id)
+            if str(sim_role).lower() == "static":
+                static_ids.add(asset_id)
+            else:
+                dynamic_ids.add(asset_id)
+
+            if "_obj_" in asset_id:
+                _add_alias(asset_id, asset_id.split("_obj_")[-1])
+            if asset_id.lower().startswith("variation_"):
+                _add_alias(asset_id, asset_id.split("variation_", 1)[-1])
+            usd_path = node.get("usd_path") or ""
+            if usd_path:
+                stem = Path(usd_path).stem
+                _add_alias(asset_id, stem)
+                if stem.lower().startswith("variation_"):
+                    _add_alias(asset_id, stem.split("variation_", 1)[-1])
+
+        tasks = task_config.get("suggested_tasks", [task_config])
+        for task in tasks:
+            target = task.get("target_object") or task.get("target_object_id") or ""
+            if target:
+                dynamic_ids.add(target)
+                if "_obj_" in target:
+                    _add_alias(target, target.split("_obj_")[-1])
+                if target.lower().startswith("variation_"):
+                    _add_alias(target, target.split("variation_", 1)[-1])
+            goal = task.get("goal_region") or ""
+            if goal:
+                if str(object_sim_roles.get(goal, "")).lower() == "static":
+                    static_ids.add(goal)
+                else:
+                    dynamic_ids.add(goal)
+                if "_obj_" in goal:
+                    _add_alias(goal, goal.split("_obj_")[-1])
+                if goal.lower().startswith("variation_"):
+                    _add_alias(goal, goal.split("variation_", 1)[-1])
+
+        return {
+            "nodes": nodes,
+            "dynamic_ids": sorted(dynamic_ids),
+            "static_ids": sorted(static_ids),
+            "variation_ids": sorted(variation_ids),
+            "object_sim_roles": object_sim_roles,
+            "object_prim_aliases": object_prim_aliases,
+        }
+
     # =========================================================================
     # Server Management
     # =========================================================================
@@ -5085,12 +5375,17 @@ class GenieSimLocalFramework:
 
         # 3) Object pose must be non-zero (not identity fallback)
         try:
-            obj_prims = (
-                getattr(self, "_scene_object_prims", [])
-                or getattr(self._client, "_scene_object_prims", [])
+            obj_ids = (
+                getattr(self._client, "_scene_object_ids_dynamic", [])
+                or getattr(self, "_scene_object_ids_dynamic", [])
             )
-            if obj_prims:
-                resolved = self._client._resolve_object_prim(obj_prims[0])
+            if not obj_ids:
+                obj_ids = (
+                    getattr(self, "_scene_object_prims", [])
+                    or getattr(self._client, "_scene_object_prims", [])
+                )
+            if obj_ids:
+                resolved = self._client._resolve_object_prim(obj_ids[0])
                 if resolved is None:
                     errors.append("object_pose unresolved; server object_pose patch required")
                 else:
@@ -5392,59 +5687,40 @@ class GenieSimLocalFramework:
                     self.log(f"Camera prim map (G1 defaults — no robot config found): {_cam_map}")
                 self._client._camera_prim_map = _cam_map
 
-            # Populate scene object prim paths for real object pose queries.
-            # Derive USD prim paths from scene_graph nodes or task_config objects.
-            _scene_obj_prims: List[str] = []
-            _scene_variation_prims: List[str] = []
-            _sg_nodes = (scene_config or {}).get("nodes", [])
-            if not _sg_nodes:
-                _sg_nodes = task_config.get("nodes", [])
-            for _node in _sg_nodes:
-                _asset_id = _node.get("asset_id", "")
-                _usd_path = _node.get("usd_path", "")
-                _variation_flag = _asset_id.lower().startswith("variation_")
-                # Derive USD stage prim path from asset file name
-                # e.g. ".../obj_Pot057/Pot057.usd" → "/World/Pot057"
-                if _usd_path:
-                    _stem = Path(_usd_path).stem  # "Pot057"
-                    if _stem.lower().startswith("variation_"):
-                        _variation_flag = True
-                    _prim = f"/World/{_stem}"
-                elif _asset_id:
-                    # Strip scene prefix: "lightwheel_kitchen_obj_Pot057" → "Pot057"
-                    _parts = _asset_id.split("_obj_")
-                    _prim = f"/World/{_parts[-1]}" if len(_parts) > 1 else f"/World/{_asset_id}"
-                else:
-                    continue
-                if _variation_flag:
-                    _scene_variation_prims.append(_prim)
-                else:
-                    _scene_obj_prims.append(_prim)
-            # Also add objects from task_config's suggested_tasks
-            for _t in task_config.get("suggested_tasks", []):
-                _target = _t.get("target_object", "")
-                if _target:
-                    _parts = _target.split("_obj_")
-                    _prim = f"/World/{_parts[-1]}" if len(_parts) > 1 else f"/World/{_target}"
-                    if _prim not in _scene_obj_prims:
-                        _scene_obj_prims.append(_prim)
-                _goal = _t.get("goal_region", "")
-                if _goal:
-                    _prim = f"/World/{_goal}"
-                    if _prim not in _scene_obj_prims:
-                        _scene_obj_prims.append(_prim)
-            self._client._scene_object_prims = _scene_obj_prims
-            self._client._scene_variation_object_prims = _scene_variation_prims
-            self._scene_object_prims = _scene_obj_prims
-            self._scene_variation_object_prims = _scene_variation_prims
-            if _scene_obj_prims:
-                self.log(f"Scene object prims for real pose queries: {_scene_obj_prims}")
+            # Populate scene object IDs for real object pose queries.
+            _scene_meta = self._build_object_metadata_from_scene_config(
+                task_config=task_config,
+                scene_config=scene_config,
+            )
+            _sg_nodes = _scene_meta["nodes"]
+            _scene_dynamic_ids = _scene_meta["dynamic_ids"]
+            _scene_static_ids = _scene_meta["static_ids"]
+            _scene_variation_ids = _scene_meta["variation_ids"]
+
+            # Store metadata on client + framework for pose resolution
+            self._client._scene_object_ids_dynamic = _scene_dynamic_ids
+            self._client._scene_object_ids_static = _scene_static_ids
+            self._client._scene_variation_object_ids = _scene_variation_ids
+            self._client._object_sim_roles = _scene_meta["object_sim_roles"]
+            self._client._object_prim_aliases = _scene_meta["object_prim_aliases"]
+
+            _scene_object_ids = list(dict.fromkeys(_scene_dynamic_ids + _scene_static_ids))
+            self._client._scene_object_prims = _scene_object_ids
+            self._client._scene_variation_object_prims = _scene_variation_ids
+            self._scene_object_ids_dynamic = _scene_dynamic_ids
+            self._scene_object_ids_static = _scene_static_ids
+            self._scene_variation_object_ids = _scene_variation_ids
+            self._scene_object_prims = _scene_object_ids
+            self._scene_variation_object_prims = _scene_variation_ids
+
+            if _scene_object_ids:
+                self.log(f"Scene object IDs for real pose queries: {_scene_object_ids}")
             else:
-                self.log("No scene object prims found — object poses will be synthetic", "WARNING")
-            if _scene_variation_prims:
+                self.log("No scene object IDs found — object poses will be synthetic", "WARNING")
+            if _scene_variation_ids:
                 self.log(
-                    "Deferring variation prims until first successful pose lookup: "
-                    f"{_scene_variation_prims}"
+                    "Deferring variation objects until first successful pose lookup: "
+                    f"{_scene_variation_ids}"
                 )
 
             # Strict realism preflight (fail-closed)
@@ -8521,13 +8797,15 @@ class GenieSimLocalFramework:
             # Direct substring match on object ids
             for _oid in _object_poses.keys():
                 _oid_lower = str(_oid).lower()
-                if _oid_lower and _oid_lower in name_lower:
+                _oid_suffix = _oid_lower.split("_obj_")[-1] if "_obj_" in _oid_lower else ""
+                if (_oid_lower and _oid_lower in name_lower) or (_oid_suffix and _oid_suffix in name_lower):
                     return _oid
             # Token match as fallback
             tokens = _tokenize_body_name(name_lower)
             for _oid in _object_poses.keys():
                 _oid_lower = str(_oid).lower()
-                if _oid_lower in tokens:
+                _oid_suffix = _oid_lower.split("_obj_")[-1] if "_obj_" in _oid_lower else ""
+                if _oid_lower in tokens or (_oid_suffix and _oid_suffix in tokens):
                     return _oid
             return None
 
@@ -8539,7 +8817,8 @@ class GenieSimLocalFramework:
                 if _oid == hint:
                     return _oid
                 _oid_norm = str(_oid).rsplit("/", 1)[-1].lower()
-                if _oid_norm == hint_norm:
+                _oid_suffix = _oid_norm.split("_obj_")[-1] if "_obj_" in _oid_norm else ""
+                if _oid_norm == hint_norm or (_oid_suffix and _oid_suffix == hint_norm):
                     return _oid
             return None
 
