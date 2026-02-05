@@ -3017,6 +3017,23 @@ class LocalPipelineRunner:
             lines.append('        bool inputs:enableColorTemperature = true')
             lines.append('    }')
 
+        # Add PhysicsScene for PhysX simulation
+        # Without a PhysicsScene, PhysX cannot simulate rigid bodies and
+        # objects will remain static even during robot manipulation.
+        lines.append('')
+        lines.append('    def PhysicsScene "PhysicsScene" {')
+        lines.append('        vector3f physics:gravityDirection = (0, -1, 0)')
+        lines.append('        float physics:gravityMagnitude = 9.81')
+        lines.append('    }')
+
+        # Add a ground plane for physics stability
+        lines.append('')
+        lines.append('    def Xform "GroundPlane" {')
+        lines.append('        def Plane "CollisionPlane" {')
+        lines.append('            uniform token purpose = "guide"')
+        lines.append('        }')
+        lines.append('    }')
+
         lines.append('}')
 
         return '\n'.join(lines)

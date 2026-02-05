@@ -30,7 +30,7 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
     # --- BEGIN BlueprintPipeline object_pose patch ---
     # Class-level transform cache and scene stage reference
     _bp_transform_cache = {}     # {prim_path: {"position": [...], "rotation": [...], "timestamp": float}}
-    _bp_cache_ttl_s = 0.05       # 50ms TTL for dynamic objects (20Hz refresh rate)
+    _bp_cache_ttl_s = 0.005      # 5ms TTL for dynamic objects (200Hz effective rate)
     _bp_scene_stage = None       # Cached reference to the scene stage
     _bp_scene_stage_id = None    # Stage identifier to detect context switches
 
@@ -40,6 +40,9 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
         This stage reference is used for all object pose queries to avoid
         context switching issues where omni.usd.get_context().get_stage()
         returns a different stage (e.g., the render stage).
+
+        Also auto-enables RigidBodyAPI on scene objects so PhysX can track
+        their motion during robot manipulation episodes.
         \"\"\"
         try:
             import omni.usd
@@ -58,6 +61,20 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                 print(f"[PATCH] World prims available: {len(world_prims)}")
                 if world_prims[:10]:
                     print(f"[PATCH] First 10 World prims: {world_prims[:10]}")
+
+                # Auto-enable RigidBodyAPI on scene objects for physics tracking
+                from pxr import UsdGeom
+                _scene_obj_count = 0
+                for p in stage.Traverse():
+                    ppath = str(p.GetPath())
+                    if ("/World/Scene/" in ppath or "/World/obj_" in ppath):
+                        if p.IsA(UsdGeom.Xformable):
+                            self._bp_ensure_physics_on_prim(p, ppath)
+                            _scene_obj_count += 1
+                if _scene_obj_count > 0:
+                    print(f"[PATCH] Enabled physics tracking on {_scene_obj_count} scene objects")
+                    # Step physics to register new rigid bodies
+                    self._bp_step_physics(num_steps=5)
         except Exception as e:
             print(f"[PATCH] Failed to capture scene stage: {e}")
 
@@ -177,8 +194,15 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
         return cache["position"], cache["rotation"]
 
     def _bp_refresh_transform(self, prim_path):
-        \"\"\"Refresh the cached transform for a prim using the scene stage.\"\"\"
+        \"\"\"Refresh the cached transform for a prim using the scene stage.
+
+        Steps physics before querying to ensure we get up-to-date poses
+        that reflect any robot-object interactions.
+        \"\"\"
         try:
+            # Step physics to advance any in-flight interactions
+            self._bp_step_physics(num_steps=1)
+
             stage = self._bp_get_scene_stage()
             if stage is None:
                 return
@@ -349,8 +373,91 @@ PHYSICS_POSE_MARKER = "BlueprintPipeline object_pose physics_pose patch"
 PHYSICS_POSE_HELPER = textwrap.dedent("""\
 
     # --- BEGIN BlueprintPipeline object_pose physics_pose patch ---
+    _bp_physics_enabled_prims = set()  # Prims where we've applied RigidBodyAPI
+    _bp_physics_enable_logged = set()  # Avoid log spam per-prim
+
+    def _bp_ensure_physics_on_prim(self, prim, prim_path):
+        \"\"\"Enable RigidBodyAPI on a prim if not already present.
+
+        This allows PhysX to track the object's pose during simulation,
+        which is required for detecting object motion during manipulation.
+        Without RigidBodyAPI, objects are kinematic and their transforms
+        never change even when the robot interacts with them.
+        \"\"\"
+        cls = type(self)
+        if prim_path in cls._bp_physics_enabled_prims:
+            return True  # Already enabled
+
+        try:
+            from pxr import UsdPhysics, PhysxSchema
+
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                cls._bp_physics_enabled_prims.add(prim_path)
+                return True
+
+            # Only enable on prims under /World/Scene/ (scene objects, not robot parts)
+            if "/World/Scene/" not in prim_path and "/World/obj_" not in prim_path:
+                return False
+
+            # Apply RigidBodyAPI to make this a physics-tracked object
+            UsdPhysics.RigidBodyAPI.Apply(prim)
+
+            # Set kinematic=False so PhysX simulates this body
+            rigid_body_api = UsdPhysics.RigidBodyAPI(prim)
+            rigid_body_api.CreateKinematicEnabledAttr(False)
+
+            # Apply collision API if not present
+            if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI.Apply(prim)
+
+            # Optionally apply PhysX rigid body properties for better simulation
+            try:
+                if not prim.HasAPI(PhysxSchema.PhysxRigidBodyAPI):
+                    PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+            except Exception:
+                pass  # PhysxSchema may not be available
+
+            cls._bp_physics_enabled_prims.add(prim_path)
+
+            if prim_path not in cls._bp_physics_enable_logged:
+                cls._bp_physics_enable_logged.add(prim_path)
+                print(f"[PATCH] Enabled RigidBodyAPI + CollisionAPI on {prim_path} for physics tracking")
+
+            return True
+        except Exception as e:
+            if prim_path not in cls._bp_physics_enable_logged:
+                cls._bp_physics_enable_logged.add(prim_path)
+                print(f"[PATCH] Failed to enable physics on {prim_path}: {e}")
+            return False
+
+    def _bp_step_physics(self, num_steps=1):
+        \"\"\"Advance the physics simulation by N steps.
+
+        This is necessary between observations to allow objects to respond
+        to robot interactions (gravity, contacts, etc.).
+        \"\"\"
+        try:
+            import omni.kit.app
+            import omni.timeline
+
+            timeline = omni.timeline.get_timeline_interface()
+            if timeline is not None and not timeline.is_playing():
+                timeline.play()
+
+            app = omni.kit.app.get_app()
+            for _ in range(num_steps):
+                app.update()
+        except Exception as e:
+            if not hasattr(self, '_bp_step_physics_warned'):
+                self._bp_step_physics_warned = True
+                print(f"[PATCH] Physics stepping failed: {e}")
+
     def _bp_get_physics_pose(self, prim_path):
         \"\"\"Get live physics pose for a rigid body using dynamic_control.
+
+        If the prim doesn't have RigidBodyAPI, this method will attempt to
+        enable it (for scene objects under /World/Scene/) so PhysX can track
+        the object's motion during robot manipulation.
 
         Returns (position, rotation) tuple or (None, None) if not a physics body
         or if physics is not running.
@@ -370,10 +477,13 @@ PHYSICS_POSE_HELPER = textwrap.dedent("""\
             if not prim or not prim.IsValid():
                 return None, None
 
-            # Check if this prim has RigidBodyAPI (is a physics-enabled rigid body)
+            # Auto-enable RigidBodyAPI on scene objects for physics tracking
             if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                # Not a rigid body - fall back to USD transform
-                return None, None
+                enabled = self._bp_ensure_physics_on_prim(prim, prim_path)
+                if not enabled:
+                    return None, None
+                # Step physics to register the new rigid body
+                self._bp_step_physics(num_steps=2)
 
             # Get the dynamic control interface
             dc = _dynamic_control.acquire_dynamic_control_interface()
@@ -383,8 +493,12 @@ PHYSICS_POSE_HELPER = textwrap.dedent("""\
             # Get the rigid body handle
             rb_handle = dc.get_rigid_body(prim_path)
             if rb_handle == _dynamic_control.INVALID_HANDLE:
-                # Physics may not be running or prim not registered
-                return None, None
+                # Physics may not be running or prim not registered yet
+                # Try stepping physics to allow registration
+                self._bp_step_physics(num_steps=3)
+                rb_handle = dc.get_rigid_body(prim_path)
+                if rb_handle == _dynamic_control.INVALID_HANDLE:
+                    return None, None
 
             # Get the live pose from PhysX
             pose = dc.get_rigid_body_pose(rb_handle)
@@ -419,6 +533,47 @@ def patch_file():
 
     has_patch_marker = PATCH_MARKER in content
     has_live_time = "def _bp_live_timecode" in content
+    has_physics_v2 = "def _bp_ensure_physics_on_prim" in content
+
+    # If we have an older version of the patch (missing physics v2), strip
+    # all BlueprintPipeline blocks and re-apply from scratch.
+    force_reapply = has_patch_marker and not has_physics_v2
+    if force_reapply:
+        print("[PATCH] Detected older patch version (missing physics v2) - upgrading")
+        # Remove all BEGIN...END blocks
+        for block_label in [
+            "BlueprintPipeline object_pose patch",
+            "BlueprintPipeline object_pose live_timecode patch",
+            "BlueprintPipeline object_pose physics_pose patch",
+        ]:
+            begin_tag = f"# --- BEGIN {block_label} ---"
+            end_tag = f"# --- END {block_label} ---"
+            while begin_tag in content:
+                start = content.find(begin_tag)
+                end = content.find(end_tag, start)
+                if start == -1 or end == -1:
+                    break
+                # Include the whole line (find previous newline)
+                line_start = content.rfind("\n", 0, start)
+                if line_start == -1:
+                    line_start = 0
+                line_end = content.find("\n", end)
+                if line_end == -1:
+                    line_end = len(content)
+                content = content[:line_start] + content[line_end:]
+                print(f"[PATCH] Removed old block: {block_label}")
+        # Also remove any inline patch markers (diagnostic lines, resolver injections)
+        cleaned_lines = []
+        for line in content.split("\n"):
+            if PATCH_MARKER in line and "# ---" not in line:
+                continue  # Skip inline injected lines
+            if LIVE_TIME_MARKER in line:
+                continue
+            cleaned_lines.append(line)
+        content = "\n".join(cleaned_lines)
+        has_patch_marker = False
+        has_live_time = False
+        print("[PATCH] Stripped old patch — re-applying fresh")
 
     # 1. Add the helper method to the class (append like camera patch)
     method_indent = "    "  # default 4 spaces
@@ -442,8 +597,19 @@ def patch_file():
         patched = patched + "\n\n" + indented_live
 
     # 1c. Add physics pose helper for live PhysX queries
-    has_physics_pose = "def _bp_get_physics_pose" in content
-    if not has_physics_pose:
+    # Check for _bp_ensure_physics_on_prim (new v2 physics helper) rather than
+    # just _bp_get_physics_pose which may exist from an older version without
+    # the physics-enable and step methods.
+    has_physics_pose_v2 = "def _bp_ensure_physics_on_prim" in content
+    if not has_physics_pose_v2:
+        # Remove old physics pose block if present (replace with new version)
+        if "BEGIN BlueprintPipeline object_pose physics_pose patch" in content:
+            old_block_start = patched.find("    # --- BEGIN BlueprintPipeline object_pose physics_pose patch ---")
+            old_block_end = patched.find("    # --- END BlueprintPipeline object_pose physics_pose patch ---")
+            if old_block_start != -1 and old_block_end != -1:
+                old_block_end = patched.find("\n", old_block_end) + 1
+                patched = patched[:old_block_start] + patched[old_block_end:]
+                print("[PATCH] Removed old physics_pose block (upgrading to v2)")
         indented_physics = "\n".join(
             (method_indent + line) if line.strip() else line
             for line in PHYSICS_POSE_HELPER.splitlines()
