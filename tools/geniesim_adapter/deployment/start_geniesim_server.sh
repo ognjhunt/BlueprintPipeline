@@ -126,10 +126,12 @@ import re
 content = re.sub(r'\\s*\"--/persistent/rtx/modes/rt2/enabled=true\",?\\n?', '\\n', content)
 
 # 5. Add extra args after extra_args opening
+# NOTE: Do NOT set --/renderer/activeGpu=0 — it breaks RGB output on L4 GPUs.
+# Let Isaac Sim auto-detect the GPU (activeGpu=-1).
 if '\"--reset-user\"' not in content:
     content = content.replace(
         '\"extra_args\": [',
-        '\"extra_args\": [\\n            \"--reset-user\",\\n            \"--/exts/isaacsim.core.throttling/enable_async=false\",\\n            \"--/renderer/activeGpu=0\",')
+        '\"extra_args\": [\\n            \"--reset-user\",')
 
 # 6. Add carb settings after asyncRendering line
 if 'rt2/enabled\", False' not in content:

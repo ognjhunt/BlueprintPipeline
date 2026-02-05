@@ -50,12 +50,12 @@ def _replace_extra_args_block(content: str) -> str:
     for line in lines:
         if not replacing and re.match(r'^\s*"extra_args"\s*:\s*\[', line):
             block_indent = line[: line.index('"extra_args"')]
+            # NOTE: Do NOT set --/renderer/activeGpu=0 — it breaks RGB output
+            # on L4 GPUs.  Let Isaac Sim auto-detect the GPU (activeGpu=-1).
             output.extend(
                 [
                     f'{block_indent}"extra_args": [',
                     f'{block_indent}    "--reset-user",',
-                    f'{block_indent}    "--/exts/isaacsim.core.throttling/enable_async=false",',
-                    f'{block_indent}    "--/renderer/activeGpu=0",',
                     f"{block_indent}],",
                 ]
             )

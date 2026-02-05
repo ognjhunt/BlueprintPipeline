@@ -259,7 +259,9 @@ CAMERA_HANDLER = textwrap.dedent("""\
             # server's main loop: World.render() or app.update().
             # rep.orchestrator.step() alone does NOT trigger the GPU render in
             # RealTimePathTracing mode — it only advances the Replicator schedule.
+            _sync_render_call_count = [0]
             def _sync_render_step():
+                _sync_render_call_count[0] += 1
                 try:
                     import omni.kit.app
                     app = omni.kit.app.get_app()
@@ -274,7 +276,9 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 try:
                     rep.orchestrator.step()
                 except Exception as _rep_err:
-                    print(f"[PATCH] rep.orchestrator.step() error: {_rep_err}")
+                    # Log only on first few calls to avoid spam
+                    if _sync_render_call_count[0] <= 3:
+                        print(f"[PATCH] rep.orchestrator.step() error (call #{_sync_render_call_count[0]}): {_rep_err}")
 
             # Cache render products and annotators across calls
             if camera_prim_path not in cls._bp_render_products:
@@ -403,10 +407,29 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
             _uniq, _std = 0, 0.0
 
+            # Final render step before capture
             _sync_render_step()
             cls._bp_total_frames_rendered[camera_prim_path] = cls._bp_total_frames_rendered.get(camera_prim_path, 0) + 1
 
+            # Diagnostic: check annotator data shape/size immediately after orchestrator step
             rgb_data = rgb_annot.get_data()
+            _diag_raw = rgb_data
+            if _diag_raw is not None:
+                _diag_arr = np.asarray(_diag_raw)
+                print(f"[PATCH] DIAG raw annotator data: shape={_diag_arr.shape}, size={_diag_arr.size}, dtype={_diag_arr.dtype}, mean={_diag_arr.mean():.3f}")
+                if _diag_arr.size == 0:
+                    print(f"[PATCH] DIAG: annotator returned EMPTY array — orchestrator.step() may not have flushed")
+                    # Try additional orchestrator steps
+                    for _extra in range(5):
+                        rep.orchestrator.step()
+                        import omni.kit.app as _kit_app
+                        _kit_app.get_app().update()
+                    rgb_data = rgb_annot.get_data()
+                    if rgb_data is not None:
+                        _diag_arr2 = np.asarray(rgb_data)
+                        print(f"[PATCH] DIAG after extra steps: shape={_diag_arr2.shape}, size={_diag_arr2.size}, mean={_diag_arr2.mean():.3f}")
+            else:
+                print(f"[PATCH] DIAG: annotator returned None")
             if rgb_data is not None:
                 if hasattr(rgb_data, "numpy"):
                     rgb_data = rgb_data.numpy()
