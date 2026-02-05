@@ -64,6 +64,15 @@ if [ ! -f "${XORG_CONFIG_PATH}" ] || [ "${VM_XORG_REFRESH_CONFIG}" = "1" ]; then
   GPU_FUNC_DEC=$((10#${_func_dec}))
   XORG_BUS_ID="PCI:${GPU_BUS_DEC}:${GPU_DEV_DEC}:${GPU_FUNC_DEC}"
 
+  # Check driver version — 590+ does not support UseDisplayDevice "None"
+  NVIDIA_DRIVER_MAJOR="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | cut -d. -f1 | tr -d '[:space:]')"
+  USE_DISPLAY_DEVICE_LINE=""
+  if [ "${NVIDIA_DRIVER_MAJOR:-0}" -lt 590 ] 2>/dev/null; then
+    USE_DISPLAY_DEVICE_LINE='    Option "UseDisplayDevice" "None"'
+  else
+    echo "[vm-start-xorg] Driver ${NVIDIA_DRIVER_MAJOR}+ detected — skipping UseDisplayDevice None (incompatible)"
+  fi
+
   echo "[vm-start-xorg] Writing ${XORG_CONFIG_PATH} with BusID=${XORG_BUS_ID}"
   sudo tee "${XORG_CONFIG_PATH}" >/dev/null <<EOF
 Section "ServerLayout"
@@ -76,7 +85,7 @@ Section "Device"
     Driver "nvidia"
     BusID "${XORG_BUS_ID}"
     Option "AllowEmptyInitialConfiguration" "true"
-    Option "UseDisplayDevice" "None"
+${USE_DISPLAY_DEVICE_LINE}
 EndSection
 
 Section "Screen"

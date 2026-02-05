@@ -381,6 +381,8 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 cls._bp_warmup_done.add(camera_prim_path)
                 print(f"[PATCH] Camera warmup complete for {camera_prim_path} (total={cls._bp_total_frames_rendered[camera_prim_path]})")
 
+            _skip_rgb = _os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
+
             _min_colors = int(_os.environ.get("CAMERA_QUALITY_MIN_COLORS", "100"))
             _min_std = float(_os.environ.get("CAMERA_QUALITY_MIN_STD", "10"))
             _max_retries = int(_os.environ.get("CAMERA_QUALITY_MAX_RETRIES", "3"))
@@ -411,42 +413,13 @@ CAMERA_HANDLER = textwrap.dedent("""\
             _sync_render_step()
             cls._bp_total_frames_rendered[camera_prim_path] = cls._bp_total_frames_rendered.get(camera_prim_path, 0) + 1
 
-            # Diagnostic: check annotator data shape/size immediately after orchestrator step
-            rgb_data = rgb_annot.get_data()
-            _diag_raw = rgb_data
-            if _diag_raw is not None:
-                _diag_arr = np.asarray(_diag_raw)
-                print(f"[PATCH] DIAG raw annotator data: shape={_diag_arr.shape}, size={_diag_arr.size}, dtype={_diag_arr.dtype}, mean={_diag_arr.mean():.3f}")
-                if _diag_arr.size == 0:
-                    print(f"[PATCH] DIAG: annotator returned EMPTY array — orchestrator.step() may not have flushed")
-                    # Try additional orchestrator steps
-                    for _extra in range(5):
-                        rep.orchestrator.step()
-                        import omni.kit.app as _kit_app
-                        _kit_app.get_app().update()
-                    rgb_data = rgb_annot.get_data()
-                    if rgb_data is not None:
-                        _diag_arr2 = np.asarray(rgb_data)
-                        print(f"[PATCH] DIAG after extra steps: shape={_diag_arr2.shape}, size={_diag_arr2.size}, mean={_diag_arr2.mean():.3f}")
+            if _skip_rgb:
+                # Skip RGB capture entirely — set to None so downstream handles gracefully
+                result["rgb"] = None
+                print(f"[PATCH] SKIP_RGB_CAPTURE=true — skipping RGB for {camera_prim_path}")
             else:
-                print(f"[PATCH] DIAG: annotator returned None")
-            if rgb_data is not None:
-                if hasattr(rgb_data, "numpy"):
-                    rgb_data = rgb_data.numpy()
-                result["rgb"] = np.asarray(rgb_data, dtype=np.uint8)
-                h, w = result["rgb"].shape[:2]
-                result["camera_info"]["width"] = w
-                result["camera_info"]["height"] = h
-                _uniq, _std = _bp_rgb_quality(result["rgb"])
-                _retry = 0
-                while (_uniq < _min_colors or _std < _min_std) and _retry < _max_retries:
-                    for _ in range(_retry_steps):
-                        _sync_render_step()
-                    cls._bp_total_frames_rendered[camera_prim_path] = cls._bp_total_frames_rendered.get(camera_prim_path, 0) + _retry_steps
-                    _retry += 1
-                    rgb_data = rgb_annot.get_data()
-                    if rgb_data is None:
-                        continue
+                rgb_data = rgb_annot.get_data()
+                if rgb_data is not None:
                     if hasattr(rgb_data, "numpy"):
                         rgb_data = rgb_data.numpy()
                     result["rgb"] = np.asarray(rgb_data, dtype=np.uint8)
@@ -454,8 +427,24 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     result["camera_info"]["width"] = w
                     result["camera_info"]["height"] = h
                     _uniq, _std = _bp_rgb_quality(result["rgb"])
-                if _retry:
-                    print(f"[PATCH] Camera {camera_prim_path} quality retry={_retry} unique={_uniq} std={_std:.2f}")
+                    _retry = 0
+                    while (_uniq < _min_colors or _std < _min_std) and _retry < _max_retries:
+                        for _ in range(_retry_steps):
+                            _sync_render_step()
+                        cls._bp_total_frames_rendered[camera_prim_path] = cls._bp_total_frames_rendered.get(camera_prim_path, 0) + _retry_steps
+                        _retry += 1
+                        rgb_data = rgb_annot.get_data()
+                        if rgb_data is None:
+                            continue
+                        if hasattr(rgb_data, "numpy"):
+                            rgb_data = rgb_data.numpy()
+                        result["rgb"] = np.asarray(rgb_data, dtype=np.uint8)
+                        h, w = result["rgb"].shape[:2]
+                        result["camera_info"]["width"] = w
+                        result["camera_info"]["height"] = h
+                        _uniq, _std = _bp_rgb_quality(result["rgb"])
+                    if _retry:
+                        print(f"[PATCH] Camera {camera_prim_path} quality retry={_retry} unique={_uniq} std={_std:.2f}")
 
             depth_data = depth_annot.get_data()
             if depth_data is not None:
@@ -463,33 +452,20 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     depth_data = depth_data.numpy()
                 result["depth"] = np.asarray(depth_data, dtype=np.float32)
 
-            # Log compact data quality diagnostics
-            _rgb_result = result["rgb"]
-            _nonzero = int(np.count_nonzero(_rgb_result))
-            _total = _rgb_result.size
-            print(
-                f"[PATCH] Camera {camera_prim_path}: shape={_rgb_result.shape}, "
-                f"nonzero={_nonzero}/{_total}, unique={_uniq}, std={_std:.2f}"
-            )
+            # Log compact data quality diagnostics (skip if RGB was skipped)
+            _rgb_result = result.get("rgb")
+            if _rgb_result is not None:
+                _nonzero = int(np.count_nonzero(_rgb_result))
+                _total = _rgb_result.size
+                print(
+                    f"[PATCH] Camera {camera_prim_path}: shape={_rgb_result.shape}, "
+                    f"nonzero={_nonzero}/{_total}, unique={_uniq}, std={_std:.2f}"
+                )
 
-            # If RGB is all-black but has alpha, try extracting RGB only
-            if _rgb_result.ndim == 3 and _rgb_result.shape[-1] == 4:
-                _rgb_only = _rgb_result[:, :, :3]
-                _alpha = _rgb_result[:, :, 3]
-                _rgb_nz = int(np.count_nonzero(_rgb_only))
-                _alpha_nz = int(np.count_nonzero(_alpha))
-                print(f"[PATCH] RGBA breakdown: RGB nonzero={_rgb_nz}, Alpha nonzero={_alpha_nz}")
-                if _rgb_nz == 0 and _alpha_nz > 0:
-                    print(f"[PATCH] WARNING: RGB channels all zero but Alpha is set — renderer not producing color data")
-                # Return RGB only (strip alpha) to fix downstream RGBA->RGB misinterpretation
-                result["rgb"] = _rgb_only
-
-            # Check depth data for diagnostic info
-            if result["depth"] is not None and hasattr(result["depth"], "shape"):
-                _depth_nz = int(np.count_nonzero(result["depth"]))
-                _depth_min = float(np.min(result["depth"]))
-                _depth_max = float(np.max(result["depth"]))
-                print(f"[PATCH] Depth: {result['depth'].shape}, nonzero={_depth_nz}, range=[{_depth_min:.3f}, {_depth_max:.3f}]")
+                # If RGB is all-black but has alpha, strip alpha channel
+                if _rgb_result.ndim == 3 and _rgb_result.shape[-1] == 4:
+                    _rgb_only = _rgb_result[:, :, :3]
+                    result["rgb"] = _rgb_only
 
         except Exception as e:
             import traceback

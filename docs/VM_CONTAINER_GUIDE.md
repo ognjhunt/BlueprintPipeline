@@ -114,6 +114,8 @@ Camera RGB capture is only reliable when Isaac Sim has a valid X display surface
 In this deployment, that means host Xorg on `:99` plus container `DISPLAY=:99`
 and `/tmp/.X11-unix` mounted into the container.
 
+**Xorg config note (driver 590+)**: The `UseDisplayDevice "None"` option in `xorg.conf` is incompatible with NVIDIA driver 590+. If Xorg fails with "no screens found" after a driver upgrade, remove `UseDisplayDevice "None"` from the `Device` section and use `AllowEmptyInitialConfiguration "true"` instead. The `vm-start-xorg.sh` script handles this automatically.
+
 ### Recommended startup sequence
 
 ```bash
@@ -213,6 +215,7 @@ kill "$(pgrep -f "tools/run_local_pipeline.py")"
 ```bash
 gcloud compute instances stop isaac-sim-ubuntu --zone=us-east1-b
 ```
+When status is `TERMINATED`, VM CPU/GPU runtime billing stops. Persistent disk and reserved static IP charges still apply.
 
 ## Testing with Different Robots
 
@@ -277,7 +280,7 @@ python3 tools/run_local_pipeline.py \
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| All camera frames black (`RGB=0`, `alpha=255`) | Isaac Sim launched with `--no-window` or missing X display socket | Check latest Kit args for `--no-window`; run `bash scripts/vm-start-xorg.sh`; confirm `DISPLAY=:99` and `/tmp/.X11-unix` mount |
+| All camera frames black (`RGB=0`, `alpha=255`) | Two modes: (1) **Display path misconfigured** (`--no-window`, no X socket, bad `DISPLAY`), or (2) **L4 RTX geometry failure** after scene load (see Known Issue #6): depth is infinity everywhere and only dome background is visible | First verify display path: no `--no-window`, host Xorg on `:99`, valid `/tmp/.X11-unix` mount. If those are correct and depth remains infinity, treat as L4 rendering incompatibility and switch GPU family or Isaac Sim version |
 | Object poses all zeros | Objects not in server USD stage | Check `[DIAG]` logs; verify `scene_usd_path` in init_robot |
 | Joint positions all same | Trajectory execution timed out | Check for `DEADLINE_EXCEEDED`; increase `GENIESIM_FIRST_CALL_TIMEOUT_S` |
 | Only 1/3 cameras return data | Robot config has fewer cameras than requested | Normal for arm robots (typically 1 wrist camera) |
@@ -317,7 +320,7 @@ These are bugs in the upstream Genie Sim server code, not our pipeline:
 
 5. **Object poses return zeros**: Objects at prim paths like `/World/Toaster003` exist in our scene graph but aren't loaded in the server's USD stage, so `get_object_pose` returns identity transforms. Stage diagnostics patch now logs what's actually loaded.
 
-6. **Camera frames are black (`RGB=0`, `alpha=255`)**: Most often caused by launching Isaac Sim with `--no-window` (headless path) or missing X display socket. Use host Xorg `:99`, keep `DISPLAY=:99` in compose, and ensure the render config patch is applied.
+6. **Camera frames are black (`RGB=0`, `alpha=255`) even after display fixes**: On this setup, the L4 + Isaac Sim 5.x path can fail to render geometry after stage load. Symptoms: RGB stays zero, alpha stays 255, depth is infinity across frame, and only dome light sky color appears. Display-path fixes (`--no-window` removal, host Xorg `:99`, valid X socket mount) are still required, but they are not sufficient in this failure mode.
 
 7. **ROS2 "No such file" errors**: Server scripts previously always passed `--publish_ros` even when ROS2 Humble isn't installed. Fixed: `--publish_ros` is now conditional on `GENIESIM_SKIP_ROS_RECORDING` (set to 1 in Dockerfile).
 
@@ -405,6 +408,22 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 
 5. **MIN_EPISODE_FRAMES and EE pose failures**: Previously observed with G1 config. May resolve once correct robot config works.
 
+7. **CRITICAL: L4 GPU (Ada Lovelace / SM 89) cannot render geometry in Isaac Sim 5.1.0-rc.19**:
+   The RTX ray tracing renderer produces `RGB=0` for ALL cameras (including the default viewport `/OmniverseKit_Persp`). Extensive testing confirmed:
+   - **Simple primitives with `displayColor`**: Appear to render (R=G=B=243) but that's actually just the dome light sky background — depth shows INFINITY everywhere, meaning rays pass through all geometry
+   - **Kitchen scene with 203 meshes + 441 materials**: RGB=0 on all cameras, depth works correctly (shows actual distances)
+   - **Driver upgrades**: Tested both NVIDIA 580.105.08 and 590.48.01 — same result
+   - **Xorg config**: Proper host Xorg on :99 with NVIDIA GLX, GLFW initializes successfully
+   - **Render modes**: Both `RayTracedLighting` and `PathTracing` — same result
+   - **Async rendering**: Disabled, sync material loading forced — same result
+   - The RTX BVH (Bounding Volume Hierarchy) acceleration structures appear to not build correctly on the L4's Ada Lovelace architecture
+   - **Everything else works**: robot init, joint control, trajectory execution, object poses, gRPC, task progression
+
+   **Options**:
+   - **Option A (recommended)**: Switch to a T4 (Turing / SM 75) or A10G (Ampere / SM 86) GPU VM — these are better tested with Isaac Sim
+   - **Option B**: Try Isaac Sim 4.x (stable release) instead of 5.1.0-rc.19 (release candidate)
+   - **Option C**: File NVIDIA bug report with reproduction script (`/tmp/no_dome_test.py` demonstrates the issue)
+
 6. **CRITICAL: Server crashes during init_robot with franka_panda.json**: The Genie Sim server only ships G1/G2 robot configs. When `franka_panda.json` is provided, the server attempts to load the Franka USD (`robot/franka/franka.usd`) and crashes during initialization (GOAWAY after 300-600s DEADLINE_EXCEEDED). **Tested twice with same result.** The previous working runs (task_success=True) used `G1_omnipicker_fixed.json`. **Options for next run:**
    - **Option A**: Revert `_ROBOT_CFG_MAP["franka"]` back to `G1_omnipicker_fixed.json` and accept slow G1 init (~10 min). The pipeline DID achieve task_success=True with G1 before.
    - **Option B**: Investigate why the server crashes with Franka. Check if `robot/franka/franka.usd` exists in the server container. Check server logs during init for the actual error. The Franka USD may not be bundled in the Docker image.
@@ -445,7 +464,7 @@ sudo docker exec -d geniesim-server bash -c '
 
 ### Current data quality (as of 2026-01-31)
 - **Joint positions**: Working (real data from server)
-- **Camera images**: Reliable only when host Xorg `:99` is active and Isaac Sim starts without `--no-window` in camera mode
+- **Camera images**: **BLOCKED** — L4 GPU RTX renderer cannot produce color (see Known Issue #7). Requires GPU type change (T4/A10G) or Isaac Sim version change. Display path (Xorg `:99`, no `--no-window`) is correctly configured
 - **Object poses**: Improved fuzzy matching with multi-candidate scoring; zero-pose objects now excluded from observations (returned as None). Server-side prim resolution logs candidates. If objects still return zeros, check `[PATCH] Prim path` and `[DIAG]` log lines to compare requested paths vs actual stage contents.
 - **EE pose**: Monkey-patch wrapper ensures safe 2-value return; regex broadened for N-variable unpacking. Previously intermittent, should now be fully handled.
 - **Trajectory**: IK fallback works; cuRobo planner has API version mismatch

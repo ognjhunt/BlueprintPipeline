@@ -125,15 +125,13 @@ content = content.replace('\"RealTimePathTracing\"', '\"RayTracedLighting\"')
 import re
 content = re.sub(r'\\s*\"--/persistent/rtx/modes/rt2/enabled=true\",?\\n?', '\\n', content)
 
-# 5. Add extra args after extra_args opening
-# NOTE: Do NOT set --/renderer/activeGpu=0 — it breaks RGB output on L4 GPUs.
-# Let Isaac Sim auto-detect the GPU (activeGpu=-1).
+# 5. Add --reset-user to extra args
 if '\"--reset-user\"' not in content:
     content = content.replace(
         '\"extra_args\": [',
         '\"extra_args\": [\\n            \"--reset-user\",')
 
-# 6. Add carb settings after asyncRendering line
+# 6. Disable rt2 via carb settings
 if 'rt2/enabled\", False' not in content:
     content = content.replace(
         'simulation_app._carb_settings.set(\"/omni/replicator/asyncRendering\", False)',
@@ -171,6 +169,7 @@ fi
 # no GLX — camera RGB will be black but depth/normals still work).
 if [ "${GENIESIM_HEADLESS}" = "1" ]; then
   export ENABLE_CAMERAS="${ENABLE_CAMERAS:-1}"
+  export SKIP_RGB_CAPTURE="${SKIP_RGB_CAPTURE:-}"
 
   _display_socket=""
   if [ -n "${DISPLAY:-}" ]; then
