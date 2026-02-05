@@ -35,6 +35,137 @@ CAMERA_HANDLER = textwrap.dedent("""\
     _bp_warmup_done = set()
     _bp_cameras_logged = False
     _bp_total_frames_rendered = {}  # Track total frames per camera since creation
+    _bp_lighting_ensured = False  # Track whether we've ensured lighting exists
+    _bp_stage_id = None  # Track stage identity to re-check lighting on stage change
+    _bp_async_disabled = False  # Track whether we've disabled async rendering
+
+    @classmethod
+    def _bp_disable_async_rendering(cls):
+        \"\"\"Disable async rendering for reliable camera capture in headless mode.
+
+        The throttling extension sets asyncRendering=True when the timeline is
+        stopped, causing the renderer to skip frames.  This forces synchronous
+        rendering so every rep.orchestrator.step() produces a valid frame.
+        \"\"\"
+        if cls._bp_async_disabled:
+            return
+        cls._bp_async_disabled = True
+        try:
+            import carb.settings
+            settings = carb.settings.get_settings()
+
+            # Log current render settings BEFORE changes
+            _diag_keys = [
+                "/app/asyncRendering", "/rtx/rendermode",
+                "/rtx/pathtracing/spp", "/rtx/pathtracing/totalSpp",
+                "/persistent/rtx/modes/rt2/enabled",
+                "/rtx/directLighting/sampledLighting/enabled",
+                "/app/renderer/skipWhileMinimized",
+                "/app/renderer/resolution/width",
+                "/app/renderer/resolution/height",
+                "/rtx/post/aa/op", "/rtx/hydra/mdlMaterialWarmup",
+            ]
+            for _dk in _diag_keys:
+                try:
+                    print(f"[PATCH-DIAG] BEFORE {_dk} = {settings.get(_dk)}")
+                except Exception:
+                    pass
+
+            # Disable async rendering — forces GPU to finish each frame before returning
+            settings.set("/app/asyncRendering", False)
+            settings.set("/app/asyncRenderingLowLatency", False)
+            # Force synchronous material loading
+            settings.set("/rtx/materialDb/syncLoads", True)
+            settings.set("/rtx/hydra/materialSyncLoads", True)
+            # Disable render throttling in headless mode
+            settings.set("/app/renderer/skipWhileMinimized", False)
+            settings.set("/app/renderer/sleepMsOnFocus", 0)
+            settings.set("/app/renderer/sleepMsOutOfFocus", 0)
+            # Ensure render resolution matches request
+            settings.set("/app/renderer/resolution/width", -1)
+            settings.set("/app/renderer/resolution/height", -1)
+            # Disable rt2/PathTracing completely — it requires many frames to converge
+            settings.set("/persistent/rtx/modes/rt2/enabled", False)
+            settings.set("/rtx/rendermode", "RayTracedLighting")
+            settings.set("/rtx/directLighting/sampledLighting/enabled", True)
+            settings.set("/rtx/pathtracing/spp", 1)
+            settings.set("/rtx/pathtracing/totalSpp", 1)
+            # Force MDL material warmup so textures are loaded before render
+            settings.set("/rtx/hydra/mdlMaterialWarmup", True)
+
+            # Log current render settings AFTER changes
+            for _dk in _diag_keys:
+                try:
+                    print(f"[PATCH-DIAG] AFTER  {_dk} = {settings.get(_dk)}")
+                except Exception:
+                    pass
+
+            print("[PATCH] Disabled async rendering + switched to RayTracedLighting for headless capture")
+        except Exception as _e:
+            print(f"[PATCH] WARNING: Could not disable async rendering: {_e}")
+
+    @classmethod
+    def _bp_ensure_lighting(cls):
+        \"\"\"Ensure lights exist in the stage for proper camera rendering.
+
+        Without any light, all cameras render black (RGB=0, Alpha=255).
+        Creates both a DomeLight (ambient) and DistantLight (directional)
+        if no lights exist.  Re-checks when stage identity changes.
+        \"\"\"
+        try:
+            import omni.usd
+            from pxr import UsdLux, Sdf
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print("[PATCH] Cannot ensure lighting: no stage available")
+                return
+
+            # Re-check lighting if the stage changed (e.g. after scene reload)
+            _current_stage_id = id(stage)
+            if cls._bp_lighting_ensured and cls._bp_stage_id == _current_stage_id:
+                return
+            cls._bp_stage_id = _current_stage_id
+            cls._bp_lighting_ensured = True
+
+            # Check if any light exists
+            _existing_lights = []
+            for prim in stage.Traverse():
+                if prim.IsA(UsdLux.DomeLight) or prim.IsA(UsdLux.DistantLight) or prim.IsA(UsdLux.SphereLight) or prim.IsA(UsdLux.RectLight):
+                    _existing_lights.append(str(prim.GetPath()))
+            if _existing_lights:
+                print(f"[PATCH] Found existing lights: {_existing_lights}")
+                return
+
+            import os as _light_os
+            _intensity = float(_light_os.environ.get("BP_DOME_LIGHT_INTENSITY", "3000.0"))
+
+            # Create DomeLight for ambient illumination
+            _dome_path = "/World/BPDefaultDomeLight"
+            dome_light = UsdLux.DomeLight.Define(stage, Sdf.Path(_dome_path))
+            dome_light.GetIntensityAttr().Set(_intensity)
+            dome_light.GetColorTemperatureAttr().Set(6500.0)
+            try:
+                dome_light.CreateEnableColorTemperatureAttr(True)
+            except Exception:
+                pass
+            print(f"[PATCH] Created DomeLight at {_dome_path} intensity={_intensity}")
+
+            # Also create a DistantLight for directional shadows/fill
+            # DomeLights alone sometimes don't work in headless RTX mode
+            _dist_path = "/World/BPDefaultDistantLight"
+            dist_light = UsdLux.DistantLight.Define(stage, Sdf.Path(_dist_path))
+            dist_light.GetIntensityAttr().Set(_intensity * 0.5)
+            dist_light.GetAngleAttr().Set(1.0)  # Sun-like angle
+            # Point the light downward
+            from pxr import UsdGeom, Gf
+            xformable = UsdGeom.Xformable(dist_light.GetPrim())
+            xformable.AddRotateXYZOp().Set(Gf.Vec3f(-45.0, 30.0, 0.0))
+            print(f"[PATCH] Created DistantLight at {_dist_path} intensity={_intensity * 0.5}")
+
+        except Exception as _light_err:
+            print(f"[PATCH] Failed to ensure lighting: {_light_err}")
+            import traceback
+            traceback.print_exc()
 
     def handle_get_camera_data(self):
         \"\"\"Handle GET_CAMERA_DATA (Command=1) — render current frame.
@@ -141,14 +272,56 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 print(f"[PATCH] Failed to compute camera intrinsics/extrinsics: {_ext_err}")
                 result["camera_info"]["intrinsics_source"] = "error"
 
-            # Cache render products and annotators across calls
+            # Disable async rendering for reliable capture in headless mode
             cls = type(self)
+            cls._bp_disable_async_rendering()
+
+            # Ensure lighting exists before any rendering
+            cls._bp_ensure_lighting()
+
+            # Helper: synchronous render step — uses app.update() + rep.orchestrator.step()
+            # to ensure the GPU actually completes the frame before we read data
+            def _sync_render_step():
+                try:
+                    import omni.kit.app
+                    app = omni.kit.app.get_app()
+                    # app.update() drives the full Omniverse frame loop:
+                    # physics, rendering, and all extensions
+                    app.update()
+                except Exception:
+                    pass
+                rep.orchestrator.step()
+
+            # Cache render products and annotators across calls
             if camera_prim_path not in cls._bp_render_products:
+                # Run several app.update() frames BEFORE creating render product
+                # to let the renderer fully initialize after our settings changes
+                print(f"[PATCH] Pre-warming renderer before creating render product...")
+                try:
+                    import omni.kit.app
+                    _pre_app = omni.kit.app.get_app()
+                    for _i in range(10):
+                        _pre_app.update()
+                except Exception as _pre_err:
+                    print(f"[PATCH] Pre-warm app.update() error: {_pre_err}")
+
                 rp = rep.create.render_product(camera_prim_path, (_w, _h))
+
+                # Try both rgb and LdrColor annotators
                 rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
                 rgb_annot.attach([rp])
                 depth_annot = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
                 depth_annot.attach([rp])
+
+                # Also try LdrColor as alternative
+                try:
+                    _ldr_annot = rep.AnnotatorRegistry.get_annotator("LdrColor")
+                    _ldr_annot.attach([rp])
+                    cls._bp_render_products[camera_prim_path + "_ldr"] = _ldr_annot
+                    print(f"[PATCH] Also attached LdrColor annotator for diagnostics")
+                except Exception as _ldr_err:
+                    print(f"[PATCH] LdrColor annotator not available: {_ldr_err}")
+
                 cls._bp_render_products[camera_prim_path] = rp
                 cls._bp_rgb_annotators[camera_prim_path] = rgb_annot
                 cls._bp_depth_annotators[camera_prim_path] = depth_annot
@@ -156,11 +329,29 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
                 # Initial prime: run extra frames immediately after render product creation
                 # to bootstrap the Replicator pipeline (shaders, textures, lighting)
-                _initial_prime = int(_os.environ.get("CAMERA_INITIAL_PRIME_STEPS", "15"))
+                _initial_prime = int(_os.environ.get("CAMERA_INITIAL_PRIME_STEPS", "30"))
                 if _initial_prime > 0:
                     print(f"[PATCH] Initial priming camera {camera_prim_path} ({_initial_prime} frames)...")
-                    for _ in range(_initial_prime):
-                        rep.orchestrator.step()
+                    for _pi in range(_initial_prime):
+                        _sync_render_step()
+                        # Check data periodically during prime
+                        if _pi in (5, 10, 15, 20, 25, 29):
+                            try:
+                                _prime_data = rgb_annot.get_data()
+                                if _prime_data is not None:
+                                    _pd = np.asarray(_prime_data, dtype=np.uint8)
+                                    _pd_nz = int(np.count_nonzero(_pd))
+                                    _pd_shape = _pd.shape
+                                    # Check per-channel stats
+                                    if _pd.ndim == 3 and _pd.shape[-1] >= 3:
+                                        _ch_means = [float(np.mean(_pd[:,:,c])) for c in range(min(4, _pd.shape[-1]))]
+                                        print(f"[PATCH] Prime frame {_pi}: shape={_pd_shape}, nonzero={_pd_nz}/{_pd.size}, ch_means={_ch_means}")
+                                    else:
+                                        print(f"[PATCH] Prime frame {_pi}: shape={_pd_shape}, nonzero={_pd_nz}/{_pd.size}")
+                                else:
+                                    print(f"[PATCH] Prime frame {_pi}: data is None")
+                            except Exception as _pe:
+                                print(f"[PATCH] Prime frame {_pi}: error checking data: {_pe}")
                     cls._bp_total_frames_rendered[camera_prim_path] = _initial_prime
                     print(f"[PATCH] Initial prime complete for {camera_prim_path}")
                 else:
@@ -194,7 +385,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
             if _needs_warmup:
                 print(f"[PATCH] Warming up camera {camera_prim_path} ({_warmup_steps} frames, total={_total_rendered})...")
                 for _ in range(_warmup_steps):
-                    rep.orchestrator.step()
+                    _sync_render_step()
                 cls._bp_total_frames_rendered[camera_prim_path] = _total_rendered + _warmup_steps
                 cls._bp_warmup_done.add(camera_prim_path)
                 print(f"[PATCH] Camera warmup complete for {camera_prim_path} (total={cls._bp_total_frames_rendered[camera_prim_path]})")
@@ -223,7 +414,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 except Exception:
                     return 0, 0.0
 
-            rep.orchestrator.step()
+            _sync_render_step()
             cls._bp_total_frames_rendered[camera_prim_path] = cls._bp_total_frames_rendered.get(camera_prim_path, 0) + 1
 
             rgb_data = rgb_annot.get_data()
@@ -238,7 +429,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 _retry = 0
                 while (_uniq < _min_colors or _std < _min_std) and _retry < _max_retries:
                     for _ in range(_retry_steps):
-                        rep.orchestrator.step()
+                        _sync_render_step()
                     cls._bp_total_frames_rendered[camera_prim_path] = cls._bp_total_frames_rendered.get(camera_prim_path, 0) + _retry_steps
                     _retry += 1
                     rgb_data = rgb_annot.get_data()
@@ -260,16 +451,68 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     depth_data = depth_data.numpy()
                 result["depth"] = np.asarray(depth_data, dtype=np.float32)
 
-            # Log data quality
-            _nonzero = int(np.count_nonzero(result["rgb"]))
-            _total = result["rgb"].size
-            if _nonzero == 0:
-                print(f"[PATCH] WARNING: Camera {camera_prim_path} returned all-zero RGB frame")
+            # Log data quality with per-channel diagnostics
+            _rgb_result = result["rgb"]
+            _nonzero = int(np.count_nonzero(_rgb_result))
+            _total = _rgb_result.size
+            if _rgb_result.ndim == 3:
+                _nch = _rgb_result.shape[-1]
+                _ch_stats = []
+                for _ci in range(min(4, _nch)):
+                    _ch = _rgb_result[:, :, _ci]
+                    _ch_stats.append(f"ch{_ci}:min={int(_ch.min())} max={int(_ch.max())} mean={float(_ch.mean()):.1f}")
+                print(f"[PATCH] Camera {camera_prim_path}: {_rgb_result.shape}, nonzero={_nonzero}/{_total}, {', '.join(_ch_stats)}")
             else:
-                print(f"[PATCH] Camera {camera_prim_path}: {result['rgb'].shape}, non-zero pixels: {_nonzero}/{_total}")
+                print(f"[PATCH] Camera {camera_prim_path}: {_rgb_result.shape}, nonzero={_nonzero}/{_total}")
+
+            # If RGB is all-black but has alpha, try extracting RGB only
+            if _rgb_result.ndim == 3 and _rgb_result.shape[-1] == 4:
+                _rgb_only = _rgb_result[:, :, :3]
+                _alpha = _rgb_result[:, :, 3]
+                _rgb_nz = int(np.count_nonzero(_rgb_only))
+                _alpha_nz = int(np.count_nonzero(_alpha))
+                print(f"[PATCH] RGBA breakdown: RGB nonzero={_rgb_nz}, Alpha nonzero={_alpha_nz}")
+                if _rgb_nz == 0 and _alpha_nz > 0:
+                    print(f"[PATCH] WARNING: RGB channels all zero but Alpha is set — renderer not producing color data")
+                # Return RGB only (strip alpha) to fix downstream RGBA->RGB misinterpretation
+                result["rgb"] = _rgb_only
+
+            # Check LdrColor annotator as alternative
+            _ldr_key = camera_prim_path + "_ldr"
+            if _ldr_key in cls._bp_render_products:
+                try:
+                    _ldr_annot = cls._bp_render_products[_ldr_key]
+                    _ldr_data = _ldr_annot.get_data()
+                    if _ldr_data is not None:
+                        _ldr_arr = np.asarray(_ldr_data, dtype=np.uint8)
+                        _ldr_nz = int(np.count_nonzero(_ldr_arr))
+                        if _ldr_arr.ndim == 3:
+                            _ldr_ch_stats = [f"ch{_ci}:mean={float(_ldr_arr[:,:,_ci].mean()):.1f}" for _ci in range(min(4, _ldr_arr.shape[-1]))]
+                            print(f"[PATCH] LdrColor annotator: {_ldr_arr.shape}, nonzero={_ldr_nz}/{_ldr_arr.size}, {', '.join(_ldr_ch_stats)}")
+                            # If LdrColor has actual RGB data, use it instead
+                            if _ldr_arr.shape[-1] >= 3:
+                                _ldr_rgb_nz = int(np.count_nonzero(_ldr_arr[:,:,:3]))
+                                if _ldr_rgb_nz > 0 and _rgb_nz == 0:
+                                    print(f"[PATCH] Using LdrColor data instead of rgb annotator (has actual colors!)")
+                                    result["rgb"] = _ldr_arr[:, :, :3] if _ldr_arr.shape[-1] == 4 else _ldr_arr
+                        else:
+                            print(f"[PATCH] LdrColor annotator: {_ldr_arr.shape}, nonzero={_ldr_nz}/{_ldr_arr.size}")
+                    else:
+                        print(f"[PATCH] LdrColor annotator returned None")
+                except Exception as _ldr_err:
+                    print(f"[PATCH] LdrColor check error: {_ldr_err}")
+
+            # Check depth data for diagnostic info
+            if result["depth"] is not None and hasattr(result["depth"], "shape"):
+                _depth_nz = int(np.count_nonzero(result["depth"]))
+                _depth_min = float(np.min(result["depth"]))
+                _depth_max = float(np.max(result["depth"]))
+                print(f"[PATCH] Depth: {result['depth'].shape}, nonzero={_depth_nz}, range=[{_depth_min:.3f}, {_depth_max:.3f}]")
 
         except Exception as e:
+            import traceback
             print(f"[PATCH] Camera capture failed (returning black frame): {e}")
+            traceback.print_exc()
 
         # Serialize numpy arrays to bytes for gRPC transport and flatten structure
         _rgb_arr = result.get("rgb")

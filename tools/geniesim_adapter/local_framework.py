@@ -5425,11 +5425,15 @@ class GenieSimLocalFramework:
 
         _run_init_sequence("initial")
         if _joint_health_ok("Post-init check"):
+            # Setup default lighting for camera rendering
+            self._setup_default_lighting()
             return
 
         self.log("Retrying init_robot + gripper + warmup due to joint health failure", "WARNING")
         _run_init_sequence("retry")
         if _joint_health_ok("Post-retry check"):
+            # Setup default lighting for camera rendering
+            self._setup_default_lighting()
             return
 
         self.log(
@@ -5479,9 +5483,9 @@ class GenieSimLocalFramework:
         }
 
         try:
-            result = self._client._send_command(
+            result = self._client.send_command(
                 command=CommandType.SET_LIGHT,
-                payload={"lights": [dome_light_config]},
+                data={"lights": [dome_light_config]},
             )
             if result.success:
                 self.log(
