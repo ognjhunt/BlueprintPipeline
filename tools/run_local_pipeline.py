@@ -3026,12 +3026,16 @@ class LocalPipelineRunner:
         lines.append('        float physics:gravityMagnitude = 9.81')
         lines.append('    }')
 
-        # Add a ground plane for physics stability
+        # Add a ground plane with physics collision for PhysX
         lines.append('')
-        lines.append('    def Xform "GroundPlane" {')
-        lines.append('        def Plane "CollisionPlane" {')
-        lines.append('            uniform token purpose = "guide"')
-        lines.append('        }')
+        lines.append('    def Mesh "GroundPlane" (')
+        lines.append('        prepend apiSchemas = ["PhysicsCollisionAPI"]')
+        lines.append('    ) {')
+        lines.append('        float3[] points = [(-500, 0, -500), (500, 0, -500), (500, 0, 500), (-500, 0, 500)]')
+        lines.append('        int[] faceVertexCounts = [4]')
+        lines.append('        int[] faceVertexIndices = [0, 1, 2, 3]')
+        lines.append('        bool physics:collisionEnabled = true')
+        lines.append('        uniform token purpose = "default"')
         lines.append('    }')
 
         lines.append('}')

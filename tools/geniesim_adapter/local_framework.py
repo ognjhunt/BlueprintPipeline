@@ -86,6 +86,7 @@ Environment Variables:
 import base64
 import binascii
 import concurrent.futures
+import copy
 import importlib.util
 import io
 import json
@@ -9504,7 +9505,22 @@ class GenieSimLocalFramework:
                 obs = dict(obs)
                 if "robot_state" in obs:
                     obs["robot_state"] = dict(obs["robot_state"])
+                # Deep-copy scene_state to prevent shared-reference aliasing
+                # when _align_observations_to_trajectory reuses the same obs
+                # object for multiple trajectory frames.  Without this,
+                # consecutive frames that share an observation will report
+                # identical object poses, causing max_displacement=0.
+                if "scene_state" in obs:
+                    obs["scene_state"] = copy.deepcopy(obs["scene_state"])
             self._current_frame_idx = step_idx
+            # [DIAG-0] Log obs keys and data_source at key frames
+            if step_idx == 0 or step_idx == len(trajectory) - 1 or step_idx % 10 == 0:
+                _diag_ds = obs.get("data_source", "MISSING")
+                _diag_ss = obs.get("scene_state")
+                _diag_ss_len = len(_diag_ss.get("objects", [])) if isinstance(_diag_ss, dict) else ("None" if _diag_ss is None else type(_diag_ss).__name__)
+                logger.info("[DIAG-0] Frame %d: data_source=%s, scene_state.objects=%s, obs_keys=%s",
+                            step_idx, _diag_ds, _diag_ss_len,
+                            [k for k in obs.keys() if k not in ('camera_frames', 'camera_observation')])
             self._attach_camera_frames(obs, episode_id=episode_id, task=task)
 
             waypoint_joints = np.array(waypoint["joint_positions"], dtype=float)
@@ -9960,6 +9976,15 @@ class GenieSimLocalFramework:
             if _scene_state is not None and obs.get("scene_state") is None:
                 obs["scene_state"] = _scene_state
             if _scene_state:
+                # [DIAG-A] Log scene_state contents at key frames
+                if step_idx == 0 or step_idx == len(trajectory) - 1 or step_idx % 10 == 0:
+                    _diag_objs = _scene_state.get("objects", [])
+                    _diag_sample = _diag_objs[0] if _diag_objs else None
+                    _diag_pose = _diag_sample.get("pose", {}) if _diag_sample else {}
+                    logger.info("[DIAG-A] Frame %d: scene_state has %d objects, sample_id=%s, sample_pose=%s",
+                                step_idx, len(_diag_objs),
+                                _diag_sample.get("object_id", "?") if _diag_sample else "N/A",
+                                _diag_pose)
                 for _obj in _scene_state.get("objects", []):
                     _oid = _obj.get("object_id", "")
                     _p = _obj.get("pose", {})
@@ -10057,6 +10082,17 @@ class GenieSimLocalFramework:
                         "rotation_quat": _rot,
                         "timestamp": _cur_ts,
                     }
+
+            # [DIAG-B] Log _object_poses at key frames
+            if step_idx == 0 or step_idx == len(trajectory) - 1 or step_idx % 10 == 0:
+                if _object_poses:
+                    _diag_first_oid = next(iter(_object_poses))
+                    _diag_first_pos = _object_poses[_diag_first_oid]
+                    logger.info("[DIAG-B] Frame %d: _object_poses has %d objects, first=%s pos=%s",
+                                step_idx, len(_object_poses), _diag_first_oid,
+                                _diag_first_pos.tolist() if hasattr(_diag_first_pos, 'tolist') else _diag_first_pos)
+                else:
+                    logger.info("[DIAG-B] Frame %d: _object_poses is EMPTY", step_idx)
 
             # Detect grasp: gripper closes near an object
             if (frame_data.get("gripper_command") == "closed"
@@ -10589,6 +10625,17 @@ class GenieSimLocalFramework:
                             frame_data["object_poses"][_oid]["linear_velocity"] = latest["linear_velocity"]
                         if latest.get("angular_velocity"):
                             frame_data["object_poses"][_oid]["angular_velocity"] = latest["angular_velocity"]
+
+            # [DIAG-C] Log frame_data.object_poses at key frames
+            if step_idx == 0 or step_idx == len(trajectory) - 1 or step_idx % 10 == 0:
+                _diag_fp = frame_data.get("object_poses", {})
+                if _diag_fp:
+                    _diag_fk = next(iter(_diag_fp))
+                    logger.info("[DIAG-C] Frame %d: frame_data.object_poses has %d entries, first=%s val=%s",
+                                step_idx, len(_diag_fp), _diag_fk, _diag_fp[_diag_fk])
+                else:
+                    logger.info("[DIAG-C] Frame %d: frame_data.object_poses is EMPTY (no 'object_poses' key in frame)",
+                                step_idx)
 
             # --- Improvement C: Mirror EE fields into observation.robot_state ---
             for _key in ("ee_pos", "ee_quat", "ee_vel", "ee_pose_source", "gripper_command", "gripper_openness"):
@@ -14463,6 +14510,26 @@ Scene objects: {scene_summary}
                             _pos = _pose_data.get("position")
                             if _pos:
                                 _object_trajectory[_oid].append(_pos)
+
+                    # [DIAG-D] Log _object_trajectory contents
+                    logger.info("[DIAG-D] _has_real_scene_state=%s, _object_trajectory has %d objects, total_frames=%d",
+                                _has_real_scene_state, len(_object_trajectory), len(frames))
+                    for _diag_oid, _diag_positions in list(_object_trajectory.items())[:3]:
+                        logger.info("[DIAG-D] Object %s: %d positions, first=%s, last=%s",
+                                    _diag_oid, len(_diag_positions),
+                                    _diag_positions[0] if _diag_positions else "N/A",
+                                    _diag_positions[-1] if _diag_positions else "N/A")
+                    if not _object_trajectory:
+                        # Check a few raw frames to understand why
+                        for _diag_fi in [0, len(frames) // 2, len(frames) - 1]:
+                            if _diag_fi < len(frames):
+                                _diag_f = frames[_diag_fi]
+                                _diag_op = _diag_f.get("object_poses", {})
+                                _diag_obs = _diag_f.get("observation", {})
+                                _diag_ds = _diag_obs.get("data_source", "MISSING") if isinstance(_diag_obs, dict) else "NOT_DICT"
+                                logger.info("[DIAG-D] Frame[%d] has object_poses=%d entries, data_source=%s, obs_keys=%s",
+                                            _diag_fi, len(_diag_op), _diag_ds,
+                                            list(_diag_obs.keys()) if isinstance(_diag_obs, dict) else "NOT_DICT")
 
                     # Check trajectory for movement
                     if _object_trajectory:
