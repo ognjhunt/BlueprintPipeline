@@ -3824,9 +3824,13 @@ class LocalPipelineRunner:
         failure_details: Dict[str, Any] = {}
         failure_reason = None
         firebase_upload_status = "skipped"
+        # Default to False: never delete completed episode data just because
+        # a later task failed.  The output directory contains per-task
+        # checkpoints (_completed_tasks.json) that allow retries to resume
+        # from where they left off.  Cleaning up destroys that data.
         cleanup_enabled = parse_bool_env(
             os.getenv("GENIESIM_CLEANUP_ON_FAILURE"),
-            default=True,
+            default=False,
         )
         cleanup_details: Dict[str, Any] = {"enabled": cleanup_enabled}
         import uuid

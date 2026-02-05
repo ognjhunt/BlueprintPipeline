@@ -84,7 +84,11 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
             return None
 
     def _bp_extract_transform(self, prim, prim_path):
-        \"\"\"Extract world transform from a prim and cache it.
+        \"\"\"Extract world transform from a prim - prefer live physics state.
+
+        Query order:
+        1. Try dynamic_control for live PhysX rigid body pose
+        2. Fall back to USD ComputeLocalToWorldTransform for kinematic objects
 
         Returns (position, rotation) tuple or (None, None) on failure.
         \"\"\"
@@ -95,6 +99,20 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
             if not prim.IsA(UsdGeom.Xformable):
                 return None, None
 
+            # PRIORITY 1: Try to get live physics pose for rigid bodies
+            physics_pos, physics_rot = self._bp_get_physics_pose(prim_path)
+            if physics_pos is not None and physics_rot is not None:
+                # Cache the transform from physics
+                cls = type(self)
+                cls._bp_transform_cache[prim_path] = {
+                    "position": physics_pos,
+                    "rotation": physics_rot,
+                    "timestamp": time.time(),
+                    "source": "physx",
+                }
+                return physics_pos, physics_rot
+
+            # PRIORITY 2: Fall back to USD transform (for kinematic/non-physics objects)
             xformable = UsdGeom.Xformable(prim)
             timecode = self._bp_live_timecode() or Usd.TimeCode.Default()
             world_xform = xformable.ComputeLocalToWorldTransform(timecode)
@@ -128,6 +146,7 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                 "rotation": rotation,
                 "timestamp": time.time(),
                 "timecode": float(timecode.GetValue()) if hasattr(timecode, 'GetValue') else 0.0,
+                "source": "usd",
             }
 
             return position, rotation
@@ -325,6 +344,69 @@ LIVE_TIMECODE_HELPER = textwrap.dedent("""\
     # --- END BlueprintPipeline object_pose live_timecode patch ---
 """)
 
+PHYSICS_POSE_MARKER = "BlueprintPipeline object_pose physics_pose patch"
+
+PHYSICS_POSE_HELPER = textwrap.dedent("""\
+
+    # --- BEGIN BlueprintPipeline object_pose physics_pose patch ---
+    def _bp_get_physics_pose(self, prim_path):
+        \"\"\"Get live physics pose for a rigid body using dynamic_control.
+
+        Returns (position, rotation) tuple or (None, None) if not a physics body
+        or if physics is not running.
+
+        position: [x, y, z] in meters
+        rotation: [w, x, y, z] quaternion (scalar-first)
+        \"\"\"
+        try:
+            from omni.isaac.dynamic_control import _dynamic_control
+            from pxr import UsdPhysics
+
+            stage = self._bp_get_scene_stage()
+            if stage is None:
+                return None, None
+
+            prim = stage.GetPrimAtPath(prim_path)
+            if not prim or not prim.IsValid():
+                return None, None
+
+            # Check if this prim has RigidBodyAPI (is a physics-enabled rigid body)
+            if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                # Not a rigid body - fall back to USD transform
+                return None, None
+
+            # Get the dynamic control interface
+            dc = _dynamic_control.acquire_dynamic_control_interface()
+            if dc is None:
+                return None, None
+
+            # Get the rigid body handle
+            rb_handle = dc.get_rigid_body(prim_path)
+            if rb_handle == _dynamic_control.INVALID_HANDLE:
+                # Physics may not be running or prim not registered
+                return None, None
+
+            # Get the live pose from PhysX
+            pose = dc.get_rigid_body_pose(rb_handle)
+            if pose is None:
+                return None, None
+
+            # pose.p is position (carb.Float3), pose.r is rotation (carb.Float4 quaternion)
+            position = [float(pose.p.x), float(pose.p.y), float(pose.p.z)]
+            # dynamic_control returns quaternion as (x, y, z, w) - convert to (w, x, y, z)
+            rotation = [float(pose.r.w), float(pose.r.x), float(pose.r.y), float(pose.r.z)]
+
+            return position, rotation
+
+        except ImportError:
+            # dynamic_control not available - this is expected outside Isaac Sim
+            return None, None
+        except Exception as e:
+            # Don't spam logs - physics queries fail often for non-physics objects
+            return None, None
+    # --- END BlueprintPipeline object_pose physics_pose patch ---
+""")
+
 
 def patch_file():
     if not os.path.isfile(COMMAND_CONTROLLER):
@@ -358,6 +440,16 @@ def patch_file():
             for line in LIVE_TIMECODE_HELPER.splitlines()
         ) + "\n"
         patched = patched + "\n\n" + indented_live
+
+    # 1c. Add physics pose helper for live PhysX queries
+    has_physics_pose = "def _bp_get_physics_pose" in content
+    if not has_physics_pose:
+        indented_physics = "\n".join(
+            (method_indent + line) if line.strip() else line
+            for line in PHYSICS_POSE_HELPER.splitlines()
+        ) + "\n"
+        patched = patched + "\n\n" + indented_physics
+        print("[PATCH] Added _bp_get_physics_pose helper for live PhysX pose queries")
 
     # 1b. Inject diagnostic logging after scene_usd_path assignment
     # This tells us whether the server's scene_usd_path resolves to a real file
