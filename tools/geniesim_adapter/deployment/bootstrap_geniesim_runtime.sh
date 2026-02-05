@@ -26,12 +26,13 @@ fi
 
 "${SCRIPT_DIR}/install_geniesim.sh"
 
-# Apply server patches (camera handler, object pose, ee pose, omnigraph dedup)
+# Apply server patches (render config, camera handler, object pose, ee pose, omnigraph dedup)
 PATCHES_DIR="${SCRIPT_DIR}/patches"
 if [ -d "${PATCHES_DIR}" ]; then
   echo "[geniesim] Applying server patches..."
   for patch_script in \
     "${PATCHES_DIR}/patch_omnigraph_dedup.py" \
+    "${PATCHES_DIR}/patch_data_collector_render_config.py" \
     "${PATCHES_DIR}/patch_camera_handler.py" \
     "${PATCHES_DIR}/patch_object_pose_handler.py" \
     "${PATCHES_DIR}/patch_ee_pose_handler.py" \

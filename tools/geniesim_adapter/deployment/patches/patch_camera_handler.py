@@ -41,148 +41,43 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
     @classmethod
     def _bp_disable_async_rendering(cls):
-        \"\"\"Disable async rendering and ensure the post-processing pipeline
-        is active for reliable RGB camera capture in headless mode.
-
-        The LdrColor/rgb annotator requires the full post-processing pipeline
-        (tonemapping, exposure, AA) to convert HDR output to LDR uint8 RGB.
-        Normals/depth work without this because they are raw render variables.
-        \"\"\"
+        \"\"\"Apply minimal render settings required for stable camera capture.\"\"\"
         if cls._bp_async_disabled:
             return
         cls._bp_async_disabled = True
         try:
             import carb.settings
             settings = carb.settings.get_settings()
+            _settings_updates = {
+                "/app/asyncRendering": False,
+                "/app/asyncRenderingLowLatency": False,
+                "/omni/replicator/asyncRendering": False,
+                "/rtx/materialDb/syncLoads": True,
+                "/rtx/hydra/materialSyncLoads": True,
+                "/app/renderer/skipWhileMinimized": False,
+                "/app/renderer/sleepMsOnFocus": 0,
+                "/app/renderer/sleepMsOutOfFocus": 0,
+                "/rtx/pathtracing/spp": 64,
+                "/rtx/pathtracing/totalSpp": 64,
+                "/rtx/post/denoiser/enabled": True,
+                "/rtx/pathtracing/optixDenoiser/enabled": True,
+                "/rtx/directLighting/sampledLighting/enabled": True,
+                "/app/usd/useFabricSceneDelegate": True,
+                "/persistent/rtx/modes/rt2/enabled": False,
+                # NOTE: Do NOT set /rtx/rendermode here — it's a namespace, not a leaf key.
+                # Setting it overwrites sub-keys like /rtx/rendermode/subframes.
+            }
+            for _key, _value in _settings_updates.items():
+                settings.set(_key, _value)
 
-            # Step 1: Enable critical extensions for RGB post-processing pipeline
-            # The rgb/LdrColor annotator needs the viewport rendering pipeline
-            # and post-processing (tonemapping, exposure) to produce color output.
-            try:
-                import omni.kit.app
-                _mgr = omni.kit.app.get_app().get_extension_manager()
-                _critical_exts = [
-                    "omni.kit.viewport.window",
-                    "omni.graph.image.nodes",
-                    "omni.kit.hydra_texture",
-                    "omni.kit.viewport.utility",
-                    "omni.kit.viewport.bundle",
-                    "omni.kit.viewport.rtx",
-                    "omni.hydra.rtx",
-                ]
-                for _ext in _critical_exts:
-                    try:
-                        _mgr.set_extension_enabled(_ext, True)
-                        print(f"[PATCH] Enabled extension: {_ext}")
-                    except Exception as _ext_err:
-                        print(f"[PATCH] Could not enable {_ext}: {_ext_err}")
-            except Exception as _mgr_err:
-                print(f"[PATCH] Extension manager error: {_mgr_err}")
-
-            # Let extensions initialize
-            try:
-                import omni.kit.app
-                _app = omni.kit.app.get_app()
-                for _ in range(5):
-                    _app.update()
-            except Exception:
-                pass
-
-            # Log current render settings BEFORE changes
-            _diag_keys = [
-                "/app/asyncRendering", "/rtx/rendermode",
-                "/rtx/pathtracing/spp", "/rtx/pathtracing/totalSpp",
-                "/persistent/rtx/modes/rt2/enabled",
-                "/rtx/directLighting/sampledLighting/enabled",
-                "/app/renderer/skipWhileMinimized",
-                "/rtx/post/tonemap/op", "/rtx/post/aa/op",
-                "/rtx/hydra/mdlMaterialWarmup",
-            ]
-            for _dk in _diag_keys:
-                try:
-                    print(f"[PATCH-DIAG] BEFORE {_dk} = {settings.get(_dk)}")
-                except Exception:
-                    pass
-
-            # Step 2: Disable async rendering
-            settings.set("/app/asyncRendering", False)
-            settings.set("/app/asyncRenderingLowLatency", False)
-            settings.set("/rtx/materialDb/syncLoads", True)
-            settings.set("/rtx/hydra/materialSyncLoads", True)
-            settings.set("/app/renderer/skipWhileMinimized", False)
-            settings.set("/app/renderer/sleepMsOnFocus", 0)
-            settings.set("/app/renderer/sleepMsOutOfFocus", 0)
-
-            # Step 3: Enable post-processing pipeline (CRITICAL for RGB)
-            # Without tonemapping, HDR output won't be converted to LDR uint8
-            settings.set("/rtx/post/tonemap/op", 1)  # 1=Aces
-            settings.set("/rtx/post/histogram/enabled", True)
-            settings.set("/rtx/post/lensFlare/enabled", False)
-            settings.set("/rtx/post/aa/op", 2)  # FXAA (simpler than DLSS for headless)
-            # Exposure
-            settings.set("/rtx/post/tonemap/autoExposure", True)
-
-            # Step 4: Renderer settings
-            settings.set("/rtx/pathtracing/spp", 64)
-            settings.set("/rtx/pathtracing/totalSpp", 64)
-            settings.set("/rtx/post/denoiser/enabled", True)
-            settings.set("/rtx/pathtracing/optixDenoiser/enabled", True)
-            settings.set("/rtx/hydra/mdlMaterialWarmup", True)
-            settings.set("/rtx/directLighting/sampledLighting/enabled", True)
-            settings.set("/app/hydraEngine/waitIdle", True)
-            settings.set("/renderer/enabled", "rtx")
-            settings.set("/app/usd/useFabricSceneDelegate", True)
-
-            # Enable render product rendering (critical for headless mode)
-            settings.set("/omni/replicator/asyncRendering", False)
-            # Ensure RTX renders sub-frames for material loading
-            settings.set("/rtx/rendermode/subframes", 2)
-
-            # Log current render settings AFTER changes
-            for _dk in _diag_keys:
-                try:
-                    print(f"[PATCH-DIAG] AFTER  {_dk} = {settings.get(_dk)}")
-                except Exception:
-                    pass
-
-            # Step 5: Create or enable viewport for post-processing pipeline
-            try:
-                from omni.kit.viewport.utility import get_active_viewport
-                _vp = get_active_viewport()
-                if _vp:
-                    _vp.updates_enabled = True
-                    print(f"[PATCH] Viewport found and enabled: {_vp}")
-                else:
-                    print("[PATCH] No active viewport — attempting to create one...")
-                    try:
-                        from omni.kit.viewport.window import ViewportWindow
-                        _vp_win = ViewportWindow("headless_cam", width=1280, height=720, visible=False)
-                        print(f"[PATCH] Created hidden ViewportWindow: {_vp_win}")
-                        # Re-check for active viewport
-                        import omni.kit.app
-                        for _ in range(5):
-                            omni.kit.app.get_app().update()
-                        _vp2 = get_active_viewport()
-                        if _vp2:
-                            _vp2.updates_enabled = True
-                            print(f"[PATCH] Viewport now active: {_vp2}")
-                    except Exception as _vw_err:
-                        print(f"[PATCH] Could not create ViewportWindow: {_vw_err}")
-            except Exception as _vp_err:
-                print(f"[PATCH] Viewport utility: {_vp_err}")
-
-            try:
-                from omni.kit.viewport.utility import get_num_viewports
-                _nv = get_num_viewports()
-                print(f"[PATCH] Number of viewports: {_nv}")
-            except Exception:
-                pass
-
-            print("[PATCH] Disabled async rendering + enabled post-processing for headless capture")
+            _diag = {
+                "asyncRendering": settings.get("/app/asyncRendering"),
+                "rendermode": settings.get("/rtx/rendermode"),
+                "rt2_enabled": settings.get("/persistent/rtx/modes/rt2/enabled"),
+            }
+            print(f"[PATCH] Render settings applied: {_diag}")
         except Exception as _e:
-            print(f"[PATCH] WARNING: Could not configure rendering: {_e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[PATCH] WARNING: Could not configure render settings: {_e}")
 
     @classmethod
     def _bp_ensure_lighting(cls):
@@ -396,53 +291,46 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
                 rp = rep.create.render_product(camera_prim_path, (_w, _h))
 
-                # Try both rgb and LdrColor annotators
                 rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
                 rgb_annot.attach([rp])
                 depth_annot = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
                 depth_annot.attach([rp])
 
-                # Also try alternative annotators for diagnostics
-                try:
-                    _ldr_annot = rep.AnnotatorRegistry.get_annotator("LdrColor")
-                    _ldr_annot.attach([rp])
-                    cls._bp_render_products[camera_prim_path + "_ldr"] = _ldr_annot
-                    print(f"[PATCH] Also attached LdrColor annotator for diagnostics")
-                except Exception as _ldr_err:
-                    print(f"[PATCH] LdrColor annotator not available: {_ldr_err}")
-
-                # HdrColor gives raw HDR float data BEFORE tonemapping
-                # If this has data but LdrColor doesn't, we can manually tonemap
-                try:
-                    _hdr_annot = rep.AnnotatorRegistry.get_annotator("HdrColor")
-                    _hdr_annot.attach([rp])
-                    cls._bp_render_products[camera_prim_path + "_hdr"] = _hdr_annot
-                    print(f"[PATCH] Also attached HdrColor annotator for diagnostics")
-                except Exception as _hdr_err:
-                    print(f"[PATCH] HdrColor annotator not available: {_hdr_err}")
-
-                try:
-                    _normals_annot = rep.AnnotatorRegistry.get_annotator("normals")
-                    _normals_annot.attach([rp])
-                    cls._bp_render_products[camera_prim_path + "_normals"] = _normals_annot
-                    print(f"[PATCH] Also attached normals annotator for diagnostics")
-                except Exception as _norm_err:
-                    print(f"[PATCH] normals annotator not available: {_norm_err}")
-
-                # Try using Camera helper class from isaacsim
-                try:
-                    from isaacsim.sensors.camera import Camera as IsaacCamera
-                    _test_cam = IsaacCamera(prim_path=camera_prim_path, resolution=(_w, _h))
-                    _test_cam.initialize()
-                    cls._bp_render_products[camera_prim_path + "_isaccam"] = _test_cam
-                    print(f"[PATCH] Also created IsaacCamera helper for diagnostics")
-                except Exception as _cam_err:
-                    print(f"[PATCH] IsaacCamera helper not available: {_cam_err}")
-
                 cls._bp_render_products[camera_prim_path] = rp
                 cls._bp_rgb_annotators[camera_prim_path] = rgb_annot
                 cls._bp_depth_annotators[camera_prim_path] = depth_annot
                 print(f"[PATCH] Created render product for {camera_prim_path}")
+
+                # Diagnostic: count scene contents to verify materials loaded
+                try:
+                    _mat_count = _mesh_count = 0
+                    for _diag_prim in stage.Traverse():
+                        _tn = _diag_prim.GetTypeName()
+                        if _tn in ("Material", "Shader"):
+                            _mat_count += 1
+                        elif _tn == "Mesh":
+                            _mesh_count += 1
+                    print(f"[PATCH] Scene contents: {_mesh_count} meshes, {_mat_count} materials/shaders")
+                except Exception as _diag_err:
+                    print(f"[PATCH] Scene diagnostic error: {_diag_err}")
+
+                # Diagnostic: also create a test render product on /OmniverseKit_Persp
+                # to check if ANY camera produces color output
+                try:
+                    _test_cam = "/OmniverseKit_Persp"
+                    _test_rp = rep.create.render_product(_test_cam, (320, 240))
+                    _test_rgb = rep.AnnotatorRegistry.get_annotator("rgb")
+                    _test_rgb.attach([_test_rp])
+                    for _ti in range(10):
+                        _sync_render_step()
+                    _test_data = _test_rgb.get_data()
+                    if _test_data is not None:
+                        _test_data = np.array(_test_data)
+                        _tc = [np.mean(_test_data[:, :, c]) for c in range(min(4, _test_data.shape[2]))]
+                        print(f"[PATCH] VIEWPORT TEST ({_test_cam}): shape={_test_data.shape}, ch_means={_tc}")
+                    _test_rgb.detach([_test_rp])
+                except Exception as _test_err:
+                    print(f"[PATCH] Viewport test error: {_test_err}")
 
                 # Initial prime: run extra frames immediately after render product creation
                 # to bootstrap the Replicator pipeline (shaders, textures, lighting)
@@ -451,24 +339,6 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     print(f"[PATCH] Initial priming camera {camera_prim_path} ({_initial_prime} frames)...")
                     for _pi in range(_initial_prime):
                         _sync_render_step()
-                        # Check data periodically during prime
-                        if _pi in (5, 10, 15, 20, 25, 29):
-                            try:
-                                _prime_data = rgb_annot.get_data()
-                                if _prime_data is not None:
-                                    _pd = np.asarray(_prime_data, dtype=np.uint8)
-                                    _pd_nz = int(np.count_nonzero(_pd))
-                                    _pd_shape = _pd.shape
-                                    # Check per-channel stats
-                                    if _pd.ndim == 3 and _pd.shape[-1] >= 3:
-                                        _ch_means = [float(np.mean(_pd[:,:,c])) for c in range(min(4, _pd.shape[-1]))]
-                                        print(f"[PATCH] Prime frame {_pi}: shape={_pd_shape}, nonzero={_pd_nz}/{_pd.size}, ch_means={_ch_means}")
-                                    else:
-                                        print(f"[PATCH] Prime frame {_pi}: shape={_pd_shape}, nonzero={_pd_nz}/{_pd.size}")
-                                else:
-                                    print(f"[PATCH] Prime frame {_pi}: data is None")
-                            except Exception as _pe:
-                                print(f"[PATCH] Prime frame {_pi}: error checking data: {_pe}")
                     cls._bp_total_frames_rendered[camera_prim_path] = _initial_prime
                     print(f"[PATCH] Initial prime complete for {camera_prim_path}")
                 else:
@@ -531,6 +401,8 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 except Exception:
                     return 0, 0.0
 
+            _uniq, _std = 0, 0.0
+
             _sync_render_step()
             cls._bp_total_frames_rendered[camera_prim_path] = cls._bp_total_frames_rendered.get(camera_prim_path, 0) + 1
 
@@ -568,19 +440,14 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     depth_data = depth_data.numpy()
                 result["depth"] = np.asarray(depth_data, dtype=np.float32)
 
-            # Log data quality with per-channel diagnostics
+            # Log compact data quality diagnostics
             _rgb_result = result["rgb"]
             _nonzero = int(np.count_nonzero(_rgb_result))
             _total = _rgb_result.size
-            if _rgb_result.ndim == 3:
-                _nch = _rgb_result.shape[-1]
-                _ch_stats = []
-                for _ci in range(min(4, _nch)):
-                    _ch = _rgb_result[:, :, _ci]
-                    _ch_stats.append(f"ch{_ci}:min={int(_ch.min())} max={int(_ch.max())} mean={float(_ch.mean()):.1f}")
-                print(f"[PATCH] Camera {camera_prim_path}: {_rgb_result.shape}, nonzero={_nonzero}/{_total}, {', '.join(_ch_stats)}")
-            else:
-                print(f"[PATCH] Camera {camera_prim_path}: {_rgb_result.shape}, nonzero={_nonzero}/{_total}")
+            print(
+                f"[PATCH] Camera {camera_prim_path}: shape={_rgb_result.shape}, "
+                f"nonzero={_nonzero}/{_total}, unique={_uniq}, std={_std:.2f}"
+            )
 
             # If RGB is all-black but has alpha, try extracting RGB only
             if _rgb_result.ndim == 3 and _rgb_result.shape[-1] == 4:
@@ -593,102 +460,6 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     print(f"[PATCH] WARNING: RGB channels all zero but Alpha is set — renderer not producing color data")
                 # Return RGB only (strip alpha) to fix downstream RGBA->RGB misinterpretation
                 result["rgb"] = _rgb_only
-
-            # Check LdrColor annotator as alternative
-            _ldr_key = camera_prim_path + "_ldr"
-            if _ldr_key in cls._bp_render_products:
-                try:
-                    _ldr_annot = cls._bp_render_products[_ldr_key]
-                    _ldr_data = _ldr_annot.get_data()
-                    if _ldr_data is not None:
-                        _ldr_arr = np.asarray(_ldr_data, dtype=np.uint8)
-                        _ldr_nz = int(np.count_nonzero(_ldr_arr))
-                        if _ldr_arr.ndim == 3:
-                            _ldr_ch_stats = [f"ch{_ci}:mean={float(_ldr_arr[:,:,_ci].mean()):.1f}" for _ci in range(min(4, _ldr_arr.shape[-1]))]
-                            print(f"[PATCH] LdrColor annotator: {_ldr_arr.shape}, nonzero={_ldr_nz}/{_ldr_arr.size}, {', '.join(_ldr_ch_stats)}")
-                            # If LdrColor has actual RGB data, use it instead
-                            if _ldr_arr.shape[-1] >= 3:
-                                _ldr_rgb_nz = int(np.count_nonzero(_ldr_arr[:,:,:3]))
-                                if _ldr_rgb_nz > 0 and _rgb_nz == 0:
-                                    print(f"[PATCH] Using LdrColor data instead of rgb annotator (has actual colors!)")
-                                    result["rgb"] = _ldr_arr[:, :, :3] if _ldr_arr.shape[-1] == 4 else _ldr_arr
-                        else:
-                            print(f"[PATCH] LdrColor annotator: {_ldr_arr.shape}, nonzero={_ldr_nz}/{_ldr_arr.size}")
-                    else:
-                        print(f"[PATCH] LdrColor annotator returned None")
-                except Exception as _ldr_err:
-                    print(f"[PATCH] LdrColor check error: {_ldr_err}")
-
-            # Check HdrColor annotator — raw HDR before tonemapping
-            _hdr_key = camera_prim_path + "_hdr"
-            if _hdr_key in cls._bp_render_products:
-                try:
-                    _hdr_annot = cls._bp_render_products[_hdr_key]
-                    _hdr_data = _hdr_annot.get_data()
-                    if _hdr_data is not None:
-                        _ha = np.asarray(_hdr_data, dtype=np.float32)
-                        _ha_nz = int(np.count_nonzero(_ha))
-                        if _ha.ndim == 3:
-                            _ha_ch = [f"ch{_ci}:min={float(_ha[:,:,_ci].min()):.4f} max={float(_ha[:,:,_ci].max()):.4f} mean={float(_ha[:,:,_ci].mean()):.4f}" for _ci in range(min(4, _ha.shape[-1]))]
-                            print(f"[PATCH] HdrColor annotator: {_ha.shape}, dtype={_ha.dtype}, nonzero={_ha_nz}/{_ha.size}, {', '.join(_ha_ch)}")
-                            # If HdrColor has actual data but LdrColor/rgb is black,
-                            # manually tonemap HDR -> LDR and use as RGB output
-                            if _ha.shape[-1] >= 3:
-                                _hdr_rgb_nz = int(np.count_nonzero(_ha[:,:,:3]))
-                                if _hdr_rgb_nz > 0 and _rgb_nz == 0:
-                                    print(f"[PATCH] HdrColor has color data! Manually tonemapping HDR->LDR...")
-                                    # Simple Reinhard tonemapping: L / (1 + L)
-                                    _hdr_rgb = _ha[:, :, :3].copy()
-                                    _hdr_rgb = np.clip(_hdr_rgb, 0, None)  # Remove negatives
-                                    # Reinhard: x / (1 + x)
-                                    _tonemapped = _hdr_rgb / (1.0 + _hdr_rgb)
-                                    # Gamma correction (linear -> sRGB)
-                                    _tonemapped = np.power(np.clip(_tonemapped, 0, 1), 1.0/2.2)
-                                    # Convert to uint8
-                                    _ldr_from_hdr = (np.clip(_tonemapped, 0, 1) * 255).astype(np.uint8)
-                                    result["rgb"] = _ldr_from_hdr
-                                    _uniq2, _std2 = _bp_rgb_quality(_ldr_from_hdr)
-                                    print(f"[PATCH] Tonemapped HDR->RGB: unique={_uniq2} std={_std2:.2f}")
-                        else:
-                            print(f"[PATCH] HdrColor annotator: {_ha.shape}, dtype={_ha.dtype}, nonzero={_ha_nz}/{_ha.size}")
-                    else:
-                        print(f"[PATCH] HdrColor annotator returned None")
-                except Exception as _he:
-                    print(f"[PATCH] HdrColor check error: {_he}")
-
-            # Check normals annotator
-            _normals_key = camera_prim_path + "_normals"
-            if _normals_key in cls._bp_render_products:
-                try:
-                    _normals_annot = cls._bp_render_products[_normals_key]
-                    _normals_data = _normals_annot.get_data()
-                    if _normals_data is not None:
-                        _na = np.asarray(_normals_data)
-                        _na_nz = int(np.count_nonzero(_na))
-                        print(f"[PATCH] Normals annotator: {_na.shape}, dtype={_na.dtype}, nonzero={_na_nz}/{_na.size}, range=[{float(np.min(_na)):.3f}, {float(np.max(_na)):.3f}]")
-                    else:
-                        print(f"[PATCH] Normals annotator returned None")
-                except Exception as _ne:
-                    print(f"[PATCH] Normals check error: {_ne}")
-
-            # Check IsaacCamera helper
-            _isaccam_key = camera_prim_path + "_isaccam"
-            if _isaccam_key in cls._bp_render_products:
-                try:
-                    _test_cam = cls._bp_render_products[_isaccam_key]
-                    _test_rgba = _test_cam.get_rgba()
-                    if _test_rgba is not None:
-                        _ta = np.asarray(_test_rgba, dtype=np.uint8)
-                        _ta_nz = int(np.count_nonzero(_ta))
-                        if _ta.ndim == 3:
-                            _ta_ch = [f"ch{i}:mean={float(_ta[:,:,i].mean()):.1f}" for i in range(min(4, _ta.shape[-1]))]
-                            print(f"[PATCH] IsaacCamera.get_rgba(): {_ta.shape}, nonzero={_ta_nz}/{_ta.size}, {', '.join(_ta_ch)}")
-                        else:
-                            print(f"[PATCH] IsaacCamera.get_rgba(): {_ta.shape}, nonzero={_ta_nz}/{_ta.size}")
-                    else:
-                        print(f"[PATCH] IsaacCamera.get_rgba() returned None")
-                except Exception as _ce:
-                    print(f"[PATCH] IsaacCamera check error: {_ce}")
 
             # Check depth data for diagnostic info
             if result["depth"] is not None and hasattr(result["depth"], "shape"):

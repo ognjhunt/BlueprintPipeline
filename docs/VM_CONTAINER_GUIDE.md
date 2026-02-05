@@ -73,6 +73,7 @@ for f in \
   tools/geniesim_adapter/asset_index.py \
   tools/geniesim_adapter/scene_graph.py \
   tools/geniesim_adapter/deployment/patches/patch_camera_handler.py \
+  tools/geniesim_adapter/deployment/patches/patch_data_collector_render_config.py \
   tools/geniesim_adapter/deployment/patches/patch_ee_pose_handler.py \
   tools/geniesim_adapter/deployment/patches/patch_object_pose_handler.py \
   tools/geniesim_adapter/deployment/patches/patch_omnigraph_dedup.py \
@@ -88,6 +89,7 @@ for f in \
   tools/geniesim_adapter/robot_configs/franka_panda.json \
   tools/geniesim_adapter/robot_configs/ur10.json \
   scripts/vm-start.sh \
+  scripts/vm-start-xorg.sh \
   Dockerfile.geniesim-server \
   docker-compose.geniesim-server.yaml \
   genie-sim-local-job/requirements.txt \
@@ -105,6 +107,33 @@ cd ~/BlueprintPipeline
 sudo docker compose -f docker-compose.geniesim-server.yaml build
 sudo docker compose -f docker-compose.geniesim-server.yaml up -d
 ```
+
+## Required Display Path For Camera RGB
+
+Camera RGB capture is only reliable when Isaac Sim has a valid X display surface.
+In this deployment, that means host Xorg on `:99` plus container `DISPLAY=:99`
+and `/tmp/.X11-unix` mounted into the container.
+
+### Recommended startup sequence
+
+```bash
+cd ~/BlueprintPipeline
+
+# 1) Ensure host Xorg is running on :99
+bash scripts/vm-start-xorg.sh
+
+# 2) Start/check container + health
+bash scripts/vm-start.sh
+
+# 3) Verify latest Kit startup args do NOT include --no-window
+sudo docker exec geniesim-server bash -c \
+  'grep "Starting kit application" /tmp/geniesim_server.log | tail -1'
+```
+
+Acceptance checks:
+- latest startup args do not include `--no-window` when cameras are enabled
+- startup args include `--reset-user` and `--/renderer/activeGpu=0`
+- camera logs show non-zero RGB channels and pass quality checks
 
 ## Common Operations
 
@@ -125,7 +154,7 @@ sudo docker logs geniesim-server --tail 50
 
 ### Apply patches at runtime (no rebuild)
 ```bash
-for p in patch_omnigraph_dedup patch_camera_handler patch_object_pose_handler \
+for p in patch_omnigraph_dedup patch_data_collector_render_config patch_camera_handler patch_object_pose_handler \
          patch_ee_pose_handler patch_stage_diagnostics patch_observation_cameras \
          patch_grpc_server _apply_safe_float patch_xforms_safe_rotation \
          patch_articulation_guard patch_autoplay; do
@@ -248,7 +277,7 @@ python3 tools/run_local_pipeline.py \
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| All camera frames black | Render product not created for camera prim | Check `[PATCH] Available cameras in stage` log; set `GENIESIM_CAMERA_PRIM_MAP` |
+| All camera frames black (`RGB=0`, `alpha=255`) | Isaac Sim launched with `--no-window` or missing X display socket | Check latest Kit args for `--no-window`; run `bash scripts/vm-start-xorg.sh`; confirm `DISPLAY=:99` and `/tmp/.X11-unix` mount |
 | Object poses all zeros | Objects not in server USD stage | Check `[DIAG]` logs; verify `scene_usd_path` in init_robot |
 | Joint positions all same | Trajectory execution timed out | Check for `DEADLINE_EXCEEDED`; increase `GENIESIM_FIRST_CALL_TIMEOUT_S` |
 | Only 1/3 cameras return data | Robot config has fewer cameras than requested | Normal for arm robots (typically 1 wrist camera) |
@@ -266,8 +295,10 @@ python3 tools/run_local_pipeline.py \
 | `variation-gen` fails | Tries to create `/mnt/gcs` (needs root) | Skip this step, or set `GCS_MOUNT_ROOT` |
 | Gemini dimension estimation fails | `google-genai` not installed on VM | `pip3 install google-genai` |
 | `docker restart` loses runtime patches? | No — `restart` preserves filesystem. Only `rm + create` loses changes | Use `docker restart`, not `docker rm` + new container |
+| `docker compose down && up` loses runtime edits | Container recreate resets files under `/opt/geniesim` | Re-apply patch scripts (or rebuild image with patches baked in) |
 | Container gRPC not listening | Server still initializing (~45s) | Check `/proc/net/tcp6` for port `C383` |
 | `ss` command not found in container | Minimal container image | Use `cat /proc/net/tcp6 | grep C383` instead |
+| `/bin/bash: ... start_geniesim_server.sh: Permission denied` | Executable bit not set on startup script | `chmod +x tools/geniesim_adapter/deployment/start_geniesim_server.sh` then restart container |
 | VM SSH hangs/unresponsive | OOM — server + pipeline consume >64GB RAM | Use g2-standard-32 (128GB); or run pipeline client outside container |
 | `DEADLINE_EXCEEDED` during trajectory | Trajectory execution takes time in simulation | Normal; retry logic handles it. Extend timeout via `GENIESIM_FIRST_CALL_TIMEOUT_S` |
 | cuRobo `'TensorDeviceType' has no attribute 'mesh'` | cuRobo API version mismatch with Isaac Sim 5.1 | Non-fatal — IK fallback trajectory works. Needs cuRobo version pin investigation |
@@ -286,7 +317,7 @@ These are bugs in the upstream Genie Sim server code, not our pipeline:
 
 5. **Object poses return zeros**: Objects at prim paths like `/World/Toaster003` exist in our scene graph but aren't loaded in the server's USD stage, so `get_object_pose` returns identity transforms. Stage diagnostics patch now logs what's actually loaded.
 
-6. **Camera frames are black**: Replicator `step()` returns black frames — annotators may need warm-up or the render pipeline isn't fully initialized. Camera patch now logs available cameras and warm-up status.
+6. **Camera frames are black (`RGB=0`, `alpha=255`)**: Most often caused by launching Isaac Sim with `--no-window` (headless path) or missing X display socket. Use host Xorg `:99`, keep `DISPLAY=:99` in compose, and ensure the render config patch is applied.
 
 7. **ROS2 "No such file" errors**: Server scripts previously always passed `--publish_ros` even when ROS2 Humble isn't installed. Fixed: `--publish_ros` is now conditional on `GENIESIM_SKIP_ROS_RECORDING` (set to 1 in Dockerfile).
 
@@ -303,6 +334,7 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 | Patch | What it fixes |
 |-------|--------------|
 | `patch_omnigraph_dedup.py` | Prevents OmniGraph duplicate graph creation errors |
+| `patch_data_collector_render_config.py` | Patches `data_collector_server.py` to avoid `--no-window` in camera mode, enforce `RaytracedLighting`, and set stable render args/settings |
 | `patch_camera_handler.py` | Adds `GET_CAMERA_DATA` command handler with Replicator rendering; logs available cameras |
 | `patch_object_pose_handler.py` | Fuzzy prim path matching for object pose queries |
 | `patch_ee_pose_handler.py` | Safe unpacking for `get_ee_pose` multi-value returns |
@@ -413,7 +445,7 @@ sudo docker exec -d geniesim-server bash -c '
 
 ### Current data quality (as of 2026-01-31)
 - **Joint positions**: Working (real data from server)
-- **Camera images**: 1 camera working (wrist), returns frames via GET_CAMERA_DATA patch
+- **Camera images**: Reliable only when host Xorg `:99` is active and Isaac Sim starts without `--no-window` in camera mode
 - **Object poses**: Improved fuzzy matching with multi-candidate scoring; zero-pose objects now excluded from observations (returned as None). Server-side prim resolution logs candidates. If objects still return zeros, check `[PATCH] Prim path` and `[DIAG]` log lines to compare requested paths vs actual stage contents.
 - **EE pose**: Monkey-patch wrapper ensures safe 2-value return; regex broadened for N-variable unpacking. Previously intermittent, should now be fully handled.
 - **Trajectory**: IK fallback works; cuRobo planner has API version mismatch
@@ -444,6 +476,9 @@ Full list: `regen3d, scale, interactive, simready, usd, inventory-enrichment, re
 | `GENIESIM_CAMERA_PRIM_MAP` | JSON map of logical camera name → USD prim path | Export before pipeline run |
 | `GENIESIM_ROBOT_CFG_FILE` | Override server robot config filename | Export before pipeline run |
 | `GENIESIM_SKIP_ROS_RECORDING` | Set to `1` to skip `--publish_ros` (default in Docker) | Dockerfile / export |
+| `GENIESIM_CAMERA_REQUIRE_DISPLAY` | If `1` (default), fail fast when cameras are enabled but no valid X socket is present | Dockerfile / export |
+| `DISPLAY` | X display used by Isaac Sim camera rendering (default `:99`) | docker-compose / export |
+| `NVIDIA_DRIVER_CAPABILITIES` | NVIDIA runtime capabilities; set to `all` for graphics + compute | docker-compose / export |
 | `CAMERA_RESOLUTION` | Camera resolution `WxH` (default: `1280x720`) | Dockerfile / export |
 | `CAMERA_WARMUP_STEPS` | Replicator warmup frames before valid camera data (default: `5`) | Dockerfile / export |
 | `GENIESIM_AUTO_RESTART` | Auto-restart server on circuit breaker open (default: `1`, set `0` to disable) | Export before pipeline run |

@@ -14,8 +14,9 @@ ISAAC_SIM_PATH=${ISAAC_SIM_PATH:-/isaac-sim}
 GENIESIM_PORT=${GENIESIM_PORT:-50051}
 GENIESIM_HEADLESS=${GENIESIM_HEADLESS:-1}
 GENIESIM_SERVER_LOG=${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
-GENIESIM_MAX_SERVER_RESTARTS=${GENIESIM_MAX_SERVER_RESTARTS:-1}
+GENIESIM_MAX_SERVER_RESTARTS=${GENIESIM_MAX_SERVER_RESTARTS:-3}
 GENIESIM_PATCH_CHECK_STRICT=${GENIESIM_PATCH_CHECK_STRICT:-0}
+GENIESIM_CAMERA_REQUIRE_DISPLAY=${GENIESIM_CAMERA_REQUIRE_DISPLAY:-1}
 
 if [ ! -x "${ISAAC_SIM_PATH}/python.sh" ]; then
   echo "[geniesim] ERROR: Isaac Sim not found at ${ISAAC_SIM_PATH}." >&2
@@ -77,6 +78,9 @@ _check_patch_marker \
 _check_patch_marker \
   "${GENIESIM_ROOT}/source/data_collection/server/command_controller.py" \
   "BlueprintPipeline object_pose patch"
+_check_patch_marker \
+  "${GENIESIM_ROOT}/source/data_collection/scripts/data_collector_server.py" \
+  "BlueprintPipeline render config patch"
 
 if [ "${#_missing_patches[@]}" -gt 0 ]; then
   echo "[geniesim] WARNING: Missing expected BlueprintPipeline patch markers:" >&2
@@ -89,11 +93,111 @@ if [ "${#_missing_patches[@]}" -gt 0 ]; then
   fi
 fi
 
+# ── Patch data_collector_server.py for headless RGB rendering ──
+# The server ships with RealTimePathTracing + rt2 enabled, which doesn't produce
+# RGB in headless mode.  We patch it at startup to:
+#   1. Use headless=False when DISPLAY is set (so --no-window is NOT added)
+#   2. Switch to RayTracedLighting renderer
+#   3. Remove rt2/enabled=true from extra_args
+#   4. Add --reset-user and --/renderer/activeGpu=0
+_DCS="${GENIESIM_ROOT}/source/data_collection/scripts/data_collector_server.py"
+if [ -f "${_DCS}" ] && ! grep -qF "os.environ.get(\"DISPLAY\")" "${_DCS}" 2>/dev/null; then
+  echo "[geniesim] Patching data_collector_server.py for headless RGB rendering..."
+  "${ISAAC_SIM_PATH}/python.sh" -c "
+import os as _os, sys as _sys
+path = '${_DCS}'
+content = open(path).read()
+
+# 1. Ensure 'import os' exists at the top (the original file uses os.path
+#    without importing os — it relies on Isaac Sim launcher pre-importing it)
+if 'import os' not in content.split('\\n')[0:10]:
+    content = 'import os\\n' + content
+
+# 2. headless=False when DISPLAY is set
+content = content.replace(
+    '\"headless\": args.headless',
+    '\"headless\": False if os.environ.get(\"DISPLAY\") else args.headless')
+
+# 3. Switch renderer
+content = content.replace('\"RealTimePathTracing\"', '\"RayTracedLighting\"')
+
+# 4. Remove rt2 flag from extra_args
+import re
+content = re.sub(r'\\s*\"--/persistent/rtx/modes/rt2/enabled=true\",?\\n?', '\\n', content)
+
+# 5. Add extra args after extra_args opening
+if '\"--reset-user\"' not in content:
+    content = content.replace(
+        '\"extra_args\": [',
+        '\"extra_args\": [\\n            \"--reset-user\",\\n            \"--/exts/isaacsim.core.throttling/enable_async=false\",\\n            \"--/renderer/activeGpu=0\",')
+
+# 6. Add carb settings after asyncRendering line
+if 'rt2/enabled\", False' not in content:
+    content = content.replace(
+        'simulation_app._carb_settings.set(\"/omni/replicator/asyncRendering\", False)',
+        'simulation_app._carb_settings.set(\"/omni/replicator/asyncRendering\", False)\\nsimulation_app._carb_settings.set(\"/persistent/rtx/modes/rt2/enabled\", False)')
+
+open(path, 'w').write(content)
+print('[geniesim] data_collector_server.py patched for headless RGB')
+" 2>&1
+fi
+
+# ── Apply camera handler patch ──
+_CAMERA_PATCH="/workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/patch_camera_handler.py"
+if [ -f "${_CAMERA_PATCH}" ]; then
+  _CC="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+  if ! grep -qF "BlueprintPipeline camera patch" "${_CC}" 2>/dev/null; then
+    echo "[geniesim] Applying camera handler patch..."
+    "${ISAAC_SIM_PATH}/python.sh" "${_CAMERA_PATCH}" 2>&1 || true
+  fi
+fi
+
 _SERVER_ARGS=""
 [ "${GENIESIM_HEADLESS}" = "1" ] && _SERVER_ARGS="${_SERVER_ARGS} --headless"
 # Only pass --publish_ros when ROS 2 is actually available
 if [ "${GENIESIM_SKIP_ROS_RECORDING:-0}" != "1" ]; then
   _SERVER_ARGS="${_SERVER_ARGS} --publish_ros"
+fi
+
+# ── Headless rendering setup ──
+# Camera RGB rendering requires a display with NVIDIA GLX support.
+# The preferred approach: docker-compose maps the host's Xorg X11 socket
+# (/tmp/.X11-unix) into the container and sets DISPLAY=:99.  The host
+# runs a headless Xorg on :99 using the nvidia driver.
+#
+# Fallback: if no DISPLAY is available, start Xvfb (software-only,
+# no GLX — camera RGB will be black but depth/normals still work).
+if [ "${GENIESIM_HEADLESS}" = "1" ]; then
+  export ENABLE_CAMERAS="${ENABLE_CAMERAS:-1}"
+
+  _display_socket=""
+  if [ -n "${DISPLAY:-}" ]; then
+    _display_num="${DISPLAY##*:}"
+    _display_num="${_display_num%%.*}"
+    if [ -n "${_display_num}" ]; then
+      _display_socket="/tmp/.X11-unix/X${_display_num}"
+    fi
+  fi
+
+  if [ -n "${_display_socket}" ] && [ -S "${_display_socket}" ]; then
+    echo "[geniesim] Using X display ${DISPLAY} (${_display_socket}) for camera rendering"
+  else
+    if [ "${ENABLE_CAMERAS}" = "1" ] && [ "${GENIESIM_CAMERA_REQUIRE_DISPLAY}" = "1" ]; then
+      echo "[geniesim] ERROR: Camera rendering requires a valid X display socket." >&2
+      echo "[geniesim] ERROR: DISPLAY='${DISPLAY:-<unset>}' socket='${_display_socket:-<none>}'" >&2
+      echo "[geniesim] ERROR: Start host Xorg (:99) or set GENIESIM_CAMERA_REQUIRE_DISPLAY=0 for degraded Xvfb fallback." >&2
+      exit 1
+    fi
+
+    if command -v Xvfb >/dev/null 2>&1; then
+      echo "[geniesim] WARNING: No host X display found — using degraded Xvfb fallback (camera RGB may be black)"
+      Xvfb :99 -screen 0 1280x720x24 +extension GLX +render -noreset &>/dev/null &
+      export DISPLAY=:99
+      sleep 1
+    else
+      echo "[geniesim] WARNING: No display available and Xvfb not installed — camera RGB may be black"
+    fi
+  fi
 fi
 
 _restart_count=0

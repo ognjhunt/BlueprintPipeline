@@ -19,6 +19,15 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONTAINER_NAME="geniesim-server"
 TIMEOUT_S=${VM_START_TIMEOUT_S:-120}
 
+# ---- Pre-step: Ensure host Xorg display exists for camera RGB ----
+if [ "${VM_SKIP_XORG_BOOTSTRAP:-0}" != "1" ]; then
+  echo "[vm-start] Ensuring host Xorg display is ready..."
+  "${SCRIPT_DIR}/vm-start-xorg.sh"
+fi
+
+# Compose defaults to :99; keep env explicit for docker compose -E usage.
+export DISPLAY="${DISPLAY:-:99}"
+
 # ---- Step 1: Check if container is already running ----
 if sudo docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   echo "[vm-start] Container '${CONTAINER_NAME}' is already running."

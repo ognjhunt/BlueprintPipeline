@@ -109,6 +109,7 @@ RUN ${ISAAC_SIM_PATH}/python.sh -m pip install grpcio-tools 2>/dev/null || true 
         /tmp/contact_report.proto \
     && rm /tmp/contact_report.proto
 RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_data_collector_render_config.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_camera_handler.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_object_pose_handler.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_ee_pose_handler.py \
