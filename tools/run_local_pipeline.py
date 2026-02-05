@@ -2966,15 +2966,17 @@ class LocalPipelineRunner:
         )
 
     def _generate_usda(self, manifest: Dict, layout: Dict) -> str:
-        """Generate a minimal scene.usda file."""
-        meters_per_unit = manifest.get("scene", {}).get("meters_per_unit", 1.0)
-        coord_frame = manifest.get("scene", {}).get("coordinate_frame", "Y")
+        """Generate a scene.usda file with asset references and physics."""
+        # Production pipeline hardcodes metersPerUnit=1.0 and upAxis="Y".
+        # Match that to avoid mismatches with assets that assume meters.
+        meters_per_unit = 1.0
+        coord_frame = "Y"
 
         lines = [
             '#usda 1.0',
             '(',
             f'    metersPerUnit = {meters_per_unit}',
-            f'    upAxis = "{coord_frame.upper()}"',
+            f'    upAxis = "{coord_frame}"',
             '    defaultPrim = "World"',
             ')',
             '',
@@ -2982,23 +2984,59 @@ class LocalPipelineRunner:
             '    def Xform "Scene" {',
         ]
 
-        # Add objects as references
+        # Add objects with USD asset references and physics APIs
         for obj in manifest.get("objects", []):
             obj_id = obj.get("id", "unknown")
-            asset_path = obj.get("asset", {}).get("path", f"assets/obj_{obj_id}/asset.glb")
+            asset_path = obj.get("asset", {}).get("path", "")
 
-            # Get transform
+            # Find the USD asset file for this object
+            obj_asset_dir = self.assets_dir / f"obj_{obj_id}"
+            usd_ref = ""
+            if obj_asset_dir.is_dir():
+                for f in obj_asset_dir.iterdir():
+                    if f.suffix in (".usd", ".usda", ".usdc", ".usdz"):
+                        usd_ref = os.path.relpath(str(f), str(self.usd_dir))
+                        break
+
+            # Get transform (position, rotation, scale)
             transform = obj.get("transform", {})
             pos = transform.get("position", {})
             px = pos.get("x", 0)
             py = pos.get("y", 0)
             pz = pos.get("z", 0)
 
-            lines.append(f'        def Xform "obj_{obj_id}" (')
-            lines.append(f'            # Reference to: {asset_path}')
-            lines.append(f'        ) {{')
+            rot = transform.get("rotation_quaternion", {})
+            rw = rot.get("w", 1.0)
+            rx = rot.get("x", 0.0)
+            ry = rot.get("y", 0.0)
+            rz = rot.get("z", 0.0)
+
+            scl = transform.get("scale", {})
+            sx = scl.get("x", 1.0)
+            sy = scl.get("y", 1.0)
+            sz = scl.get("z", 1.0)
+
+            # Physics properties from manifest
+            mass = obj.get("physics", {}).get("mass", 1.0)
+
+            if usd_ref:
+                lines.append(f'        def Xform "obj_{obj_id}" (')
+                lines.append(f'            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsCollisionAPI"]')
+                lines.append(f'            prepend references = @{usd_ref}@')
+                lines.append(f'        ) {{')
+                lines.append(f'            float physics:mass = {mass}')
+                lines.append(f'            bool physics:collisionEnabled = true')
+                # Local pipeline assets lack collision meshes, so all objects
+                # must be kinematic to prevent falling through the ground.
+                lines.append(f'            bool physics:kinematicEnabled = true')
+            else:
+                lines.append(f'        def Xform "obj_{obj_id}" (')
+                lines.append(f'            # No USD asset found for: {asset_path}')
+                lines.append(f'        ) {{')
             lines.append(f'            double3 xformOp:translate = ({px}, {py}, {pz})')
-            lines.append(f'            uniform token[] xformOpOrder = ["xformOp:translate"]')
+            lines.append(f'            quatd xformOp:orient = ({rw}, {rx}, {ry}, {rz})')
+            lines.append(f'            double3 xformOp:scale = ({sx}, {sy}, {sz})')
+            lines.append(f'            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]')
             lines.append(f'        }}')
             lines.append('')
 
@@ -3008,7 +3046,7 @@ class LocalPipelineRunner:
         # Without lighting, cameras capture black/uniform images
         skip_lighting = os.environ.get("USD_SKIP_DEFAULT_LIGHTING", "0") == "1"
         if not skip_lighting:
-            dome_intensity = float(os.environ.get("USD_DOME_LIGHT_INTENSITY", "3000.0"))
+            dome_intensity = float(os.environ.get("USD_DOME_LIGHT_INTENSITY", "200.0"))
             dome_color_temp = float(os.environ.get("USD_DOME_LIGHT_COLOR_TEMP", "6500.0"))
             lines.append('')
             lines.append('    def DomeLight "DefaultDomeLight" {')
@@ -3018,23 +3056,29 @@ class LocalPipelineRunner:
             lines.append('    }')
 
         # Add PhysicsScene for PhysX simulation
-        # Without a PhysicsScene, PhysX cannot simulate rigid bodies and
-        # objects will remain static even during robot manipulation.
         lines.append('')
         lines.append('    def PhysicsScene "PhysicsScene" {')
-        lines.append('        vector3f physics:gravityDirection = (0, -1, 0)')
+        if coord_frame == "Z":
+            lines.append('        vector3f physics:gravityDirection = (0, 0, -1)')
+        else:
+            lines.append('        vector3f physics:gravityDirection = (0, -1, 0)')
         lines.append('        float physics:gravityMagnitude = 9.81')
         lines.append('    }')
 
         # Add a ground plane with physics collision for PhysX
+        if coord_frame == "Z":
+            gp_points = '[(-500, -500, 0), (500, -500, 0), (500, 500, 0), (-500, 500, 0)]'
+        else:
+            gp_points = '[(-500, 0, -500), (500, 0, -500), (500, 0, 500), (-500, 0, 500)]'
         lines.append('')
         lines.append('    def Mesh "GroundPlane" (')
-        lines.append('        prepend apiSchemas = ["PhysicsCollisionAPI"]')
+        lines.append('        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsRigidBodyAPI"]')
         lines.append('    ) {')
-        lines.append('        float3[] points = [(-500, 0, -500), (500, 0, -500), (500, 0, 500), (-500, 0, 500)]')
+        lines.append(f'        float3[] points = {gp_points}')
         lines.append('        int[] faceVertexCounts = [4]')
         lines.append('        int[] faceVertexIndices = [0, 1, 2, 3]')
         lines.append('        bool physics:collisionEnabled = true')
+        lines.append('        bool physics:kinematicEnabled = true')
         lines.append('        uniform token purpose = "default"')
         lines.append('    }')
 

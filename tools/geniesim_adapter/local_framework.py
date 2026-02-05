@@ -5668,20 +5668,58 @@ class GenieSimLocalFramework:
                             )
                         cam_error = "camera intrinsics missing in CamInfo"
                     rgb = cam_data.get("rgb")
+                    _rgb_enc = cam_data.get("rgb_encoding") or cam_data.get("encoding") or ""
+                    _rgb_w = int(cam_data.get("width") or 0)
+                    _rgb_h = int(cam_data.get("height") or 0)
+                    _rgb_raw_len = len(rgb) if isinstance(rgb, (bytes, bytearray)) else 0
+                    _rgb_shape = getattr(rgb, 'shape', None)
+                    _rgb_dtype = getattr(rgb, 'dtype', None)
+                    self.log(
+                        f"[PREFLIGHT-DEBUG] Camera raw data: encoding='{_rgb_enc}', "
+                        f"w={_rgb_w}, h={_rgb_h}, raw_bytes={_rgb_raw_len}, "
+                        f"expected_rgb={_rgb_w*_rgb_h*3}, expected_rgba={_rgb_w*_rgb_h*4}, "
+                        f"type={type(rgb).__name__}, has_shape={hasattr(rgb, 'shape')}, "
+                        f"shape={_rgb_shape}, dtype={_rgb_dtype}"
+                    )
                     if rgb is not None and hasattr(rgb, "shape"):
-                        pass
+                        import numpy as _np_dbg
+                        self.log(
+                            f"[PREFLIGHT-DEBUG] ndarray stats: min={_np_dbg.min(rgb)}, max={_np_dbg.max(rgb)}, "
+                            f"mean={_np_dbg.mean(rgb):.2f}, nonzero={_np_dbg.count_nonzero(rgb)}/{rgb.size}"
+                        )
                     elif isinstance(rgb, (bytes, bytearray)):
+                        # Check if data is RGBA (4 bytes per pixel) but encoding says RGB
+                        _expected_rgba = _rgb_w * _rgb_h * 4
+                        if _rgb_raw_len == _expected_rgba and "rgba" not in _rgb_enc.lower():
+                            self.log(
+                                f"[PREFLIGHT-DEBUG] Raw bytes match RGBA size ({_expected_rgba}), "
+                                f"but encoding='{_rgb_enc}'. Forcing RGBA decode.",
+                                "WARNING",
+                            )
+                            _rgb_enc = "rgba8"
                         rgb = decode_camera_bytes(
                             bytes(rgb),
-                            width=int(cam_data.get("width") or 0),
-                            height=int(cam_data.get("height") or 0),
-                            encoding=cam_data.get("rgb_encoding") or cam_data.get("encoding") or "",
+                            width=_rgb_w,
+                            height=_rgb_h,
+                            encoding=_rgb_enc,
                             kind="rgb",
                         )
                     if rgb is None:
                         cam_error = "camera RGB decode failed"
                     else:
                         is_valid, diag = validate_rgb_frame_quality(rgb, context="preflight")
+                        # Debug: save preflight camera image for inspection
+                        try:
+                            import numpy as np
+                            from PIL import Image as _PILImage
+                            _dbg_path = f"/tmp/preflight_cam_{cam_id}_attempt{_attempt}.png"
+                            if rgb.ndim == 3 and rgb.shape[-1] >= 3:
+                                _PILImage.fromarray(rgb[:, :, :3].astype(np.uint8)).save(_dbg_path)
+                            elif rgb.ndim == 2:
+                                _PILImage.fromarray(rgb.astype(np.uint8)).save(_dbg_path)
+                            self.log(f"[PREFLIGHT-DEBUG] Saved camera image to {_dbg_path} (valid={is_valid}, colors={diag.get('unique_colors')})")
+                        except Exception as _dbg_exc:
+                            self.log(f"[PREFLIGHT-DEBUG] Failed to save debug image: {_dbg_exc}", "WARNING")
                         if is_valid:
                             cam_ok = True
                             break
@@ -5690,6 +5728,34 @@ class GenieSimLocalFramework:
                     time.sleep(_retry_delay)
             if not cam_ok and cam_error:
                 errors.append(cam_error)
+            # Debug: also save images from ALL cameras for inspection
+            try:
+                import numpy as np
+                from PIL import Image as _PILImage
+                for _dbg_cam_id in cam_map:
+                    if _dbg_cam_id == cam_id:
+                        continue  # Already saved above
+                    _dbg_cam_data = self._client.get_camera_data(_dbg_cam_id)
+                    if _dbg_cam_data is None:
+                        _dbg_cam_data = self._client._get_camera_data_raw(cam_map[_dbg_cam_id])
+                    if _dbg_cam_data:
+                        _dbg_rgb = _dbg_cam_data.get("rgb")
+                        if isinstance(_dbg_rgb, (bytes, bytearray)):
+                            _dbg_rgb = decode_camera_bytes(
+                                bytes(_dbg_rgb),
+                                width=int(_dbg_cam_data.get("width") or 0),
+                                height=int(_dbg_cam_data.get("height") or 0),
+                                encoding=_dbg_cam_data.get("rgb_encoding") or _dbg_cam_data.get("encoding") or "",
+                                kind="rgb",
+                            )
+                        if _dbg_rgb is not None and hasattr(_dbg_rgb, "shape"):
+                            _dbg_valid, _dbg_diag = validate_rgb_frame_quality(_dbg_rgb, context=f"debug_{_dbg_cam_id}")
+                            _dbg_path = f"/tmp/preflight_cam_{_dbg_cam_id}.png"
+                            if _dbg_rgb.ndim == 3 and _dbg_rgb.shape[-1] >= 3:
+                                _PILImage.fromarray(_dbg_rgb[:, :, :3].astype(np.uint8)).save(_dbg_path)
+                            self.log(f"[PREFLIGHT-DEBUG] Saved {_dbg_cam_id} camera to {_dbg_path} (valid={_dbg_valid}, colors={_dbg_diag.get('unique_colors')})")
+            except Exception as _dbg_all_exc:
+                self.log(f"[PREFLIGHT-DEBUG] Failed to save all camera images: {_dbg_all_exc}", "WARNING")
         except Exception as exc:
             errors.append(f"camera preflight exception: {exc}")
 
