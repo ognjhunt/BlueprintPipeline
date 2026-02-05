@@ -41,11 +41,12 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
     @classmethod
     def _bp_disable_async_rendering(cls):
-        \"\"\"Disable async rendering for reliable camera capture in headless mode.
+        \"\"\"Disable async rendering and ensure the post-processing pipeline
+        is active for reliable RGB camera capture in headless mode.
 
-        The throttling extension sets asyncRendering=True when the timeline is
-        stopped, causing the renderer to skip frames.  This forces synchronous
-        rendering so every rep.orchestrator.step() produces a valid frame.
+        The LdrColor/rgb annotator requires the full post-processing pipeline
+        (tonemapping, exposure, AA) to convert HDR output to LDR uint8 RGB.
+        Normals/depth work without this because they are raw render variables.
         \"\"\"
         if cls._bp_async_disabled:
             return
@@ -54,6 +55,39 @@ CAMERA_HANDLER = textwrap.dedent("""\
             import carb.settings
             settings = carb.settings.get_settings()
 
+            # Step 1: Enable critical extensions for RGB post-processing pipeline
+            # The rgb/LdrColor annotator needs the viewport rendering pipeline
+            # and post-processing (tonemapping, exposure) to produce color output.
+            try:
+                import omni.kit.app
+                _mgr = omni.kit.app.get_app().get_extension_manager()
+                _critical_exts = [
+                    "omni.kit.viewport.window",
+                    "omni.graph.image.nodes",
+                    "omni.kit.hydra_texture",
+                    "omni.kit.viewport.utility",
+                    "omni.kit.viewport.bundle",
+                    "omni.kit.viewport.rtx",
+                    "omni.hydra.rtx",
+                ]
+                for _ext in _critical_exts:
+                    try:
+                        _mgr.set_extension_enabled(_ext, True)
+                        print(f"[PATCH] Enabled extension: {_ext}")
+                    except Exception as _ext_err:
+                        print(f"[PATCH] Could not enable {_ext}: {_ext_err}")
+            except Exception as _mgr_err:
+                print(f"[PATCH] Extension manager error: {_mgr_err}")
+
+            # Let extensions initialize
+            try:
+                import omni.kit.app
+                _app = omni.kit.app.get_app()
+                for _ in range(5):
+                    _app.update()
+            except Exception:
+                pass
+
             # Log current render settings BEFORE changes
             _diag_keys = [
                 "/app/asyncRendering", "/rtx/rendermode",
@@ -61,9 +95,8 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 "/persistent/rtx/modes/rt2/enabled",
                 "/rtx/directLighting/sampledLighting/enabled",
                 "/app/renderer/skipWhileMinimized",
-                "/app/renderer/resolution/width",
-                "/app/renderer/resolution/height",
-                "/rtx/post/aa/op", "/rtx/hydra/mdlMaterialWarmup",
+                "/rtx/post/tonemap/op", "/rtx/post/aa/op",
+                "/rtx/hydra/mdlMaterialWarmup",
             ]
             for _dk in _diag_keys:
                 try:
@@ -71,27 +104,39 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 except Exception:
                     pass
 
-            # Disable async rendering — forces GPU to finish each frame before returning
+            # Step 2: Disable async rendering
             settings.set("/app/asyncRendering", False)
             settings.set("/app/asyncRenderingLowLatency", False)
-            # Force synchronous material loading
             settings.set("/rtx/materialDb/syncLoads", True)
             settings.set("/rtx/hydra/materialSyncLoads", True)
-            # Disable render throttling in headless mode
             settings.set("/app/renderer/skipWhileMinimized", False)
             settings.set("/app/renderer/sleepMsOnFocus", 0)
             settings.set("/app/renderer/sleepMsOutOfFocus", 0)
-            # Ensure render resolution matches request
-            settings.set("/app/renderer/resolution/width", -1)
-            settings.set("/app/renderer/resolution/height", -1)
-            # Disable rt2/PathTracing completely — it requires many frames to converge
-            settings.set("/persistent/rtx/modes/rt2/enabled", False)
-            settings.set("/rtx/rendermode", "RayTracedLighting")
-            settings.set("/rtx/directLighting/sampledLighting/enabled", True)
-            settings.set("/rtx/pathtracing/spp", 1)
-            settings.set("/rtx/pathtracing/totalSpp", 1)
-            # Force MDL material warmup so textures are loaded before render
+
+            # Step 3: Enable post-processing pipeline (CRITICAL for RGB)
+            # Without tonemapping, HDR output won't be converted to LDR uint8
+            settings.set("/rtx/post/tonemap/op", 1)  # 1=Aces
+            settings.set("/rtx/post/histogram/enabled", True)
+            settings.set("/rtx/post/lensFlare/enabled", False)
+            settings.set("/rtx/post/aa/op", 2)  # FXAA (simpler than DLSS for headless)
+            # Exposure
+            settings.set("/rtx/post/tonemap/autoExposure", True)
+
+            # Step 4: Renderer settings
+            settings.set("/rtx/pathtracing/spp", 64)
+            settings.set("/rtx/pathtracing/totalSpp", 64)
+            settings.set("/rtx/post/denoiser/enabled", True)
+            settings.set("/rtx/pathtracing/optixDenoiser/enabled", True)
             settings.set("/rtx/hydra/mdlMaterialWarmup", True)
+            settings.set("/rtx/directLighting/sampledLighting/enabled", True)
+            settings.set("/app/hydraEngine/waitIdle", True)
+            settings.set("/renderer/enabled", "rtx")
+            settings.set("/app/usd/useFabricSceneDelegate", True)
+
+            # Enable render product rendering (critical for headless mode)
+            settings.set("/omni/replicator/asyncRendering", False)
+            # Ensure RTX renders sub-frames for material loading
+            settings.set("/rtx/rendermode/subframes", 2)
 
             # Log current render settings AFTER changes
             for _dk in _diag_keys:
@@ -100,9 +145,44 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 except Exception:
                     pass
 
-            print("[PATCH] Disabled async rendering + switched to RayTracedLighting for headless capture")
+            # Step 5: Create or enable viewport for post-processing pipeline
+            try:
+                from omni.kit.viewport.utility import get_active_viewport
+                _vp = get_active_viewport()
+                if _vp:
+                    _vp.updates_enabled = True
+                    print(f"[PATCH] Viewport found and enabled: {_vp}")
+                else:
+                    print("[PATCH] No active viewport — attempting to create one...")
+                    try:
+                        from omni.kit.viewport.window import ViewportWindow
+                        _vp_win = ViewportWindow("headless_cam", width=1280, height=720, visible=False)
+                        print(f"[PATCH] Created hidden ViewportWindow: {_vp_win}")
+                        # Re-check for active viewport
+                        import omni.kit.app
+                        for _ in range(5):
+                            omni.kit.app.get_app().update()
+                        _vp2 = get_active_viewport()
+                        if _vp2:
+                            _vp2.updates_enabled = True
+                            print(f"[PATCH] Viewport now active: {_vp2}")
+                    except Exception as _vw_err:
+                        print(f"[PATCH] Could not create ViewportWindow: {_vw_err}")
+            except Exception as _vp_err:
+                print(f"[PATCH] Viewport utility: {_vp_err}")
+
+            try:
+                from omni.kit.viewport.utility import get_num_viewports
+                _nv = get_num_viewports()
+                print(f"[PATCH] Number of viewports: {_nv}")
+            except Exception:
+                pass
+
+            print("[PATCH] Disabled async rendering + enabled post-processing for headless capture")
         except Exception as _e:
-            print(f"[PATCH] WARNING: Could not disable async rendering: {_e}")
+            print(f"[PATCH] WARNING: Could not configure rendering: {_e}")
+            import traceback
+            traceback.print_exc()
 
     @classmethod
     def _bp_ensure_lighting(cls):
@@ -279,18 +359,27 @@ CAMERA_HANDLER = textwrap.dedent("""\
             # Ensure lighting exists before any rendering
             cls._bp_ensure_lighting()
 
-            # Helper: synchronous render step — uses app.update() + rep.orchestrator.step()
-            # to ensure the GPU actually completes the frame before we read data
+            # Helper: synchronous render step — drives the actual rendering pipeline.
+            # The key insight is that we need to use the same rendering path as the
+            # server's main loop: World.render() or app.update().
+            # rep.orchestrator.step() alone does NOT trigger the GPU render in
+            # RealTimePathTracing mode — it only advances the Replicator schedule.
             def _sync_render_step():
                 try:
                     import omni.kit.app
                     app = omni.kit.app.get_app()
-                    # app.update() drives the full Omniverse frame loop:
-                    # physics, rendering, and all extensions
+                    # app.update() runs the full frame: physics + rendering + extensions
+                    # This is what actually submits GPU work and produces pixel output
                     app.update()
-                except Exception:
-                    pass
-                rep.orchestrator.step()
+                    app.update()  # Double update for pipeline flush
+                except Exception as _update_err:
+                    print(f"[PATCH] app.update() error: {_update_err}")
+                # rep.orchestrator.step() advances Replicator annotators to read
+                # from the most recently rendered frame
+                try:
+                    rep.orchestrator.step()
+                except Exception as _rep_err:
+                    print(f"[PATCH] rep.orchestrator.step() error: {_rep_err}")
 
             # Cache render products and annotators across calls
             if camera_prim_path not in cls._bp_render_products:
@@ -313,7 +402,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 depth_annot = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
                 depth_annot.attach([rp])
 
-                # Also try LdrColor as alternative
+                # Also try alternative annotators for diagnostics
                 try:
                     _ldr_annot = rep.AnnotatorRegistry.get_annotator("LdrColor")
                     _ldr_annot.attach([rp])
@@ -321,6 +410,34 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     print(f"[PATCH] Also attached LdrColor annotator for diagnostics")
                 except Exception as _ldr_err:
                     print(f"[PATCH] LdrColor annotator not available: {_ldr_err}")
+
+                # HdrColor gives raw HDR float data BEFORE tonemapping
+                # If this has data but LdrColor doesn't, we can manually tonemap
+                try:
+                    _hdr_annot = rep.AnnotatorRegistry.get_annotator("HdrColor")
+                    _hdr_annot.attach([rp])
+                    cls._bp_render_products[camera_prim_path + "_hdr"] = _hdr_annot
+                    print(f"[PATCH] Also attached HdrColor annotator for diagnostics")
+                except Exception as _hdr_err:
+                    print(f"[PATCH] HdrColor annotator not available: {_hdr_err}")
+
+                try:
+                    _normals_annot = rep.AnnotatorRegistry.get_annotator("normals")
+                    _normals_annot.attach([rp])
+                    cls._bp_render_products[camera_prim_path + "_normals"] = _normals_annot
+                    print(f"[PATCH] Also attached normals annotator for diagnostics")
+                except Exception as _norm_err:
+                    print(f"[PATCH] normals annotator not available: {_norm_err}")
+
+                # Try using Camera helper class from isaacsim
+                try:
+                    from isaacsim.sensors.camera import Camera as IsaacCamera
+                    _test_cam = IsaacCamera(prim_path=camera_prim_path, resolution=(_w, _h))
+                    _test_cam.initialize()
+                    cls._bp_render_products[camera_prim_path + "_isaccam"] = _test_cam
+                    print(f"[PATCH] Also created IsaacCamera helper for diagnostics")
+                except Exception as _cam_err:
+                    print(f"[PATCH] IsaacCamera helper not available: {_cam_err}")
 
                 cls._bp_render_products[camera_prim_path] = rp
                 cls._bp_rgb_annotators[camera_prim_path] = rgb_annot
@@ -501,6 +618,77 @@ CAMERA_HANDLER = textwrap.dedent("""\
                         print(f"[PATCH] LdrColor annotator returned None")
                 except Exception as _ldr_err:
                     print(f"[PATCH] LdrColor check error: {_ldr_err}")
+
+            # Check HdrColor annotator — raw HDR before tonemapping
+            _hdr_key = camera_prim_path + "_hdr"
+            if _hdr_key in cls._bp_render_products:
+                try:
+                    _hdr_annot = cls._bp_render_products[_hdr_key]
+                    _hdr_data = _hdr_annot.get_data()
+                    if _hdr_data is not None:
+                        _ha = np.asarray(_hdr_data, dtype=np.float32)
+                        _ha_nz = int(np.count_nonzero(_ha))
+                        if _ha.ndim == 3:
+                            _ha_ch = [f"ch{_ci}:min={float(_ha[:,:,_ci].min()):.4f} max={float(_ha[:,:,_ci].max()):.4f} mean={float(_ha[:,:,_ci].mean()):.4f}" for _ci in range(min(4, _ha.shape[-1]))]
+                            print(f"[PATCH] HdrColor annotator: {_ha.shape}, dtype={_ha.dtype}, nonzero={_ha_nz}/{_ha.size}, {', '.join(_ha_ch)}")
+                            # If HdrColor has actual data but LdrColor/rgb is black,
+                            # manually tonemap HDR -> LDR and use as RGB output
+                            if _ha.shape[-1] >= 3:
+                                _hdr_rgb_nz = int(np.count_nonzero(_ha[:,:,:3]))
+                                if _hdr_rgb_nz > 0 and _rgb_nz == 0:
+                                    print(f"[PATCH] HdrColor has color data! Manually tonemapping HDR->LDR...")
+                                    # Simple Reinhard tonemapping: L / (1 + L)
+                                    _hdr_rgb = _ha[:, :, :3].copy()
+                                    _hdr_rgb = np.clip(_hdr_rgb, 0, None)  # Remove negatives
+                                    # Reinhard: x / (1 + x)
+                                    _tonemapped = _hdr_rgb / (1.0 + _hdr_rgb)
+                                    # Gamma correction (linear -> sRGB)
+                                    _tonemapped = np.power(np.clip(_tonemapped, 0, 1), 1.0/2.2)
+                                    # Convert to uint8
+                                    _ldr_from_hdr = (np.clip(_tonemapped, 0, 1) * 255).astype(np.uint8)
+                                    result["rgb"] = _ldr_from_hdr
+                                    _uniq2, _std2 = _bp_rgb_quality(_ldr_from_hdr)
+                                    print(f"[PATCH] Tonemapped HDR->RGB: unique={_uniq2} std={_std2:.2f}")
+                        else:
+                            print(f"[PATCH] HdrColor annotator: {_ha.shape}, dtype={_ha.dtype}, nonzero={_ha_nz}/{_ha.size}")
+                    else:
+                        print(f"[PATCH] HdrColor annotator returned None")
+                except Exception as _he:
+                    print(f"[PATCH] HdrColor check error: {_he}")
+
+            # Check normals annotator
+            _normals_key = camera_prim_path + "_normals"
+            if _normals_key in cls._bp_render_products:
+                try:
+                    _normals_annot = cls._bp_render_products[_normals_key]
+                    _normals_data = _normals_annot.get_data()
+                    if _normals_data is not None:
+                        _na = np.asarray(_normals_data)
+                        _na_nz = int(np.count_nonzero(_na))
+                        print(f"[PATCH] Normals annotator: {_na.shape}, dtype={_na.dtype}, nonzero={_na_nz}/{_na.size}, range=[{float(np.min(_na)):.3f}, {float(np.max(_na)):.3f}]")
+                    else:
+                        print(f"[PATCH] Normals annotator returned None")
+                except Exception as _ne:
+                    print(f"[PATCH] Normals check error: {_ne}")
+
+            # Check IsaacCamera helper
+            _isaccam_key = camera_prim_path + "_isaccam"
+            if _isaccam_key in cls._bp_render_products:
+                try:
+                    _test_cam = cls._bp_render_products[_isaccam_key]
+                    _test_rgba = _test_cam.get_rgba()
+                    if _test_rgba is not None:
+                        _ta = np.asarray(_test_rgba, dtype=np.uint8)
+                        _ta_nz = int(np.count_nonzero(_ta))
+                        if _ta.ndim == 3:
+                            _ta_ch = [f"ch{i}:mean={float(_ta[:,:,i].mean()):.1f}" for i in range(min(4, _ta.shape[-1]))]
+                            print(f"[PATCH] IsaacCamera.get_rgba(): {_ta.shape}, nonzero={_ta_nz}/{_ta.size}, {', '.join(_ta_ch)}")
+                        else:
+                            print(f"[PATCH] IsaacCamera.get_rgba(): {_ta.shape}, nonzero={_ta_nz}/{_ta.size}")
+                    else:
+                        print(f"[PATCH] IsaacCamera.get_rgba() returned None")
+                except Exception as _ce:
+                    print(f"[PATCH] IsaacCamera check error: {_ce}")
 
             # Check depth data for diagnostic info
             if result["depth"] is not None and hasattr(result["depth"], "shape"):
