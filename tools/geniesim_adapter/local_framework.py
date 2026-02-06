@@ -6150,20 +6150,14 @@ class GenieSimLocalFramework:
             if scene_usd_path:
                 scene_usd_path = Path(scene_usd_path)
 
-            # Normalize scene units (meters_per_unit) for EE/object comparisons
-            _mpu = None
-            if scene_config:
-                _mpu = scene_config.get("meters_per_unit")
-                if _mpu is None:
-                    _mpu = (scene_config.get("scene") or {}).get("meters_per_unit")
-            try:
-                _mpu = float(_mpu) if _mpu not in (None, "") else 1.0
-            except (TypeError, ValueError):
-                _mpu = 1.0
-            if not _mpu or _mpu <= 0:
-                _mpu = 1.0
-            self._meters_per_unit = _mpu
-            self._units_per_meter = 1.0 / _mpu if _mpu > 0 else 1.0
+            # GenieSim gRPC API always returns positions in meters, regardless of
+            # the USD stage's internal metersPerUnit.  The scene_graph.json may
+            # report meters_per_unit=0.01 (Isaac Sim default centimetres) but
+            # that only describes the USD stage — not the gRPC response
+            # coordinates.  Force units_per_meter=1.0 so all thresholds
+            # (move, grasp, divergence) stay in metre-scale.
+            self._meters_per_unit = 1.0
+            self._units_per_meter = 1.0
 
             if not self.config.geniesim_root.exists() and not self.is_server_running():
                 msg = (
@@ -14896,14 +14890,20 @@ Scene objects: {scene_summary}
                         for _oid, _positions in _object_trajectory.items():
                             if len(_positions) < 2:
                                 continue
+                            _local_max = 0.0
                             for i in range(1, len(_positions)):
                                 prev_pos = np.array(_positions[i - 1])
                                 curr_pos = np.array(_positions[i])
                                 disp = float(np.linalg.norm(curr_pos - prev_pos))
+                                _local_max = max(_local_max, disp)
                                 _max_displacement = max(_max_displacement, disp)
                                 if disp > _move_thresh:
                                     _any_moved = True
                                     break
+                            if _local_max > 0.001:
+                                logger.info("[MOTION-DIAG] %s: %d positions, max_consecutive_disp=%.6f, thresh=%.6f, first=%s, last=%s",
+                                            _oid, len(_positions), _local_max, _move_thresh,
+                                            _positions[0], _positions[-1])
                             if _any_moved:
                                 break
 
