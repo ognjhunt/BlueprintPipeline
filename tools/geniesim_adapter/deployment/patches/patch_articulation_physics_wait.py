@@ -52,8 +52,8 @@ def patch_file():
     if re.search(pattern, content):
         replacement = r'''\1# ''' + PATCH_MARKER + r'''
 \1# Wait for physics backend to be ready before creating Articulation
-\1_max_physics_wait_retries = 10
-\1_physics_wait_delay = 0.5
+\1_max_physics_wait_retries = 30
+\1_physics_wait_delay = 1.0
 \1for _attempt in range(_max_physics_wait_retries):
 \1    try:
 \1        self.articulation = Articulation(prim_path=self.robot_prim_path, name=self.robot_name)
@@ -95,8 +95,8 @@ def patch_file():
 
             replacement = f'''# {PATCH_MARKER}
 {indent}# Wait for physics backend to be ready before creating Articulation
-{indent}_max_physics_wait_retries = 10
-{indent}_physics_wait_delay = 0.5
+{indent}_max_physics_wait_retries = 30
+{indent}_physics_wait_delay = 1.0
 {indent}for _attempt in range(_max_physics_wait_retries):
 {indent}    try:
 {indent}        self.articulation = Articulation(prim_path=self.robot_prim_path, name=self.robot_name)
