@@ -2714,6 +2714,7 @@ class GenieSimGRPCClient:
                     "object_id": obj_id,
                     "prim_path": resolved_path,
                     "pose": obj_pose,
+                    "source": "server",
                 })
                 _record_success(obj_id)
                 logger.info(f"[OBS] Got real object pose for {resolved_path}: {obj_pose}")
@@ -2737,6 +2738,7 @@ class GenieSimGRPCClient:
                         "object_id": obj_id,
                         "prim_path": cache.get("prim_path"),
                         "pose": cache.get("pose") or {},
+                        "source": cache.get("source", "server_cached"),
                     })
                     continue
                 if _static_manifest_first:
@@ -2789,11 +2791,13 @@ class GenieSimGRPCClient:
                     "pose": obj_pose,
                     "prim_path": resolved_path,
                     "timestamp": now_ts,
+                    "source": "server",
                 }
                 scene_objects.append({
                     "object_id": obj_id,
                     "prim_path": resolved_path,
                     "pose": obj_pose,
+                    "source": "server",
                 })
                 _record_success(obj_id)
                 logger.info(f"[OBS] Got real object pose for {resolved_path}: {obj_pose}")

@@ -402,6 +402,21 @@ def assemble_scene(
     else:
         print("\n[PHASE 4.5] Articulation wiring not available (skipping)")
 
+    # [PHASE 4.7] Fix physics conflicts from referenced assets
+    print("\n[PHASE 4.7] Fixing internal physics conflicts...")
+    try:
+        from usd_assembly_job.build_scene_usd import fix_internal_physics_conflicts as _fix_physics
+        physics_fixes = _fix_physics(stage)
+        print(f"  Fixed {physics_fixes} internal physics conflicts")
+    except ImportError:
+        try:
+            import importlib, sys as _sys
+            _bsu = importlib.import_module("build_scene_usd")
+            physics_fixes = _bsu.fix_internal_physics_conflicts(stage)
+            print(f"  Fixed {physics_fixes} internal physics conflicts")
+        except Exception as e:
+            print(f"[WARN] Could not fix internal physics conflicts: {e}")
+
     stage.GetRootLayer().Save()
     print(f"  Saved updated scene: {stage_path}")
 

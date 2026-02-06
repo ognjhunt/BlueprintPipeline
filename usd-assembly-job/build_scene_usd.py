@@ -1286,13 +1286,17 @@ class SceneBuilder:
             # Set kinematic vs dynamic based on sim_role.
             rigid_body_api.CreateKinematicEnabledAttr().Set(not is_dynamic)
 
-        # Dynamic objects need collision with a simulation-friendly approximation.
-        if is_dynamic:
-            collision_api = UsdPhysics.CollisionAPI.Apply(prim)
-            collision_api.CreateCollisionEnabledAttr().Set(True)
-            prim.CreateAttribute(
-                "physics:approximation", Sdf.ValueTypeNames.Token
-            ).Set("convexDecomposition")
+        # All physics objects need collision so dynamic objects interact with
+        # kinematic surfaces (tables, counters, etc.) and vice versa.
+        collision_api = UsdPhysics.CollisionAPI.Apply(prim)
+        collision_api.CreateCollisionEnabledAttr().Set(True)
+        # Dynamic objects use convexDecomposition for accurate collision;
+        # kinematic objects use convexHull which is cheaper and sufficient
+        # since they don't deform.
+        approx = "convexDecomposition" if is_dynamic else "convexHull"
+        prim.CreateAttribute(
+            "physics:approximation", Sdf.ValueTypeNames.Token
+        ).Set(approx)
 
         if (
             static_friction is not None
@@ -1332,6 +1336,73 @@ class SceneBuilder:
             sim_role,
             is_dynamic,
         )
+
+    def fix_internal_physics_conflicts(self) -> int:
+        """Override internal RigidBodyAPI settings in referenced assets.
+
+        Pre-made USD assets (from catalogs or interactive-job) often have their
+        own RigidBodyAPI with kinematicEnabled=False on internal prims.  When
+        these assets are referenced into a scene, the internal setting overrides
+        the scene-level kinematic flag because it lives on a more specific prim.
+
+        This method walks the composed stage after references are wired and
+        ensures that child prims under each object Xform inherit the same
+        kinematic state as the scene-level physics definition.
+
+        Returns the number of fixes applied.
+        """
+        return fix_internal_physics_conflicts(self.stage)
+
+
+# -----------------------------------------------------------------------------
+# Post-reference physics fixup
+# -----------------------------------------------------------------------------
+
+
+def fix_internal_physics_conflicts(stage: Usd.Stage) -> int:
+    """Fix kinematic conflicts in referenced USD assets.
+
+    Pre-made USD assets often have their own RigidBodyAPI with
+    kinematicEnabled=False on internal prims.  When referenced into a
+    scene, the internal flag overrides the scene-level setting because
+    it's on a more specific prim.  This function walks the composed
+    stage and ensures descendant prims inherit the parent's kinematic
+    state.
+
+    Should be called AFTER references are wired (Phase 4+).
+
+    Returns the number of fixes applied.
+    """
+    scene_prim = stage.GetPrimAtPath("/World/Scene")
+    if not scene_prim or not scene_prim.IsValid():
+        return 0
+
+    fixed = 0
+    for obj_prim in scene_prim.GetChildren():
+        if not obj_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            continue
+        parent_kin = obj_prim.GetAttribute("physics:kinematicEnabled")
+        if not parent_kin:
+            continue
+        is_kinematic = parent_kin.Get()
+
+        for desc in Usd.PrimRange(obj_prim):
+            if desc == obj_prim:
+                continue
+            if not desc.HasAPI(UsdPhysics.RigidBodyAPI):
+                continue
+            child_kin = desc.GetAttribute("physics:kinematicEnabled")
+            if child_kin and child_kin.Get() != is_kinematic:
+                child_kin.Set(is_kinematic)
+                fixed += 1
+                logger.info(
+                    "[USD] Fixed internal kinematic conflict: %s -> kinematic=%s",
+                    desc.GetPath(), is_kinematic,
+                )
+
+    if fixed:
+        logger.info("[USD] Fixed %d internal physics conflicts", fixed)
+    return fixed
 
 
 # -----------------------------------------------------------------------------
