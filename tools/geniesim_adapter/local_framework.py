@@ -1392,6 +1392,7 @@ class GenieSimGRPCClient:
         self._joint_names: List[str] = []
         self._latest_joint_positions: List[float] = []
         self._grpc_unavailable_logged: set[str] = set()
+        self._ee_wrench_rpc_supported: Optional[bool] = None
         self._camera_missing_logged: set[str] = set()
         self._first_joint_call = True  # first set_joint_position uses longer timeout
         self._first_trajectory_call = True  # first trajectory waypoint uses longer timeout
@@ -1733,6 +1734,18 @@ class GenieSimGRPCClient:
                     and unimplemented_code is not None
                     and exc.code() == unimplemented_code
                 )
+                if _is_unimplemented and action == "get_ee_wrench":
+                    # This RPC is optional and absent on some server builds.
+                    # Disable subsequent polling instead of logging noisy errors.
+                    self._ee_wrench_rpc_supported = False
+                    if action not in self._grpc_unavailable_logged:
+                        logger.warning(
+                            "Genie Sim gRPC %s unsupported by server (UNIMPLEMENTED); "
+                            "disabling ee_wrench polling for this run",
+                            action,
+                        )
+                        self._grpc_unavailable_logged.add(action)
+                    return fallback
                 if self._circuit_breaker and not _is_unimplemented:
                     self._circuit_breaker.record_failure(exc)
 
@@ -2874,7 +2887,10 @@ class GenieSimGRPCClient:
             return self._grpc_unavailable("get_ee_wrench", "gRPC not available")
         if self._stub is None:
             return self._grpc_unavailable("get_ee_wrench", "gRPC channel not initialized")
+        if self._ee_wrench_rpc_supported is False:
+            return self._grpc_unavailable("get_ee_wrench", "RPC not supported by server")
         if not hasattr(self._stub, "get_ee_wrench"):
+            self._ee_wrench_rpc_supported = False
             return self._grpc_unavailable("get_ee_wrench", "RPC not supported by server")
 
         request = EEWrenchReq(include_contacts=include_contacts)
@@ -2890,7 +2906,10 @@ class GenieSimGRPCClient:
             lock_timeout=lock_timeout,
         )
         if response is None:
+            if self._ee_wrench_rpc_supported is False:
+                return self._grpc_unavailable("get_ee_wrench", "RPC not supported by server")
             return GrpcCallResult(success=False, available=True, error="gRPC call failed")
+        self._ee_wrench_rpc_supported = True
 
         contacts = []
         for contact in getattr(response, "contacts", []):
@@ -14735,7 +14754,12 @@ Scene objects: {scene_summary}
         # Fail-fast gate: Object motion validation
         if _requires_motion and not _any_moved:
             try:
-                from data_fidelity import validate_object_motion, DataFidelityError
+                from data_fidelity import (
+                    validate_object_motion,
+                    DataFidelityError,
+                    require_object_motion,
+                )
+                _motion_gate_enabled = bool(require_object_motion())
                 _is_valid, _motion_diag = validate_object_motion(
                     any_moved=_any_moved,
                     max_displacement=_max_displacement if "_max_displacement" in dir() else 0.0,
@@ -14743,10 +14767,18 @@ Scene objects: {scene_summary}
                     min_displacement_threshold=0.001,  # 1mm
                 )
                 if not _is_valid:
-                    logger.error(
-                        "Object motion validation failed: %s",
-                        _motion_diag.get("reason", "unknown"),
+                    _max_disp = float(_motion_diag.get("max_displacement_m", 0.0))
+                    _min_thresh = float(_motion_diag.get("min_threshold_m", 0.001))
+                    _reason = _motion_diag.get("reason") or (
+                        f"max_displacement={_max_disp:.6f}m below threshold={_min_thresh:.6f}m"
                     )
+                    if _motion_gate_enabled:
+                        logger.error("Object motion validation failed: %s", _reason)
+                    else:
+                        logger.warning(
+                            "Object motion below threshold but gate disabled: %s",
+                            _reason,
+                        )
             except ImportError:
                 pass
             except DataFidelityError as e:
