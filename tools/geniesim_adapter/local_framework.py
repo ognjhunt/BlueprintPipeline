@@ -4679,6 +4679,7 @@ class GenieSimLocalFramework:
         self.config = config or GenieSimConfig.from_env()
         self.verbose = verbose
         self._strict_realism = _strict_realism_enabled()
+        self._skip_rgb_placeholder = os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
 
         self._apply_curobo_fallback_policy()
 
@@ -5629,6 +5630,9 @@ class GenieSimLocalFramework:
             errors.append(f"object_pose exception: {exc}")
 
         # 4) Camera intrinsics + non-placeholder frame
+        _skip_rgb_preflight = os.getenv("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
+        if _skip_rgb_preflight:
+            self.log("[PREFLIGHT] SKIP_RGB_CAPTURE=true — skipping camera RGB preflight check")
         try:
             cam_map = getattr(self._client, "_camera_prim_map", {}) or {}
             cam_id = "wrist" if "wrist" in cam_map else (list(cam_map.keys())[0] if cam_map else None)
@@ -5709,8 +5713,15 @@ class GenieSimLocalFramework:
                             kind="rgb",
                         )
                     if rgb is None:
+                        if _skip_rgb_preflight:
+                            cam_ok = True
+                            break
                         cam_error = "camera RGB decode failed"
                     else:
+                        if _skip_rgb_preflight:
+                            # RGB skipped — accept camera as OK if intrinsics passed
+                            cam_ok = True
+                            break
                         is_valid, diag = validate_rgb_frame_quality(rgb, context="preflight")
                         # Debug: save preflight camera image for inspection
                         try:
@@ -7496,7 +7507,7 @@ class GenieSimLocalFramework:
                     task=task,
                     episode_dir=output_dir,
                 )
-                if frame_validation.get("camera_placeholder_detected"):
+                if frame_validation.get("camera_placeholder_detected") and not self._skip_rgb_placeholder:
                     message = (
                         f"Placeholder camera frames detected for episode {episode_id}; "
                         "aborting to avoid synthetic data."
@@ -7505,6 +7516,8 @@ class GenieSimLocalFramework:
                     result["frame_validation"] = frame_validation
                     self.log(message, "ERROR")
                     return result
+                elif frame_validation.get("camera_placeholder_detected") and self._skip_rgb_placeholder:
+                    self.log(f"[SKIP_RGB] Placeholder camera frames in {episode_id} — allowed (SKIP_RGB_CAPTURE=true)", "WARNING")
                 if frame_validation["errors"]:
                     message = (
                         f"Frame validation failed for episode {episode_id}: "
@@ -7524,7 +7537,7 @@ class GenieSimLocalFramework:
                 )
                 frame_validation.update(placeholder_check)
                 frame_validation["enabled"] = True
-                if placeholder_check.get("camera_placeholder_detected"):
+                if placeholder_check.get("camera_placeholder_detected") and not self._skip_rgb_placeholder:
                     message = (
                         f"Placeholder camera frames detected for episode {episode_id}; "
                         "aborting to avoid synthetic data."
@@ -11679,6 +11692,7 @@ class GenieSimLocalFramework:
     ) -> Dict[str, Any]:
         details: List[str] = []
         checked: set[str] = set()
+        _skip_rgb = _os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
         _frames_dir = None
         if episode_dir is not None:
             _frames_dir = episode_dir / f"{episode_id}_frames"
@@ -11688,14 +11702,16 @@ class GenieSimLocalFramework:
             for camera_id, camera_data in camera_frames.items():
                 if camera_id in checked or not isinstance(camera_data, dict):
                     continue
-                rgb_arr = load_camera_frame(
-                    camera_data, "rgb", ep_dir=episode_dir, frames_dir=_frames_dir
-                )
-                if rgb_arr is not None and is_placeholder_rgb(rgb_arr):
-                    details.append(
-                        f"Frame {idx} camera '{camera_id}' rgb appears placeholder "
-                        "(few colors, mostly zeros)."
+                # Skip RGB placeholder check when RGB capture is intentionally disabled
+                if not _skip_rgb:
+                    rgb_arr = load_camera_frame(
+                        camera_data, "rgb", ep_dir=episode_dir, frames_dir=_frames_dir
                     )
+                    if rgb_arr is not None and is_placeholder_rgb(rgb_arr):
+                        details.append(
+                            f"Frame {idx} camera '{camera_id}' rgb appears placeholder "
+                            "(few colors, mostly zeros)."
+                        )
                 depth_arr = load_camera_frame(
                     camera_data, "depth", ep_dir=episode_dir, frames_dir=_frames_dir
                 )
@@ -11707,29 +11723,30 @@ class GenieSimLocalFramework:
                 checked.add(camera_id)
             if details:
                 break
-        # Frame sequence variety check (static sequences)
-        try:
-            if frames:
-                cam_frames = (frames[0].get("observation") or {}).get("camera_frames") or {}
-                if isinstance(cam_frames, dict) and cam_frames:
-                    cam_id = next(iter(cam_frames.keys()))
-                    sampled = []
-                    for frame in frames[: min(10, len(frames))]:
-                        cam_data = (frame.get("observation") or {}).get("camera_frames", {}).get(cam_id)
-                        if not isinstance(cam_data, dict):
-                            continue
-                        rgb_arr = load_camera_frame(
-                            cam_data, "rgb", ep_dir=episode_dir, frames_dir=_frames_dir
-                        )
-                        if rgb_arr is not None:
-                            sampled.append(rgb_arr)
-                    is_valid, diag = validate_frame_sequence_variety(sampled)
-                    if not is_valid:
-                        details.append(
-                            f"Camera '{cam_id}' frame sequence appears static: {diag.get('reason')}"
-                        )
-        except Exception:
-            pass
+        # Frame sequence variety check (static sequences) — skip when RGB is disabled
+        if not _skip_rgb:
+            try:
+                if frames:
+                    cam_frames = (frames[0].get("observation") or {}).get("camera_frames") or {}
+                    if isinstance(cam_frames, dict) and cam_frames:
+                        cam_id = next(iter(cam_frames.keys()))
+                        sampled = []
+                        for frame in frames[: min(10, len(frames))]:
+                            cam_data = (frame.get("observation") or {}).get("camera_frames", {}).get(cam_id)
+                            if not isinstance(cam_data, dict):
+                                continue
+                            rgb_arr = load_camera_frame(
+                                cam_data, "rgb", ep_dir=episode_dir, frames_dir=_frames_dir
+                            )
+                            if rgb_arr is not None:
+                                sampled.append(rgb_arr)
+                        is_valid, diag = validate_frame_sequence_variety(sampled)
+                        if not is_valid:
+                            details.append(
+                                f"Camera '{cam_id}' frame sequence appears static: {diag.get('reason')}"
+                            )
+            except Exception:
+                pass
         return {
             "camera_placeholder_detected": bool(details),
             "camera_placeholder_details": details,

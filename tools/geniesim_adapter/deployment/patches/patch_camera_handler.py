@@ -280,20 +280,32 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     if _sync_render_call_count[0] <= 3:
                         print(f"[PATCH] rep.orchestrator.step() error (call #{_sync_render_call_count[0]}): {_rep_err}")
 
+            _skip_rgb_init = _os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
+
             # Cache render products and annotators across calls
             if camera_prim_path not in cls._bp_render_products:
-                # Run several app.update() frames BEFORE creating render product
-                # to let the renderer fully initialize after our settings changes
-                print(f"[PATCH] Pre-warming renderer before creating render product...")
+                # Pre-warm renderer (fewer frames when skipping RGB)
+                _pre_frames = 10
+                print(f"[PATCH] Pre-warming renderer ({_pre_frames} frames)...")
                 try:
                     import omni.kit.app
                     _pre_app = omni.kit.app.get_app()
-                    for _i in range(10):
+                    for _i in range(_pre_frames):
                         _pre_app.update()
                 except Exception as _pre_err:
                     print(f"[PATCH] Pre-warm app.update() error: {_pre_err}")
 
+                # Verify camera prim exists before creating render product
+                import omni.usd
+                _stage = omni.usd.get_context().get_stage()
+                _cam_prim = _stage.GetPrimAtPath(camera_prim_path) if _stage else None
+                if _cam_prim and _cam_prim.IsValid():
+                    print(f"[PATCH] Camera prim verified: {camera_prim_path} (type={_cam_prim.GetTypeName()})")
+                else:
+                    print(f"[PATCH] WARNING: Camera prim NOT FOUND at {camera_prim_path}")
+
                 rp = rep.create.render_product(camera_prim_path, (_w, _h))
+                print(f"[PATCH] render_product result: {type(rp)} = {rp}")
 
                 rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
                 rgb_annot.attach([rp])
@@ -305,40 +317,10 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 cls._bp_depth_annotators[camera_prim_path] = depth_annot
                 print(f"[PATCH] Created render product for {camera_prim_path}")
 
-                # Diagnostic: count scene contents to verify materials loaded
-                try:
-                    _mat_count = _mesh_count = 0
-                    for _diag_prim in stage.Traverse():
-                        _tn = _diag_prim.GetTypeName()
-                        if _tn in ("Material", "Shader"):
-                            _mat_count += 1
-                        elif _tn == "Mesh":
-                            _mesh_count += 1
-                    print(f"[PATCH] Scene contents: {_mesh_count} meshes, {_mat_count} materials/shaders")
-                except Exception as _diag_err:
-                    print(f"[PATCH] Scene diagnostic error: {_diag_err}")
-
-                # Diagnostic: also create a test render product on /OmniverseKit_Persp
-                # to check if ANY camera produces color output
-                try:
-                    _test_cam = "/OmniverseKit_Persp"
-                    _test_rp = rep.create.render_product(_test_cam, (320, 240))
-                    _test_rgb = rep.AnnotatorRegistry.get_annotator("rgb")
-                    _test_rgb.attach([_test_rp])
-                    for _ti in range(10):
-                        _sync_render_step()
-                    _test_data = _test_rgb.get_data()
-                    if _test_data is not None:
-                        _test_data = np.array(_test_data)
-                        _tc = [np.mean(_test_data[:, :, c]) for c in range(min(4, _test_data.shape[2]))]
-                        print(f"[PATCH] VIEWPORT TEST ({_test_cam}): shape={_test_data.shape}, ch_means={_tc}")
-                    _test_rgb.detach([_test_rp])
-                except Exception as _test_err:
-                    print(f"[PATCH] Viewport test error: {_test_err}")
-
-                # Initial prime: run extra frames immediately after render product creation
-                # to bootstrap the Replicator pipeline (shaders, textures, lighting)
-                _initial_prime = int(_os.environ.get("CAMERA_INITIAL_PRIME_STEPS", "30"))
+                # Initial prime: bootstrap the Replicator pipeline
+                # Use fewer frames when skipping RGB (depth needs less warmup)
+                _default_prime = "5" if _skip_rgb_init else "30"
+                _initial_prime = int(_os.environ.get("CAMERA_INITIAL_PRIME_STEPS", _default_prime))
                 if _initial_prime > 0:
                     print(f"[PATCH] Initial priming camera {camera_prim_path} ({_initial_prime} frames)...")
                     for _pi in range(_initial_prime):
@@ -357,8 +339,10 @@ CAMERA_HANDLER = textwrap.dedent("""\
             # Warmup logic with cumulative frame tracking to ensure render pipeline
             # gets enough total frames across retries.
             _rewarmup_on_reset = _os.environ.get("CAMERA_REWARMUP_ON_RESET", "0") == "1"
-            _cumulative_target = int(_os.environ.get("CAMERA_CUMULATIVE_WARMUP_TARGET", "30"))
-            _warmup_steps = int(_os.environ.get("CAMERA_WARMUP_STEPS", "5"))
+            _default_cumulative = "10" if _skip_rgb_init else "30"
+            _default_warmup = "2" if _skip_rgb_init else "5"
+            _cumulative_target = int(_os.environ.get("CAMERA_CUMULATIVE_WARMUP_TARGET", _default_cumulative))
+            _warmup_steps = int(_os.environ.get("CAMERA_WARMUP_STEPS", _default_warmup))
 
             _total_rendered = cls._bp_total_frames_rendered.get(camera_prim_path, 0)
             _needs_warmup = False
@@ -507,6 +491,13 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
         # Serialize depth to bytes
         if _depth_arr is not None and hasattr(_depth_arr, "tobytes"):
+            _finite_mask = np.isfinite(_depth_arr)
+            _n_finite = int(_finite_mask.sum())
+            _n_total = _depth_arr.size
+            _depth_mean = float(np.nanmean(_depth_arr[_finite_mask])) if _n_finite > 0 else float('inf')
+            print(f"[PATCH] Depth stats for {camera_prim_path}: "
+                  f"finite={_n_finite}/{_n_total}, mean={_depth_mean:.3f}, "
+                  f"dtype={_depth_arr.dtype}, shape={_depth_arr.shape}")
             flat_result["depth"] = _depth_arr.tobytes()
             flat_result["depth_shape"] = list(_depth_arr.shape)
             flat_result["depth_dtype"] = str(_depth_arr.dtype)
