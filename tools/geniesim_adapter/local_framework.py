@@ -161,6 +161,10 @@ from tools.error_handling.retry import RetryConfig, calculate_delay
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.config.env import parse_bool_env
 from tools.quality.quality_config import load_quality_config, QualityConfig
+from tools.quality_gates.physics_certification import (
+    run_episode_certification,
+    write_run_certification_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -4917,6 +4921,20 @@ class GenieSimLocalFramework:
         self.verbose = verbose
         self._strict_realism = _strict_realism_enabled()
         self._skip_rgb_placeholder = os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
+        self._modality_profile = os.environ.get("GENIESIM_MODALITY_PROFILE", "no_rgb").strip().lower()
+        if self._modality_profile not in {"no_rgb", "rgb"}:
+            self._modality_profile = "no_rgb"
+        _cert_mode_default = "strict" if self._strict_realism else "compat"
+        self._physics_cert_mode = os.environ.get("PHYSICS_CERT_MODE", _cert_mode_default).strip().lower()
+        if self._physics_cert_mode not in {"strict", "compat"}:
+            self._physics_cert_mode = _cert_mode_default
+        self._physics_cert_enabled = parse_bool_env(
+            os.getenv("PHYSICS_CERT_ENABLED"),
+            default=True,
+        )
+        if self._modality_profile == "no_rgb":
+            # No-RGB profile intentionally omits camera payloads from episodes.
+            self._skip_rgb_placeholder = True
 
         self._apply_curobo_fallback_policy()
 
@@ -6473,6 +6491,7 @@ class GenieSimLocalFramework:
             collision_info_episodes = 0
             task_success_episodes = 0
             task_success_info_episodes = 0
+            certification_episode_reports: List[Dict[str, Any]] = []
 
             # Create output directory for this run.
             # Use a stable hash so retries of the same scene+config reuse the
@@ -6690,6 +6709,15 @@ class GenieSimLocalFramework:
                             task_success_info_episodes += 1
                             if task_success_flag:
                                 task_success_episodes += 1
+                        _cert_payload = episode_result.get("certification")
+                        if isinstance(_cert_payload, dict):
+                            certification_episode_reports.append({
+                                "episode_id": episode_result.get("episode_id"),
+                                "task_name": task_name,
+                                "robot_type": getattr(self.config, "robot_type", None),
+                                "dataset_tier": episode_result.get("dataset_tier", "raw_preserved"),
+                                "certification": _cert_payload,
+                            })
 
                         if episode_result.get("success"):
                             passed_episodes += 1
@@ -6891,6 +6919,24 @@ class GenieSimLocalFramework:
                 )
             self.log(f"Duration: {result.duration_seconds:.1f}s")
             self.log(f"Output: {run_dir}")
+
+            if certification_episode_reports:
+                try:
+                    cert_report = write_run_certification_report(
+                        run_dir,
+                        certification_episode_reports,
+                    )
+                    result.server_info["certification_summary"] = cert_report.get("summary", {})
+                    self.log(
+                        "Certification summary: "
+                        f"{cert_report.get('summary', {}).get('certified', 0)}/"
+                        f"{cert_report.get('summary', {}).get('episodes', 0)} physics_certified",
+                    )
+                except Exception as _cert_exc:
+                    self.log(
+                        f"Failed to write run certification report: {_cert_exc}",
+                        "WARNING",
+                    )
 
             # Log final stall statistics for pattern analysis (P1)
             if result.stall_statistics and result.stall_statistics.total_stalls > 0:
@@ -7811,7 +7857,14 @@ class GenieSimLocalFramework:
                 "invalid_frame_count": 0,
                 "total_frames": len(frames),
             }
-            if self.config.validate_frames:
+            if self._modality_profile == "no_rgb":
+                frame_validation["enabled"] = True
+                frame_validation["warnings"] = [
+                    "Camera validation skipped in no-RGB modality profile."
+                ]
+                frame_validation["camera_placeholder_detected"] = False
+                frame_validation["camera_placeholder_details"] = []
+            elif self.config.validate_frames:
                 frame_validation = self._validate_frames(
                     frames,
                     episode_id=episode_id,
@@ -8603,7 +8656,8 @@ class GenieSimLocalFramework:
             # 6. Hard-cap quality_score based on data source
             _sensor_source = "isaac_sim_camera" if _camera_frame_count > 0 else "mock"
             _physics_backend = "physx" if _real_scene_state_count > 0 else "heuristic"
-            if _sensor_source == "mock":
+            _camera_required = self._modality_profile != "no_rgb"
+            if _camera_required and _sensor_source == "mock":
                 quality_score = 0.0
                 self.log("[VALIDITY_GATE] quality_score forced to 0.0: sensor_source=mock", "WARNING")
             elif _physics_backend == "heuristic":
@@ -8613,7 +8667,7 @@ class GenieSimLocalFramework:
                     "physics_backend=heuristic",
                     "WARNING",
                 )
-            if _camera_frame_count == 0:
+            if _camera_required and _camera_frame_count == 0:
                 quality_score = 0.0
                 self.log("[VALIDITY_GATE] quality_score forced to 0.0: camera_count=0", "WARNING")
 
@@ -8648,6 +8702,8 @@ class GenieSimLocalFramework:
                 if _is_production
                 else os.getenv("REQUIRE_CAMERA_CALIBRATION", "false").lower() == "true"
             )
+            if self._modality_profile == "no_rgb":
+                require_calibration = False
             if require_calibration and frames:
                 _cam_calib_missing = False
                 _cam_frames = (frames[0].get("observation") or {}).get("camera_frames") or {}
@@ -9028,9 +9084,86 @@ class GenieSimLocalFramework:
                 "control_frequency_hz": robot_metadata.get("control_frequency_hz"),
             }
 
+            modalities = ["proprio", "scene_state", "contacts"]
+            if self._modality_profile != "no_rgb":
+                modalities.append("rgb")
+
+            certification: Dict[str, Any] = {
+                "mode": getattr(self, "_physics_cert_mode", "strict"),
+                "passed": False,
+                "critical_failures": [],
+                "metrics": {"certification_disabled": True},
+                "gate_versions": {"physics_certification": "1.0.0"},
+            }
+            task_outcome: Dict[str, Any] = {
+                "canonical_task_success": bool(task_success),
+                "geometric_success": None,
+                "environment_success": bool(collision_free_physics),
+                "llm_assessment": {
+                    "task_success": task_success,
+                    "task_success_reasoning": llm_metadata.get("task_success_reasoning"),
+                    "source": llm_metadata.get("task_success_source", "geometric_goal_region_v2"),
+                },
+            }
+            channel_completeness: Dict[str, float] = {}
+            object_id_map: Dict[str, List[str]] = {}
+            dataset_tier = "raw_preserved"
+
+            if getattr(self, "_physics_cert_enabled", True):
+                try:
+                    cert_eval = run_episode_certification(
+                        frames,
+                        {
+                            "episode_id": episode_id,
+                            "target_object": task.get("target_object"),
+                            "goal_region_verification": llm_metadata.get("goal_region_verification"),
+                            "task_success": task_success,
+                            "task_success_reasoning": llm_metadata.get("task_success_reasoning"),
+                            "task_success_source": llm_metadata.get("task_success_source", "geometric_goal_region_v2"),
+                            "collision_free": collision_free,
+                            "collision_free_physics": collision_free_physics,
+                            "modality_profile": self._modality_profile,
+                            "effort_source_policy": _frame_stats.get("effort_source_policy", _efforts_source),
+                            "object_metadata": object_metadata,
+                        },
+                        task,
+                        mode=getattr(self, "_physics_cert_mode", "strict"),
+                    )
+                    if isinstance(cert_eval, dict):
+                        certification = {
+                            "mode": cert_eval.get("mode", getattr(self, "_physics_cert_mode", "strict")),
+                            "passed": bool(cert_eval.get("passed", False)),
+                            "critical_failures": list(cert_eval.get("critical_failures") or []),
+                            "metrics": cert_eval.get("metrics") or {},
+                            "gate_versions": cert_eval.get("gate_versions") or {},
+                        }
+                        task_outcome = cert_eval.get("task_outcome") or task_outcome
+                        channel_completeness = cert_eval.get("channel_completeness") or {}
+                        object_id_map = cert_eval.get("object_id_map") or {}
+                        dataset_tier = str(cert_eval.get("dataset_tier") or "raw_preserved")
+                except Exception as cert_exc:
+                    self.log(
+                        f"Episode certification failed for {episode_id}: {cert_exc}",
+                        "WARNING",
+                    )
+                    certification = {
+                        "mode": getattr(self, "_physics_cert_mode", "strict"),
+                        "passed": False,
+                        "critical_failures": [],
+                        "metrics": {"certification_error": str(cert_exc)},
+                        "gate_versions": {"physics_certification": "1.0.0"},
+                    }
+
             with open(episode_path, "w") as f:
                 json.dump({
+                    "schema_version": "2.0",
                     "episode_id": episode_id,
+                    "dataset_tier": dataset_tier,
+                    "modalities": modalities,
+                    "certification": certification,
+                    "task_outcome": task_outcome,
+                    "channel_completeness": channel_completeness,
+                    "object_id_map": object_id_map,
                     "task_name": task.get("task_name") or llm_metadata.get("task_name") or "unknown_task",
                     "task_type": task.get("task_type"),
                     "target_object": task.get("target_object"),
@@ -9165,6 +9298,11 @@ class GenieSimLocalFramework:
             result["task_success"] = task_success
             result["collision_free"] = collision_free
             result["collision_free_physics"] = collision_free_physics
+            result["dataset_tier"] = dataset_tier
+            result["certification"] = certification
+            result["task_outcome"] = task_outcome
+            result["channel_completeness"] = channel_completeness
+            result["object_id_map"] = object_id_map
             result["output_path"] = str(episode_path)
             result["frame_validation"] = frame_validation
             if vlm_audit:
@@ -9804,6 +9942,10 @@ class GenieSimLocalFramework:
         _ee_static_std = 1e-4
         _is_production = getattr(self.config, "environment", "") == "production"
         _strict_realism = getattr(self, "_strict_realism", False)
+        _cert_strict = bool(
+            getattr(self, "_physics_cert_enabled", True)
+            and getattr(self, "_physics_cert_mode", "strict") == "strict"
+        )
         _collision_source_hint = (self._last_planning_report.get("collision_source") or "").lower()
         _contact_query_warned = False
 
@@ -9911,7 +10053,14 @@ class GenieSimLocalFramework:
                 logger.info("[DIAG-0] Frame %d: data_source=%s, scene_state.objects=%s, obs_keys=%s",
                             step_idx, _diag_ds, _diag_ss_len,
                             [k for k in obs.keys() if k not in ('camera_frames', 'camera_observation')])
-            self._attach_camera_frames(obs, episode_id=episode_id, task=task)
+            if self._modality_profile != "no_rgb":
+                self._attach_camera_frames(obs, episode_id=episode_id, task=task)
+            else:
+                # No-RGB profile: explicitly drop camera payloads to avoid
+                # placeholder/static artifacts contaminating "physics-certified"
+                # no-vision datasets.
+                obs.pop("camera_frames", None)
+                obs.pop("camera_observation", None)
 
             waypoint_joints = np.array(waypoint["joint_positions"], dtype=float)
 
@@ -10081,16 +10230,20 @@ class GenieSimLocalFramework:
             # Ensure camera_frames is always present (even if empty) so quality
             # checks don't report missing required observation fields.
             # camera_frames is expected to be a dict keyed by camera_id.
-            _cam_obs = obs.pop("camera_observation", {})
-            _cam_images = _cam_obs.get("images", [])
-            if _cam_images and isinstance(_cam_images, list):
-                # Convert list of camera images to dict keyed by index
-                _cam_dict = {f"camera_{i}": img for i, img in enumerate(_cam_images) if img}
-            elif isinstance(_cam_images, dict):
-                _cam_dict = _cam_images
+            if self._modality_profile != "no_rgb":
+                _cam_obs = obs.pop("camera_observation", {})
+                _cam_images = _cam_obs.get("images", [])
+                if _cam_images and isinstance(_cam_images, list):
+                    # Convert list of camera images to dict keyed by index
+                    _cam_dict = {f"camera_{i}": img for i, img in enumerate(_cam_images) if img}
+                elif isinstance(_cam_images, dict):
+                    _cam_dict = _cam_images
+                else:
+                    _cam_dict = {}
+                obs.setdefault("camera_frames", _cam_dict)
             else:
-                _cam_dict = {}
-            obs.setdefault("camera_frames", _cam_dict)
+                obs.pop("camera_observation", None)
+                obs.pop("camera_frames", None)
 
             frame_data: Dict[str, Any] = {
                 "step": step_idx,
@@ -10445,7 +10598,7 @@ class GenieSimLocalFramework:
                         _init_pos_for_obj is not None
                         and float(np.linalg.norm(_pos - _init_pos_for_obj)) < 0.005 * _units_per_meter
                     )
-                    if _oid in _released_object_last_pos and _server_is_static:
+                    if _oid in _released_object_last_pos and _server_is_static and not _cert_strict:
                         # Server hasn't moved this object — keep released position
                         _object_poses[_oid] = _released_object_last_pos[_oid].copy()
                         _pose_source = "kinematic_ee_offset_released"
@@ -10544,24 +10697,30 @@ class GenieSimLocalFramework:
                             _attached_has_real_pose = True  # server reports actual movement
                         break
             if _attached_object_id is not None and _ee_pos_units is not None and not _attached_has_real_pose:
-                if _strict_realism:
-                    # Kinematic EE-offset tracking is valid even in strict mode:
-                    # the EE position comes from the real physics engine, so using
-                    # it to infer the grasped object's position is physically sound.
-                    logger.warning(
-                        "Attached object %s pose is static; using kinematic EE-offset tracking (strict mode).",
-                        _attached_object_id,
-                    )
-                _new_pos = _ee_pos_units + _grasp_ee_offset
-                _object_poses[_attached_object_id] = _new_pos.copy()
-                # Update scene_state in observation
-                if obs.get("scene_state"):
-                    for _obj in obs["scene_state"].get("objects", []):
-                        if _obj.get("object_id") == _attached_object_id:
-                            _update_pose_dict(_obj, _new_pos)
-                            break
-                # Mark that kinematic EE-offset tracking was used (for quality scoring)
-                obs["scene_state_provenance"] = "kinematic_ee_offset"
+                if _cert_strict:
+                    # Strict certification mode disallows client-side object pose
+                    # synthesis for certified outputs.
+                    if obs.get("scene_state_provenance") != "kinematic_ee_offset_blocked":
+                        obs["scene_state_provenance"] = "kinematic_ee_offset_blocked"
+                else:
+                    if _strict_realism:
+                        # Kinematic EE-offset tracking is valid even in strict mode:
+                        # the EE position comes from the real physics engine, so using
+                        # it to infer the grasped object's position is physically sound.
+                        logger.warning(
+                            "Attached object %s pose is static; using kinematic EE-offset tracking (strict mode).",
+                            _attached_object_id,
+                        )
+                    _new_pos = _ee_pos_units + _grasp_ee_offset
+                    _object_poses[_attached_object_id] = _new_pos.copy()
+                    # Update scene_state in observation
+                    if obs.get("scene_state"):
+                        for _obj in obs["scene_state"].get("objects", []):
+                            if _obj.get("object_id") == _attached_object_id:
+                                _update_pose_dict(_obj, _new_pos)
+                                break
+                    # Mark that kinematic EE-offset tracking was used (for quality scoring)
+                    obs["scene_state_provenance"] = "kinematic_ee_offset"
 
             # Query physics contact report before estimating forces (Issue 3/4 fix)
             _contact_result_available = False
@@ -10753,16 +10912,19 @@ class GenieSimLocalFramework:
                     frame_data["grasp_feasible"] = True
                     frame_data["grasped_object_id"] = _attached_object_id
                     _attached_has_real_pose = False
-                    # Apply kinematic attachment update immediately
-                    # (Valid in strict mode: EE position is from real physics)
-                    _new_pos = _ee_pos_units + _grasp_ee_offset
-                    _object_poses[_attached_object_id] = _new_pos.copy()
-                    if obs.get("scene_state"):
-                        for _obj in obs["scene_state"].get("objects", []):
-                            if _obj.get("object_id") == _attached_object_id:
-                                _update_pose_dict(_obj, _new_pos)
-                                break
-                    obs["scene_state_provenance"] = "kinematic_ee_offset"
+                    if not _cert_strict:
+                        # Apply kinematic attachment update immediately
+                        # (compat mode only; strict certification forbids client synthesis)
+                        _new_pos = _ee_pos_units + _grasp_ee_offset
+                        _object_poses[_attached_object_id] = _new_pos.copy()
+                        if obs.get("scene_state"):
+                            for _obj in obs["scene_state"].get("objects", []):
+                                if _obj.get("object_id") == _attached_object_id:
+                                    _update_pose_dict(_obj, _new_pos)
+                                    break
+                        obs["scene_state_provenance"] = "kinematic_ee_offset"
+                    else:
+                        obs["scene_state_provenance"] = "kinematic_ee_offset_blocked"
 
             # Contact force estimation: use PhysX contact report when available
             _contact_forces_payload = None
@@ -11713,6 +11875,16 @@ class GenieSimLocalFramework:
         task: Dict[str, Any],
         episode_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
+        if self._modality_profile == "no_rgb":
+            return {
+                "enabled": True,
+                "errors": [],
+                "warnings": ["Camera validation skipped in no-RGB modality profile."],
+                "invalid_frame_count": 0,
+                "total_frames": len(frames),
+                "camera_placeholder_detected": False,
+                "camera_placeholder_details": [],
+            }
         errors: List[str] = []
         warnings: List[str] = []
         invalid_frames: set[int] = set()
@@ -12079,6 +12251,11 @@ class GenieSimLocalFramework:
         episode_id: str,
         episode_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
+        if self._modality_profile == "no_rgb":
+            return {
+                "camera_placeholder_detected": False,
+                "camera_placeholder_details": [],
+            }
         details: List[str] = []
         checked: set[str] = set()
         _skip_rgb = _os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
@@ -14665,8 +14842,17 @@ Scene objects: {scene_summary}
         task_obs_schema = task.get("observation_schema") or {}
         required_keys = task_obs_schema.get("required_keys") or task.get("required_observation_keys")
         if not required_keys:
-            # Always require full observation schema including camera data
-            required_keys = DEFAULT_OBSERVATION_SCHEMA["required_keys"]
+            # No-RGB profile intentionally omits camera channels.
+            if getattr(self, "_modality_profile", "no_rgb") == "no_rgb":
+                required_keys = PROPRIOCEPTION_ONLY_OBSERVATION_SCHEMA["required_keys"]
+            else:
+                required_keys = DEFAULT_OBSERVATION_SCHEMA["required_keys"]
+        elif getattr(self, "_modality_profile", "no_rgb") == "no_rgb":
+            required_keys = [
+                key for key in required_keys if str(key) not in ("camera_frames", "camera_observation")
+            ]
+            if not required_keys:
+                required_keys = PROPRIOCEPTION_ONLY_OBSERVATION_SCHEMA["required_keys"]
 
         task_action_bounds = task.get("action_bounds") or task.get("joint_limits") or {}
         lower_bounds = (
@@ -15651,6 +15837,10 @@ Scene objects: {scene_summary}
         skipped_count = 0
         total_frames = 0
         frame_counts: Dict[str, int] = {}
+        eligible_certified = 0
+        exported_raw_only = 0
+        rejected_by_gate_code: Dict[str, int] = {}
+        _certified_only = os.getenv("LEROBOT_EXPORT_CERTIFIED_ONLY", "true").lower() == "true"
 
         # Find all episode files
         episode_files = list(recording_dir.glob("*.json"))
@@ -15699,9 +15889,28 @@ Scene objects: {scene_summary}
                 with open(ep_file) as f:
                     episode = json.load(f)
 
-                # Skip low quality
+                dataset_tier = str(episode.get("dataset_tier") or "raw_preserved")
+                cert_payload = episode.get("certification") if isinstance(episode.get("certification"), dict) else {}
+                critical_failures = cert_payload.get("critical_failures", []) if isinstance(cert_payload, dict) else []
+                if dataset_tier == "physics_certified":
+                    eligible_certified += 1
+                if _certified_only:
+                    if dataset_tier != "physics_certified":
+                        exported_raw_only += 1
+                        skipped_count += 1
+                        if isinstance(critical_failures, list) and critical_failures:
+                            for code in critical_failures:
+                                code_key = str(code)
+                                rejected_by_gate_code[code_key] = rejected_by_gate_code.get(code_key, 0) + 1
+                        else:
+                            code_key = "NOT_PHYSICS_CERTIFIED"
+                            rejected_by_gate_code[code_key] = rejected_by_gate_code.get(code_key, 0) + 1
+                        continue
+                # Skip low quality (secondary telemetry gate)
                 if episode.get("quality_score", 0) < min_quality_score:
                     skipped_count += 1
+                    code_key = "QUALITY_SCORE_BELOW_MIN"
+                    rejected_by_gate_code[code_key] = rejected_by_gate_code.get(code_key, 0) + 1
                     continue
 
                 episode_id = str(episode.get("episode_id", ep_file.stem))
@@ -15848,6 +16057,10 @@ Scene objects: {scene_summary}
                 "episodes": exported_count,
                 "skipped": skipped_count,
                 "total_frames": total_frames,
+                "eligible_certified": eligible_certified,
+                "exported_raw_only": exported_raw_only,
+                "rejected_by_gate_code": dict(sorted(rejected_by_gate_code.items())),
+                "certified_only_export": _certified_only,
                 "exported_at": datetime.utcnow().isoformat() + "Z",
                 "data_path": "data",
                 "chunking": {
@@ -15880,6 +16093,10 @@ Scene objects: {scene_summary}
                 "total_episodes": exported_count,
                 "skipped": skipped_count,
                 "total_frames": total_frames,
+                "eligible_certified": eligible_certified,
+                "exported_raw_only": exported_raw_only,
+                "rejected_by_gate_code": dict(sorted(rejected_by_gate_code.items())),
+                "certified_only_export": _certified_only,
                 "exported_at": datetime.utcnow().isoformat() + "Z",
                 "data_path": "data",
                 "chunking": {"strategy": "single", "chunk_dir": "chunk-000"},
@@ -15949,6 +16166,10 @@ Scene objects: {scene_summary}
             "total_episodes": exported_count,
             "skipped": skipped_count,
             "total_frames": total_frames,
+            "eligible_certified": eligible_certified,
+            "exported_raw_only": exported_raw_only,
+            "rejected_by_gate_code": dict(sorted(rejected_by_gate_code.items())),
+            "certified_only_export": _certified_only,
             "exported_at": datetime.utcnow().isoformat() + "Z",
             "lerobot_info": "meta/info.json",
             "debug_json_output": False,
@@ -15977,6 +16198,9 @@ Scene objects: {scene_summary}
             "success": True,
             "exported": exported_count,
             "skipped": skipped_count,
+            "eligible_certified": eligible_certified,
+            "exported_raw_only": exported_raw_only,
+            "rejected_by_gate_code": dict(sorted(rejected_by_gate_code.items())),
             "parquet_episodes": exported_count,
             "output_dir": output_dir,
         }

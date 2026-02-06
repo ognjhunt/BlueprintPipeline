@@ -37,6 +37,8 @@ def test_offline_audit_detects_missing_modalities(tmp_path: Path) -> None:
     episode_path.write_text(json.dumps(episode))
 
     config = audit._resolve_requirements("full")
-    report = audit.run_audit([tmp_path], config)
+    report = audit.run_audit([tmp_path], config, workers=1)
 
     assert report["summary"]["failed_episodes"] == 1
+    assert "gate_histogram" in report["summary"]
+    assert "baseline_metrics" in report["summary"]

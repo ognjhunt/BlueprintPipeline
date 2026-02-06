@@ -6,7 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -531,6 +534,16 @@ def _audit_episode(path: Path, data: Dict[str, Any], config: AuditConfig) -> Dic
     return {
         "path": str(path),
         "episode_id": data.get("episode_id", path.stem),
+        "task_name": data.get("task_name"),
+        "robot_type": ((data.get("robot_metadata") or {}).get("robot_type") if isinstance(data.get("robot_metadata"), dict) else None),
+        "dataset_tier": data.get("dataset_tier"),
+        "certification": data.get("certification") if isinstance(data.get("certification"), dict) else None,
+        "certification_passed": bool(((data.get("certification") or {}).get("passed"))) if isinstance(data.get("certification"), dict) else None,
+        "certification_failures": (
+            list((data.get("certification") or {}).get("critical_failures") or [])
+            if isinstance(data.get("certification"), dict)
+            else []
+        ),
         "frame_count": total_frames,
         "camera_ids": camera_ids,
         "metrics": {
@@ -571,15 +584,85 @@ def _audit_episode(path: Path, data: Dict[str, Any], config: AuditConfig) -> Dic
     }
 
 
-def run_audit(paths: Iterable[Path], config: AuditConfig) -> Dict[str, Any]:
-    episodes: List[Dict[str, Any]] = []
-    for path in _iter_episode_files(paths):
-        data = _load_episode(path)
-        if not data:
-            continue
-        episodes.append(_audit_episode(path, data, config))
+def _audit_episode_file(path: Path, config: AuditConfig) -> Optional[Dict[str, Any]]:
+    data = _load_episode(path)
+    if not data:
+        return None
+    return _audit_episode(path, data, config)
 
+
+def run_audit(paths: Iterable[Path], config: AuditConfig, *, workers: int = 1) -> Dict[str, Any]:
+    episodes: List[Dict[str, Any]] = []
+    episode_paths = list(_iter_episode_files(paths))
+    workers = max(1, int(workers))
+
+    if workers > 1 and len(episode_paths) > 1:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_audit_episode_file, path, config) for path in episode_paths]
+            for future in as_completed(futures):
+                item = future.result()
+                if item:
+                    episodes.append(item)
+    else:
+        for path in episode_paths:
+            item = _audit_episode_file(path, config)
+            if item:
+                episodes.append(item)
+
+    episodes.sort(key=lambda e: e.get("path") or "")
     failed = [ep for ep in episodes if not ep.get("passed", False)]
+
+    gate_hist = Counter()
+    cert_gate_hist = Counter()
+    task_fail_hist = Counter()
+    robot_fail_hist = Counter()
+    certified_count = 0
+    baseline_metric_samples: Dict[str, List[float]] = {
+        "snapback_detected": [],
+        "kinematic_pose_frame_ratio": [],
+        "success_contradiction_count": [],
+        "valid_contact_frame_ratio": [],
+        "target_schema_completeness": [],
+        "channel_completeness_min": [],
+    }
+    for ep in episodes:
+        for gate in ep.get("failures", []):
+            gate_hist[str(gate)] += 1
+        for code in ep.get("certification_failures", []):
+            cert_gate_hist[str(code)] += 1
+        cert_metrics = (((ep.get("certification") or {}) if isinstance(ep.get("certification"), dict) else {}).get("metrics") or {})
+        if isinstance(cert_metrics, dict):
+            for key in baseline_metric_samples.keys():
+                value = cert_metrics.get(key)
+                if isinstance(value, (int, float)):
+                    baseline_metric_samples[key].append(float(value))
+        if ep.get("dataset_tier") == "physics_certified" or ep.get("certification_passed") is True:
+            certified_count += 1
+        if not ep.get("passed", False):
+            task_fail_hist[str(ep.get("task_name") or "unknown")] += 1
+            robot_fail_hist[str(ep.get("robot_type") or "unknown")] += 1
+
+    baseline_metrics = {}
+    for key, values in baseline_metric_samples.items():
+        if values:
+            baseline_metrics[key] = round(sum(values) / float(len(values)), 4)
+        else:
+            baseline_metrics[key] = None
+    baseline_metrics["export_eligibility_count"] = certified_count
+    certification_pass_rate = (
+        (certified_count / float(len(episodes))) if episodes else 0.0
+    )
+    slo_targets = {
+        "canary_min_certification_pass_rate": 0.95,
+        "preprod_min_certification_pass_rate": 0.97,
+        "production_min_certification_pass_rate": 0.98,
+    }
+    slo_status = {
+        "canary": certification_pass_rate >= slo_targets["canary_min_certification_pass_rate"],
+        "preprod": certification_pass_rate >= slo_targets["preprod_min_certification_pass_rate"],
+        "production": certification_pass_rate >= slo_targets["production_min_certification_pass_rate"],
+    }
+
     report = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "config": asdict(config),
@@ -587,6 +670,15 @@ def run_audit(paths: Iterable[Path], config: AuditConfig) -> Dict[str, Any]:
             "episodes_scanned": len(episodes),
             "failed_episodes": len(failed),
             "passed_episodes": len(episodes) - len(failed),
+            "audit_pass_rate": round(((len(episodes) - len(failed)) / float(len(episodes))) if episodes else 0.0, 4),
+            "certification_pass_rate": round(certification_pass_rate, 4),
+            "gate_histogram": dict(sorted(gate_hist.items())),
+            "certification_gate_histogram": dict(sorted(cert_gate_hist.items())),
+            "top_failing_task_templates": task_fail_hist.most_common(10),
+            "per_robot_failure_distribution": dict(sorted(robot_fail_hist.items())),
+            "baseline_metrics": baseline_metrics,
+            "slo_targets": slo_targets,
+            "slo_status": slo_status,
         },
         "episodes": episodes,
     }
@@ -624,16 +716,35 @@ def main() -> int:
         default="",
         help="Optional path to write JSON report.",
     )
+    parser.add_argument(
+        "--output-jsonl",
+        type=str,
+        default="",
+        help="Optional path to write one-line-per-episode JSONL.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, min(16, os.cpu_count() or 1)),
+        help="Number of worker processes for episode auditing.",
+    )
     args = parser.parse_args()
 
     config = _resolve_requirements(args.data_tier, strict=args.strict)
     config.missing_threshold = args.missing_threshold
     paths = [Path(p) for p in args.paths]
 
-    report = run_audit(paths, config)
+    report = run_audit(paths, config, workers=args.workers)
+    wrote_output = False
     if args.output:
         Path(args.output).write_text(json.dumps(report, indent=2))
-    else:
+        wrote_output = True
+    if args.output_jsonl:
+        with open(args.output_jsonl, "w") as jf:
+            for episode in report.get("episodes", []):
+                jf.write(json.dumps(episode) + "\n")
+        wrote_output = True
+    if not wrote_output:
         print(json.dumps(report, indent=2))
 
     return 0 if report["summary"]["failed_episodes"] == 0 else 2

@@ -26,6 +26,9 @@ jobs:
       STAGING_DATA_ROOT: ${{ secrets.STAGING_DATA_ROOT }}
       STAGING_SCENE_ID: ${{ inputs.staging_scene_id || secrets.STAGING_SCENE_ID }}
       STAGING_ENVIRONMENT_TYPE: ${{ secrets.STAGING_ENVIRONMENT_TYPE || 'kitchen' }}
+      STAGING_CERT_SLO_PROFILE: ${{ secrets.STAGING_CERT_SLO_PROFILE || 'production' }}
+      STAGING_CERT_MIN_EPISODES: ${{ secrets.STAGING_CERT_MIN_EPISODES || '1' }}
+      STAGING_CERT_PASS_RATE_OVERRIDE: ${{ secrets.STAGING_CERT_PASS_RATE_OVERRIDE || '' }}
       NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
     steps:
       - name: Checkout
@@ -63,6 +66,17 @@ jobs:
             /bin/bash -lc \
             "/isaac-sim/python.sh -m pytest tests/test_geniesim_staging_e2e.py -v --junitxml=logs/ci/geniesim/pytest-junit.xml" \
             | tee logs/ci/geniesim/pytest.log
+
+      - name: Enforce certification pass-rate SLO gate
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml exec -T \
+            -e STAGING_DATA_ROOT="$STAGING_DATA_ROOT" \
+            -e STAGING_SCENE_ID="$STAGING_SCENE_ID" \
+            -e STAGING_CERT_SLO_PROFILE="$STAGING_CERT_SLO_PROFILE" \
+            -e STAGING_CERT_MIN_EPISODES="$STAGING_CERT_MIN_EPISODES" \
+            -e STAGING_CERT_PASS_RATE_OVERRIDE="$STAGING_CERT_PASS_RATE_OVERRIDE" \
+            geniesim-server \
+            /bin/bash -lc 'set -euo pipefail; SCENE_DIR="${STAGING_DATA_ROOT}/scenes/${STAGING_SCENE_ID}"; CMD=(/isaac-sim/python.sh tools/quality_gates/certification_slo_gate.py --search-root "${SCENE_DIR}/episodes" --profile "${STAGING_CERT_SLO_PROFILE}" --min-episodes "${STAGING_CERT_MIN_EPISODES}" --output logs/ci/geniesim/certification-slo-gate.json); if [ -n "${STAGING_CERT_PASS_RATE_OVERRIDE}" ]; then CMD+=(--min-pass-rate "${STAGING_CERT_PASS_RATE_OVERRIDE}"); fi; "${CMD[@]}"'
 
       - name: Capture Genie Sim server log
         if: always()
