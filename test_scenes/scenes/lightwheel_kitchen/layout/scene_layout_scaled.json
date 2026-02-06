@@ -11,7 +11,7 @@
     {"id": "Kitchen_Cabinet002", "class_name": "cabinet", "center3d": [0.5, 1.5, -2.5]},
     {"id": "Table049", "class_name": "table", "center3d": [0.0, 0.4, 1.0]},
     {"id": "WallStackOven004", "class_name": "oven", "center3d": [-2.0, 1.0, -2.5]},
-    {"id": "Toaster003", "class_name": "toaster", "center3d": [0.3, 0.95, -2.3]},
+    {"id": "Toaster003", "class_name": "toaster", "center3d": [0.0, 0.80, 1.0]},
     {"id": "CoffeeMachine006", "class_name": "coffee_machine", "center3d": [-0.3, 0.95, -2.3]},
     {"id": "Pot057", "class_name": "pot", "center3d": [1.0, 0.95, -2.3]}
   ],

@@ -1162,10 +1162,13 @@ class SceneBuilder:
                 obj["pipeline"]
             )
 
+        sim_role = obj.get("sim_role", "static")
+        prim.CreateAttribute("sim_role", Sdf.ValueTypeNames.String).Set(sim_role)
+
         physics_fields = _extract_physics_fields(obj)
         has_physics_fields = any(value is not None for value in physics_fields.values())
         if has_physics_fields:
-            self._apply_physics_fields(prim, physics_fields, oid)
+            self._apply_physics_fields(prim, physics_fields, oid, sim_role=sim_role)
         else:
             logger.warning(
                 "[USD] obj_%s: no physics fields found in manifest; skipping physics setup",
@@ -1255,18 +1258,41 @@ class SceneBuilder:
                 raise ObjectAddFailures(failures)
             logger.warning("[WARN] %s", message)
 
+    # Sim roles that should be fully dynamic (affected by gravity, graspable).
+    _DYNAMIC_SIM_ROLES = frozenset({
+        "clutter",
+        "manipulable_object",
+    })
+
     def _apply_physics_fields(
-        self, prim: Usd.Prim, physics_fields: Dict[str, Optional[float]], oid: Any
+        self,
+        prim: Usd.Prim,
+        physics_fields: Dict[str, Optional[float]],
+        oid: Any,
+        sim_role: Optional[str] = None,
     ) -> None:
         mass = physics_fields.get("mass_kg")
         static_friction = physics_fields.get("static_friction")
         dynamic_friction = physics_fields.get("dynamic_friction")
         restitution = physics_fields.get("restitution")
 
+        is_dynamic = sim_role in self._DYNAMIC_SIM_ROLES
+
         if mass is not None:
-            UsdPhysics.RigidBodyAPI.Apply(prim)
+            rigid_body_api = UsdPhysics.RigidBodyAPI.Apply(prim)
             mass_api = UsdPhysics.MassAPI.Apply(prim)
             mass_api.CreateMassAttr().Set(float(mass))
+
+            # Set kinematic vs dynamic based on sim_role.
+            rigid_body_api.CreateKinematicEnabledAttr().Set(not is_dynamic)
+
+        # Dynamic objects need collision with a simulation-friendly approximation.
+        if is_dynamic:
+            collision_api = UsdPhysics.CollisionAPI.Apply(prim)
+            collision_api.CreateCollisionEnabledAttr().Set(True)
+            prim.CreateAttribute(
+                "physics:approximation", Sdf.ValueTypeNames.Token
+            ).Set("convexDecomposition")
 
         if (
             static_friction is not None
@@ -1297,12 +1323,14 @@ class SceneBuilder:
             UsdShade.MaterialBindingAPI(prim).Bind(material, UsdShade.Tokens.physics)
 
         logger.info(
-            "[USD] obj_%s: physics applied (mass=%s, static_friction=%s, dynamic_friction=%s, restitution=%s)",
+            "[USD] obj_%s: physics applied (mass=%s, static_friction=%s, dynamic_friction=%s, restitution=%s, sim_role=%s, dynamic=%s)",
             oid,
             mass,
             static_friction,
             dynamic_friction,
             restitution,
+            sim_role,
+            is_dynamic,
         )
 
 
