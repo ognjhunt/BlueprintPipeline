@@ -15457,7 +15457,7 @@ Scene objects: {scene_summary}
         self,
         recording_dir: Path,
         output_dir: Path,
-        min_quality_score: float = 0.7,
+        min_quality_score: float = 0.5,
         export_format: Optional[Union[str, LeRobotExportFormat]] = None,
     ) -> Dict[str, Any]:
         """
