@@ -87,23 +87,27 @@ def _normalize_import_os(content: str) -> str:
     # Remove duplicate import os lines first.
     content = re.sub(r"^\s*import os\s*$\n?", "", content, flags=re.MULTILINE)
 
-    # Re-insert one import os in a stable position.
-    if re.search(r"^args\s*=\s*parser\.parse_args\(\)\s*$", content, flags=re.MULTILINE):
+    # Re-insert one import os right after "import sys" — must be before
+    # root_directory = os.path.dirname(...) which is near the top of the file.
+    if re.search(r"^import sys\s*$", content, flags=re.MULTILINE):
         content = re.sub(
-            r"^(args\s*=\s*parser\.parse_args\(\)\s*)$",
-            r"\1\nimport os",
+            r"^(import sys\s*)$",
+            r"\1import os\n",
+            content,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    elif re.search(r"^import argparse\s*$", content, flags=re.MULTILINE):
+        content = re.sub(
+            r"^(import argparse\s*)$",
+            r"\1import os\n",
             content,
             count=1,
             flags=re.MULTILINE,
         )
     else:
-        content = _replace_once(
-            content,
-            r"^from isaacsim import SimulationApp\s*$",
-            "import os\nfrom isaacsim import SimulationApp",
-            "import os insertion",
-            flags=re.MULTILINE,
-        )
+        # Last resort: prepend import os at the very top (after any comments).
+        content = "import os\n" + content
     return content
 
 
