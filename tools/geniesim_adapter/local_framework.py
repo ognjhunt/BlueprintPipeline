@@ -1692,11 +1692,15 @@ class GenieSimGRPCClient:
                 if abort_event is not None:
                     # Run the blocking gRPC call in a worker so we can poll
                     # abort_event every 0.5s and bail out early.
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(func)
-                        wait_started = time.monotonic()
-                        wait_log_interval = 30.0
-                        next_wait_log = wait_started + wait_log_interval
+                    # NOTE: do not use a context manager here; with-block
+                    # teardown waits for the worker and defeats abort.
+                    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    pool_shutdown = False
+                    future = pool.submit(func)
+                    wait_started = time.monotonic()
+                    wait_log_interval = 30.0
+                    next_wait_log = wait_started + wait_log_interval
+                    try:
                         while True:
                             try:
                                 result = future.result(timeout=0.5)
@@ -1718,9 +1722,19 @@ class GenieSimGRPCClient:
                                         action,
                                         attempt,
                                     )
-                                    # Can't truly cancel the gRPC call, but we
-                                    # return immediately so the caller unblocks.
+                                    # Best-effort cancellation. gRPC call may
+                                    # continue in background; caller handles
+                                    # recovery/restart when needed.
+                                    try:
+                                        future.cancel()
+                                    except Exception:
+                                        pass
+                                    pool.shutdown(wait=False, cancel_futures=True)
+                                    pool_shutdown = True
                                     return fallback
+                    finally:
+                        if not pool_shutdown:
+                            pool.shutdown(wait=False, cancel_futures=False)
                 else:
                     result = func()
             except Exception as exc:
@@ -4147,6 +4161,7 @@ class GenieSimGRPCClient:
         base_pose: Optional[Dict[str, Any]] = None,
         initial_joint_positions: Optional[Sequence[float]] = None,
         scene_usd_path: str = "",
+        abort_event: Optional[threading.Event] = None,
     ) -> GrpcCallResult:
         """
         Initialize the robot in the simulation.
@@ -4200,12 +4215,16 @@ class GenieSimGRPCClient:
             _request,
             None,
             success_checker=lambda resp: bool(resp.msg),
+            abort_event=abort_event,
         )
         if response is None:
+            error_message = "gRPC call failed"
+            if abort_event is not None and abort_event.is_set():
+                error_message = "init_robot aborted by watchdog (timeout/deadlock guard)"
             return GrpcCallResult(
                 success=False,
                 available=True,
-                error="gRPC call failed",
+                error=error_message,
             )
         return GrpcCallResult(
             success=True,
@@ -5531,19 +5550,71 @@ class GenieSimLocalFramework:
             # init_robot will succeed. Retry with exponential backoff.
             _max_init_attempts = 5
             _init_backoff = 5.0  # start at 5s, multiply by 1.5 up to 60s
+            _init_abort_timeout_s = float(
+                os.environ.get(
+                    "GENIESIM_INIT_ABORT_TIMEOUT_S",
+                    str(self._client._first_call_timeout),
+                )
+            )
+            _init_abort_timeout_s = max(_init_abort_timeout_s, self._client.timeout + 5.0)
+
+            def _is_init_timeout_error(error_text: str) -> bool:
+                if not error_text:
+                    return False
+                _normalized = error_text.lower()
+                return (
+                    "deadline exceeded" in _normalized
+                    or "timed out" in _normalized
+                    or "aborted by watchdog" in _normalized
+                )
+
             init_result = None
             for _init_attempt in range(1, _max_init_attempts + 1):
-                init_result = self._client.init_robot(
-                    robot_type=robot_cfg_file,
-                    base_pose=base_pose,
-                    scene_usd_path=scene_usd,
-                )
+                _attempt_started = time.time()
+                _init_abort_event = threading.Event()
+                _init_timed_out = False
+
+                def _trip_init_watchdog() -> None:
+                    nonlocal _init_timed_out
+                    _init_timed_out = True
+                    _init_abort_event.set()
+
+                _watchdog = threading.Timer(_init_abort_timeout_s, _trip_init_watchdog)
+                _watchdog.daemon = True
+                _watchdog.start()
+                try:
+                    init_result = self._client.init_robot(
+                        robot_type=robot_cfg_file,
+                        base_pose=base_pose,
+                        scene_usd_path=scene_usd,
+                        abort_event=_init_abort_event,
+                    )
+                finally:
+                    _watchdog.cancel()
+                _elapsed = time.time() - _attempt_started
                 if init_result.success:
-                    self.log(f"Robot initialized (attempt {_init_attempt}): {init_result.payload}")
+                    self.log(
+                        f"Robot initialized (attempt {_init_attempt}, {_elapsed:.1f}s): "
+                        f"{init_result.payload}"
+                    )
                     break
+                _error_text = str(getattr(init_result, "error", "") or "")
+                _is_timeout = _init_timed_out or _is_init_timeout_error(_error_text)
+                if _is_timeout:
+                    self.log(
+                        f"init_robot attempt {_init_attempt}/{_max_init_attempts} timed out "
+                        f"after {_elapsed:.1f}s (guard={_init_abort_timeout_s:.1f}s): {_error_text}",
+                        "WARNING",
+                    )
+                    if (
+                        hasattr(self._client, "_attempt_server_restart")
+                        and self._client._attempt_server_restart(count_toward_budget=False)
+                    ):
+                        self.log("Server restarted after init timeout; retrying init", "WARNING")
+                        continue
                 self.log(
                     f"init_robot attempt {_init_attempt}/{_max_init_attempts} failed: "
-                    f"{init_result.error} — retrying in {_init_backoff:.0f}s",
+                    f"{_error_text} — retrying in {_init_backoff:.0f}s",
                     "WARNING",
                 )
                 if _init_attempt < _max_init_attempts:

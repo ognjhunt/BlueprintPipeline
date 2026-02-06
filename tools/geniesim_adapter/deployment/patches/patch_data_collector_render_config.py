@@ -91,16 +91,16 @@ def _normalize_import_os(content: str) -> str:
     # root_directory = os.path.dirname(...) which is near the top of the file.
     if re.search(r"^import sys\s*$", content, flags=re.MULTILINE):
         content = re.sub(
-            r"^(import sys\s*)$",
-            r"\1import os\n",
+            r"^(import sys)\s*$",
+            r"\1\nimport os",
             content,
             count=1,
             flags=re.MULTILINE,
         )
     elif re.search(r"^import argparse\s*$", content, flags=re.MULTILINE):
         content = re.sub(
-            r"^(import argparse\s*)$",
-            r"\1import os\n",
+            r"^(import argparse)\s*$",
+            r"\1\nimport os",
             content,
             count=1,
             flags=re.MULTILINE,
