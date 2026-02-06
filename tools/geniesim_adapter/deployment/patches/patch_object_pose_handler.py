@@ -33,6 +33,7 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
     _bp_cache_ttl_s = 0.005      # 5ms TTL for dynamic objects (200Hz effective rate)
     _bp_scene_stage = None       # Cached reference to the scene stage
     _bp_scene_stage_id = None    # Stage identifier to detect context switches
+    _bp_scene_stage_capture_logged = False
 
     def _bp_capture_scene_stage(self):
         \"\"\"Capture and cache a reference to the scene stage after init_robot.
@@ -40,41 +41,28 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
         This stage reference is used for all object pose queries to avoid
         context switching issues where omni.usd.get_context().get_stage()
         returns a different stage (e.g., the render stage).
-
-        Also auto-enables RigidBodyAPI on scene objects so PhysX can track
-        their motion during robot manipulation episodes.
         \"\"\"
         try:
             import omni.usd
             stage = omni.usd.get_context().get_stage()
-            if stage is not None:
-                cls = type(self)
-                cls._bp_scene_stage = stage
-                try:
-                    cls._bp_scene_stage_id = str(stage.GetRootLayer().identifier)
-                except Exception:
-                    cls._bp_scene_stage_id = "unknown"
-                # Log available scene prims for diagnostics
-                world_prims = [str(p.GetPath()) for p in stage.Traverse()
-                              if str(p.GetPath()).startswith("/World/")]
-                print(f"[PATCH] Captured scene stage: {cls._bp_scene_stage_id}")
-                print(f"[PATCH] World prims available: {len(world_prims)}")
-                if world_prims[:10]:
-                    print(f"[PATCH] First 10 World prims: {world_prims[:10]}")
+            if stage is None:
+                return
+            cls = type(self)
+            try:
+                stage_id = str(stage.GetRootLayer().identifier)
+            except Exception:
+                stage_id = "unknown"
 
-                # Auto-enable RigidBodyAPI on scene objects for physics tracking
-                from pxr import UsdGeom
-                _scene_obj_count = 0
-                for p in stage.Traverse():
-                    ppath = str(p.GetPath())
-                    if ("/World/Scene/" in ppath or "/World/obj_" in ppath):
-                        if p.IsA(UsdGeom.Xformable):
-                            self._bp_ensure_physics_on_prim(p, ppath)
-                            _scene_obj_count += 1
-                if _scene_obj_count > 0:
-                    print(f"[PATCH] Enabled physics tracking on {_scene_obj_count} scene objects")
-                    # Step physics to register new rigid bodies
-                    self._bp_step_physics(num_steps=5)
+            # BlueprintPipeline object_pose stage_capture_light v2
+            # This hook may run every command; keep it O(1) and idempotent.
+            if cls._bp_scene_stage is stage and cls._bp_scene_stage_id == stage_id:
+                return
+
+            cls._bp_scene_stage = stage
+            cls._bp_scene_stage_id = stage_id
+            if not getattr(cls, "_bp_scene_stage_capture_logged", False):
+                cls._bp_scene_stage_capture_logged = True
+                print(f"[PATCH] Captured scene stage: {stage_id}")
         except Exception as e:
             print(f"[PATCH] Failed to capture scene stage: {e}")
 
@@ -449,6 +437,7 @@ OBJECT_POSE_V2_MARKER = "BlueprintPipeline object_pose override v2"
 DYNAMIC_ALIAS_MARKER = "Prefer dynamic alias"
 DYNAMIC_DESC_MARKER = "Prefer dynamic descendant"
 LIVE_TIME_MARKER = "BlueprintPipeline object_pose live_timecode patch"
+STAGE_CAPTURE_LIGHT_MARKER = "BlueprintPipeline object_pose stage_capture_light v2"
 
 LIVE_TIMECODE_HELPER = textwrap.dedent("""\
 
@@ -568,9 +557,9 @@ PHYSICS_POSE_HELPER = textwrap.dedent("""\
     def _bp_get_physics_pose(self, prim_path):
         \"\"\"Get live physics pose for a rigid body using dynamic_control.
 
-        If the prim doesn't have RigidBodyAPI, this method will attempt to
-        enable it (for scene objects under /World/Scene/) so PhysX can track
-        the object's motion during robot manipulation.
+        By default this method only reads existing rigid bodies. Auto-enabling
+        RigidBodyAPI is disabled unless BP_OBJECT_POSE_AUTO_ENABLE_PHYSICS=1 to
+        avoid expensive stage mutations during command handling.
 
         Returns (position, rotation) tuple or (None, None) if not a physics body
         or if physics is not running.
@@ -590,8 +579,11 @@ PHYSICS_POSE_HELPER = textwrap.dedent("""\
             if not prim or not prim.IsValid():
                 return None, None
 
-            # Auto-enable RigidBodyAPI on scene objects for physics tracking
+            # Optional auto-enable path (disabled by default for init stability)
             if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                import os
+                if os.environ.get("BP_OBJECT_POSE_AUTO_ENABLE_PHYSICS", "0") != "1":
+                    return None, None
                 enabled = self._bp_ensure_physics_on_prim(prim, prim_path)
                 if not enabled:
                     return None, None
@@ -649,12 +641,17 @@ def patch_file():
     has_dynamic_alias = DYNAMIC_ALIAS_MARKER in content
     has_live_time = "def _bp_live_timecode" in content
     has_physics_v2 = "def _bp_ensure_physics_on_prim" in content
+    has_stage_capture_light = STAGE_CAPTURE_LIGHT_MARKER in content
 
     # If we have an older version of the patch (missing physics v2), strip
     # all BlueprintPipeline blocks and re-apply from scratch.
     has_dynamic_desc = DYNAMIC_DESC_MARKER in content
     force_reapply = has_patch_marker and (
-        not has_physics_v2 or not has_object_pose_v2 or not has_dynamic_alias or not has_dynamic_desc
+        not has_physics_v2
+        or not has_object_pose_v2
+        or not has_dynamic_alias
+        or not has_dynamic_desc
+        or not has_stage_capture_light
     )
     if force_reapply:
         print("[PATCH] Detected older patch version (missing physics v2) - upgrading")
@@ -741,19 +738,22 @@ def patch_file():
         r"((\s+)(self\.scene_usd_path\s*=\s*os\.path\.join\(self\.sim_assets_root,\s*scene_usd\)))\n",
         re.MULTILINE,
     )
-    scene_match = scene_path_pattern.search(patched)
-    if scene_match:
-        indent_s = scene_match.group(2)
-        diag = (
-            f"\n{indent_s}print(f'[PATCH-DIAG] scene_usd_path={{self.scene_usd_path}}, "
-            f"exists={{os.path.exists(self.scene_usd_path)}}, "
-            f"sim_assets_root={{self.sim_assets_root}}, scene_usd={{scene_usd}}')"
-            f"  # {PATCH_MARKER}"
-        )
-        patched = patched[:scene_match.end(1)] + diag + patched[scene_match.end(1):]
-        print("[PATCH] Injected scene_usd_path diagnostic logging")
+    if "[PATCH-DIAG] scene_usd_path=" in patched:
+        print("[PATCH] scene_usd_path diagnostic already present — skipping")
     else:
-        print("[PATCH] WARNING: Could not find scene_usd_path assignment for diagnostics")
+        scene_match = scene_path_pattern.search(patched)
+        if scene_match:
+            indent_s = scene_match.group(2)
+            diag = (
+                f"\n{indent_s}print(f'[PATCH-DIAG] scene_usd_path={{self.scene_usd_path}}, "
+                f"exists={{os.path.exists(self.scene_usd_path)}}, "
+                f"sim_assets_root={{self.sim_assets_root}}, scene_usd={{scene_usd}}')"
+                f"  # {PATCH_MARKER}"
+            )
+            patched = patched[:scene_match.end(1)] + diag + patched[scene_match.end(1):]
+            print("[PATCH] Injected scene_usd_path diagnostic logging")
+        else:
+            print("[PATCH] WARNING: Could not find scene_usd_path assignment for diagnostics")
 
     # 2. Find get_object_pose handling and inject path resolution.
     # Look for patterns like:

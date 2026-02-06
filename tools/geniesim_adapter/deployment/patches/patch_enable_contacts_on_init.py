@@ -1,83 +1,125 @@
 #!/usr/bin/env python3
 """Patch: Enable PhysX contact reporting after init_robot.
 
-Inserts a call to _bp_enable_contact_reporting() at the end of init_robot(),
-so that PhysX ContactReportAPI is activated on prims after the scene is loaded.
+IMPORTANT: Contact reporting must be enabled on the SIM THREAD (command_controller),
+NOT the gRPC thread (grpc_server), because USD stage operations deadlock from
+non-main threads in Isaac Sim.
+
+This patch:
+1. Removes any old gRPC-thread injection from grpc_server.py
+2. Adds the contact reporting call to handle_init_robot in command_controller.py
+   (which runs on the sim thread via on_command_step dispatch)
 """
 import re
 import sys
 
-SERVER_FILE = "/opt/geniesim/source/data_collection/server/grpc_server.py"
+# ── Step 1: Remove old injection from grpc_server.py (if present) ──────────────
+GRPC_FILE = "/opt/geniesim/source/data_collection/server/grpc_server.py"
+with open(GRPC_FILE, "r") as f:
+    grpc = f.read()
 
-with open(SERVER_FILE, "r") as f:
-    content = f.read()
-
-# First, remove any duplicate bad patches from prior sed runs
-content = re.sub(
-    r'        # Enable PhysX contact reporting after robot init\n'
-    r'        try:\n'
-    r'            self\._bp_enable_contact_reporting\(\)\n'
-    r'            print\("\[INIT_ROBOT\] PhysX contact reporting enabled\."\)\n'
-    r'        except Exception as e:\n'
-    r'            print\(f"\[INIT_ROBOT\] Failed to enable contact reporting: \{e\}"\)\n',
-    '',
-    content,
+# Remove any block between blocking_start_server call and return rsp that
+# contains _bp_enable_contact_reporting
+old_block_re = re.compile(
+    r'        # Enable PhysX contact reporting after robot init.*?(?=        return rsp)',
+    re.DOTALL,
 )
-
-# Find the init_robot method and insert the call before 'return rsp'
-# Pattern: the init_robot method ends with:
-#   ) or "")
-#         return rsp
-#
-#     def set_object_pose
-pattern = r'(    def init_robot\(self, req, rsp\):.*?)(        return rsp\n\n    def set_object_pose)'
-match = re.search(pattern, content, re.DOTALL)
-if match:
-    insert_point = match.start(2)
-    injection = (
-        '        # Enable PhysX contact reporting after robot init\n'
-        '        try:\n'
-        '            self._bp_enable_contact_reporting()\n'
-        '            print("[INIT_ROBOT] PhysX contact reporting enabled.")\n'
-        '        except Exception as e:\n'
-        '            print(f"[INIT_ROBOT] Failed to enable contact reporting: {e}")\n'
-    )
-    content = content[:insert_point] + injection + content[insert_point:]
-    with open(SERVER_FILE, "w") as f:
-        f.write(content)
-    print("[PATCH] Injected _bp_enable_contact_reporting() into init_robot()")
-    # Verify single occurrence
-    count = content.count("_bp_enable_contact_reporting()")
-    print(f"[PATCH] Total occurrences of _bp_enable_contact_reporting(): {count}")
+if old_block_re.search(grpc):
+    grpc = old_block_re.sub('', grpc)
+    with open(GRPC_FILE, "w") as f:
+        f.write(grpc)
+    print("[PATCH] Removed old gRPC-thread contact reporting injection from grpc_server.py")
 else:
-    print("[PATCH] ERROR: Could not find init_robot pattern. Checking manually...")
-    idx = content.find("def init_robot")
-    if idx < 0:
-        print("[PATCH] init_robot not found in file!")
+    print("[PATCH] No gRPC-thread contact injection found in grpc_server.py (clean)")
+
+# ── Step 2: Inject into command_controller.py handle_init_robot (sim thread) ───
+CC_FILE = "/opt/geniesim/source/data_collection/server/command_controller.py"
+with open(CC_FILE, "r") as f:
+    cc = f.read()
+
+MARKER = "# BlueprintPipeline contact_reporting_on_init patch"
+
+if MARKER in cc:
+    print("[PATCH] Contact reporting already injected in command_controller.py — skipping")
+    sys.exit(0)
+
+# Find handle_init_robot's data_to_send = "success" line
+# We insert the contact reporting BEFORE setting data_to_send so it runs on the sim thread
+old_pattern = '        self.data_to_send = "success"\n\n    def handle_add_camera'
+if old_pattern not in cc:
+    # Try more flexible match
+    match = re.search(
+        r'(    def handle_init_robot\(self\):.*?)(        self\.data_to_send = "success"\n)',
+        cc,
+        re.DOTALL,
+    )
+    if not match:
+        print("[PATCH] ERROR: Could not find handle_init_robot data_to_send pattern")
         sys.exit(1)
-    idx2 = content.find("def set_object_pose", idx)
-    if idx2 < 0:
-        print("[PATCH] set_object_pose not found after init_robot!")
-        sys.exit(1)
-    print(f"[PATCH] init_robot at {idx}, set_object_pose at {idx2}")
-    block = content[idx:idx2]
-    returns = [m.start() for m in re.finditer(r'return rsp', block)]
-    print(f"[PATCH] Found {len(returns)} 'return rsp' in init_robot block")
-    if returns:
-        # Insert before last return rsp
-        abs_pos = idx + returns[-1]
-        injection = (
-            '        # Enable PhysX contact reporting after robot init\n'
-            '        try:\n'
-            '            self._bp_enable_contact_reporting()\n'
-            '            print("[INIT_ROBOT] PhysX contact reporting enabled.")\n'
-            '        except Exception as e:\n'
-            '            print(f"[INIT_ROBOT] Failed to enable contact reporting: {e}")\n'
+    insert_pos = match.end(2)
+    injection = (
+        f'        {MARKER}\n'
+        '        try:\n'
+        '            import os as _os\n'
+        '            if _os.environ.get("BP_ENABLE_CONTACTS_ON_INIT", "1") == "1":\n'
+        '                grpc_srv = getattr(self, "_grpc_server_ref", None)\n'
+        '                if grpc_srv and hasattr(grpc_srv, "_bp_enable_contact_reporting"):\n'
+        '                    grpc_srv._bp_enable_contact_reporting()\n'
+        '                    print("[INIT_ROBOT] PhysX contact reporting enabled (sim thread).")\n'
+        '                else:\n'
+        '                    print("[INIT_ROBOT] No gRPC server ref — skipping contact reporting")\n'
+        '        except Exception as _cr_e:\n'
+        '            print(f"[INIT_ROBOT] Contact reporting failed: {_cr_e}")\n'
+    )
+    cc = cc[:insert_pos] + injection + cc[insert_pos:]
+else:
+    # Replace the simple pattern
+    replacement = (
+        f'        {MARKER}\n'
+        '        try:\n'
+        '            import os as _os\n'
+        '            if _os.environ.get("BP_ENABLE_CONTACTS_ON_INIT", "1") == "1":\n'
+        '                grpc_srv = getattr(self, "_grpc_server_ref", None)\n'
+        '                if grpc_srv and hasattr(grpc_srv, "_bp_enable_contact_reporting"):\n'
+        '                    grpc_srv._bp_enable_contact_reporting()\n'
+        '                    print("[INIT_ROBOT] PhysX contact reporting enabled (sim thread).")\n'
+        '                else:\n'
+        '                    print("[INIT_ROBOT] No gRPC server ref — skipping contact reporting")\n'
+        '        except Exception as _cr_e:\n'
+        '            print(f"[INIT_ROBOT] Contact reporting failed: {_cr_e}")\n'
+        '        self.data_to_send = "success"\n\n    def handle_add_camera'
+    )
+    cc = cc.replace(old_pattern, replacement, 1)
+
+with open(CC_FILE, "w") as f:
+    f.write(cc)
+
+# ── Step 3: Wire up _grpc_server_ref on CommandController ──────────────────────
+# The GrpcServer already has server_function pointing to CommandController.
+# We need CommandController to have a back-reference to GrpcServer.
+# Inject this into grpc_server.py's __init__ or start method.
+with open(GRPC_FILE, "r") as f:
+    grpc = f.read()
+
+BACKREF_MARKER = "# BlueprintPipeline grpc_server_backref"
+if BACKREF_MARKER not in grpc:
+    # Find where rpc_server.start() is called or where server_function is set
+    # In GrpcServer.__init__, self.server_function = server_function
+    old_init = 'self.server_function = server_function'
+    if old_init in grpc:
+        new_init = (
+            'self.server_function = server_function\n'
+            f'        {BACKREF_MARKER}\n'
+            '        self.server_function._grpc_server_ref = self'
         )
-        content = content[:abs_pos] + injection + content[abs_pos:]
-        with open(SERVER_FILE, "w") as f:
-            f.write(content)
-        print("[PATCH] Injected via fallback method")
+        grpc = grpc.replace(old_init, new_init, 1)
+        with open(GRPC_FILE, "w") as f:
+            f.write(grpc)
+        print("[PATCH] Added _grpc_server_ref backref in grpc_server.py")
     else:
-        print("[PATCH] No return rsp found - cannot patch")
-        sys.exit(1)
+        print("[PATCH] WARNING: Could not find server_function assignment for backref")
+else:
+    print("[PATCH] grpc_server_ref backref already present")
+
+print("[PATCH] Contact reporting now runs on SIM THREAD via handle_init_robot.")
+print("[PATCH] Set BP_ENABLE_CONTACTS_ON_INIT=0 to disable.")
