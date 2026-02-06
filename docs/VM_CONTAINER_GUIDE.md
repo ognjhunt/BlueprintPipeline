@@ -8,7 +8,7 @@ Quick reference for getting the BlueprintPipeline running on the GCP VM with Gen
 |-------|-------|
 | Instance | `isaac-sim-ubuntu` |
 | Zone | `us-east1-b` |
-| Machine | `g2-standard-32` (32 vCPUs, 128 GB RAM, NVIDIA L4 24GB VRAM) |
+| Machine | `g2-standard-16` or `g2-standard-32` (both with NVIDIA L4 24GB VRAM) |
 | Docker | Requires `sudo` |
 | User home | `/home/nijelhunt1` |
 | Repo path | `~/BlueprintPipeline` |
@@ -61,6 +61,64 @@ python3 tools/run_local_pipeline.py \
   --steps simready,usd,replicator,isaac-lab,genie-sim-export,genie-sim-submit,genie-sim-import \
   --use-geniesim --fail-fast
 ```
+
+### Strict production run (RGB disabled only)
+
+Use this when you want strict realism checks for everything except RGB color validity:
+
+```bash
+cd ~/BlueprintPipeline
+bash scripts/vm-start-xorg.sh
+sudo docker restart geniesim-server >/dev/null
+bash scripts/vm-start.sh
+
+export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
+export GENIESIM_HOST=localhost
+export GENIESIM_PORT=50051
+export GENIESIM_SKIP_DEFAULT_LIGHTING=1
+export SKIP_RGB_CAPTURE=true
+export REQUIRE_VALID_RGB=false
+export DATA_FIDELITY_MODE=production
+export STRICT_REALISM=true
+export REQUIRE_OBJECT_MOTION=true
+export REQUIRE_REAL_CONTACTS=true
+export REQUIRE_REAL_EFFORTS=true
+export REQUIRE_INTRINSICS=true
+export GENIESIM_FIRST_CALL_TIMEOUT_S=600
+unset SKIP_QUALITY_GATES || true
+
+python3 tools/run_local_pipeline.py \
+  --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
+  --steps genie-sim-submit \
+  --force-rerun genie-sim-submit \
+  --use-geniesim --fail-fast
+```
+
+### If a run appears stuck at init
+
+Symptoms:
+- Pipeline process is alive, but `/tmp/pipeline_strict.log` timestamp stops advancing.
+- Last line is often `Running init sequence (initial)`.
+
+Action:
+```bash
+pkill -9 -f 'tools/run_local_pipeline.py' 2>/dev/null || true
+pkill -9 -f 'pipeline_guard.sh' 2>/dev/null || true
+
+cd ~/BlueprintPipeline
+bash scripts/vm-start-xorg.sh
+sudo docker restart geniesim-server >/dev/null
+bash scripts/vm-start.sh
+```
+
+This is usually a stale server/init deadlock, not CPU/GPU saturation. Confirm before resizing:
+```bash
+uptime
+free -h
+nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader
+```
+
+If load/utilization are low and logs are frozen, restart the container and rerun instead of scaling first.
 
 ### Syncing code changes from local machine
 
@@ -299,6 +357,7 @@ python3 tools/run_local_pipeline.py \
 | Gemini dimension estimation fails | `google-genai` not installed on VM | `pip3 install google-genai` |
 | `docker restart` loses runtime patches? | No — `restart` preserves filesystem. Only `rm + create` loses changes | Use `docker restart`, not `docker rm` + new container |
 | `docker compose down && up` loses runtime edits | Container recreate resets files under `/opt/geniesim` | Re-apply patch scripts (or rebuild image with patches baked in) |
+| Pipeline appears "running" but log is frozen at `Running init sequence` | Stale init deadlock after prior run/container state | Stop pipeline + guard, restart container (`docker restart geniesim-server`), wait for gRPC ready, rerun |
 | Container gRPC not listening | Server still initializing (~45s) | Check `/proc/net/tcp6` for port `C383` |
 | `ss` command not found in container | Minimal container image | Use `cat /proc/net/tcp6 | grep C383` instead |
 | `/bin/bash: ... start_geniesim_server.sh: Permission denied` | Executable bit not set on startup script | `chmod +x tools/geniesim_adapter/deployment/start_geniesim_server.sh` then restart container |
@@ -487,7 +546,7 @@ Full list: `regen3d, scale, interactive, simready, usd, inventory-enrichment, re
 | `GEMINI_API_KEY` | Gemini dimension estimation | `.env` file (auto-loaded via python-dotenv) |
 | `SKIP_QUALITY_GATES` | Skip blocking quality gates | Export before pipeline run |
 | `PYTHONPATH` | Module resolution | Must include `~/BlueprintPipeline` |
-| `GENIESIM_FIRST_CALL_TIMEOUT_S` | First joint call timeout (default 300) | Export before pipeline run |
+| `GENIESIM_FIRST_CALL_TIMEOUT_S` | First init/joint call timeout (start with `600` on smaller VMs; `300` often enough on g2-standard-32) | Export before pipeline run |
 | `GENIESIM_GRPC_TIMEOUT_S` | General gRPC timeout (default 60) | Export before pipeline run |
 | `ROBOT_TYPES` | Comma-separated robot types for multi-robot (default: `franka`) | Export before pipeline run |
 | `GENIESIM_ROBOT_TYPE` | Single robot type (default: `franka`) | Export before pipeline run |

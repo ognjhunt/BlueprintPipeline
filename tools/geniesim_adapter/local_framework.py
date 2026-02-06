@@ -2587,6 +2587,43 @@ class GenieSimGRPCClient:
         object_dynamic_ids = list(dict.fromkeys(object_dynamic_ids))
         object_static_ids = list(dict.fromkeys(object_static_ids))
 
+        def _alias_token(_obj_id: str) -> str:
+            _tail = _obj_id.split("_obj_")[-1].lower()
+            if _tail.startswith("variation_"):
+                _tail = _tail[len("variation_"):]
+            while _tail and _tail[-1].isdigit():
+                _tail = _tail[:-1]
+            return _tail
+
+        # If a "variation_*" dynamic object has an equivalent non-variation object
+        # (e.g., variation_toaster vs Toaster003), prefer the non-variation ID to
+        # avoid duplicate pose probes and timeout fan-out.
+        if object_dynamic_ids:
+            _non_variation_by_token: Dict[str, str] = {}
+            for _obj_id in object_dynamic_ids:
+                _tail = _obj_id.split("_obj_")[-1].lower()
+                if "variation_" in _tail:
+                    continue
+                _non_variation_by_token[_alias_token(_obj_id)] = _obj_id
+
+            if not hasattr(self, "_variation_alias_skips_logged"):
+                self._variation_alias_skips_logged: Set[str] = set()
+            _filtered_dynamic: List[str] = []
+            for _obj_id in object_dynamic_ids:
+                _tail = _obj_id.split("_obj_")[-1].lower()
+                if "variation_" in _tail:
+                    _token = _alias_token(_obj_id)
+                    _replacement = _non_variation_by_token.get(_token)
+                    if _replacement:
+                        if _obj_id not in self._variation_alias_skips_logged:
+                            logger.info(
+                                f"[OBS] Skipping variation alias {_obj_id} in favor of {_replacement}"
+                            )
+                            self._variation_alias_skips_logged.add(_obj_id)
+                        continue
+                _filtered_dynamic.append(_obj_id)
+            object_dynamic_ids = _filtered_dynamic
+
         now_ts = _time.time()
         _consecutive_failures = 0
         _early_fail_threshold = get_geniesim_object_pose_early_fail()
@@ -2602,6 +2639,9 @@ class GenieSimGRPCClient:
             static_ttl_s = float(os.environ.get("GENIESIM_OBJECT_POSE_STATIC_TTL_S", "0") or 0.0)
         except ValueError:
             static_ttl_s = 0.0
+        # Strict-safe default: query live poses first; only use manifest fallback
+        # when explicitly enabled via env var.
+        _static_manifest_first = os.environ.get("GENIESIM_STATIC_POSE_MANIFEST_FIRST", "0").strip().lower() not in {"0", "false", "no"}
 
         def _should_skip(obj_id: str) -> bool:
             info = self._object_pose_failures.get(obj_id) or {}
@@ -2685,6 +2725,25 @@ class GenieSimGRPCClient:
                         "pose": cache.get("pose") or {},
                     })
                     continue
+                if _static_manifest_first:
+                    manifest_pose = self._get_manifest_transform_fallback(obj_id)
+                    if manifest_pose is not None:
+                        synthetic_path = f"/World/Scene/obj_{obj_id}"
+                        self._static_object_pose_cache[obj_id] = {
+                            "pose": manifest_pose,
+                            "prim_path": synthetic_path,
+                            "timestamp": now_ts,
+                            "source": "manifest_fallback",
+                        }
+                        scene_objects.append({
+                            "object_id": obj_id,
+                            "prim_path": synthetic_path,
+                            "pose": manifest_pose,
+                            "source": "manifest_fallback",
+                        })
+                        _record_success(obj_id)
+                        self._resolved_any_object_pose = True
+                        continue
                 if _should_skip(obj_id):
                     continue
                 resolved = self._resolve_object_prim(obj_id)
@@ -2939,8 +2998,6 @@ class GenieSimGRPCClient:
         """Return candidate prim paths for resolving an object pose."""
         if not hasattr(self, "_resolved_prim_cache"):
             self._resolved_prim_cache: Dict[str, str] = {}
-        if prim_path in self._resolved_prim_cache:
-            return [self._resolved_prim_cache[prim_path]]
 
         # Load explicit overrides (if provided)
         overrides = self._object_prim_overrides_cache
@@ -2958,9 +3015,17 @@ class GenieSimGRPCClient:
                     logger.warning("Failed to parse GENIESIM_OBJECT_PRIM_OVERRIDES_JSON: %s", exc)
             self._object_prim_overrides_cache = overrides
 
-        candidates: List[str] = []
+        # Runtime overrides must win over stale cache entries so attach remaps
+        # (obj_ -> obj_obj_) take effect immediately.
         if overrides and prim_path in overrides:
-            candidates.append(overrides[prim_path])
+            _override = str(overrides[prim_path])
+            self._resolved_prim_cache[prim_path] = _override
+            return [_override]
+
+        if prim_path in self._resolved_prim_cache:
+            return [self._resolved_prim_cache[prim_path]]
+
+        candidates: List[str] = []
 
         def _add_name(names: List[str], value: Optional[str]) -> None:
             if not value:
@@ -3018,13 +3083,22 @@ class GenieSimGRPCClient:
             if not name:
                 continue
             if name.startswith("/"):
+                if "/World/Scene/obj_" in name and "/obj_obj_" not in name:
+                    candidates.append(name.replace("/World/Scene/obj_", "/World/Scene/obj_obj_", 1))
                 candidates.append(name)
                 if name.startswith("/World/"):
                     _bare = name[len("/World/"):]
                     candidates.append(f"/{_bare}")
                     candidates.append(f"/Root/{_bare}")
                 continue
-            candidates.append(f"/World/Scene/obj_{name}")
+            _base_name = name
+            if _base_name.startswith("obj_obj_"):
+                _base_name = _base_name[len("obj_obj_"):]
+            elif _base_name.startswith("obj_"):
+                _base_name = _base_name[len("obj_"):]
+            # Prefer dynamic alias body over static visual prim.
+            candidates.append(f"/World/Scene/obj_obj_{_base_name}")
+            candidates.append(f"/World/Scene/obj_{_base_name}")
             candidates.append(f"/World/Scene/{name}")
             candidates.append(f"/World/{name}")
 
@@ -3125,6 +3199,14 @@ class GenieSimGRPCClient:
                 zero_pose_seen = zero_pose_seen or zero_pose
                 if zero_pose:
                     zero_pose_attempts += 1
+                # A single DEADLINE_EXCEEDED usually indicates the server is saturated;
+                # probing more candidate paths only multiplies timeout cost.
+                if getattr(self, "_last_object_pose_deadline", False):
+                    logger.warning(
+                        f"[OBS] get_object_pose({prim_path}) deadline on candidate {candidate}; "
+                        f"skipping remaining {max(0, len(candidates) - attempted)} candidates"
+                    )
+                    break
                 if obj_pose is not None:
                     if candidate != prim_path:
                         self._resolved_prim_cache[prim_path] = candidate
@@ -3144,6 +3226,7 @@ class GenieSimGRPCClient:
     def _get_object_pose_raw(self, prim_path: str) -> Tuple[Optional[Dict[str, Any]], bool]:
         """Get object pose via SimObjectService.get_object_pose (raw gRPC)."""
         import struct as _struct
+        self._last_object_pose_deadline = False
         # Build GetObjectPoseReq: field 1 (prim_path, string)
         prim_bytes = prim_path.encode("utf-8")
         # Protobuf: tag 0x0a (field 1, length-delimited), then varint length, then bytes
@@ -3180,6 +3263,9 @@ class GenieSimGRPCClient:
                 return None, True
             return pose, False
         except Exception as exc:
+            _msg = str(exc)
+            if "DEADLINE_EXCEEDED" in _msg or "Deadline Exceeded" in _msg:
+                self._last_object_pose_deadline = True
             logger.warning(f"[OBS] raw get_object_pose({prim_path}) failed: {exc}")
             return None, False
 
@@ -4004,15 +4090,22 @@ class GenieSimGRPCClient:
             )
         return GrpcCallResult(success=True, available=True, payload={"msg": response.msg})
 
-    def attach_object(self, object_id: str, link_name: str) -> GrpcCallResult:
+    def attach_object(
+        self,
+        object_id: str,
+        link_name: Optional[str] = None,
+        is_right: Optional[bool] = None,
+    ) -> GrpcCallResult:
         """
         Attach an object to a robot link.
 
         Uses real gRPC attach_obj call.
 
         Args:
-            object_id: Object identifier
-            link_name: Robot link name
+            object_id: Object identifier.
+            link_name: Optional robot link name (legacy call path).
+            is_right: Optional explicit hand selector. When omitted, side is
+                inferred from ``link_name`` and defaults to right hand.
 
         Returns:
             GrpcCallResult indicating success.
@@ -4021,18 +4114,22 @@ class GenieSimGRPCClient:
             CommandType.ATTACH_OBJ,
             {
                 "object_prims": [object_id],
-                "is_right": "right" in link_name.lower(),
+                "is_right": (
+                    bool(is_right)
+                    if is_right is not None
+                    else ("right" in (link_name or "").lower() if link_name else True)
+                ),
             },
         )
 
-    def detach_object(self, object_id: str) -> GrpcCallResult:
+    def detach_object(self, object_id: Optional[str] = None) -> GrpcCallResult:
         """
         Detach an object from the robot.
 
         Uses real gRPC detach_obj call.
 
         Args:
-            object_id: Object identifier
+            object_id: Optional object identifier (unused by gRPC detach path).
 
         Returns:
             GrpcCallResult indicating success.
@@ -4563,13 +4660,105 @@ class GenieSimGRPCClient:
                 self._last_gripper_aperture = gripper_aperture
             # Attach object on grasp (gripper closing)
             if phase == "grasp" and gripper_aperture is not None and gripper_aperture < 0.1:
-                _obj_prims = waypoint.get("object_prims", [])
+                _target_hint = None
+                _obj_prims = list(waypoint.get("object_prims", []) or [])
+                if not _obj_prims:
+                    # Fallback: resolve target object from active task context so
+                    # grasp phases still issue server-side attach requests.
+                    _target_hint = (
+                        waypoint.get("target_object")
+                        or waypoint.get("target_object_id")
+                        or getattr(self, "_active_target_object_prim", None)
+                        or getattr(self, "_active_target_object", None)
+                    )
+                    if _target_hint:
+                        try:
+                            _resolved = self._resolve_object_prim(str(_target_hint))
+                            _resolved_prim = ""
+                            if isinstance(_resolved, str):
+                                _resolved_prim = _resolved
+                            elif isinstance(_resolved, (list, tuple)) and _resolved:
+                                if isinstance(_resolved[0], str):
+                                    _resolved_prim = _resolved[0]
+                            if _resolved_prim:
+                                _obj_prims = [_resolved_prim]
+                                logger.info(
+                                    "[GRASP] Resolved attach target from hint '%s' -> %s",
+                                    _target_hint,
+                                    _resolved_prim,
+                                )
+                        except Exception as _resolve_err:
+                            logger.warning(
+                                "[GRASP] Failed to resolve attach target '%s': %s",
+                                _target_hint,
+                                _resolve_err,
+                            )
                 for _op in _obj_prims:
-                    try:
-                        self.attach_object(_op, is_right=True)
-                        logger.info("[GRASP] Attached object: %s", _op)
-                    except Exception as _a_err:
-                        logger.warning("[GRASP] attach_object failed: %s", _a_err)
+                    _attach_candidates: List[str] = [_op]
+                    if "/obj_obj_" in _op:
+                        _attach_candidates.append(_op.replace("/obj_obj_", "/obj_", 1))
+                    elif "/obj_" in _op:
+                        _attach_candidates.append(_op.replace("/obj_", "/obj_obj_", 1))
+                    # Preserve order while removing duplicates
+                    _attach_candidates = list(dict.fromkeys(_attach_candidates))
+
+                    _attached_prim = ""
+                    _last_attach_error = ""
+                    for _cand in _attach_candidates:
+                        try:
+                            _attach_result = self.attach_object(_cand, is_right=True)
+                            if _attach_result.available and _attach_result.success:
+                                _attached_prim = _cand
+                                logger.info("[GRASP] Attached object: %s", _attached_prim)
+                                break
+                            _last_attach_error = _attach_result.error or "attach_object returned unsuccessful response"
+                            logger.warning(
+                                "[GRASP] attach_object unsuccessful for %s: %s",
+                                _cand,
+                                _last_attach_error,
+                            )
+                        except Exception as _a_err:
+                            _last_attach_error = str(_a_err)
+                            logger.warning("[GRASP] attach_object exception for %s: %s", _cand, _a_err)
+
+                    if not _attached_prim:
+                        logger.warning(
+                            "[GRASP] Failed to attach target %s after %d candidate(s): %s",
+                            _op,
+                            len(_attach_candidates),
+                            _last_attach_error or "unknown error",
+                        )
+                        continue
+
+                    _overrides = self._object_prim_overrides_cache
+                    if _overrides is None:
+                        _overrides = {}
+                        self._object_prim_overrides_cache = _overrides
+                    _override_keys: Set[str] = set()
+                    for _key in (
+                        _target_hint,
+                        getattr(self, "_active_target_object", None),
+                        getattr(self, "_active_target_object_prim", None),
+                    ):
+                        if _key:
+                            _override_keys.add(str(_key))
+                    if _target_hint and "_obj_" in str(_target_hint):
+                        _override_keys.add(str(_target_hint).rsplit("_obj_", 1)[-1])
+                    # Keep both static and dynamic aliases mapped to the proven attach prim.
+                    if "/obj_obj_" in _attached_prim:
+                        _override_keys.add(_attached_prim.replace("/obj_obj_", "/obj_", 1))
+                    elif "/obj_" in _attached_prim:
+                        _override_keys.add(_attached_prim.replace("/obj_", "/obj_obj_", 1))
+                    for _k in _override_keys:
+                        _overrides[_k] = _attached_prim
+                    setattr(self, "_active_target_object_prim", _attached_prim)
+                    if hasattr(self, "_resolved_prim_cache"):
+                        self._resolved_prim_cache.clear()
+                    logger.info(
+                        "[GRASP] Prim override updated to %s for keys=%s",
+                        _attached_prim,
+                        sorted(_override_keys),
+                    )
             # Detach object on place (gripper opening)
             if phase == "place" and gripper_aperture is not None and gripper_aperture > 0.9:
                 try:
@@ -7050,6 +7239,34 @@ class GenieSimLocalFramework:
             def _on_waypoint_done(wp_idx: int) -> None:
                 """Update watchdog progress when a waypoint gRPC call completes."""
                 collector_state["last_progress_time"] = time.time()
+
+            _target_hint = (
+                task.get("target_object_prim")
+                or task.get("object_prim")
+                or task.get("target_object")
+                or task.get("target_object_id")
+            )
+            if _target_hint:
+                setattr(self._client, "_active_target_object", str(_target_hint))
+                _resolved_target = ""
+                try:
+                    _resolve_fn = getattr(self._client, "_resolve_object_prim", None)
+                    if callable(_resolve_fn):
+                        _resolved_raw = _resolve_fn(str(_target_hint))
+                        if isinstance(_resolved_raw, str):
+                            _resolved_target = _resolved_raw
+                        elif isinstance(_resolved_raw, (list, tuple)) and _resolved_raw:
+                            if isinstance(_resolved_raw[0], str):
+                                _resolved_target = _resolved_raw[0]
+                except Exception:
+                    _resolved_target = ""
+                if _resolved_target:
+                    setattr(self._client, "_active_target_object_prim", _resolved_target)
+                logger.info(
+                    "[GRASP] Seeded trajectory target hint: %s (resolved=%s)",
+                    _target_hint,
+                    _resolved_target or "none",
+                )
 
             def _execute_trajectory() -> None:
                 try:

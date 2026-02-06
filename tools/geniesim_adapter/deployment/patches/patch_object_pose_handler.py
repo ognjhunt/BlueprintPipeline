@@ -220,11 +220,11 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
         because the USD context may change before the transform is used.
         The cached transform is stored in _bp_transform_cache.
 
-        If the exact path exists, return it.  Otherwise, search for prims
-        whose name (last path component) matches the requested path's name,
-        then score candidates: prefer Xformable prims under /World/ with
-        shorter paths.  Falls back to substring matching if no exact name
-        match is found.
+        If the exact path exists, we still prefer a dynamic alias prim
+        (obj_obj_<name>) when available.  Otherwise, search for prims whose
+        name (last path component) matches the requested path's name, then
+        score candidates: prefer Xformable prims under /World/ with shorter
+        paths.  Falls back to substring matching if no exact name match is found.
         \"\"\"
         try:
             from pxr import UsdGeom
@@ -232,13 +232,6 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
             # Use cached scene stage if available
             stage = self._bp_get_scene_stage()
             if stage is None:
-                return requested_path
-
-            # Exact match
-            prim = stage.GetPrimAtPath(requested_path)
-            if prim and prim.IsValid():
-                # CRITICAL: Extract and cache transform NOW while stage is valid
-                self._bp_extract_transform(prim, requested_path)
                 return requested_path
 
             # Extract target name (last path component)
@@ -257,10 +250,32 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
 
             # USD uses obj_BaseName format for scene objects
             target_with_obj = f"obj_{base_name}" if not base_name.startswith("obj_") else base_name
+            target_with_obj_obj = f"obj_obj_{base_name}" if not str(base_name).startswith("obj_obj_") else base_name
+
+            # Exact match (with dynamic alias preference)
+            prim = stage.GetPrimAtPath(requested_path)
+            if prim and prim.IsValid():
+                _parent = requested_path.rsplit("/", 1)[0]
+                _alias_candidates = [
+                    f"{_parent}/{target_with_obj_obj}",
+                    f"/World/Scene/{target_with_obj_obj}",
+                ]
+                for _alias_path in _alias_candidates:
+                    if _alias_path == requested_path:
+                        continue
+                    _alias_prim = stage.GetPrimAtPath(_alias_path)
+                    if _alias_prim and _alias_prim.IsValid():
+                        self._bp_extract_transform(_alias_prim, _alias_path)
+                        print(f"[PATCH] Prefer dynamic alias: {requested_path} -> {_alias_path}")
+                        return _alias_path
+                # CRITICAL: Extract and cache transform NOW while stage is valid
+                self._bp_extract_transform(prim, requested_path)
+                return requested_path
 
             # Create set of names to match against (case-sensitive and lowercase)
             match_names = {target_name, target_lower, base_name, base_name.lower(),
-                           target_with_obj, target_with_obj.lower()}
+                           target_with_obj, target_with_obj.lower(),
+                           target_with_obj_obj, target_with_obj_obj.lower()}
 
             # Collect candidates: exact name match and substring match
             exact_candidates = []
@@ -274,7 +289,7 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                 # Check if prim name matches any of our target variants
                 if prim_name in match_names or prim_name_lower in match_names:
                     exact_candidates.append((prim_path, prim))
-                elif any(m in prim_name_lower for m in [base_name.lower(), target_with_obj.lower()]):
+                elif any(m in prim_name_lower for m in [base_name.lower(), target_with_obj.lower(), target_with_obj_obj.lower()]):
                     substring_candidates.append((prim_path, prim))
 
             # Score and pick best from exact matches first, then substring
@@ -294,6 +309,9 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                 # Prefer paths containing "obj_" (scene objects follow this convention)
                 if "/obj_" in path:
                     s += 25
+                # Prefer dynamic alias bodies over static visual roots.
+                if "/obj_obj_" in path:
+                    s += 120
                 # Prefer shorter paths (less deeply nested)
                 s -= path.count("/")
                 return s
@@ -303,6 +321,41 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                     continue
                 scored = sorted(candidates, key=lambda c: _score(c[0], c[1]), reverse=True)
                 best_path, best_prim = scored[0]
+                # If we landed on a static visual root, prefer a plausible
+                # dynamic descendant (usually where live rigid body motion is).
+                if "/World/Scene/obj_" in best_path and "/obj_obj_" not in best_path:
+                    _desc_best = None
+                    _desc_score = -1e9
+                    for _p in stage.Traverse():
+                        _p_path = str(_p.GetPath())
+                        if not _p_path.startswith(best_path + "/"):
+                            continue
+                        if "/mtl/" in _p_path:
+                            continue
+                        _name_l = _p_path.rsplit("/", 1)[-1].lower()
+                        if base_name.lower() not in _name_l and "obj_obj_" not in _name_l:
+                            continue
+                        _s = 0
+                        try:
+                            if _p.IsA(UsdGeom.Xformable):
+                                _s += 80
+                        except Exception:
+                            pass
+                        try:
+                            from pxr import UsdPhysics
+                            if _p.HasAPI(UsdPhysics.RigidBodyAPI):
+                                _s += 140
+                        except Exception:
+                            pass
+                        if "/obj_obj_" in _p_path:
+                            _s += 120
+                        _s -= _p_path.count("/")
+                        if _s > _desc_score:
+                            _desc_score = _s
+                            _desc_best = (_p_path, _p)
+                    if _desc_best is not None:
+                        print(f"[PATCH] Prefer dynamic descendant: {best_path} -> {_desc_best[0]}")
+                        best_path, best_prim = _desc_best
                 if len(scored) > 1:
                     print(f"[PATCH] Prim path {label} candidates for '{target_name}' (base='{base_name}'): "
                           f"{[c[0] for c in scored[:5]]}")
@@ -331,10 +384,70 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
             print(f"[PATCH] Prim path resolution failed: {e}")
 
         return requested_path
+
+    # BlueprintPipeline object_pose override v2
+    # Override upstream _get_object_pose to use resolver + live PhysX-first extraction.
+    # This is intentionally defined late in the class so it supersedes the original method.
+    def _get_object_pose(self, object_prim_path: str) -> Tuple[np.ndarray, np.ndarray]:
+        try:
+            import numpy as np
+            from pxr import UsdGeom
+        except Exception:
+            # Fallback to upstream behavior if imports are unavailable.
+            if object_prim_path == "robot":
+                return self.usd_objects["robot"].get_world_pose()
+            target_object = XFormPrim(prim_path=object_prim_path)
+            return target_object.get_world_pose()
+
+        # Keep articulation objects initialized like upstream path.
+        for value in self.articulat_objects.values():
+            value.initialize()
+
+        if object_prim_path == "robot":
+            position, rotation = self.usd_objects["robot"].get_world_pose()
+            for value in self.articulat_objects.values():
+                value.initialize()
+            return position, rotation
+
+        resolved_path = self._bp_resolve_prim_path(object_prim_path)
+
+        # Try cached/live transform first.
+        pos, rot = self._bp_get_cached_transform(resolved_path)
+        if pos is None or rot is None:
+            stage = self._bp_get_scene_stage()
+            if stage is not None:
+                prim = stage.GetPrimAtPath(resolved_path)
+                if prim and prim.IsValid() and prim.IsA(UsdGeom.Xformable):
+                    pos, rot = self._bp_extract_transform(prim, resolved_path)
+
+        # Final fallback to XFormPrim for compatibility.
+        if pos is None or rot is None:
+            try:
+                target_object = XFormPrim(prim_path=resolved_path)
+                pos, rot = target_object.get_world_pose()
+                pos = np.array(pos, dtype=np.float64)
+                rot = np.array(rot, dtype=np.float64)
+            except Exception as _fallback_err:
+                print(f"[PATCH] _get_object_pose fallback failed for {resolved_path}: {_fallback_err}")
+                pos = np.zeros(3, dtype=np.float64)
+                rot = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+
+        # Guarantee numpy arrays for downstream serialization code.
+        if not isinstance(pos, np.ndarray):
+            pos = np.array(pos, dtype=np.float64)
+        if not isinstance(rot, np.ndarray):
+            rot = np.array(rot, dtype=np.float64)
+
+        for value in self.articulat_objects.values():
+            value.initialize()
+        return pos, rot
     # --- END BlueprintPipeline object_pose patch ---
 """)
 
 PATCH_MARKER = "BlueprintPipeline object_pose patch"
+OBJECT_POSE_V2_MARKER = "BlueprintPipeline object_pose override v2"
+DYNAMIC_ALIAS_MARKER = "Prefer dynamic alias"
+DYNAMIC_DESC_MARKER = "Prefer dynamic descendant"
 LIVE_TIME_MARKER = "BlueprintPipeline object_pose live_timecode patch"
 
 LIVE_TIMECODE_HELPER = textwrap.dedent("""\
@@ -532,12 +645,17 @@ def patch_file():
         content = f.read()
 
     has_patch_marker = PATCH_MARKER in content
+    has_object_pose_v2 = OBJECT_POSE_V2_MARKER in content
+    has_dynamic_alias = DYNAMIC_ALIAS_MARKER in content
     has_live_time = "def _bp_live_timecode" in content
     has_physics_v2 = "def _bp_ensure_physics_on_prim" in content
 
     # If we have an older version of the patch (missing physics v2), strip
     # all BlueprintPipeline blocks and re-apply from scratch.
-    force_reapply = has_patch_marker and not has_physics_v2
+    has_dynamic_desc = DYNAMIC_DESC_MARKER in content
+    force_reapply = has_patch_marker and (
+        not has_physics_v2 or not has_object_pose_v2 or not has_dynamic_alias or not has_dynamic_desc
+    )
     if force_reapply:
         print("[PATCH] Detected older patch version (missing physics v2) - upgrading")
         # Remove all BEGIN...END blocks
