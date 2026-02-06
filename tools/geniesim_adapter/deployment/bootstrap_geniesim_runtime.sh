@@ -45,6 +45,11 @@ if [ -d "${PATCHES_DIR}" ]; then
     "${PATCHES_DIR}/_apply_safe_float.py" \
     "${PATCHES_DIR}/patch_xforms_safe_rotation.py" \
     "${PATCHES_DIR}/patch_articulation_guard.py" \
+    "${PATCHES_DIR}/patch_enable_contacts_on_init.py" \
+    "${PATCHES_DIR}/patch_articulation_physics_wait.py" \
+    "${PATCHES_DIR}/patch_set_joint_guard.py" \
+    "${PATCHES_DIR}/patch_camera_crash_guard.py" \
+    "${PATCHES_DIR}/patch_sim_thread_physics_cache.py" \
     "${PATCHES_DIR}/patch_autoplay.py"; do
     if [ -f "${patch_script}" ]; then
       "${ISAAC_SIM_PATH}/python.sh" "${patch_script}" || echo "[geniesim] WARNING: ${patch_script} failed (non-fatal)"
@@ -64,6 +69,11 @@ if [ -d "${PATCHES_DIR}" ]; then
     echo "[geniesim] ✓ object_pose patch verified in command_controller.py"
   else
     echo "[geniesim] WARNING: object_pose patch may not have been applied to command_controller.py"
+  fi
+  if grep -q "BlueprintPipeline sim_thread_physics_cache patch" "${_CMD_CTRL}" 2>/dev/null; then
+    echo "[geniesim] ✓ sim_thread_physics_cache patch verified in command_controller.py"
+  else
+    echo "[geniesim] WARNING: sim_thread_physics_cache patch may not have been applied"
   fi
 fi
 

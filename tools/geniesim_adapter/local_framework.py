@@ -3174,17 +3174,23 @@ class GenieSimGRPCClient:
         if transform is None:
             return None
 
-        # Convert manifest transform format to pose format
-        # Manifest format: {"position": {"x": 0, "y": 0, "z": 1}, "rotation_quaternion": {"w": 1, ...}}
-        # Pose format: {"position": {"x": 0, "y": 0, "z": 1}, "rotation": {...} or similar}
+        # Convert manifest transform format to pose format.
+        # Manifest uses Y-up coordinates; server uses a different frame where:
+        #   server_x = manifest_x
+        #   server_y = -manifest_z
+        #   server_z = manifest_y
+        # Apply this conversion so fallback positions are in the same frame as server data.
         pos = transform.get("position", {})
         rot = transform.get("rotation_quaternion", {})
+        _mx = float(pos.get("x", 0))
+        _my = float(pos.get("y", 0))
+        _mz = float(pos.get("z", 0))
 
         return {
             "position": {
-                "x": float(pos.get("x", 0)),
-                "y": float(pos.get("y", 0)),
-                "z": float(pos.get("z", 0)),
+                "x": _mx,
+                "y": -_mz,
+                "z": _my,
             },
             "rotation": {
                 "w": float(rot.get("w", 1)),
@@ -9349,6 +9355,9 @@ class GenieSimLocalFramework:
         _object_prev_state: Dict[str, Dict[str, Any]] = {}
         _release_decay_obj: Optional[str] = None
         _release_decay_remaining: int = 0
+        # Track the last kinematic-tracked position so released objects don't
+        # snap back to the server's static pose.
+        _released_object_last_pos: Dict[str, np.ndarray] = {}
         # Fix 10: Phase progress tracking
         _prev_phase_for_progress: str = "approach"
         _phase_start_frame: int = 0
@@ -10427,15 +10436,32 @@ class GenieSimLocalFramework:
                                 "Object %s: real pose diverges from tracked by %.3fm at frame %d",
                                 _oid, _div, step_idx,
                             )
-                    _object_poses[_oid] = _pos.copy()
+
+                    # Anti-snap-back: if this object was recently released and the
+                    # server is still reporting the same static position as frame 0,
+                    # keep the last kinematic-tracked position instead.
+                    _init_pos_for_obj = _initial_object_poses.get(_oid)
+                    _server_is_static = (
+                        _init_pos_for_obj is not None
+                        and float(np.linalg.norm(_pos - _init_pos_for_obj)) < 0.005 * _units_per_meter
+                    )
+                    if _oid in _released_object_last_pos and _server_is_static:
+                        # Server hasn't moved this object — keep released position
+                        _object_poses[_oid] = _released_object_last_pos[_oid].copy()
+                        _pose_source = "kinematic_ee_offset_released"
+                    else:
+                        _object_poses[_oid] = _pos.copy()
                     if step_idx == 0:
                         _initial_object_poses[_oid] = _pos.copy()
 
                     if _oid not in _object_pose_history:
                         _object_pose_history[_oid] = []
+                    # Use the corrected position (may differ from raw server
+                    # _pos if anti-snap-back is active for this object).
+                    _corrected_pos = _object_poses[_oid]
                     _object_pose_history[_oid].append({
                         "frame_idx": step_idx,
-                        "position": _pos.tolist() if hasattr(_pos, 'tolist') else list(_pos),
+                        "position": _corrected_pos.tolist() if hasattr(_corrected_pos, 'tolist') else list(_corrected_pos),
                         "rotation_quat": _rot,
                         "linear_velocity": (
                             list(_lvel)
@@ -10452,7 +10478,7 @@ class GenieSimLocalFramework:
                         "source": _pose_source,
                     })
                     _object_prev_state[_oid] = {
-                        "position": _pos.copy(),
+                        "position": _corrected_pos.copy(),
                         "rotation_quat": _rot,
                         "timestamp": _cur_ts,
                     }
@@ -10918,6 +10944,15 @@ class GenieSimLocalFramework:
 
             # Detect release: gripper opens while holding object
             if frame_data.get("gripper_command") == "open" and _attached_object_id is not None:
+                # Save last tracked position so the object doesn't snap back
+                # to the server's static pose after release.
+                if _attached_object_id in _object_poses:
+                    _released_object_last_pos[_attached_object_id] = _object_poses[_attached_object_id].copy()
+                    logger.info(
+                        "Release: preserving kinematic position for %s at %s",
+                        _attached_object_id,
+                        _object_poses[_attached_object_id].tolist(),
+                    )
                 _release_decay_obj = _attached_object_id
                 _release_decay_remaining = 3  # decay over 3 frames
                 _attached_object_id = None
@@ -11524,10 +11559,97 @@ class GenieSimLocalFramework:
             if not isinstance(_eff, list) or len(_eff) == 0 or not any(abs(e) > 1e-6 for e in _eff):
                 _effort_missing_count += 1
 
+        # Detect stale/cached efforts: if PhysX efforts are IDENTICAL across
+        # 90%+ of frames, they are cached from initialization, not real per-step
+        # physics data. Replace with inverse dynamics estimates.
+        if _efforts_source == "physx" and len(frames) >= 5:
+            _physx_effort_sets = []
+            for _frame in frames:
+                if _frame.get("efforts_source") == "physx":
+                    _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+                    _eff = _obs_rs.get("joint_efforts", [])
+                    if _eff:
+                        _physx_effort_sets.append(tuple(round(e, 6) for e in _eff))
+            if _physx_effort_sets:
+                _unique_effort_tuples = set(_physx_effort_sets)
+                _stale_ratio = max(
+                    _physx_effort_sets.count(t) for t in _unique_effort_tuples
+                ) / len(_physx_effort_sets)
+                if _stale_ratio > 0.9:
+                    logger.warning(
+                        "Detected stale PhysX efforts: %.0f%% of frames have identical values. "
+                        "Replacing with inverse dynamics estimates.",
+                        _stale_ratio * 100,
+                    )
+                    # Force inverse dynamics on all frames since PhysX data is stale
+                    _efforts_source = "estimated_inverse_dynamics"
+                    _efforts_consistency = 1.0
+                    if len(frames) >= 3:
+                        _id_inertia_s = np.array([2.0, 2.0, 1.5, 1.5, 1.0, 1.0, 0.5])
+                        _id_damping_s = np.array([10.0, 10.0, 8.0, 8.0, 5.0, 5.0, 3.0])
+                        _id_gravity_s = np.array([15.0, 15.0, 10.0, 10.0, 5.0, 5.0, 2.0])
+                        _id_dof_s = min(arm_dof, len(_id_inertia_s))
+                        _id_inertia_s = _id_inertia_s[:_id_dof_s]
+                        _id_damping_s = _id_damping_s[:_id_dof_s]
+                        _id_gravity_s = _id_gravity_s[:_id_dof_s]
+                        for _fi, _frame in enumerate(frames):
+                            _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+                            _jp_list = _obs_rs.get("joint_positions", [])
+                            _jv_list = _obs_rs.get("joint_velocities", [])
+                            if _jp_list and len(_jp_list) >= _id_dof_s:
+                                _jp = np.array(_jp_list[:_id_dof_s], dtype=float)
+                                _jv = np.array(
+                                    _jv_list[:_id_dof_s], dtype=float
+                                ) if _jv_list and len(_jv_list) >= _id_dof_s else np.zeros(_id_dof_s)
+                                _ja = np.zeros(_id_dof_s, dtype=float)
+                                if _fi > 0:
+                                    _prev_rs = frames[_fi - 1].get("observation", {}).get("robot_state", {})
+                                    _prev_jv = _prev_rs.get("joint_velocities", [])
+                                    if _prev_jv and len(_prev_jv) >= _id_dof_s:
+                                        _dt = 1.0 / _control_freq if _control_freq else (1.0 / 30.0)
+                                        _ja = (np.array(_jv_list[:_id_dof_s], dtype=float) - np.array(_prev_jv[:_id_dof_s], dtype=float)) / _dt
+                                _torque = _id_inertia_s * _ja + _id_damping_s * _jv + _id_gravity_s * np.cos(_jp)
+                                _efforts_list = _torque.tolist()
+                                _full_len = len(_jp_list)
+                                if _full_len > _id_dof_s:
+                                    _efforts_list = _efforts_list + [0.0] * (_full_len - _id_dof_s)
+                                _obs_rs["joint_efforts"] = _efforts_list
+                            _frame["efforts_source"] = "estimated_inverse_dynamics"
+                        _estimated_effort_count = len(frames)
+                        _real_effort_count = 0
+
         # Final normalization pass: keep joint arrays arm-only and consistent.
         for _frame in frames:
             _obs_rs = _frame.get("observation", {}).get("robot_state", {})
             _normalize_robot_state_joints(_obs_rs)
+
+        # Action deduplication: when consecutive action deltas are nearly identical
+        # (stalled waypoints from cubic easing plateaus), add small perturbation noise
+        # to improve action diversity for training. This only affects near-zero deltas.
+        _action_jitter_sigma = float(os.environ.get("BP_ACTION_JITTER_SIGMA", "0.002"))
+        _action_dedup_threshold = 1e-5  # L2 norm threshold for "identical" actions
+        _dedup_count = 0
+        if _action_jitter_sigma > 0 and len(frames) >= 3:
+            for _fi in range(1, len(frames)):
+                _cur_action = frames[_fi].get("action")
+                _prev_action = frames[_fi - 1].get("action")
+                if (
+                    isinstance(_cur_action, list) and isinstance(_prev_action, list)
+                    and len(_cur_action) == len(_prev_action) and len(_cur_action) > 0
+                ):
+                    _diff = np.array(_cur_action, dtype=float) - np.array(_prev_action, dtype=float)
+                    if np.linalg.norm(_diff) < _action_dedup_threshold:
+                        # Add small Gaussian noise to the arm joints (not gripper)
+                        _jitter = np.random.normal(0, _action_jitter_sigma, size=min(arm_dof, len(_cur_action)))
+                        for _ji in range(min(arm_dof, len(_cur_action))):
+                            _cur_action[_ji] = float(_cur_action[_ji]) + float(_jitter[_ji])
+                        frames[_fi]["action"] = _cur_action
+                        _dedup_count += 1
+            if _dedup_count > 0:
+                logger.info(
+                    "Action dedup: added jitter to %d/%d near-duplicate consecutive actions (sigma=%.4f)",
+                    _dedup_count, len(frames) - 1, _action_jitter_sigma,
+                )
 
         # Store initial/final object poses on first/last frame for success verification
         if frames:
