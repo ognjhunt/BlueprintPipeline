@@ -5868,20 +5868,94 @@ class GenieSimLocalFramework:
             )
 
     def _runtime_patch_health_check(self) -> Tuple[bool, List[str]]:
-        """Verify critical runtime patch markers in active server sources."""
+        """Verify critical runtime patch markers in active server sources.
+
+        For containerized/remote servers where GENIESIM_ROOT is not locally
+        visible, this checks runtime readiness probe JSON output instead of
+        silently passing.
+        """
         details: List[str] = []
         geniesim_root = Path(getattr(self.config, "geniesim_root", Path("/opt/geniesim")))
-        marker_specs: List[Tuple[Path, str]] = [
+
+        readiness_reports: List[Tuple[Path, Dict[str, Any]]] = []
+        for _env_name, _default in (
+            ("GENIESIM_RUNTIME_READINESS_JSON", "/tmp/geniesim_runtime_readiness.json"),
+            ("GENIESIM_RUNTIME_PRESTART_JSON", "/tmp/geniesim_runtime_prestart_probe.json"),
+        ):
+            _raw = os.getenv(_env_name, _default).strip()
+            if not _raw:
+                continue
+            _report_path = Path(_raw)
+            if not _report_path.is_file():
+                continue
+            try:
+                _payload = json.loads(_report_path.read_text())
+            except Exception as exc:
+                details.append(f"failed to parse runtime readiness report {_report_path}: {exc}")
+                continue
+            if isinstance(_payload, dict):
+                readiness_reports.append((_report_path, _payload))
+
+        # If geniesim_root doesn't exist locally, the server is likely
+        # remote/containerised. Require readiness probe evidence in strict mode.
+        if not geniesim_root.exists():
+            _probe_ok = True
+            _probe_checked = False
+            for _report_path, _payload in readiness_reports:
+                _checks = _payload.get("checks")
+                if not isinstance(_checks, list):
+                    continue
+                for _check in _checks:
+                    if not isinstance(_check, dict):
+                        continue
+                    if str(_check.get("name") or "") != "runtime_patch_markers":
+                        continue
+                    _probe_checked = True
+                    _check_ok = bool(_check.get("passed", False))
+                    if _check_ok:
+                        details.append(
+                            f"runtime patch markers verified via readiness report: {_report_path}"
+                        )
+                    else:
+                        _probe_ok = False
+                        _missing = _check.get("missing")
+                        if isinstance(_missing, list) and _missing:
+                            details.extend(
+                                [f"missing patch marker from readiness report: {m}" for m in _missing]
+                            )
+                        _diag = _check.get("details")
+                        if isinstance(_diag, list) and _diag:
+                            details.extend([str(v) for v in _diag])
+            if _probe_checked:
+                return _probe_ok, details
+
+            _require_probe = parse_bool_env(
+                os.getenv("GENIESIM_REQUIRE_RUNTIME_PATCH_REPORT"),
+                default=getattr(self, "_strict_realism", False),
+            )
+            if _require_probe:
+                details.append(
+                    "runtime patch markers could not be verified: "
+                    f"geniesim_root {geniesim_root} not found locally and no readiness report evidence"
+                )
+                return False, details
+            details.append(
+                f"geniesim_root {geniesim_root} not found locally and readiness report missing; "
+                "skipping runtime patch marker check (non-strict override)"
+            )
+            return True, details
+
+        marker_specs: List[Tuple[str, str]] = [
             (
-                geniesim_root / "source/data_collection/server/grpc_server.py",
+                "source/data_collection/server/grpc_server.py",
                 "BlueprintPipeline contact_report patch",
             ),
             (
-                geniesim_root / "source/data_collection/server/command_controller.py",
+                "source/data_collection/server/command_controller.py",
                 "BlueprintPipeline object_pose patch",
             ),
             (
-                geniesim_root / "source/data_collection/server/command_controller.py",
+                "source/data_collection/server/command_controller.py",
                 "BlueprintPipeline sim_thread_physics_cache patch",
             ),
         ]
@@ -5895,13 +5969,28 @@ class GenieSimLocalFramework:
                 _rel = _rel.strip()
                 _marker = _marker.strip()
                 if _rel and _marker:
-                    marker_specs.append((geniesim_root / _rel, _marker))
+                    marker_specs.append((_rel, _marker))
+
+        def _resolve_patch_target(root: Path, rel_path: str) -> Path:
+            direct = root / rel_path
+            if direct.is_file():
+                return direct
+            rel_tail = Path(rel_path).as_posix()
+            basename = Path(rel_path).name
+            try:
+                for candidate in root.rglob(basename):
+                    if candidate.is_file() and candidate.as_posix().endswith(rel_tail):
+                        return candidate
+            except Exception:
+                pass
+            return direct
 
         ok = True
-        for file_path, marker in marker_specs:
+        for rel_path, marker in marker_specs:
+            file_path = _resolve_patch_target(geniesim_root, rel_path)
             if not file_path.is_file():
                 ok = False
-                details.append(f"missing patch target file: {file_path}")
+                details.append(f"missing patch target file: {file_path} (rel={rel_path})")
                 continue
             try:
                 content = file_path.read_text(errors="ignore")
@@ -6037,6 +6126,29 @@ class GenieSimLocalFramework:
         self._strict_runtime_patch_details = []
         _max_retries = int(os.getenv("GENIESIM_STRICT_PREFLIGHT_RETRIES", "5"))
         _retry_delay = float(os.getenv("GENIESIM_STRICT_PREFLIGHT_DELAY_S", "0.5"))
+
+        _require_camera_data = parse_bool_env(
+            os.getenv("REQUIRE_CAMERA_DATA"),
+            default=self._modality_profile != "no_rgb",
+        )
+        _skip_rgb_capture = parse_bool_env(
+            os.getenv("SKIP_RGB_CAPTURE"),
+            default=self._skip_rgb_placeholder,
+        )
+        if _require_camera_data and _skip_rgb_capture:
+            errors.append(
+                "Invalid camera profile: REQUIRE_CAMERA_DATA=true cannot be combined with SKIP_RGB_CAPTURE=true"
+            )
+        _dataset_profile = os.getenv("GENIESIM_DATASET_PROFILE", "").strip().lower()
+        if _dataset_profile in {"buyable", "lab_grade", "production_camera"}:
+            if self._modality_profile == "no_rgb":
+                errors.append(
+                    f"Dataset profile '{_dataset_profile}' requires GENIESIM_MODALITY_PROFILE=rgb"
+                )
+            if not _require_camera_data:
+                errors.append(
+                    f"Dataset profile '{_dataset_profile}' requires REQUIRE_CAMERA_DATA=true"
+                )
 
         # 0) Runtime patch marker health
         _patch_ok, _patch_details = self._runtime_patch_health_check()
@@ -6305,13 +6417,14 @@ class GenieSimLocalFramework:
             msg = "Strict realism preflight failed:\n  - " + "\n  - ".join(errors)
             self._strict_runtime_patch_health = False
             self._strict_runtime_patch_details.extend(errors)
-            fail_action = os.getenv("GENIESIM_STRICT_PREFLIGHT_FAIL_ACTION", "raw_only").strip().lower()
-            self._force_raw_only = True
-            if fail_action == "error":
-                self.log(msg, "ERROR")
-                raise RuntimeError(msg)
-            self.log(msg, "WARNING")
-            self.log("Strict preflight failed — forcing raw_preserved mode for this run.", "WARNING")
+            fail_action = os.getenv("GENIESIM_STRICT_PREFLIGHT_FAIL_ACTION", "error").strip().lower()
+            if fail_action == "raw_only":
+                self._force_raw_only = True
+                self.log(msg, "WARNING")
+                self.log("Strict preflight failed — forcing raw_preserved mode for this run.", "WARNING")
+                return
+            self.log(msg, "ERROR")
+            raise RuntimeError(msg)
 
     # =========================================================================
     # Data Collection
@@ -6925,6 +7038,41 @@ class GenieSimLocalFramework:
                             scene_graph_nodes=_sg_nodes,
                         )
 
+                        _episode_error = str(episode_result.get("error") or "")
+                        _retryable_transport_failure = (
+                            not episode_result.get("success")
+                            and any(
+                                _token in _episode_error.lower()
+                                for _token in (
+                                    "grpc",
+                                    "deadline exceeded",
+                                    "connection reset",
+                                    "channel closed",
+                                    "trajectory execution unavailable",
+                                    "reset failed",
+                                )
+                            )
+                        )
+                        if _retryable_transport_failure:
+                            self.log(
+                                f"Episode {ep_idx} transport/runtime failure; restarting server "
+                                "and deferring task for clean rerun.",
+                                "WARNING",
+                            )
+                            result.warnings.append(
+                                f"Episode {ep_idx} retryable transport failure: {_episode_error}"
+                            )
+                            self.stop_server()
+                            if not self.start_server(scene_usd_path=scene_usd_path):
+                                result.errors.append(
+                                    "Server restart failed after retryable transport failure"
+                                )
+                                return result
+                            self._reinit_robot_after_restart()
+                            if self.config.stall_backoff_s > 0:
+                                time.sleep(self.config.stall_backoff_s)
+                            continue
+
                         total_episodes += 1
                         collision_free_flag = episode_result.get("collision_free")
                         if collision_free_flag is not None:
@@ -6955,12 +7103,9 @@ class GenieSimLocalFramework:
                             if len(_stall_window) > _stall_window_size:
                                 _stall_window.pop(0)
                         elif episode_result.get("task_success") and not episode_result.get("success"):
-                            # Task succeeded but data capture failed (e.g. server deadlock).
-                            # Count for checkpoint so we move on to next task.
-                            _task_episodes_passed += 1
                             self.log(
-                                f"Episode {ep_idx} had task_success but data capture failed — "
-                                "counting for checkpoint",
+                                f"Episode {ep_idx} reported task_success but capture/export failed — "
+                                "not counting for checkpoint.",
                                 "WARNING",
                             )
                         else:
@@ -7126,9 +7271,42 @@ class GenieSimLocalFramework:
 
             result.success = (passed_episodes > 0) and not timed_out
 
+            cert_summary: Dict[str, Any] = {}
+            if certification_episode_reports:
+                try:
+                    cert_report = write_run_certification_report(
+                        run_dir,
+                        certification_episode_reports,
+                    )
+                    cert_summary = cert_report.get("summary", {}) or {}
+                    result.server_info["certification_summary"] = cert_summary
+                except Exception as _cert_exc:
+                    self.log(
+                        f"Failed to write run certification report: {_cert_exc}",
+                        "WARNING",
+                    )
+            if getattr(self, "_physics_cert_enabled", True) and cert_summary:
+                _min_cert_pass_rate = float(os.getenv("GENIESIM_MIN_CERT_PASS_RATE", "0.95"))
+                _cert_pass_rate = float(cert_summary.get("certification_pass_rate") or 0.0)
+                if _cert_pass_rate < _min_cert_pass_rate:
+                    result.success = False
+                    result.warnings.append(
+                        "Certification pass-rate below threshold: "
+                        f"{_cert_pass_rate:.2%} < {_min_cert_pass_rate:.2%}."
+                    )
+
             self.log("\n" + "=" * 70)
             self.log("DATA COLLECTION COMPLETE")
             self.log("=" * 70)
+            if cert_summary:
+                self.log(
+                    "Certification pass-rate: "
+                    f"{float(cert_summary.get('certification_pass_rate') or 0.0):.2%} "
+                    f"({int(cert_summary.get('certified') or 0)}/"
+                    f"{int(cert_summary.get('episodes') or 0)} physics_certified)"
+                )
+            else:
+                self.log("Certification pass-rate: unavailable")
             self.log(f"Episodes: {passed_episodes}/{total_episodes} passed")
             self.log(f"Total frames: {total_frames}")
             self.log(f"Average quality: {result.average_quality_score:.2f}")
@@ -7146,24 +7324,6 @@ class GenieSimLocalFramework:
                 )
             self.log(f"Duration: {result.duration_seconds:.1f}s")
             self.log(f"Output: {run_dir}")
-
-            if certification_episode_reports:
-                try:
-                    cert_report = write_run_certification_report(
-                        run_dir,
-                        certification_episode_reports,
-                    )
-                    result.server_info["certification_summary"] = cert_report.get("summary", {})
-                    self.log(
-                        "Certification summary: "
-                        f"{cert_report.get('summary', {}).get('certified', 0)}/"
-                        f"{cert_report.get('summary', {}).get('episodes', 0)} physics_certified",
-                    )
-                except Exception as _cert_exc:
-                    self.log(
-                        f"Failed to write run certification report: {_cert_exc}",
-                        "WARNING",
-                    )
 
             # Log final stall statistics for pattern analysis (P1)
             if result.stall_statistics and result.stall_statistics.total_stalls > 0:
@@ -7588,13 +7748,103 @@ class GenieSimLocalFramework:
                 """Update watchdog progress when a waypoint gRPC call completes."""
                 collector_state["last_progress_time"] = time.time()
 
+            _strict_episode = bool(
+                getattr(self, "_physics_cert_enabled", True)
+                and getattr(self, "_physics_cert_mode", "strict") == "strict"
+            )
+            _requires_motion_target = self._requires_object_motion(task)
+
+            def _normalize_target_token(value: Optional[str]) -> str:
+                token = str(value or "").rsplit("/", 1)[-1].lower()
+                if "_obj_" in token:
+                    token = token.split("_obj_")[-1]
+                if token.startswith("variation_"):
+                    token = token[len("variation_") :]
+                while token and token[-1].isdigit():
+                    token = token[:-1]
+                return token
+
+            def _resolve_target_object_id(target_hint: Optional[str]) -> Optional[str]:
+                if not target_hint:
+                    return None
+                hint = str(target_hint)
+                hint_norm = hint.rsplit("/", 1)[-1].lower()
+                hint_token = _normalize_target_token(hint)
+                known_ids: List[str] = []
+                for _src in (
+                    getattr(self, "_scene_object_ids_dynamic", []),
+                    getattr(self, "_scene_variation_object_ids", []),
+                    getattr(self, "_scene_object_prims", []),
+                    getattr(self, "_scene_variation_object_prims", []),
+                ):
+                    if isinstance(_src, list):
+                        for _oid in _src:
+                            _oid_s = str(_oid)
+                            if _oid_s not in known_ids:
+                                known_ids.append(_oid_s)
+                exact: Optional[str] = None
+                relaxed: List[str] = []
+                for _oid in known_ids:
+                    _oid_norm = _oid.rsplit("/", 1)[-1].lower()
+                    _oid_suffix = _oid_norm.split("_obj_")[-1] if "_obj_" in _oid_norm else ""
+                    if _oid == hint or _oid_norm == hint_norm or (_oid_suffix and _oid_suffix == hint_norm):
+                        exact = _oid
+                        break
+                    if _normalize_target_token(_oid_norm) == hint_token:
+                        relaxed.append(_oid)
+                if exact is not None:
+                    return exact
+                if relaxed:
+                    relaxed.sort(key=lambda _id: (str(_id).lower().startswith("variation_"), str(_id)))
+                    return relaxed[0]
+                return None
+
             _target_hint = (
                 task.get("target_object_prim")
                 or task.get("object_prim")
+                or task.get("_resolved_target_object_id")
                 or task.get("target_object")
                 or task.get("target_object_id")
             )
+            _resolved_target_object_id = _resolve_target_object_id(_target_hint)
+            if _resolved_target_object_id:
+                task["_resolved_target_object_id"] = _resolved_target_object_id
+            _hint_norm = str(_target_hint or "").rsplit("/", 1)[-1].lower()
+            _variation_hint = "variation_" in _hint_norm
+            if (
+                _strict_episode
+                and _requires_motion_target
+                and _variation_hint
+                and not _resolved_target_object_id
+            ):
+                message = (
+                    f"Unresolved variation target object before execution: '{_target_hint}'. "
+                    "Strict mode requires deterministic target-object mapping."
+                )
+                result["error"] = message
+                try:
+                    partial_path = output_dir / f"{episode_id}.partial.json"
+                    partial_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(partial_path, "w") as _pf:
+                        json.dump(
+                            {
+                                "episode_id": episode_id,
+                                "task_name": task.get("task_name", "unknown"),
+                                "error": message,
+                                "target_hint": _target_hint,
+                                "resolved_target_object_id": _resolved_target_object_id,
+                            },
+                            _pf,
+                            indent=2,
+                        )
+                except Exception:
+                    pass
+                self.log(message, "ERROR")
+                return result
+
             if _target_hint:
+                if _resolved_target_object_id:
+                    _target_hint = _resolved_target_object_id
                 setattr(self._client, "_active_target_object", str(_target_hint))
                 _resolved_target = ""
                 try:
@@ -7608,12 +7858,18 @@ class GenieSimLocalFramework:
                                 _resolved_target = _resolved_raw[0]
                 except Exception:
                     _resolved_target = ""
+                # Always seed the active target so attach_object can find the
+                # prim even when _resolve_object_prim returns empty.
                 if _resolved_target:
                     setattr(self._client, "_active_target_object_prim", _resolved_target)
+                else:
+                    # Fallback: use the raw target_hint as the prim path —
+                    # the attach_object code will try prim-path variants.
+                    setattr(self._client, "_active_target_object_prim", str(_target_hint))
                 logger.info(
                     "[GRASP] Seeded trajectory target hint: %s (resolved=%s)",
                     _target_hint,
-                    _resolved_target or "none",
+                    _resolved_target or str(_target_hint),
                 )
 
             def _execute_trajectory() -> None:
@@ -8224,7 +8480,10 @@ class GenieSimLocalFramework:
             quality_score = self._calculate_quality_score(frames, task)
             min_quality = float(os.getenv("MIN_QUALITY_SCORE", "0.7"))
             validation_passed = quality_score >= min_quality
-            task_success = self._extract_task_success(frames, task)
+            task_success_server = self._extract_task_success(frames, task)
+            task_success = task_success_server
+            _geometric_task_success: Optional[bool] = None
+            _environment_success_estimate: Optional[bool] = None
             collision_free = planning_report.get("collision_free")
             collision_source = planning_report.get("collision_source")
             collision_free_physics = _collision_free_physics
@@ -8242,9 +8501,8 @@ class GenieSimLocalFramework:
                 episode_id=episode_id,
                 collision_free=collision_free,
             )
-            # Use LLM task_success if server-side evaluation is unavailable
-            if task_success is None and llm_metadata.get("task_success") is not None:
-                task_success = llm_metadata["task_success"]
+            if llm_metadata.get("task_success") is not None:
+                llm_metadata["task_success_llm"] = bool(llm_metadata.get("task_success"))
 
             # Deterministic fallbacks when LLM enrichment is unavailable
             if not llm_metadata.get("task_description"):
@@ -8286,9 +8544,9 @@ class GenieSimLocalFramework:
                     _tt, ["Task initiated", "Motion completed", "End state reached"]
                 )
 
-            # Gemini-based task success evaluation (primary)
+            # Gemini-based task-success annotation (advisory only).
             _gemini_ts_client = getattr(self, "_gemini_client_for_props", None)
-            if task_success is None and frames and _gemini_ts_client:
+            if frames and _gemini_ts_client:
                 try:
                     _task_desc = task.get("description_hint") or task.get("task_type", "manipulation")
                     _target_obj = task.get("target_object", "unknown")
@@ -8311,7 +8569,11 @@ class GenieSimLocalFramework:
                         "ee_end": [round(v, 3) for v in _last_ee],
                     }
                     # Add object displacement if available
-                    _target_oid_ts = task.get("target_object") or task.get("target_object_id")
+                    _target_oid_ts = (
+                        task.get("_resolved_target_object_id")
+                        or task.get("target_object")
+                        or task.get("target_object_id")
+                    )
                     if _target_oid_ts:
                         _ip = frames[0].get("_initial_object_poses", {}).get(_target_oid_ts)
                         _fp = frames[-1].get("_final_object_poses", {}).get(_target_oid_ts)
@@ -8333,21 +8595,23 @@ class GenieSimLocalFramework:
                     _ts_end = _ts_text.rfind("}") + 1
                     if _ts_start >= 0 and _ts_end > _ts_start:
                         _ts_data = _json_mod.loads(_ts_text[_ts_start:_ts_end])
-                        task_success = bool(_ts_data.get("success", False))
+                        llm_metadata["task_success_llm"] = bool(_ts_data.get("success", False))
                         _ts_conf = float(_ts_data.get("confidence", 0.5))
                         llm_metadata["task_success_reasoning"] = (
                             f"Gemini evaluation (confidence={_ts_conf:.2f}): "
                             f"{_ts_data.get('reasoning', 'no reasoning')}"
                         )
-                        llm_metadata["task_success_source"] = "gemini_estimated"
+                        llm_metadata["task_success_source"] = "gemini_annotation"
                 except Exception as _ts_exc:
                     logger.debug("Gemini task success evaluation failed: %s", _ts_exc)
 
-            # Geometric task success: goal-region verification
-            # Always compute for metadata; only override task_success if not yet determined
-            _geo_is_fallback = task_success is None
+            # Geometric task success: authoritative signal for canonical success.
             if frames:
-                _target_oid = task.get("target_object") or task.get("target_object_id")
+                _target_oid = (
+                    task.get("_resolved_target_object_id")
+                    or task.get("target_object")
+                    or task.get("target_object_id")
+                )
                 if _target_oid:
                     _init_p = frames[0].get("_initial_object_poses", {}).get(_target_oid)
                     _final_p = frames[-1].get("_final_object_poses", {}).get(_target_oid)
@@ -8440,8 +8704,7 @@ class GenieSimLocalFramework:
                             "gripper_released": _release_after_place,
                         }
                         _success_count = sum(_milestones.values())
-                        if _geo_is_fallback:
-                            task_success = _success_count >= 4  # require at least 4 of 5
+                        _geometric_task_success = _success_count >= 4  # require at least 4 of 5
 
                         # Store detailed metrics
                         _ctrl_freq = 30.0
@@ -8457,14 +8720,13 @@ class GenieSimLocalFramework:
                         llm_metadata["goal_region_verification"]["stability_score"] = 1.0 if _stable else 0.0
 
                         _reasons = [f"{k}={'✓' if v else '✗'}" for k, v in _milestones.items()]
-                        if _geo_is_fallback:
-                            llm_metadata["task_success_reasoning"] = (
-                                f"Goal-region: {_success_count}/5 milestones met "
-                                f"(disp={_disp:.3f}m). {', '.join(_reasons)}"
-                            )
+                        llm_metadata["task_success_reasoning"] = (
+                            f"Goal-region: {_success_count}/5 milestones met "
+                            f"(disp={_disp:.3f}m). {', '.join(_reasons)}"
+                        )
 
-            # Heuristic task_success from gripper transitions
-            if task_success is None and frames:
+            # Heuristic success summary (diagnostic only).
+            if frames:
                 _has_grasp = False
                 _has_release = False
                 for _f in frames:
@@ -8474,13 +8736,35 @@ class GenieSimLocalFramework:
                     elif _gc == "open" and _has_grasp:
                         _has_release = True
                         break
-                if _has_grasp:
-                    task_success = _has_release
-                    llm_metadata["task_success_reasoning"] = (
-                        "Heuristic: grasp detected"
-                        + (" followed by release (pick-place pattern)." if _has_release
-                           else " but no subsequent release detected.")
-                    )
+                llm_metadata["task_success_heuristic"] = {
+                    "grasp_detected": _has_grasp,
+                    "release_after_grasp": _has_release,
+                }
+
+            _environment_success_estimate = (
+                bool(collision_free_physics)
+                if collision_free_physics is not None
+                else (bool(collision_free) if collision_free is not None else None)
+            )
+            if _geometric_task_success is not None:
+                if _environment_success_estimate is None:
+                    task_success = bool(_geometric_task_success)
+                else:
+                    task_success = bool(_geometric_task_success) and bool(_environment_success_estimate)
+                llm_metadata["task_success_source"] = "canonical_geometric_physics"
+            elif task_success_server is not None:
+                if _environment_success_estimate is None:
+                    task_success = bool(task_success_server)
+                else:
+                    task_success = bool(task_success_server) and bool(_environment_success_estimate)
+                llm_metadata["task_success_source"] = "server_task_success_constrained_by_physics"
+            else:
+                task_success = False
+                llm_metadata.setdefault(
+                    "task_success_reasoning",
+                    "Canonical success unavailable: missing geometric verification and server success signal.",
+                )
+                llm_metadata["task_success_source"] = "canonical_geometric_physics"
 
             # Gemini-based phase labeling (post-episode batch)
             _gemini_pl_client = getattr(self, "_gemini_client_for_props", None)
@@ -8644,9 +8928,38 @@ class GenieSimLocalFramework:
             # =================================================================
             _validity_errors: list[str] = []
             _is_production = getattr(self.config, "environment", "") == "production"
+            _requires_motion = self._requires_object_motion(task)
+            _motion_diag = (
+                (getattr(self, "_last_quality_breakdown", {}) or {})
+                .get("diagnostics", {})
+                .get("object_motion", {})
+            )
+            _motion_any_moved = bool(_motion_diag.get("any_moved"))
+            _motion_max_disp = float(_motion_diag.get("max_displacement") or 0.0)
+            _strict_motion_min_disp = float(
+                os.getenv("GENIESIM_STRICT_MIN_TARGET_DISPLACEMENT_M", "0.005")
+            )
 
             # 1. Camera: any required camera modality must have non-null RGB
-            _require_cameras = os.getenv("REQUIRE_CAMERA_DATA", "true").lower() == "true"
+            _require_cameras = parse_bool_env(
+                os.getenv("REQUIRE_CAMERA_DATA"),
+                default=self._modality_profile != "no_rgb",
+            )
+            _skip_rgb_capture = parse_bool_env(
+                os.getenv("SKIP_RGB_CAPTURE"),
+                default=self._skip_rgb_placeholder,
+            )
+            _dataset_profile = os.getenv("GENIESIM_DATASET_PROFILE", "").strip().lower()
+            if _dataset_profile in {"buyable", "lab_grade", "production_camera"}:
+                _require_cameras = True
+            if _require_cameras and _skip_rgb_capture:
+                _validity_errors.append(
+                    "REQUIRE_CAMERA_DATA=true is incompatible with SKIP_RGB_CAPTURE=true."
+                )
+            if _dataset_profile in {"buyable", "lab_grade", "production_camera"} and self._modality_profile == "no_rgb":
+                _validity_errors.append(
+                    f"Dataset profile '{_dataset_profile}' requires GENIESIM_MODALITY_PROFILE=rgb."
+                )
             if _require_cameras and _camera_frame_count == 0:
                 _validity_errors.append(
                     f"All {len(frames)} frames have null camera RGB. "
@@ -8701,6 +9014,21 @@ class GenieSimLocalFramework:
                         f"({len(frames) - _real_scene_state_count}/{len(frames)}). "
                         "Real PhysX scene state required for >90% of frames."
                     )
+                if _strict_realism and _requires_motion and _synthetic_ratio > 0.0:
+                    _validity_errors.append(
+                        "Strict motion task has non-server scene-state provenance; "
+                        "synthetic/kinematic fallback is not allowed."
+                    )
+
+            if _strict_realism and _requires_motion and (
+                (not _motion_any_moved) or (_motion_max_disp < _strict_motion_min_disp)
+            ):
+                _validity_errors.append(
+                    "Strict motion evidence missing: target object did not show "
+                    f"real motion (max_displacement={_motion_max_disp:.6f}m, "
+                    f"threshold={_strict_motion_min_disp:.6f}m)."
+                )
+                task_success = False
 
             # 3. Pick/place must show gripper open→close→open transition
             _task_type = task.get("task_type", "")
@@ -8831,7 +9159,7 @@ class GenieSimLocalFramework:
                         f"reopen={_saw_reopen}."
                     )
 
-            # 4. Contradictory success reasoning overrides task_success
+            # 4. Contradictory success reasoning is logged for diagnostics only.
             _ts_reasoning = llm_metadata.get("task_success_reasoning", "")
             _failure_phrases = [
                 "gripper remains closed",
@@ -8848,14 +9176,12 @@ class GenieSimLocalFramework:
                 for _fp in _failure_phrases:
                     if _fp.lower() in _ts_reasoning.lower():
                         self.log(
-                            f"[VALIDITY_GATE] Overriding task_success=True→False: "
+                            f"[VALIDITY_GATE] Success reasoning contradiction detected: "
                             f"reasoning contains '{_fp}': {_ts_reasoning}",
                             "WARNING",
                         )
-                        task_success = False
-                        llm_metadata["task_success_override"] = (
-                            f"Overridden from True to False by validity gate: "
-                            f"reasoning contains failure phrase '{_fp}'"
+                        llm_metadata["task_success_reasoning_contradiction"] = (
+                            f"Reasoning contains failure phrase '{_fp}'"
                         )
                         break
 
@@ -8883,7 +9209,7 @@ class GenieSimLocalFramework:
             # 6. Hard-cap quality_score based on data source
             _sensor_source = "isaac_sim_camera" if _camera_frame_count > 0 else "mock"
             _physics_backend = "physx" if _real_scene_state_count > 0 else "heuristic"
-            _camera_required = self._modality_profile != "no_rgb"
+            _camera_required = bool(_require_cameras)
             if _camera_required and _sensor_source == "mock":
                 quality_score = 0.0
                 self.log("[VALIDITY_GATE] quality_score forced to 0.0: sensor_source=mock", "WARNING")
@@ -9385,7 +9711,7 @@ class GenieSimLocalFramework:
                 "llm_assessment": {
                     "task_success": task_success,
                     "task_success_reasoning": llm_metadata.get("task_success_reasoning"),
-                    "source": llm_metadata.get("task_success_source", "geometric_goal_region_v2"),
+                    "source": llm_metadata.get("task_success_source", "canonical_geometric_physics"),
                 },
             }
             channel_completeness: Dict[str, float] = {}
@@ -9398,13 +9724,14 @@ class GenieSimLocalFramework:
                         frames,
                         {
                             "episode_id": episode_id,
-                            "target_object": task.get("target_object"),
+                            "target_object": task.get("_resolved_target_object_id") or task.get("target_object"),
                             "goal_region_verification": llm_metadata.get("goal_region_verification"),
                             "task_success": task_success,
                             "task_success_reasoning": llm_metadata.get("task_success_reasoning"),
-                            "task_success_source": llm_metadata.get("task_success_source", "geometric_goal_region_v2"),
+                            "task_success_source": llm_metadata.get("task_success_source", "canonical_geometric_physics"),
                             "collision_free": collision_free,
                             "collision_free_physics": collision_free_physics,
+                            "camera_required": bool(_require_cameras),
                             "modality_profile": self._modality_profile,
                             "effort_source_policy": _frame_stats.get("effort_source_policy", _efforts_source),
                             "object_metadata": object_metadata,
@@ -9457,9 +9784,14 @@ class GenieSimLocalFramework:
                         getattr(self, "_strict_runtime_patch_details", []) or []
                     )
 
+            if isinstance(task_outcome, dict):
+                _canonical_success = task_outcome.get("canonical_task_success")
+                if _canonical_success is not None:
+                    task_success = bool(_canonical_success)
+
             with open(episode_path, "w") as f:
                 json.dump({
-                    "schema_version": "2.0",
+                    "schema_version": "2.1",
                     "episode_id": episode_id,
                     "dataset_tier": dataset_tier,
                     "modalities": modalities,
@@ -9804,7 +10136,11 @@ class GenieSimLocalFramework:
         # Fix 10: Phase progress tracking
         _prev_phase_for_progress: str = "approach"
         _phase_start_frame: int = 0
-        _target_oid_for_subgoal = task.get("target_object") or task.get("target_object_id")
+        _target_oid_for_subgoal = (
+            task.get("_resolved_target_object_id")
+            or task.get("target_object")
+            or task.get("target_object_id")
+        )
 
         # --- Sensor noise config (Improvement E) ---
         _inject_noise = os.environ.get("INJECT_SENSOR_NOISE", "1") == "1"
@@ -9901,23 +10237,63 @@ class GenieSimLocalFramework:
             return None
 
         def _resolve_object_id_by_hint(hint: Optional[str]) -> Optional[str]:
-            if not hint or not _object_poses:
+            if not hint:
                 return None
+
+            def _hint_token(value: str) -> str:
+                token = str(value or "").rsplit("/", 1)[-1].lower()
+                if "_obj_" in token:
+                    token = token.split("_obj_")[-1]
+                if token.startswith("variation_"):
+                    token = token[len("variation_") :]
+                while token and token[-1].isdigit():
+                    token = token[:-1]
+                return token
+
             hint_norm = str(hint).rsplit("/", 1)[-1].lower()
-            for _oid in _object_poses.keys():
+            hint_token = _hint_token(hint_norm)
+
+            known_ids: List[str] = list(_object_poses.keys())
+            for _source_ids in (
+                getattr(self, "_scene_object_ids_dynamic", []),
+                getattr(self, "_scene_variation_object_ids", []),
+                getattr(self, "_scene_object_prims", []),
+                getattr(self, "_scene_variation_object_prims", []),
+            ):
+                if isinstance(_source_ids, list):
+                    for _oid in _source_ids:
+                        _oid_s = str(_oid)
+                        if _oid_s not in known_ids:
+                            known_ids.append(_oid_s)
+
+            exact_match: Optional[str] = None
+            relaxed_matches: List[str] = []
+            for _oid in known_ids:
                 if _oid == hint:
                     return _oid
                 _oid_norm = str(_oid).rsplit("/", 1)[-1].lower()
                 _oid_suffix = _oid_norm.split("_obj_")[-1] if "_obj_" in _oid_norm else ""
                 if _oid_norm == hint_norm or (_oid_suffix and _oid_suffix == hint_norm):
-                    return _oid
+                    if exact_match is None:
+                        exact_match = _oid
+                    continue
+                _oid_token = _hint_token(_oid_norm)
+                if _oid_token and _oid_token == hint_token:
+                    relaxed_matches.append(_oid)
+
+            if exact_match is not None:
+                return exact_match
+            if relaxed_matches:
+                # Deterministic choice: prefer concrete object ids over variation aliases.
+                relaxed_matches.sort(key=lambda _id: (str(_id).lower().startswith("variation_"), str(_id)))
+                return relaxed_matches[0]
             return None
 
         def _seed_target_object(
             obs: Dict[str, Any],
             target_id: Optional[str],
         ) -> None:
-            if not target_id or _is_production:
+            if not target_id or _is_production or _cert_strict:
                 return
             if target_id in _object_poses:
                 return
@@ -10809,6 +11185,22 @@ class GenieSimLocalFramework:
                     robot_state["ee_acceleration"] = [0.0, 0.0, 0.0]
                     robot_state["ee_acc"] = [0.0, 0.0, 0.0]
 
+            # Sync robot_state.ee_pose with the resolved frame-level ee_pos/ee_quat
+            # so downstream consumers reading robot_state get current values,
+            # not the frozen initial server response.
+            if frame_data.get("ee_pos"):
+                _ee_p = frame_data["ee_pos"]
+                robot_state["ee_pose"] = {
+                    "position": {"x": _ee_p[0], "y": _ee_p[1], "z": _ee_p[2]},
+                    "orientation": None,
+                }
+                robot_state["ee_pos"] = list(_ee_p)
+                _ee_q = frame_data.get("ee_quat")
+                if _ee_q and len(_ee_q) >= 4:
+                    robot_state["ee_pose"]["orientation"] = {
+                        "w": _ee_q[0], "x": _ee_q[1], "y": _ee_q[2], "z": _ee_q[3],
+                    }
+
             # Explicit gripper command: prefer gripper_aperture from waypoint
             # (trajectory planner sets this per-phase), fall back to inferring
             # from gripper joint positions when available.
@@ -11089,49 +11481,51 @@ class GenieSimLocalFramework:
                     _contact_payload = payload
                     _contact_result_available = True
                     frame_data["penetration_depth"] = payload.get("max_penetration_depth")
-                    frame_data["contact_count"] = int(payload.get("contact_count", 0))
-
+                    frame_data["collision_contacts"] = []
+                    frame_data["contact_count"] = 0
                     _contacts = payload.get("contacts", []) or []
-                    if _contacts:
-                        _contact_rows = [
-                            {
-                                "body_a": c.get("body_a", "") if isinstance(c, dict) else getattr(c, "body_a", ""),
-                                "body_b": c.get("body_b", "") if isinstance(c, dict) else getattr(c, "body_b", ""),
-                                "force_N": round(
-                                    float(
-                                        c.get("normal_force_N")
-                                        if isinstance(c, dict) and c.get("normal_force_N") is not None
-                                        else (
-                                            c.get("normal_force", 0)
-                                            if isinstance(c, dict)
-                                            else getattr(c, "normal_force", 0)
-                                        )
-                                    ),
-                                    4,
+                    _contact_rows = [
+                        {
+                            "body_a": c.get("body_a", "") if isinstance(c, dict) else getattr(c, "body_a", ""),
+                            "body_b": c.get("body_b", "") if isinstance(c, dict) else getattr(c, "body_b", ""),
+                            "force_N": round(
+                                float(
+                                    c.get("normal_force_N")
+                                    if isinstance(c, dict) and c.get("normal_force_N") is not None
+                                    else (
+                                        c.get("normal_force", 0)
+                                        if isinstance(c, dict)
+                                        else getattr(c, "normal_force", 0)
+                                    )
                                 ),
-                                "force_vector": c.get("force_vector") if isinstance(c, dict) else getattr(c, "force_vector", None),
-                                "tangent_impulse": c.get("tangent_impulse") if isinstance(c, dict) else getattr(c, "tangent_impulse", None),
-                                "friction": c.get("friction") if isinstance(c, dict) else getattr(c, "friction", None),
-                                "contact_area": c.get("contact_area") if isinstance(c, dict) else getattr(c, "contact_area", None),
-                                "position": c.get("position") if isinstance(c, dict) else getattr(c, "position", None),
-                                "normal": c.get("normal") if isinstance(c, dict) else getattr(c, "normal", None),
-                                "penetration_depth": c.get("penetration_depth") if isinstance(c, dict) else getattr(c, "penetration_depth", None),
-                            }
-                            for c in _contacts[:5]  # Top 5 contacts
+                                4,
+                            ),
+                            "force_vector": c.get("force_vector") if isinstance(c, dict) else getattr(c, "force_vector", None),
+                            "tangent_impulse": c.get("tangent_impulse") if isinstance(c, dict) else getattr(c, "tangent_impulse", None),
+                            "friction": c.get("friction") if isinstance(c, dict) else getattr(c, "friction", None),
+                            "contact_area": c.get("contact_area") if isinstance(c, dict) else getattr(c, "contact_area", None),
+                            "position": c.get("position") if isinstance(c, dict) else getattr(c, "position", None),
+                            "normal": c.get("normal") if isinstance(c, dict) else getattr(c, "normal", None),
+                            "penetration_depth": c.get("penetration_depth") if isinstance(c, dict) else getattr(c, "penetration_depth", None),
+                        }
+                        for c in _contacts[:5]  # Top 5 contacts
+                    ]
+                    if _cert_strict:
+                        _strict_contacts = [
+                            _c
+                            for _c in _contact_rows
+                            if str(_c.get("body_a") or "").strip()
+                            and str(_c.get("body_b") or "").strip()
+                            and float(_c.get("force_N") or 0.0) > 0.0
+                            and isinstance(_c.get("penetration_depth"), (type(None), int, float))
                         ]
-                        if _cert_strict:
-                            _strict_contacts = [
-                                _c
-                                for _c in _contact_rows
-                                if str(_c.get("body_a") or "").strip()
-                                and str(_c.get("body_b") or "").strip()
-                                and float(_c.get("force_N") or 0.0) > 0.0
-                            ]
-                            frame_data["collision_contacts"] = _strict_contacts
-                            if _contact_rows and not _strict_contacts:
-                                frame_data["collision_contacts_diagnostic"] = _contact_rows
-                        else:
-                            frame_data["collision_contacts"] = _contact_rows
+                        frame_data["collision_contacts"] = _strict_contacts
+                        frame_data["contact_count"] = len(_strict_contacts)
+                        if _contact_rows and not _strict_contacts:
+                            frame_data["collision_contacts_diagnostic"] = _contact_rows
+                    else:
+                        frame_data["collision_contacts"] = _contact_rows
+                        frame_data["contact_count"] = len(_contact_rows)
                     collision_provenance = "physx_contact_report"
                     _contact_report_count += 1
                 else:
@@ -11154,7 +11548,12 @@ class GenieSimLocalFramework:
             # Hybrid collision metric: allow gripper-target and target-surface contacts
             collision_free_physics = None
             if _contact_result_available:
-                _target_norm = (task.get("target_object") or task.get("target_object_id") or "").rsplit("/", 1)[-1].lower()
+                _target_norm = (
+                    task.get("_resolved_target_object_id")
+                    or task.get("target_object")
+                    or task.get("target_object_id")
+                    or ""
+                ).rsplit("/", 1)[-1].lower()
                 if _target_norm:
                     collision_free_physics = True
                     for _c in _contacts:
@@ -11196,7 +11595,11 @@ class GenieSimLocalFramework:
                 and _ee_pos_units is not None
             ):
                 _candidate = None
-                _target_hint = task.get("target_object") or task.get("target_object_id")
+                _target_hint = (
+                    task.get("_resolved_target_object_id")
+                    or task.get("target_object")
+                    or task.get("target_object_id")
+                )
                 _seed_target_object(obs, _target_hint)
 
                 _phase = waypoint.get("phase", "")
@@ -11613,6 +12016,28 @@ class GenieSimLocalFramework:
                 _obs_full["privileged"] = _privileged
 
             frames.append(frame_data)
+
+        # --- P6 fix: Drop frame-0 if it captures a home/init position that
+        #     teleports to the first planned waypoint.  A 1m+ discontinuous
+        #     jump between frame 0 and frame 1 is physically impossible and
+        #     corrupts FD velocity/acceleration at that transition.
+        if len(frames) >= 3:
+            _f0_ee = frames[0].get("ee_pos")
+            _f1_ee = frames[1].get("ee_pos")
+            if _f0_ee is not None and _f1_ee is not None:
+                _teleport_dist = float(np.linalg.norm(
+                    np.array(_f1_ee, dtype=float) - np.array(_f0_ee, dtype=float)
+                ))
+                _MAX_INIT_STEP = 0.15  # metres — plausible single-frame step at 30 Hz
+                if _teleport_dist > _MAX_INIT_STEP:
+                    logger.info(
+                        "[P6] Dropping frame 0 (home position teleport: %.3fm to first waypoint)",
+                        _teleport_dist,
+                    )
+                    frames.pop(0)
+                    # Re-index step numbers after drop
+                    for _ri, _rf in enumerate(frames):
+                        _rf["step"] = _ri
 
         robot_type = getattr(self.config, "robot_type", "").lower()
         # Velocity/acceleration limits (robot-specific when available).
@@ -12897,9 +13322,24 @@ class GenieSimLocalFramework:
             "notes": [],
         }
         production_mode = self.config.environment == "production"
-        # Get target position from task
-        target_pos = task.get("target_position", [0.5, 0.0, 0.8])
-        place_pos = task.get("place_position", [0.3, 0.2, 0.8])
+        # Resolve target position from task config, scene manifest, or observation
+        # — do NOT fall back to a hard-coded default so the planner aims at the
+        #   actual object rather than producing the same trajectory for every task.
+        workspace_bounds = self._resolve_workspace_bounds(task)
+        target_pos, place_pos = self._resolve_task_waypoints(
+            task=task,
+            initial_obs=initial_obs,
+            workspace_bounds=workspace_bounds,
+        )
+        # _resolve_task_waypoints already resolves place_position from task type
+        # template offsets when not explicitly provided.
+        if place_pos is None:
+            place_pos = np.array(target_pos, dtype=float) + np.array([0.25, 0.0, 0.0])
+        self.log(
+            f"  ℹ️  Resolved target_pos={np.asarray(target_pos).round(3).tolist()}, "
+            f"place_pos={np.asarray(place_pos).round(3).tolist()}",
+            "INFO",
+        )
 
         # Get initial joint positions
         initial_joints_result = self._client.get_joint_position()
@@ -13269,30 +13709,66 @@ class GenieSimLocalFramework:
         scene_state = initial_obs.get("scene_state", {})
         objects = scene_state.get("objects", [])
         target_ids = [
+            task.get("_resolved_target_object_id"),
             task.get("target_object_id"),
             task.get("target_object"),
             task.get("target_object_name"),
         ]
+        def _extract_pos(obj_dict):
+            """Extract position from an observation object dict."""
+            pose = obj_dict.get("pose", {})
+            position = pose.get("position")
+            if position is not None:
+                if isinstance(position, dict):
+                    return np.array([position.get("x", 0), position.get("y", 0), position.get("z", 0)], dtype=float)
+                return np.array(position, dtype=float)
+            if "x" in pose and "y" in pose and "z" in pose:
+                return np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
+            return None
+
         for target_id in target_ids:
             if not target_id:
                 continue
+            # Normalise for fuzzy matching (strip scene prefix)
+            _tid_lower = str(target_id).lower()
+            _tid_base = _tid_lower.split("_obj_")[-1] if "_obj_" in _tid_lower else _tid_lower
             for obj in objects:
-                obj_id = obj.get("object_id") or obj.get("id") or obj.get("name")
-                if obj_id == target_id:
-                    pose = obj.get("pose", {})
-                    # Support both {"position": [x,y,z]} and {"x":..,"y":..,"z":..} formats
-                    position = pose.get("position")
-                    if position is not None:
-                        return np.array(position, dtype=float)
-                    if "x" in pose and "y" in pose and "z" in pose:
-                        return np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
+                obj_id = obj.get("object_id") or obj.get("id") or obj.get("name") or ""
+                _oid_lower = str(obj_id).lower()
+                _oid_base = _oid_lower.split("_obj_")[-1] if "_obj_" in _oid_lower else _oid_lower
+                if _oid_lower == _tid_lower or _oid_base == _tid_base:
+                    pos = _extract_pos(obj)
+                    if pos is not None:
+                        return pos
         target_objects = task.get("target_objects", [])
         if target_objects:
             position = target_objects[0].get("position")
             if position is not None:
                 return np.array(position, dtype=float)
-        # Fallback: synthesize position from robot config (same logic as frame builder)
-        _target = task.get("target_object")
+        # Fallback: look up the object position from the scene manifest transforms.
+        # The manifest contains the ground-truth placement of every object in the
+        # scene and is always available, even if the initial observation's
+        # scene_state is empty (which happens when the server hasn't been queried).
+        _target = (
+            task.get("_resolved_target_object_id")
+            or task.get("target_object")
+            or task.get("target_object_id")
+        )
+        if _target:
+            manifest_pose = self._client._get_manifest_transform_fallback(_target)
+            if manifest_pose is not None:
+                pos = manifest_pose.get("position")
+                if pos is not None:
+                    if isinstance(pos, dict):
+                        arr = np.array([pos.get("x", 0), pos.get("y", 0), pos.get("z", 0)], dtype=float)
+                    else:
+                        arr = np.array(pos, dtype=float)
+                    logger.info(
+                        "[TRAJ] Resolved target position from manifest for %s: %s",
+                        _target, arr.round(3).tolist(),
+                    )
+                    return arr
+        # Last resort: synthesize position from robot config
         if _target:
             _rc_cfg = task.get("robot_config") or {}
             _base = _rc_cfg.get("base_position", [0.5, 0.0, 0.8])
@@ -13589,13 +14065,16 @@ Scene objects: {scene_summary}
             )
             timestamp += duration
 
+        # Waypoint durations tuned for realistic pick-and-place timing.
+        # At 15fps (default), 7.5s total → ~112 trajectory steps → ~150+ frames
+        # with between-waypoint observations.
         pre_grasp_position = target_position.copy()
         pre_grasp_position[2] += 0.15
         _add_waypoint(
             pre_grasp_position,
             target_orientation,
             MotionPhase.PRE_GRASP,
-            duration=1.0,
+            duration=1.5,
         )
 
         grasp_position = target_position.copy()
@@ -13604,7 +14083,7 @@ Scene objects: {scene_summary}
             grasp_position,
             target_orientation,
             MotionPhase.GRASP,
-            duration=0.6,
+            duration=1.0,
             gripper_aperture=0.0,  # Fix 4A: close gripper to grasp
         )
 
@@ -13614,7 +14093,7 @@ Scene objects: {scene_summary}
             lift_position,
             target_orientation,
             MotionPhase.LIFT,
-            duration=0.8,
+            duration=1.2,
             gripper_aperture=0.0,  # Fix 4A: keep gripper closed while lifting
         )
 
@@ -13625,7 +14104,7 @@ Scene objects: {scene_summary}
                 pre_place_position,
                 place_orientation,
                 MotionPhase.TRANSPORT,
-                duration=1.2,
+                duration=1.8,
                 gripper_aperture=0.0,  # Fix 4A: keep gripper closed during transport
             )
 
@@ -13633,7 +14112,7 @@ Scene objects: {scene_summary}
                 place_position,
                 place_orientation,
                 MotionPhase.PLACE,
-                duration=0.6,
+                duration=1.0,
                 gripper_aperture=1.0,  # Fix 4A: open gripper to release
             )
 
@@ -13644,7 +14123,7 @@ Scene objects: {scene_summary}
                 retract_position,
                 place_orientation,
                 MotionPhase.RETRACT,
-                duration=0.8,
+                duration=1.0,
                 gripper_aperture=1.0,  # gripper stays open
             )
 
@@ -15342,7 +15821,11 @@ Scene objects: {scene_summary}
         # --- Fix 7: Goal-region geometric task success verification ---
         geometric_success = None
         geometric_reasoning = ""
-        target_object_id = task.get("target_object") or task.get("target_object_id")
+        target_object_id = (
+            task.get("_resolved_target_object_id")
+            or task.get("target_object")
+            or task.get("target_object_id")
+        )
         if target_object_id and frames:
             _init_poses = frames[0].get("_initial_object_poses", {})
             _final_poses = frames[-1].get("_final_object_poses", {})
@@ -15686,10 +16169,8 @@ Scene objects: {scene_summary}
             logger.info("Quality: scene_state penalty skipped (task does not require object motion).")
 
         # Fail-fast gate: Object motion validation
-        # When cert-strict mode blocks client-side kinematic tracking, use EE
-        # displacement during manipulation phases (grasp/lift/transport) as a
-        # server-backed proxy for object motion.  The EE positions come from
-        # the real server, so this does NOT relax the strictness guarantee.
+        # EE displacement during manipulation is tracked as a diagnostic signal
+        # only; it must never satisfy object-motion acceptance criteria.
         if _requires_motion and not _any_moved:
             # --- EE-manipulation-phase displacement proxy ---
             _ee_grasp_disp = 0.0
@@ -15708,24 +16189,14 @@ Scene objects: {scene_summary}
                     _d = float(np.linalg.norm(np.array(_gep) - _first))
                     _ee_grasp_disp = max(_ee_grasp_disp, _d)
 
-            if _ee_grasp_disp > 0.01:  # >1cm EE displacement during manipulation
-                _any_moved = True
-                _max_displacement = max(_max_displacement, _ee_grasp_disp)
-                scene_state_penalty = min(scene_state_penalty, 0.02)
-                logger.info(
-                    "[MOTION] EE-manipulation-displacement proxy: %.4fm — accepting as object "
-                    "motion (server returns static kinematic poses but EE moved during "
-                    "grasp/lift/transport phases)",
-                    _ee_grasp_disp,
-                )
-            else:
-                logger.warning(
-                    "[MOTION] EE-manipulation-displacement proxy: %.4fm (below 0.01m threshold). "
-                    "Phases found: %s, manip_ee_count=%d",
-                    _ee_grasp_disp,
-                    {str(_gf.get("phase", "")).lower() for _gf in frames},
-                    len(_manip_ee_positions),
-                )
+            logger.warning(
+                "[MOTION] EE-manipulation-displacement diagnostic: %.4fm. "
+                "Object motion remains unverified from scene-state target trajectories. "
+                "Phases=%s, manip_ee_count=%d",
+                _ee_grasp_disp,
+                {str(_gf.get("phase", "")).lower() for _gf in frames},
+                len(_manip_ee_positions),
+            )
 
             if not _any_moved:
                 try:

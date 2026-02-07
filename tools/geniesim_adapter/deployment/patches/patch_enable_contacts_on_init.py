@@ -10,11 +10,22 @@ This patch:
 2. Adds the contact reporting call to handle_init_robot in command_controller.py
    (which runs on the sim thread via on_command_step dispatch)
 """
+import os
 import re
 import sys
 
+GENIESIM_ROOT = os.environ.get("GENIESIM_ROOT", "/opt/geniesim")
+
 # ── Step 1: Remove old injection from grpc_server.py (if present) ──────────────
-GRPC_FILE = "/opt/geniesim/source/data_collection/server/grpc_server.py"
+GRPC_FILE = os.path.join(
+    GENIESIM_ROOT,
+    "source", "data_collection", "server", "grpc_server.py",
+)
+if not os.path.isfile(GRPC_FILE):
+    print(f"[PATCH] grpc_server.py not found at {GRPC_FILE}")
+    print("[PATCH] Skipping enable_contacts_on_init patch (server source not available)")
+    sys.exit(0)
+
 with open(GRPC_FILE, "r") as f:
     grpc = f.read()
 
@@ -33,7 +44,15 @@ else:
     print("[PATCH] No gRPC-thread contact injection found in grpc_server.py (clean)")
 
 # ── Step 2: Inject into command_controller.py handle_init_robot (sim thread) ───
-CC_FILE = "/opt/geniesim/source/data_collection/server/command_controller.py"
+CC_FILE = os.path.join(
+    GENIESIM_ROOT,
+    "source", "data_collection", "server", "command_controller.py",
+)
+if not os.path.isfile(CC_FILE):
+    print(f"[PATCH] command_controller.py not found at {CC_FILE}")
+    print("[PATCH] Skipping enable_contacts_on_init patch (command_controller not available)")
+    sys.exit(0)
+
 with open(CC_FILE, "r") as f:
     cc = f.read()
 

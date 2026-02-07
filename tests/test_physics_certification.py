@@ -164,6 +164,62 @@ def test_physics_certification_accepts_ee_velocity_alias_fields():
     assert report["metrics"]["ee_acceleration_coverage"] == 1.0
 
 
+def test_physics_certification_resolves_variation_target_alias():
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], effort_value=0.1),
+        _frame(position=[0.11, 0.0, 0.2], effort_value=0.2),
+        _frame(position=[0.12, 0.0, 0.2], effort_value=0.3),
+    ]
+    meta = _episode_meta()
+    meta["target_object"] = "variation_toaster"
+    task = {"task_type": "inspect", "target_object": "variation_toaster"}
+
+    report = run_episode_certification(frames, meta, task, mode="strict")
+
+    assert report["passed"] is True
+    assert report["metrics"]["target_schema_completeness"] == 1.0
+    assert report["metrics"]["server_target_source_ratio"] == 1.0
+
+
+def test_physics_certification_fails_static_target_motion_task():
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], closed=True),
+        _frame(position=[0.1, 0.0, 0.2], closed=True),
+        _frame(position=[0.1, 0.0, 0.2], closed=False),
+    ]
+    meta = _episode_meta()
+    meta["task_success"] = True
+    meta["goal_region_verification"] = {
+        "grasp_detected": True,
+        "object_lifted_5cm": True,
+        "placed_in_goal": True,
+        "stable_at_end": True,
+        "gripper_released": True,
+    }
+    task = {"task_type": "pick_place", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+
+    report = run_episode_certification(frames, meta, task, mode="strict")
+
+    assert report["passed"] is False
+    assert "EE_TARGET_GEOMETRY_IMPLAUSIBLE" in report["critical_failures"]
+    assert report["dataset_tier"] == "raw_preserved"
+
+
+def test_physics_certification_requires_camera_when_flagged():
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2]),
+        _frame(position=[0.11, 0.0, 0.2]),
+    ]
+    meta = _episode_meta()
+    meta["camera_required"] = True
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+
+    report = run_episode_certification(frames, meta, task, mode="strict")
+
+    assert report["passed"] is False
+    assert "CAMERA_PLACEHOLDER_PRESENT" in report["critical_failures"]
+
+
 def test_write_run_certification_report_outputs_json_and_jsonl(tmp_path: Path):
     reports = [
         {

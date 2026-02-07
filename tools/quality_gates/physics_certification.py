@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ import numpy as np
 
 from tools.camera_io import is_placeholder_depth, is_placeholder_rgb
 
-GATE_VERSION = "1.0.0"
+GATE_VERSION = "1.1.0"
 GATE_CODES = (
     "KINEMATIC_OBJECT_POSE_USED",
     "SNAPBACK_OR_TELEPORT_DETECTED",
@@ -37,7 +38,7 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _normalize_obj_token(name: Optional[str]) -> str:
+def _normalize_obj_token(name: Optional[str], *, strip_numeric_suffix: bool = True) -> str:
     token = str(name or "").strip()
     if not token:
         return ""
@@ -47,6 +48,8 @@ def _normalize_obj_token(name: Optional[str]) -> str:
     token = token.lower()
     if token.startswith("variation_"):
         token = token[len("variation_") :]
+    if strip_numeric_suffix:
+        token = re.sub(r"\d+$", "", token)
     return token
 
 
@@ -275,6 +278,51 @@ def _camera_placeholder_present(frames: List[Dict[str, Any]]) -> bool:
     return False
 
 
+def _camera_frame_coverage(frames: List[Dict[str, Any]]) -> Tuple[float, int, int]:
+    total = len(frames)
+    if total == 0:
+        return 0.0, 0, 0
+    complete = 0
+    for frame in frames:
+        obs = frame.get("observation", {})
+        cams = obs.get("camera_frames") if isinstance(obs, dict) else None
+        if not isinstance(cams, dict) or not cams:
+            continue
+        frame_ok = True
+        for cam in cams.values():
+            if not isinstance(cam, dict):
+                frame_ok = False
+                break
+            if cam.get("rgb") is None or cam.get("depth") is None:
+                frame_ok = False
+                break
+        if frame_ok:
+            complete += 1
+    return complete / float(total), complete, total
+
+
+def _task_requires_motion(task: Dict[str, Any]) -> bool:
+    explicit_keys = (
+        "requires_object_motion",
+        "requires_object_movement",
+        "expect_object_motion",
+        "expects_object_motion",
+    )
+    for key in explicit_keys:
+        if key in task:
+            try:
+                return bool(task.get(key))
+            except Exception:
+                return False
+
+    task_type = str(task.get("task_type") or task.get("task_name") or "").lower()
+    if any(k in task_type for k in ("inspect", "observe", "scan", "detect", "classify", "segment")):
+        return False
+    if any(k in task_type for k in ("pick", "place", "grasp", "organize", "stack", "interact", "lift", "transport")):
+        return True
+    return bool(task.get("goal_region")) and bool(task.get("target_object") or task.get("target_object_id"))
+
+
 def _compute_ee_target_min_dist(frames: List[Dict[str, Any]], target_id: str) -> Optional[float]:
     target_norm = _normalize_obj_token(target_id)
     min_dist = math.inf
@@ -394,10 +442,12 @@ def run_episode_certification(
     )
     has_target = bool(str(target_id).strip())
     target_positions = _extract_target_positions(frames, target_id) if target_id else []
+    requires_motion = _task_requires_motion(task)
 
     teleport_jump_threshold_m = _env_float("PHYSICS_CERT_TELEPORT_JUMP_M", 0.12)
     release_snapback_threshold_m = _env_float("PHYSICS_CERT_RELEASE_SNAPBACK_M", 0.05)
     grasp_proximity_max_m = _env_float("PHYSICS_CERT_GRASP_PROXIMITY_MAX_M", 0.15)
+    min_target_displacement_m = _env_float("PHYSICS_CERT_MIN_TARGET_DISPLACEMENT_M", 0.005)
     server_pose_coverage_min = _env_float("PHYSICS_CERT_SERVER_POSE_COVERAGE_MIN", 0.95)
     min_contact_frames_for_pick_place = int(_env_float("PHYSICS_CERT_MIN_CONTACT_FRAMES", 3))
     target_frame_presence_required = _env_float("PHYSICS_CERT_TARGET_FRAME_PRESENCE_REQUIRED", 1.0)
@@ -451,6 +501,15 @@ def run_episode_certification(
     metrics["snapback_detected"] = bool(snapback_detected)
     if max_consecutive_disp >= teleport_jump_threshold_m or snapback_detected:
         gate_failures.append("SNAPBACK_OR_TELEPORT_DETECTED")
+    metrics["task_requires_motion"] = bool(requires_motion)
+    metrics["target_motion_min_displacement_m"] = float(min_target_displacement_m)
+    if requires_motion and has_target:
+        _has_target_motion = len(target_positions) >= 2 and end_disp >= min_target_displacement_m
+        metrics["target_motion_present"] = bool(_has_target_motion)
+        if not _has_target_motion:
+            gate_failures.append("EE_TARGET_GEOMETRY_IMPLAUSIBLE")
+    else:
+        metrics["target_motion_present"] = None
 
     # Success contradiction gate.
     task_success = episode_meta.get("task_success")
@@ -477,7 +536,7 @@ def run_episode_certification(
     metrics.update(contact_stats)
     metrics["valid_nonzero_contact_ratio"] = metrics.get("valid_contact_frame_ratio", 0.0)
     task_type = str(task.get("task_type", "")).lower()
-    is_manipulation = any(k in task_type for k in ("pick", "place", "organize", "stack", "grasp"))
+    is_manipulation = any(k in task_type for k in ("pick", "place", "organize", "stack", "grasp")) or requires_motion
     min_required_valid_contact_frames = min_contact_frames_for_pick_place if is_manipulation else 0
     if (
         contact_stats["placeholder_contact_frames"] > 0
@@ -552,8 +611,17 @@ def run_episode_certification(
     if server_backed_ratio < server_pose_coverage_min:
         gate_failures.append("SCENE_STATE_NOT_SERVER_BACKED")
 
-    # Camera placeholder gate (only for RGB profile).
-    if modality_profile != "no_rgb":
+    # Camera completeness/placeholder gate (required for RGB profile or explicit camera-required mode).
+    camera_required = bool(episode_meta.get("camera_required")) or modality_profile != "no_rgb"
+    metrics["camera_required"] = camera_required
+    if camera_required:
+        camera_cov, camera_complete_frames, camera_total_frames = _camera_frame_coverage(frames)
+        metrics["camera_complete_frame_ratio"] = round(camera_cov, 4)
+        metrics["camera_complete_frames"] = camera_complete_frames
+        metrics["camera_total_frames"] = camera_total_frames
+        if camera_cov < 1.0 or _camera_placeholder_present(frames):
+            gate_failures.append("CAMERA_PLACEHOLDER_PRESENT")
+    elif modality_profile != "no_rgb":
         if _camera_placeholder_present(frames):
             gate_failures.append("CAMERA_PLACEHOLDER_PRESENT")
 
@@ -563,7 +631,7 @@ def run_episode_certification(
     llm_assessment = {
         "task_success": episode_meta.get("task_success"),
         "task_success_reasoning": episode_meta.get("task_success_reasoning"),
-        "source": episode_meta.get("task_success_source") or "llm_or_server",
+        "source": episode_meta.get("task_success_source") or "canonical_geometric_physics",
     }
     task_outcome = {
         "canonical_task_success": canonical_task_success,

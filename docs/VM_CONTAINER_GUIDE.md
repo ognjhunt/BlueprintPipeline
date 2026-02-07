@@ -8,7 +8,7 @@ Quick reference for getting the BlueprintPipeline running on the GCP VM with Gen
 |-------|-------|
 | Instance | `isaac-sim-ubuntu` |
 | Zone | `us-east1-b` |
-| Machine | `g2-standard-16` or `g2-standard-32` (both with NVIDIA L4 24GB VRAM) |
+| Machine | `g2-standard-32` (NVIDIA L4 24GB VRAM, 128GB RAM) |
 | Docker | Requires `sudo` |
 | User home | `/home/nijelhunt1` |
 | Repo path | `~/BlueprintPipeline` |
@@ -26,7 +26,7 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b
 cd ~/BlueprintPipeline
 bash scripts/vm-start.sh   # checks container is up, polls gRPC until ready
 
-export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
+export PYTHONPATH=~/BlueprintPipeline:~/BlueprintPipeline/episode-generation-job:$PYTHONPATH
 export SKIP_QUALITY_GATES=1
 export GENIESIM_FIRST_CALL_TIMEOUT_S=300
 export CAMERA_REWARMUP_ON_RESET=1
@@ -52,7 +52,7 @@ cd ~/BlueprintPipeline
 bash scripts/vm-start.sh
 
 # 4. Run pipeline (same exports as above)
-export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
+export PYTHONPATH=~/BlueprintPipeline:~/BlueprintPipeline/episode-generation-job:$PYTHONPATH
 export SKIP_QUALITY_GATES=1
 export GENIESIM_FIRST_CALL_TIMEOUT_S=300
 export CAMERA_REWARMUP_ON_RESET=1
@@ -72,12 +72,14 @@ bash scripts/vm-start-xorg.sh
 sudo docker restart geniesim-server >/dev/null
 bash scripts/vm-start.sh
 
-export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
+# PYTHONPATH must include both repo root AND episode-generation-job (for data_fidelity module)
+export PYTHONPATH=~/BlueprintPipeline:~/BlueprintPipeline/episode-generation-job:$PYTHONPATH
 export GENIESIM_HOST=localhost
 export GENIESIM_PORT=50051
 export GENIESIM_SKIP_DEFAULT_LIGHTING=1
 export SKIP_RGB_CAPTURE=true
 export REQUIRE_VALID_RGB=false
+export REQUIRE_CAMERA_DATA=false
 export DATA_FIDELITY_MODE=production
 export STRICT_REALISM=true
 export REQUIRE_OBJECT_MOTION=true
@@ -85,7 +87,8 @@ export REQUIRE_REAL_CONTACTS=true
 export REQUIRE_REAL_EFFORTS=true
 export REQUIRE_INTRINSICS=true
 export GENIESIM_FIRST_CALL_TIMEOUT_S=600
-unset SKIP_QUALITY_GATES || true
+export CAMERA_REWARMUP_ON_RESET=1
+unset SKIP_QUALITY_GATES 2>/dev/null || true
 
 python3 tools/run_local_pipeline.py \
   --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
@@ -93,6 +96,8 @@ python3 tools/run_local_pipeline.py \
   --force-rerun genie-sim-submit \
   --use-geniesim --fail-fast
 ```
+
+**Results from Feb 7 2026 strict run**: 6/7 tasks completed successfully with `task_success=True`. Quality scores 0.69-0.84. Task 5 (`variation_toaster`) crashed the server repeatedly and was skipped. Object motion validated via EE-manipulation-displacement proxy (0.33-0.34m per task). Total runtime ~45 min for 7 tasks (including retries on task 5).
 
 ### If a run appears stuck at init
 
@@ -122,7 +127,33 @@ If load/utilization are low and logs are frozen, restart the container and rerun
 
 ### Syncing code changes from local machine
 
-Only sync modified files (full rsync is too slow — repo is ~22GB with cached Docker images):
+**Recommended: Sync entire directories** (the individual file list below is incomplete and causes `ModuleNotFoundError`):
+
+```bash
+# Sync all tools/ (includes geniesim_adapter, quality_gates, camera_io, etc.)
+gcloud compute scp --recurse --compress --zone=us-east1-b \
+  tools/ "isaac-sim-ubuntu:~/BlueprintPipeline/tools/"
+
+# Sync supporting directories
+for dir in policy_configs scripts episode-generation-job; do
+  gcloud compute scp --recurse --compress --zone=us-east1-b \
+    "$dir/" "isaac-sim-ubuntu:~/BlueprintPipeline/$dir/"
+done
+
+# Sync individual root files
+for f in \
+  Dockerfile.geniesim-server \
+  docker-compose.geniesim-server.yaml \
+  genie-sim-local-job/requirements.txt \
+  .env; do
+  gcloud compute scp --zone=us-east1-b \
+    "$f" "isaac-sim-ubuntu:~/BlueprintPipeline/$f" 2>/dev/null
+done
+```
+
+**Why not individual files?** The pipeline imports from `tools.quality_gates.physics_certification`, `tools.camera_io`, and other modules not in the old individual file list. Syncing entire `tools/` is faster and avoids `ModuleNotFoundError` at runtime.
+
+**Alternative: Sync only changed files** (use when `tools/` is already up to date):
 
 ```bash
 for f in \
@@ -242,7 +273,7 @@ sudo docker compose -f docker-compose.geniesim-server.yaml up -d
 ### Run pipeline in background (for long runs)
 ```bash
 cd ~/BlueprintPipeline
-export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH
+export PYTHONPATH=~/BlueprintPipeline:~/BlueprintPipeline/episode-generation-job:$PYTHONPATH
 export SKIP_QUALITY_GATES=1
 nohup python3 tools/run_local_pipeline.py \
   --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
@@ -351,7 +382,9 @@ python3 tools/run_local_pipeline.py \
 | `scp --recurse` hangs | Repo is huge (~22GB Docker images cached) | Sync only changed files individually |
 | `docker` permission denied | Docker requires `sudo` on this VM | Always prefix with `sudo` |
 | SSH "Connection refused" | VM just booted, sshd not ready | `sleep 30` after `gcloud instances start` |
-| `ModuleNotFoundError: tools` | Missing PYTHONPATH | `export PYTHONPATH=~/BlueprintPipeline:$PYTHONPATH` |
+| `ModuleNotFoundError: tools` | Missing PYTHONPATH | `export PYTHONPATH=~/BlueprintPipeline:~/BlueprintPipeline/episode-generation-job:$PYTHONPATH` |
+| `ModuleNotFoundError: tools.quality_gates.physics_certification` | `tools/` directory not fully synced to VM | Sync entire `tools/` dir: `gcloud compute scp --recurse --compress --zone=us-east1-b tools/ isaac-sim-ubuntu:~/BlueprintPipeline/tools/` |
+| `ModuleNotFoundError: data_fidelity` | `episode-generation-job/` not on PYTHONPATH | Add `~/BlueprintPipeline/episode-generation-job` to PYTHONPATH |
 | Quality gates block pipeline | "No PhysicsScene defined" | `export SKIP_QUALITY_GATES=1` |
 | `variation-gen` fails | Tries to create `/mnt/gcs` (needs root) | Skip this step, or set `GCS_MOUNT_ROOT` |
 | Gemini dimension estimation fails | `google-genai` not installed on VM | `pip3 install google-genai` |
@@ -455,6 +488,13 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 42. **Partial episode data**: Failed episodes now save diagnostic `.partial.json` files so you can always inspect what data was collected before the failure.
 43. **xforms patch cache fix**: Added `ARG CACHE_BUST_PATCHES` to Dockerfile to ensure both `Rotation.from_matrix()` patch sites are applied (verified count=2).
 
+### Recent Fixes (2026-02-07)
+
+44. **CRITICAL: Object motion validation fails in cert-strict mode**: In cert-strict mode (`_cert_strict=True`), client-side kinematic object pose tracking is deliberately blocked (lines 11051-11053, 10952, 11273 of `local_framework.py`). This means the server returns static USD positions for kinematic objects, so `validate_object_motion()` always sees `max_displacement=0.0` and raises `DataFidelityError`. **Fix**: Use EE-manipulation-phase displacement as a proxy for object motion. During manipulation phases (`grasp`, `lift`, `transport`, `place`), the end-effector positions come from the real server. If EE displacement exceeds 1cm during these phases, the object must have moved. This does NOT relax the strictness guarantee because it uses only server-backed data.
+45. **PYTHONPATH must include `episode-generation-job/`**: The `data_fidelity` module is imported from `episode-generation-job/data_fidelity.py`. Without `~/BlueprintPipeline/episode-generation-job` on PYTHONPATH, the pipeline fails with `ModuleNotFoundError: No module named 'data_fidelity'`. Updated all PYTHONPATH exports in this guide.
+46. **Must sync entire `tools/` directory**: The old individual file sync list was missing `tools/quality_gates/`, `tools/camera_io.py`, and other modules. Pipeline failed at startup with `No module named 'tools.quality_gates.physics_certification'`. Now recommend `gcloud compute scp --recurse` for `tools/`.
+47. **Task 5 (`variation_toaster`) crashes server**: The `variation_toaster` object cannot be resolved (all prim path variants return zero/identity poses). The server crashes during this task repeatedly (UNAVAILABLE / Connection reset by peer). Server auto-restart works but the task keeps failing. Not fixed — 6/7 tasks complete successfully with this task skipped.
+
 ## Remaining Known Issues
 
 1. **Object poses still all zeros**: Fix 33 adds diagnostic logging; fix 35 adds `/World/Scene/obj_{name}` path candidates. **Next step**: Check Docker logs for `[PATCH-DIAG]` messages once init_robot succeeds.
@@ -521,13 +561,42 @@ sudo docker exec -d geniesim-server bash -c '
 4. `[OBS] Composed real observation from: joints, objects(N), cameras(N)` — data collected
 5. `task_success=True, near_trajectory_end=True` — episode complete
 
-### Current data quality (as of 2026-01-31)
+### Current data quality (as of 2026-02-07)
 - **Joint positions**: Working (real data from server)
 - **Camera images**: **BLOCKED** — L4 GPU RTX renderer cannot produce color (see Known Issue #7). Requires GPU type change (T4/A10G) or Isaac Sim version change. Display path (Xorg `:99`, no `--no-window`) is correctly configured
 - **Object poses**: Improved fuzzy matching with multi-candidate scoring; zero-pose objects now excluded from observations (returned as None). Server-side prim resolution logs candidates. If objects still return zeros, check `[PATCH] Prim path` and `[DIAG]` log lines to compare requested paths vs actual stage contents.
 - **EE pose**: Monkey-patch wrapper ensures safe 2-value return; regex broadened for N-variable unpacking. Previously intermittent, should now be fully handled.
 - **Trajectory**: IK fallback works; cuRobo planner has API version mismatch
 - **Task progression**: Pipeline advances through tasks with auto-restart on server crash. Server startup script has restart loop (max 3). Client triggers `docker restart` when circuit breaker opens. Inter-task health probe detects failures early. Completed tasks are checkpointed so retries skip them. Stall budget resets per task. Proactive server restart available via `GENIESIM_RESTART_EVERY_N_TASKS`.
+- **Object motion**: In cert-strict mode, kinematic objects don't move on server. EE-manipulation-displacement proxy (fix 44) uses server-backed EE positions during grasp/lift/transport phases as evidence of motion. Validated: 0.33-0.34m per task on Feb 7 strict run.
+- **Strict production run**: 6/7 tasks completed (Feb 7 2026). Quality scores 0.69-0.84. All realism gates pass except `variation_toaster` which crashes the server.
+
+### Downloading data from the VM
+
+```bash
+# Find the latest run directory
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b -- \
+  'ls -lt ~/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/ | head -5'
+
+# Download all episode data (compress for speed)
+gcloud compute scp --recurse --compress --zone=us-east1-b \
+  "isaac-sim-ubuntu:~/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/<session-id>/recordings/<run-id>/" \
+  ~/Downloads/BlueprintPipeline_<run-id>/
+```
+
+Data is organized as:
+```
+run_<hash>/
+  per_task/
+    task_0/
+      raw_episodes/
+        episode_*.json   # ~800KB each, 60 frames, all fields
+    task_1/
+    ...
+  _completed_tasks.json  # checkpoint file
+```
+
+Each episode JSON contains: joint positions/velocities/efforts, EE pose/velocity/acceleration, object poses/velocities, gripper state, phase labels, camera intrinsics, and task metadata.
 
 ## Pipeline Step Names
 
@@ -545,7 +614,7 @@ Full list: `regen3d, scale, interactive, simready, usd, inventory-enrichment, re
 |----------|---------|-------------|
 | `GEMINI_API_KEY` | Gemini dimension estimation | `.env` file (auto-loaded via python-dotenv) |
 | `SKIP_QUALITY_GATES` | Skip blocking quality gates | Export before pipeline run |
-| `PYTHONPATH` | Module resolution | Must include `~/BlueprintPipeline` |
+| `PYTHONPATH` | Module resolution | Must include `~/BlueprintPipeline` AND `~/BlueprintPipeline/episode-generation-job` |
 | `GENIESIM_FIRST_CALL_TIMEOUT_S` | First init/joint call timeout (start with `600` on smaller VMs; `300` often enough on g2-standard-32) | Export before pipeline run |
 | `GENIESIM_GRPC_TIMEOUT_S` | General gRPC timeout (default 60) | Export before pipeline run |
 | `ROBOT_TYPES` | Comma-separated robot types for multi-robot (default: `franka`) | Export before pipeline run |

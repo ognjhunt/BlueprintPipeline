@@ -39,10 +39,73 @@ fi
 
 "${SCRIPT_DIR}/install_geniesim.sh"
 
+# ── Validate GENIESIM_ROOT and discover server files ──────────────────────────
+# Patches target specific Python files inside the GenieSim source tree.
+# If the expected paths don't exist (different repo layout, pre-installed at
+# alternate location), discover them dynamically and update GENIESIM_ROOT.
+_GRPC_EXPECTED="${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py"
+_CC_EXPECTED="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+_DCS_EXPECTED="${GENIESIM_ROOT}/source/data_collection/scripts/data_collector_server.py"
+
+_discover_geniesim_root() {
+  # Strategy: find grpc_server.py under common locations and derive GENIESIM_ROOT
+  local _search_dirs=("${GENIESIM_ROOT}" "/opt/geniesim" "/opt/nvidia/geniesim" "/workspace/geniesim" "/home")
+  for _dir in "${_search_dirs[@]}"; do
+    [ -d "${_dir}" ] || continue
+    local _found
+    _found="$(find "${_dir}" -maxdepth 6 -name "grpc_server.py" -path "*/data_collection/server/*" -print -quit 2>/dev/null)" || true
+    if [ -n "${_found}" ]; then
+      # Derive GENIESIM_ROOT: strip /source/data_collection/server/grpc_server.py
+      local _server_dir
+      _server_dir="$(dirname "${_found}")"              # .../server
+      local _dc_dir
+      _dc_dir="$(dirname "${_server_dir}")"             # .../data_collection
+      local _source_dir
+      _source_dir="$(dirname "${_dc_dir}")"             # .../source
+      local _candidate
+      _candidate="$(dirname "${_source_dir}")"          # GENIESIM_ROOT
+      if [ -f "${_candidate}/source/data_collection/server/grpc_server.py" ]; then
+        echo "${_candidate}"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+if [ ! -f "${_GRPC_EXPECTED}" ] || [ ! -f "${_CC_EXPECTED}" ]; then
+  echo "[geniesim] WARNING: Expected server files not found at ${GENIESIM_ROOT}"
+  echo "[geniesim] Searching for GenieSim source tree..."
+  _DISCOVERED_ROOT="$(_discover_geniesim_root)" || _DISCOVERED_ROOT=""
+  if [ -n "${_DISCOVERED_ROOT}" ] && [ "${_DISCOVERED_ROOT}" != "${GENIESIM_ROOT}" ]; then
+    echo "[geniesim] ✓ Discovered GenieSim at ${_DISCOVERED_ROOT} (was: ${GENIESIM_ROOT})"
+    GENIESIM_ROOT="${_DISCOVERED_ROOT}"
+    export GENIESIM_ROOT
+    _GRPC_EXPECTED="${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py"
+    _CC_EXPECTED="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+    _DCS_EXPECTED="${GENIESIM_ROOT}/source/data_collection/scripts/data_collector_server.py"
+  else
+    echo "[geniesim] ERROR: Could not find GenieSim server files anywhere."
+    echo "[geniesim] Looked for: grpc_server.py under data_collection/server/"
+    echo "[geniesim] Patches will NOT be applied. Continuing with degraded mode."
+    _mark_force_raw_only "geniesim_server_files_not_found"
+  fi
+fi
+
+# Final pre-flight check: log which target files exist
+echo "[geniesim] Pre-flight patch target validation:"
+for _target_file in "${_GRPC_EXPECTED}" "${_CC_EXPECTED}" "${_DCS_EXPECTED}"; do
+  if [ -f "${_target_file}" ]; then
+    echo "[geniesim]   ✓ ${_target_file}"
+  else
+    echo "[geniesim]   ✗ ${_target_file} (MISSING)"
+  fi
+done
+
 # Apply server patches (render config, camera handler, object pose, ee pose, omnigraph dedup)
 PATCHES_DIR="${SCRIPT_DIR}/patches"
 if [ -d "${PATCHES_DIR}" ]; then
-  echo "[geniesim] Applying server patches..."
+  echo "[geniesim] Applying server patches (GENIESIM_ROOT=${GENIESIM_ROOT})..."
   for patch_script in \
     "${PATCHES_DIR}/patch_omnigraph_dedup.py" \
     "${PATCHES_DIR}/patch_data_collector_render_config.py" \

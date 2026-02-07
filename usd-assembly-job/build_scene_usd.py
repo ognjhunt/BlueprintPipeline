@@ -1325,6 +1325,7 @@ class SceneBuilder:
     _DYNAMIC_SIM_ROLES = frozenset({
         "clutter",
         "manipulable_object",
+        "interactive",
     })
 
     def _apply_physics_fields(
