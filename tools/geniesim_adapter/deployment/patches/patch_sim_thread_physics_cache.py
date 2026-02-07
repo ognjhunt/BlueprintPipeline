@@ -146,6 +146,16 @@ def patch_command_controller():
 {method_indent}            _efforts = None
 {method_indent}            _source = 'unavailable'
 {method_indent}
+{method_indent}            # Pre-compute: force PhysX to compute efforts for this step.
+{method_indent}            # Without this call, effort queries return stale cached values.
+{method_indent}            for _compute_fn in ('compute_joint_efforts', '_compute_joint_efforts'):
+{method_indent}                if hasattr(_articulation, _compute_fn):
+{method_indent}                    try:
+{method_indent}                        getattr(_articulation, _compute_fn)()
+{method_indent}                    except Exception:
+{method_indent}                        pass
+{method_indent}                    break
+{method_indent}
 {method_indent}            def _nontrivial(vals):
 {method_indent}                try:
 {method_indent}                    _v = vals.flatten().tolist() if hasattr(vals, 'flatten') else list(vals)
@@ -266,8 +276,19 @@ def patch_command_controller():
 {method_indent}                self._bp_cached_efforts_source = _source
 {method_indent}                if not getattr(self, '_bp_efforts_logged', False):
 {method_indent}                    _sample = [round(float(e), 4) for e in self._bp_cached_efforts[:5]]
-{method_indent}                    print(f'[SIM_CACHE] Joint efforts cached: source={{_source}}, sample={{_sample}}')
+{method_indent}                    print(f'[SIM_CACHE] Joint efforts cached: source={{_source}}, n_dof={{len(self._bp_cached_efforts)}}, sample={{_sample}}')
+{method_indent}                    # Log available APIs for diagnostics
+{method_indent}                    _apis = [a for a in ('get_measured_joint_forces', 'get_measured_joint_efforts',
+{method_indent}                             'get_applied_joint_efforts', 'get_joint_efforts',
+{method_indent}                             'compute_joint_efforts', 'get_generalized_gravity_forces')
+{method_indent}                             if hasattr(_articulation, a)]
+{method_indent}                    print(f'[SIM_CACHE] Available articulation APIs: {{_apis}}')
 {method_indent}                    self._bp_efforts_logged = True
+{method_indent}            else:
+{method_indent}                if not getattr(self, '_bp_no_efforts_logged', False):
+{method_indent}                    _apis = [a for a in dir(_articulation) if 'effort' in a.lower() or 'force' in a.lower() or 'torque' in a.lower()]
+{method_indent}                    print(f'[SIM_CACHE] No valid efforts found. Articulation type={{type(_articulation).__name__}}, relevant_apis={{_apis[:20]}}')
+{method_indent}                    self._bp_no_efforts_logged = True
 {method_indent}    except Exception as _eff_err:
 {method_indent}        if not getattr(self, '_bp_effort_err_logged', False):
 {method_indent}            print(f'[SIM_CACHE] Effort cache error: {{_eff_err}}')
@@ -297,20 +318,30 @@ def patch_command_controller():
 {method_indent}        _total_force = 0.0
 {method_indent}        _max_pen = 0.0
 {method_indent}        if _contact_data:
+{method_indent}            # Log contact data structure on first call for debugging
+{method_indent}            if not getattr(self, '_bp_contact_struct_logged', False):
+{method_indent}                _c0 = _contact_data[0] if _contact_data else None
+{method_indent}                if _c0 is not None:
+{method_indent}                    if isinstance(_c0, dict):
+{method_indent}                        print(f'[SIM_CACHE] Contact data structure: dict keys={{list(_c0.keys())}}')
+{method_indent}                    else:
+{method_indent}                        print(f'[SIM_CACHE] Contact data structure: type={{type(_c0).__name__}}, attrs={{[a for a in dir(_c0) if not a.startswith("_")][:20]}}')
+{method_indent}                self._bp_contact_struct_logged = True
+{method_indent}
 {method_indent}            for _c in _contact_data:
 {method_indent}                if isinstance(_c, dict):
-{method_indent}                    _ba = str(_c.get('actor0', ''))
-{method_indent}                    _bb = str(_c.get('actor1', ''))
-{method_indent}                    _imp = float(_c.get('impulse', 0.0))
-{method_indent}                    _sep = float(_c.get('separation', 0.0))
-{method_indent}                    _pos = _c.get('position', [0, 0, 0])
+{method_indent}                    _ba = str(_c.get('actor0', '') or _c.get('body0', '') or _c.get('body_a', ''))
+{method_indent}                    _bb = str(_c.get('actor1', '') or _c.get('body1', '') or _c.get('body_b', ''))
+{method_indent}                    _imp = float(_c.get('impulse', 0.0) or _c.get('normal_force', 0.0))
+{method_indent}                    _sep = float(_c.get('separation', 0.0) or _c.get('distance', 0.0))
+{method_indent}                    _pos = _c.get('position', [0, 0, 0]) or _c.get('point', [0, 0, 0])
 {method_indent}                    _nrm = _c.get('normal', [0, 0, 1])
 {method_indent}                else:
-{method_indent}                    _ba = str(getattr(_c, 'actor0', ''))
-{method_indent}                    _bb = str(getattr(_c, 'actor1', ''))
-{method_indent}                    _imp = float(getattr(_c, 'impulse', 0.0))
-{method_indent}                    _sep = float(getattr(_c, 'separation', 0.0))
-{method_indent}                    _pos = getattr(_c, 'position', [0, 0, 0])
+{method_indent}                    _ba = str(getattr(_c, 'actor0', '') or getattr(_c, 'body0', '') or getattr(_c, 'body_a', ''))
+{method_indent}                    _bb = str(getattr(_c, 'actor1', '') or getattr(_c, 'body1', '') or getattr(_c, 'body_b', ''))
+{method_indent}                    _imp = float(getattr(_c, 'impulse', 0.0) or getattr(_c, 'normal_force', 0.0))
+{method_indent}                    _sep = float(getattr(_c, 'separation', 0.0) or getattr(_c, 'distance', 0.0))
+{method_indent}                    _pos = getattr(_c, 'position', [0, 0, 0]) or getattr(_c, 'point', [0, 0, 0])
 {method_indent}                    _nrm = getattr(_c, 'normal', [0, 0, 1])
 {method_indent}                _pen = abs(_sep)
 {method_indent}                _total_force += _imp

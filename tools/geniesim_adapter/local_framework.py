@@ -10391,6 +10391,20 @@ class GenieSimLocalFramework:
             _rs_vel = robot_state.get("joint_velocities", [])
             if _rs_vel and any(abs(v) > 1e-10 for v in _rs_vel):
                 _real_velocity_count += 1
+            # Joint velocity validation: if server velocities are suspiciously
+            # small vs finite-difference from joint positions, substitute FD.
+            _jvel_dt = frame_data.get("dt", 1.0 / _control_freq)
+            if frames and _jvel_dt > 1e-8:
+                _prev_jp = frames[-1].get("observation", {}).get("robot_state", {}).get("joint_positions", [])
+                _cur_jp = robot_state.get("joint_positions", [])
+                if _prev_jp and _cur_jp and len(_prev_jp) == len(_cur_jp):
+                    _fd_vel = [(float(_cur_jp[i]) - float(_prev_jp[i])) / _jvel_dt for i in range(len(_cur_jp))]
+                    _fd_mag = sum(abs(v) for v in _fd_vel)
+                    _rs_mag = sum(abs(v) for v in _rs_vel) if _rs_vel else 0.0
+                    if _fd_mag > 0.01 and (_rs_mag < 1e-6 or _fd_mag / max(_rs_mag, 1e-10) > 10.0):
+                        robot_state["joint_velocities"] = [round(v, 6) for v in _fd_vel]
+                        robot_state["joint_velocities_source"] = "finite_difference"
+                        _rs_vel = robot_state["joint_velocities"]
             _rs_eff = robot_state.get("joint_efforts", [])
             _real_efforts = _rs_eff if _rs_eff is not None else []
             _has_real_efforts = bool(_real_efforts and any(abs(e) > 1e-6 for e in _real_efforts))
@@ -10464,6 +10478,22 @@ class GenieSimLocalFramework:
                     2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x),
                 ]
                 frame_data["ee_rot6d"] = [round(v, 8) for v in _rot6d]
+
+            # EE velocity and acceleration via finite differences
+            _dt_fd = frame_data.get("dt", 1.0 / _control_freq)
+            if frame_data.get("ee_pos") and frames and frames[-1].get("ee_pos") and _dt_fd > 1e-8:
+                _ee_curr = np.array(frame_data["ee_pos"], dtype=float)
+                _ee_prev = np.array(frames[-1]["ee_pos"], dtype=float)
+                _ee_vel = ((_ee_curr - _ee_prev) / _dt_fd)
+                frame_data["ee_velocity"] = [round(float(v), 6) for v in _ee_vel]
+                robot_state["ee_velocity"] = frame_data["ee_velocity"]
+                # Acceleration from velocity finite difference
+                _prev_vel = frames[-1].get("ee_velocity")
+                if _prev_vel is not None:
+                    _ee_vel_prev = np.array(_prev_vel, dtype=float)
+                    _ee_acc = ((_ee_vel - _ee_vel_prev) / _dt_fd)
+                    frame_data["ee_acceleration"] = [round(float(a), 6) for a in _ee_acc]
+                    robot_state["ee_acceleration"] = frame_data["ee_acceleration"]
 
             # Explicit gripper command: prefer gripper_aperture from waypoint
             # (trajectory planner sets this per-phase), fall back to inferring
@@ -10559,22 +10589,29 @@ class GenieSimLocalFramework:
                     _lvel_source = _p.get("linear_velocity_source") or _obj.get("linear_velocity_source") or _pose_source
                     _avel_source = _p.get("angular_velocity_source") or _obj.get("angular_velocity_source") or _pose_source
 
-                    # Compute finite-difference velocities if missing
+                    # Compute finite-difference velocities when missing or
+                    # when server returns all-zeros (kinematic objects).
                     _prev_state = _object_prev_state.get(_oid, {})
                     _prev_pos = _prev_state.get("position")
                     _prev_rot = _prev_state.get("rotation_quat")
                     _prev_ts = _prev_state.get("timestamp")
                     _cur_ts = frame_data.get("timestamp")
+                    if _cur_ts is None:
+                        _cur_ts = step_idx / _control_freq
                     _dt = None
-                    if _prev_ts is not None and _cur_ts is not None:
+                    if _prev_ts is not None:
                         try:
                             _dt = float(_cur_ts) - float(_prev_ts)
                         except (TypeError, ValueError):
                             _dt = None
-                    if _lvel is None and _prev_pos is not None and _dt and _dt > 0:
+                    if _dt is None or _dt <= 0:
+                        _dt = 1.0 / _control_freq  # fallback to nominal dt
+                    _lvel_is_zero = _lvel is None or (isinstance(_lvel, (list, tuple)) and all(abs(v) < 1e-10 for v in _lvel))
+                    if _lvel_is_zero and _prev_pos is not None:
                         _lvel = ((_pos - _prev_pos) / _dt).tolist()
                         _lvel_source = "finite_difference"
-                    if _avel is None and _rot is not None and _prev_rot is not None and _dt and _dt > 0:
+                    _avel_is_zero = _avel is None or (isinstance(_avel, (list, tuple)) and all(abs(v) < 1e-10 for v in _avel))
+                    if _avel_is_zero and _rot is not None and _prev_rot is not None:
                         _avel = _quat_to_ang_vel(_prev_rot, _rot, _dt)
                         if _avel is not None:
                             _avel_source = "finite_difference"

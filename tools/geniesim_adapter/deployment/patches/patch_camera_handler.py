@@ -282,8 +282,32 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
             _skip_rgb_init = _os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
 
-            # Cache render products and annotators across calls
-            if camera_prim_path not in cls._bp_render_products:
+            # Cache render products and annotators across calls.
+            # If the cached product returned None data previously, invalidate
+            # and re-create it (the camera prim may have become available).
+            _need_create = camera_prim_path not in cls._bp_render_products
+
+            if not _need_create:
+                # Validate existing product still works
+                _cached_rgb = cls._bp_rgb_annotators.get(camera_prim_path)
+                if _cached_rgb is not None:
+                    try:
+                        _probe = _cached_rgb.get_data()
+                        if _probe is None:
+                            print(f"[PATCH] Cached render product for {camera_prim_path} returned None — invalidating")
+                            _need_create = True
+                            cls._bp_render_products.pop(camera_prim_path, None)
+                            cls._bp_rgb_annotators.pop(camera_prim_path, None)
+                            cls._bp_depth_annotators.pop(camera_prim_path, None)
+                            cls._bp_warmup_done.discard(camera_prim_path)
+                    except Exception:
+                        _need_create = True
+                        cls._bp_render_products.pop(camera_prim_path, None)
+                        cls._bp_rgb_annotators.pop(camera_prim_path, None)
+                        cls._bp_depth_annotators.pop(camera_prim_path, None)
+                        cls._bp_warmup_done.discard(camera_prim_path)
+
+            if _need_create:
                 # Pre-warm renderer (fewer frames when skipping RGB)
                 _pre_frames = 10
                 print(f"[PATCH] Pre-warming renderer ({_pre_frames} frames)...")
@@ -295,7 +319,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 except Exception as _pre_err:
                     print(f"[PATCH] Pre-warm app.update() error: {_pre_err}")
 
-                # Verify camera prim exists before creating render product
+                # Verify camera prim exists; if not, discover from stage
                 import omni.usd
                 _stage = omni.usd.get_context().get_stage()
                 _cam_prim = _stage.GetPrimAtPath(camera_prim_path) if _stage else None
@@ -303,6 +327,24 @@ CAMERA_HANDLER = textwrap.dedent("""\
                     print(f"[PATCH] Camera prim verified: {camera_prim_path} (type={_cam_prim.GetTypeName()})")
                 else:
                     print(f"[PATCH] WARNING: Camera prim NOT FOUND at {camera_prim_path}")
+                    # Try to discover a matching camera by suffix
+                    _requested_suffix = camera_prim_path.rsplit("/", 1)[-1] if "/" in camera_prim_path else camera_prim_path
+                    if _stage:
+                        for _discover_prim in _stage.Traverse():
+                            if _discover_prim.IsA(UsdGeom.Camera):
+                                _dp = str(_discover_prim.GetPath())
+                                if _dp.endswith(_requested_suffix):
+                                    print(f"[PATCH] Discovered matching camera: {_dp} (requested suffix: {_requested_suffix})")
+                                    camera_prim_path = _dp
+                                    break
+                        else:
+                            # Use any available camera as last resort
+                            _all_stage_cams = [str(p.GetPath()) for p in _stage.Traverse() if p.IsA(UsdGeom.Camera)]
+                            if _all_stage_cams:
+                                camera_prim_path = _all_stage_cams[0]
+                                print(f"[PATCH] Using first available camera: {camera_prim_path}")
+                            else:
+                                print(f"[PATCH] No cameras found in stage — render will produce black frames")
 
                 rp = rep.create.render_product(camera_prim_path, (_w, _h))
                 print(f"[PATCH] render_product result: {type(rp)} = {rp}")

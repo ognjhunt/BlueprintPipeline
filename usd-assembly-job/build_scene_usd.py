@@ -162,6 +162,17 @@ def _extract_physics_fields(obj: Dict[str, Any]) -> Dict[str, Optional[float]]:
             physics[key] = obj.get(key)
 
     mass = _coerce_float(physics.get("mass_kg") or physics.get("mass"))
+
+    # Fallback: derive mass from physics_hints if explicit mass is missing.
+    if mass is None:
+        hints = obj.get("physics_hints") or {}
+        mass_range = hints.get("mass_range_kg") or hints.get("mass_kg_range")
+        if isinstance(mass_range, (list, tuple)) and len(mass_range) >= 2:
+            try:
+                mass = (float(mass_range[0]) + float(mass_range[1])) / 2.0
+            except (TypeError, ValueError):
+                pass
+
     friction = _coerce_float(physics.get("friction"))
     static_friction = _coerce_float(physics.get("static_friction"))
     dynamic_friction = _coerce_float(physics.get("dynamic_friction"))
@@ -179,6 +190,44 @@ def _extract_physics_fields(obj: Dict[str, Any]) -> Dict[str, Optional[float]]:
         "dynamic_friction": dynamic_friction,
         "restitution": restitution,
     }
+
+
+# Default mass (kg) by object category for objects missing explicit physics.
+_CATEGORY_DEFAULT_MASS: Dict[str, float] = {
+    "toaster": 2.0,
+    "pot": 1.5,
+    "pan": 1.2,
+    "plate": 0.3,
+    "mug": 0.3,
+    "cup": 0.2,
+    "bowl": 0.4,
+    "bottle": 0.5,
+    "can": 0.35,
+    "jar": 0.6,
+    "knife": 0.15,
+    "fork": 0.05,
+    "spoon": 0.05,
+    "spatula": 0.1,
+    "cutting_board": 0.8,
+    "kettle": 1.0,
+    "blender": 2.5,
+    "pitcher": 0.6,
+    "container": 0.4,
+    "box": 0.5,
+}
+
+
+def _estimate_mass_from_category(obj: Dict[str, Any]) -> float:
+    """Estimate a plausible mass (kg) from the object's category or ID."""
+    category = (obj.get("category") or "").lower().strip()
+    obj_id = (obj.get("id") or "").lower().strip()
+
+    # Direct category match
+    for cat, mass in _CATEGORY_DEFAULT_MASS.items():
+        if cat in category or cat in obj_id:
+            return mass
+
+    return 1.0  # Generic fallback for unknown objects
 
 
 class SizedCache:
@@ -1167,6 +1216,20 @@ class SceneBuilder:
 
         physics_fields = _extract_physics_fields(obj)
         has_physics_fields = any(value is not None for value in physics_fields.values())
+
+        # Dynamic objects MUST have mass for RigidBodyAPI. Provide a default
+        # when the manifest/physics_hints don't supply one.
+        if physics_fields.get("mass_kg") is None and sim_role in self._DYNAMIC_SIM_ROLES:
+            default_mass = _estimate_mass_from_category(obj)
+            physics_fields["mass_kg"] = default_mass
+            has_physics_fields = True
+            logger.warning(
+                "[USD] obj_%s: dynamic object (sim_role=%s) missing mass; using default %.2f kg",
+                oid,
+                sim_role,
+                default_mass,
+            )
+
         if has_physics_fields:
             self._apply_physics_fields(prim, physics_fields, oid, sim_role=sim_role)
         else:
