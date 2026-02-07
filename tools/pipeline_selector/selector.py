@@ -318,7 +318,7 @@ class PipelineSelector:
         # Genie Sim specific overrides
         if data_backend == DataGenerationBackend.GENIESIM:
             overrides["USE_GENIESIM"] = "true"
-            robot_type = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
+            robot_type = os.getenv("GENIESIM_ROBOT_TYPE", "g1")
             overrides["GENIESIM_ROBOT_TYPE"] = robot_type
 
         return overrides

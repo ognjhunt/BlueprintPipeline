@@ -13,6 +13,84 @@ Quick reference for getting the BlueprintPipeline running on the GCP VM with Gen
 | User home | `/home/nijelhunt1` |
 | Repo path | `~/BlueprintPipeline` |
 
+## One-Shot Cold Start (from local machine)
+
+Run this entire block from your **local** machine to go from stopped VM to running pipeline:
+
+```bash
+# 1. Start VM and wait for SSH
+gcloud compute instances start isaac-sim-ubuntu --zone=us-east1-b
+sleep 35
+
+# 2. Sync code (tools/, scripts/, etc.)
+gcloud compute scp --recurse --compress --zone=us-east1-b \
+  tools/ "isaac-sim-ubuntu:~/BlueprintPipeline/tools/"
+for dir in policy_configs scripts episode-generation-job; do
+  gcloud compute scp --recurse --compress --zone=us-east1-b \
+    "$dir/" "isaac-sim-ubuntu:~/BlueprintPipeline/$dir/"
+done
+for f in Dockerfile.geniesim-server docker-compose.geniesim-server.yaml \
+         genie-sim-local-job/requirements.txt .env; do
+  gcloud compute scp --zone=us-east1-b \
+    "$f" "isaac-sim-ubuntu:~/BlueprintPipeline/$f" 2>/dev/null
+done
+
+# 3. CRITICAL: Remove nested dirs created by scp --recurse
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+  rm -rf ~/BlueprintPipeline/tools/tools/
+  rm -rf ~/BlueprintPipeline/policy_configs/policy_configs/
+  rm -rf ~/BlueprintPipeline/scripts/scripts/
+  rm -rf ~/BlueprintPipeline/episode-generation-job/episode-generation-job/
+"
+
+# 4. Start Xorg + restart container + wait for gRPC
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+  cd ~/BlueprintPipeline
+  bash scripts/vm-start-xorg.sh
+"
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+  sudo docker restart geniesim-server >/dev/null 2>&1
+"
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+  cd ~/BlueprintPipeline && bash scripts/vm-start.sh
+"
+
+# 5. Upload + run pipeline script (avoids SSH quoting issues with nohup)
+cat > /tmp/run_pipeline.sh << 'SCRIPT'
+#!/bin/bash
+cd ~/BlueprintPipeline
+export PYTHONPATH=~/BlueprintPipeline:~/BlueprintPipeline/episode-generation-job:$PYTHONPATH
+export GENIESIM_HOST=localhost
+export GENIESIM_PORT=50051
+export GENIESIM_SKIP_DEFAULT_LIGHTING=1
+export SKIP_RGB_CAPTURE=true
+export REQUIRE_VALID_RGB=false
+export REQUIRE_CAMERA_DATA=false
+export DATA_FIDELITY_MODE=production
+export STRICT_REALISM=true
+export REQUIRE_OBJECT_MOTION=true
+export REQUIRE_REAL_CONTACTS=true
+export REQUIRE_REAL_EFFORTS=true
+export REQUIRE_INTRINSICS=true
+export GENIESIM_FIRST_CALL_TIMEOUT_S=600
+export CAMERA_REWARMUP_ON_RESET=1
+unset SKIP_QUALITY_GATES 2>/dev/null || true
+nohup python3 tools/run_local_pipeline.py \
+  --scene-dir ./test_scenes/scenes/lightwheel_kitchen \
+  --steps genie-sim-submit \
+  --force-rerun genie-sim-submit \
+  --use-geniesim --fail-fast \
+  > /tmp/pipeline_strict.log 2>&1 &
+echo "PID: $!"
+echo $! > /tmp/pipeline_run.pid
+SCRIPT
+gcloud compute scp --zone=us-east1-b /tmp/run_pipeline.sh isaac-sim-ubuntu:/tmp/run_pipeline.sh
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="bash /tmp/run_pipeline.sh"
+
+# 6. Monitor
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="tail -f /tmp/pipeline_strict.log"
+```
+
 ## Quick Start
 
 ### If the VM is already running
@@ -149,9 +227,24 @@ for f in \
   gcloud compute scp --zone=us-east1-b \
     "$f" "isaac-sim-ubuntu:~/BlueprintPipeline/$f" 2>/dev/null
 done
+
+# CRITICAL: Remove nested directories created by scp --recurse
+# gcloud compute scp --recurse copies local dir/ INTO remote dir/,
+# creating dir/dir/ with duplicate content. This causes Python import
+# resolution issues (e.g., tools.quality.quality_config resolves from
+# tools/tools/quality/ instead of tools/quality/, computing wrong REPO_ROOT).
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+  rm -rf ~/BlueprintPipeline/tools/tools/
+  rm -rf ~/BlueprintPipeline/policy_configs/policy_configs/
+  rm -rf ~/BlueprintPipeline/scripts/scripts/
+  rm -rf ~/BlueprintPipeline/episode-generation-job/episode-generation-job/
+  echo 'Cleaned nested scp directories'
+"
 ```
 
 **Why not individual files?** The pipeline imports from `tools.quality_gates.physics_certification`, `tools.camera_io`, and other modules not in the old individual file list. Syncing entire `tools/` is faster and avoids `ModuleNotFoundError` at runtime.
+
+**IMPORTANT: scp nesting bug.** `gcloud compute scp --recurse tools/ remote:~/BlueprintPipeline/tools/` creates `tools/tools/` on the remote. Python resolves `tools.quality.quality_config` from `tools/tools/quality/quality_config.py` instead of `tools/quality/quality_config.py`, causing `FileNotFoundError` because `REPO_ROOT` computes to the wrong directory. Always run the cleanup step above after syncing.
 
 **Alternative: Sync only changed files** (use when `tools/` is already up to date):
 
@@ -380,6 +473,9 @@ python3 tools/run_local_pipeline.py \
 | Issue | Root Cause | Fix |
 |-------|-----------|-----|
 | `scp --recurse` hangs | Repo is huge (~22GB Docker images cached) | Sync only changed files individually |
+| `scp --recurse` creates nested dirs (`tools/tools/`) | `gcloud compute scp --recurse dir/ remote:path/dir/` copies dir contents INTO dir, creating dir/dir/ | After scp, run `rm -rf ~/BlueprintPipeline/tools/tools/` (and similar for other synced dirs) |
+| `FileNotFoundError: quality_config.json` after scp | Nested `tools/tools/` causes Python to resolve `tools.quality.quality_config` from wrong path, computing wrong `REPO_ROOT` | Remove nested dirs (see "One-Shot Cold Start" section) |
+| SSH quoting breaks `nohup` / `$!` | `gcloud compute ssh --command` double-escapes `$!` as `$\!` | Upload a shell script via scp, then run it (see One-Shot Cold Start step 5) |
 | `docker` permission denied | Docker requires `sudo` on this VM | Always prefix with `sudo` |
 | SSH "Connection refused" | VM just booted, sshd not ready | `sleep 30` after `gcloud instances start` |
 | `ModuleNotFoundError: tools` | Missing PYTHONPATH | `export PYTHONPATH=~/BlueprintPipeline:~/BlueprintPipeline/episode-generation-job:$PYTHONPATH` |

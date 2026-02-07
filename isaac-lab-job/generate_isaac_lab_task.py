@@ -697,7 +697,7 @@ def main():
     # Optional configuration
     environment_type = os.getenv("ENVIRONMENT_TYPE", "generic")
     policy_id = os.getenv("POLICY_ID", None)
-    robot_type = os.getenv("ROBOT_TYPE", "franka")
+    robot_type = os.getenv("ROBOT_TYPE", "g1")
     num_envs = int(os.getenv("NUM_ENVS", "1024"))
 
     # Runtime validation settings

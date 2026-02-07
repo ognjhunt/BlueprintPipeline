@@ -77,7 +77,7 @@ def _namespaced_asset_id(scene_id: Optional[str], obj_id: str) -> str:
 class RobotConfig:
     """Robot configuration for Genie Sim."""
 
-    robot_type: str = "franka"  # franka, g2, ur10, custom
+    robot_type: str = "g1"  # g1, g2, ur10, custom
     urdf_path: Optional[str] = None
     base_position: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     workspace_bounds: List[List[float]] = field(

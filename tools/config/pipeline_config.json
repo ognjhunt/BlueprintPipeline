@@ -126,13 +126,14 @@
     "description": "Reward shaping parameters for RL training"
   },
   "robot_config": {
-    "default_robot": "franka",
+    "default_robot": "g1",
     "geniesim_robot_catalog_path": "tools/geniesim_adapter/geniesim_robot_catalog.json",
     "supported_robots": [
       "baxter",
       "fetch",
       "figure_01",
       "franka",
+      "g1",
       "g2",
       "gr1",
       "h1",

@@ -926,7 +926,7 @@ def main():
     )
     parser.add_argument(
         "--robot-type",
-        default=os.getenv("ROBOT_TYPE", "franka"),
+        default=os.getenv("ROBOT_TYPE", "g1"),
         help="Robot type",
     )
     parser.add_argument(

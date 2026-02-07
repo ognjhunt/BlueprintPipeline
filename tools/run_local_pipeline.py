@@ -843,8 +843,8 @@ class LocalPipelineRunner:
             parsed = self._parse_csv(raw_robot_types)
             if parsed:
                 return parsed
-        legacy_robot = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
-        return [legacy_robot] if legacy_robot else ["franka"]
+        legacy_robot = os.getenv("GENIESIM_ROBOT_TYPE", "g1")
+        return [legacy_robot] if legacy_robot else ["g1"]
 
     def _resolve_step_timeouts(self) -> Dict[PipelineStep, Optional[float]]:
         adaptive_config = load_adaptive_timeout_config()
@@ -3673,7 +3673,7 @@ class LocalPipelineRunner:
         geniesim_prefix = f"{self.scene_id}/geniesim"
         variation_assets_prefix = f"{self.scene_id}/variation_assets"
         replicator_prefix = f"{self.scene_id}/replicator"
-        robot_type = os.getenv("GENIESIM_ROBOT_TYPE", "franka")
+        robot_type = os.getenv("GENIESIM_ROBOT_TYPE", "g1")
         os.environ.setdefault("VARIATION_ASSETS_PREFIX", variation_assets_prefix)
 
         def _export_job() -> None:

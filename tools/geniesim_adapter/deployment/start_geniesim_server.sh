@@ -152,8 +152,22 @@ if [ -f "${_CAMERA_PATCH}" ]; then
   fi
 fi
 
+# ── Apply register_scene_objects patch ──
+_SCENE_OBJ_PATCH="/workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/patch_register_scene_objects.py"
+if [ -f "${_SCENE_OBJ_PATCH}" ]; then
+  _CC="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+  if ! grep -qF "BPv3_pre_play_kinematic" "${_CC}" 2>/dev/null; then
+    echo "[geniesim] Applying register_scene_objects patch..."
+    "${ISAAC_SIM_PATH}/python.sh" "${_SCENE_OBJ_PATCH}" 2>&1 || true
+  fi
+fi
+
 _SERVER_ARGS=""
 [ "${GENIESIM_HEADLESS}" = "1" ] && _SERVER_ARGS="${_SERVER_ARGS} --headless"
+# Enable cuRobo motion planner for server-side IK
+_SERVER_ARGS="${_SERVER_ARGS} --enable_curobo"
+# Enable physics for dynamic rigid bodies
+_SERVER_ARGS="${_SERVER_ARGS} --enable_physics"
 # Only pass --publish_ros when ROS 2 is actually available
 if [ "${GENIESIM_SKIP_ROS_RECORDING:-0}" != "1" ]; then
   _SERVER_ARGS="${_SERVER_ARGS} --publish_ros"

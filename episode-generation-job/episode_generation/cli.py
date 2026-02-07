@@ -425,7 +425,7 @@ def main() -> None:
         "episodes_prefix": episodes_prefix,
         "enable_firebase_upload": os.getenv("ENABLE_FIREBASE_UPLOAD"),
         "firebase_upload_prefix": os.getenv("FIREBASE_UPLOAD_PREFIX", "datasets"),
-        "robot_type": os.getenv("ROBOT_TYPE", "franka"),
+        "robot_type": os.getenv("ROBOT_TYPE", "g1"),
         "episodes_per_variation": os.getenv("EPISODES_PER_VARIATION", "10"),
         "max_variations": os.getenv("MAX_VARIATIONS"),
         "fps": os.getenv("FPS", "30"),
