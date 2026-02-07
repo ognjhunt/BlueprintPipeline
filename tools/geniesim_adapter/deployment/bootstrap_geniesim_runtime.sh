@@ -12,11 +12,24 @@ GENIESIM_HEADLESS=${GENIESIM_HEADLESS:-1}
 GENIESIM_START_SERVER=${GENIESIM_START_SERVER:-1}
 GENIESIM_HEALTHCHECK=${GENIESIM_HEALTHCHECK:-1}
 GENIESIM_SERVER_LOG=${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
+GENIESIM_STRICT_RUNTIME_READINESS=${GENIESIM_STRICT_RUNTIME_READINESS:-0}
+GENIESIM_STRICT_FAIL_ACTION=${GENIESIM_STRICT_FAIL_ACTION:-raw_only}
+GENIESIM_RUNTIME_READINESS_JSON=${GENIESIM_RUNTIME_READINESS_JSON:-/tmp/geniesim_runtime_readiness.json}
+GENIESIM_RUNTIME_PRESTART_JSON=${GENIESIM_RUNTIME_PRESTART_JSON:-/tmp/geniesim_runtime_prestart_probe.json}
+GENIESIM_FORCE_RAW_ONLY_FLAG_FILE=${GENIESIM_FORCE_RAW_ONLY_FLAG_FILE:-/tmp/geniesim_force_raw_only.flag}
 
 if [ ! -x "${ISAAC_SIM_PATH}/python.sh" ]; then
   echo "[geniesim] ERROR: Isaac Sim not found at ${ISAAC_SIM_PATH}." >&2
   exit 1
 fi
+
+_mark_force_raw_only() {
+  local reason="${1:-unknown}"
+  echo "[geniesim] Forcing raw-only certification mode: ${reason}"
+  export GENIESIM_FORCE_RAW_ONLY=1
+  export PHYSICS_CERT_MODE=compat
+  echo "reason=${reason}" > "${GENIESIM_FORCE_RAW_ONLY_FLAG_FILE}"
+}
 
 # Fast-path: if running in a pre-baked image, skip installation entirely
 if [ -f /opt/.geniesim-prebaked ]; then
@@ -74,6 +87,25 @@ if [ -d "${PATCHES_DIR}" ]; then
     echo "[geniesim] ✓ sim_thread_physics_cache patch verified in command_controller.py"
   else
     echo "[geniesim] WARNING: sim_thread_physics_cache patch may not have been applied"
+  fi
+
+  # Pre-start patch marker readiness probe
+  if [ -f "${SCRIPT_DIR}/readiness_probe.py" ]; then
+    echo "[geniesim] Running pre-start runtime patch readiness probe"
+    if ! "${ISAAC_SIM_PATH}/python.sh" "${SCRIPT_DIR}/readiness_probe.py" \
+      --skip-grpc \
+      --check-patches \
+      --geniesim-root "${GENIESIM_ROOT}" \
+      --output "${GENIESIM_RUNTIME_PRESTART_JSON}"; then
+      echo "[geniesim] WARNING: Runtime patch pre-start readiness probe failed"
+      if [ "${GENIESIM_STRICT_RUNTIME_READINESS}" = "1" ]; then
+        if [ "${GENIESIM_STRICT_FAIL_ACTION}" = "error" ]; then
+          echo "[geniesim] ERROR: strict runtime readiness requested and pre-start patch probe failed"
+          exit 1
+        fi
+        _mark_force_raw_only "runtime_patch_prestart_probe_failed"
+      fi
+    fi
   fi
 fi
 
@@ -185,6 +217,32 @@ if [ "${GENIESIM_HEALTHCHECK}" = "1" ]; then
   "${ISAAC_SIM_PATH}/python.sh" -m tools.geniesim_adapter.geniesim_healthcheck || {
     echo "[geniesim] Health check not yet passing - server may still be starting"
   }
+fi
+
+# Post-start strict readiness probe (grpc + runtime patch markers + optional
+# physics coverage report checks)
+if [ "${GENIESIM_START_SERVER}" = "1" ] && [ -f "${SCRIPT_DIR}/readiness_probe.py" ]; then
+  _probe_args=(
+    --host "${GENIESIM_HOST}"
+    --port "${GENIESIM_PORT}"
+    --check-patches
+    --geniesim-root "${GENIESIM_ROOT}"
+    --output "${GENIESIM_RUNTIME_READINESS_JSON}"
+  )
+  if [ "${GENIESIM_STRICT_RUNTIME_READINESS}" = "1" ]; then
+    _probe_args+=(--strict-runtime)
+  fi
+  echo "[geniesim] Running post-start runtime readiness probe"
+  if ! "${ISAAC_SIM_PATH}/python.sh" "${SCRIPT_DIR}/readiness_probe.py" "${_probe_args[@]}"; then
+    echo "[geniesim] WARNING: post-start runtime readiness probe failed"
+    if [ "${GENIESIM_STRICT_RUNTIME_READINESS}" = "1" ]; then
+      if [ "${GENIESIM_STRICT_FAIL_ACTION}" = "error" ]; then
+        echo "[geniesim] ERROR: strict runtime readiness requested and post-start probe failed"
+        exit 1
+      fi
+      _mark_force_raw_only "runtime_patch_poststart_probe_failed"
+    fi
+  fi
 fi
 
 # Keep container alive by waiting on the server process

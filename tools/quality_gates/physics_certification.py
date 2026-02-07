@@ -26,6 +26,7 @@ GATE_CODES = (
     "EE_TARGET_GEOMETRY_IMPLAUSIBLE",
     "SCENE_STATE_NOT_SERVER_BACKED",
     "CAMERA_PLACEHOLDER_PRESENT",
+    "STRICT_RUNTIME_PRECHECK_FAILED",
 )
 
 
@@ -122,9 +123,9 @@ def _channel_completeness(frames: List[Dict[str, Any]]) -> Dict[str, float]:
             counts["ee_pos"] += 1
         if frame.get("ee_quat") is not None:
             counts["ee_quat"] += 1
-        if frame.get("ee_vel") is not None:
+        if frame.get("ee_vel") is not None or frame.get("ee_velocity") is not None:
             counts["ee_vel"] += 1
-        if frame.get("ee_acc") is not None:
+        if frame.get("ee_acc") is not None or frame.get("ee_acceleration") is not None:
             counts["ee_acc"] += 1
         if isinstance(rs.get("joint_positions"), list) and len(rs["joint_positions"]) > 0:
             counts["joint_positions"] += 1
@@ -134,7 +135,10 @@ def _channel_completeness(frames: List[Dict[str, Any]]) -> Dict[str, float]:
             counts["joint_accelerations"] += 1
         if isinstance(rs.get("joint_efforts"), list) and len(rs["joint_efforts"]) > 0:
             counts["joint_efforts"] += 1
-    return {k: round(v / float(total), 4) for k, v in counts.items()}
+    coverage = {k: round(v / float(total), 4) for k, v in counts.items()}
+    coverage["ee_velocity"] = coverage["ee_vel"]
+    coverage["ee_acceleration"] = coverage["ee_acc"]
+    return coverage
 
 
 def _stale_effort_stats(frames: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -326,6 +330,51 @@ def _target_mass_present(episode_meta: Dict[str, Any], target_id: str) -> Option
     return None
 
 
+def _target_source_ratio(frames: List[Dict[str, Any]], target_id: str) -> Optional[float]:
+    target_norm = _normalize_obj_token(target_id)
+    if not target_norm:
+        return None
+    total = 0
+    server_backed = 0
+    for frame in frames:
+        obj_poses = frame.get("object_poses", {})
+        if not isinstance(obj_poses, dict):
+            continue
+        for oid, pose in obj_poses.items():
+            if _normalize_obj_token(oid) != target_norm or not isinstance(pose, dict):
+                continue
+            total += 1
+            source = str(pose.get("source") or "").lower()
+            if ("server" in source) or ("physx" in source):
+                server_backed += 1
+            break
+    if total == 0:
+        return None
+    return server_backed / float(total)
+
+
+def _target_velocity_coverage(frames: List[Dict[str, Any]], target_id: str) -> Optional[float]:
+    target_norm = _normalize_obj_token(target_id)
+    if not target_norm:
+        return None
+    total = 0
+    with_velocity = 0
+    for frame in frames:
+        obj_poses = frame.get("object_poses", {})
+        if not isinstance(obj_poses, dict):
+            continue
+        for oid, pose in obj_poses.items():
+            if _normalize_obj_token(oid) != target_norm or not isinstance(pose, dict):
+                continue
+            total += 1
+            if pose.get("linear_velocity") is not None and pose.get("angular_velocity") is not None:
+                with_velocity += 1
+            break
+    if total == 0:
+        return None
+    return with_velocity / float(total)
+
+
 def run_episode_certification(
     frames: List[Dict[str, Any]],
     episode_meta: Dict[str, Any],
@@ -357,6 +406,10 @@ def run_episode_certification(
 
     gate_failures: List[str] = []
     metrics: Dict[str, Any] = {}
+    strict_runtime_patch_health = bool(episode_meta.get("strict_runtime_patch_health", True))
+    metrics["strict_runtime_patch_health"] = strict_runtime_patch_health
+    if mode_norm == "strict" and not strict_runtime_patch_health:
+        gate_failures.append("STRICT_RUNTIME_PRECHECK_FAILED")
 
     # Kinematic source usage gate.
     kinematic_frames = 0
@@ -422,6 +475,7 @@ def run_episode_certification(
     # Contact validity gate.
     contact_stats = _valid_contact_stats(frames, target_id)
     metrics.update(contact_stats)
+    metrics["valid_nonzero_contact_ratio"] = metrics.get("valid_contact_frame_ratio", 0.0)
     task_type = str(task.get("task_type", "")).lower()
     is_manipulation = any(k in task_type for k in ("pick", "place", "organize", "stack", "grasp"))
     min_required_valid_contact_frames = min_contact_frames_for_pick_place if is_manipulation else 0
@@ -456,10 +510,20 @@ def run_episode_certification(
         metrics["target_schema_complete_frames"] = None
         metrics["target_schema_total_frames"] = target_total
     metrics["target_mass_kg_present"] = target_mass_present
+    _target_source = _target_source_ratio(frames, target_id) if has_target else None
+    metrics["server_target_source_ratio"] = (
+        round(float(_target_source), 4) if _target_source is not None else None
+    )
+    _target_vel_cov = _target_velocity_coverage(frames, target_id) if has_target else None
+    metrics["target_velocity_coverage"] = (
+        round(float(_target_vel_cov), 4) if _target_vel_cov is not None else None
+    )
 
     # Channel completeness gate.
     channel_completeness = _channel_completeness(frames)
     metrics["channel_completeness_min"] = min(channel_completeness.values()) if channel_completeness else 0.0
+    metrics["ee_velocity_coverage"] = channel_completeness.get("ee_vel", 0.0)
+    metrics["ee_acceleration_coverage"] = channel_completeness.get("ee_acc", 0.0)
     if any(v < required_channel_completeness for v in channel_completeness.values()):
         gate_failures.append("CHANNEL_INCOMPLETE")
     stale_effort_stats = _stale_effort_stats(frames)

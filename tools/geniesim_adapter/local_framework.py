@@ -4932,6 +4932,20 @@ class GenieSimLocalFramework:
             os.getenv("PHYSICS_CERT_ENABLED"),
             default=True,
         )
+        self._strict_runtime_patch_health = True
+        self._strict_runtime_patch_details: List[str] = []
+        self._strict_scene_physics_probe_result: Dict[str, Any] = {}
+        self._force_raw_only = parse_bool_env(
+            os.getenv("GENIESIM_FORCE_RAW_ONLY"),
+            default=False,
+        )
+        _raw_only_flag_file = os.getenv("GENIESIM_FORCE_RAW_ONLY_FLAG_FILE", "/tmp/geniesim_force_raw_only.flag")
+        if _raw_only_flag_file and Path(_raw_only_flag_file).is_file():
+            self._force_raw_only = True
+            self._strict_runtime_patch_health = False
+            self._strict_runtime_patch_details.append(
+                f"raw-only flag file present: {_raw_only_flag_file}"
+            )
         if self._modality_profile == "no_rgb":
             # No-RGB profile intentionally omits camera payloads from episodes.
             self._skip_rgb_placeholder = True
@@ -5853,6 +5867,163 @@ class GenieSimLocalFramework:
                 "WARNING",
             )
 
+    def _runtime_patch_health_check(self) -> Tuple[bool, List[str]]:
+        """Verify critical runtime patch markers in active server sources."""
+        details: List[str] = []
+        geniesim_root = Path(getattr(self.config, "geniesim_root", Path("/opt/geniesim")))
+        marker_specs: List[Tuple[Path, str]] = [
+            (
+                geniesim_root / "source/data_collection/server/grpc_server.py",
+                "BlueprintPipeline contact_report patch",
+            ),
+            (
+                geniesim_root / "source/data_collection/server/command_controller.py",
+                "BlueprintPipeline object_pose patch",
+            ),
+            (
+                geniesim_root / "source/data_collection/server/command_controller.py",
+                "BlueprintPipeline sim_thread_physics_cache patch",
+            ),
+        ]
+        extra_specs = os.getenv("GENIESIM_REQUIRED_PATCH_MARKERS", "").strip()
+        if extra_specs:
+            for _item in extra_specs.split(","):
+                _spec = _item.strip()
+                if not _spec or "::" not in _spec:
+                    continue
+                _rel, _marker = _spec.split("::", 1)
+                _rel = _rel.strip()
+                _marker = _marker.strip()
+                if _rel and _marker:
+                    marker_specs.append((geniesim_root / _rel, _marker))
+
+        ok = True
+        for file_path, marker in marker_specs:
+            if not file_path.is_file():
+                ok = False
+                details.append(f"missing patch target file: {file_path}")
+                continue
+            try:
+                content = file_path.read_text(errors="ignore")
+            except Exception as exc:
+                ok = False
+                details.append(f"failed reading {file_path}: {exc}")
+                continue
+            if marker not in content:
+                ok = False
+                details.append(f"missing marker '{marker}' in {file_path}")
+        if ok:
+            details.append("runtime patch markers verified")
+        return ok, details
+
+    def _strict_scene_physics_probe(self) -> Tuple[bool, Dict[str, Any], List[str]]:
+        """Probe for dynamic rigid-body behavior before strict certification."""
+        if not parse_bool_env(os.getenv("GENIESIM_ENABLE_SCENE_PHYSICS_PROBE"), default=True):
+            return True, {"skipped": True, "reason": "probe disabled by env"}, []
+
+        errors: List[str] = []
+        dynamic_ids = list(getattr(self, "_scene_object_ids_dynamic", []) or [])
+        if not dynamic_ids:
+            return False, {"skipped": False}, ["no dynamic scene objects available for physics probe"]
+
+        probe_object_id = dynamic_ids[0]
+        lift_m = float(os.getenv("GENIESIM_SCENE_PHYSICS_PROBE_LIFT_M", "0.18"))
+        sample_dt_s = float(os.getenv("GENIESIM_SCENE_PHYSICS_PROBE_SAMPLE_DT_S", "0.2"))
+        sample_count = int(float(os.getenv("GENIESIM_SCENE_PHYSICS_PROBE_SAMPLES", "6")))
+        gravity_drop_min_m = float(os.getenv("GENIESIM_SCENE_PHYSICS_PROBE_DROP_MIN_M", "0.03"))
+        settle_eps_m = float(os.getenv("GENIESIM_SCENE_PHYSICS_PROBE_SETTLE_EPS_M", "0.005"))
+
+        def _pose_xyz(payload: Dict[str, Any]) -> Optional[np.ndarray]:
+            if not isinstance(payload, dict):
+                return None
+            pos = payload.get("position")
+            if isinstance(pos, dict):
+                try:
+                    return np.array(
+                        [float(pos.get("x", 0.0)), float(pos.get("y", 0.0)), float(pos.get("z", 0.0))],
+                        dtype=float,
+                    )
+                except Exception:
+                    return None
+            if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                try:
+                    return np.array([float(pos[0]), float(pos[1]), float(pos[2])], dtype=float)
+                except Exception:
+                    return None
+            return None
+
+        probe_summary: Dict[str, Any] = {
+            "probe_object_id": probe_object_id,
+            "lift_m": lift_m,
+            "sample_dt_s": sample_dt_s,
+            "sample_count": sample_count,
+        }
+
+        initial_pose_result = self._client.get_object_pose(probe_object_id)
+        if not initial_pose_result.success or not initial_pose_result.payload:
+            errors.append(
+                f"physics probe object pose unavailable for {probe_object_id}: {initial_pose_result.error}"
+            )
+            return False, probe_summary, errors
+        initial_pose = initial_pose_result.payload
+        initial_xyz = _pose_xyz(initial_pose)
+        if initial_xyz is None:
+            errors.append(f"physics probe could not parse initial pose for {probe_object_id}")
+            return False, probe_summary, errors
+
+        target_xyz = initial_xyz.copy()
+        target_xyz[2] = target_xyz[2] + lift_m
+        target_pose = {
+            "position": {"x": float(target_xyz[0]), "y": float(target_xyz[1]), "z": float(target_xyz[2])},
+            "orientation": initial_pose.get("orientation") or {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+        }
+
+        set_result = self._client.set_object_pose(probe_object_id, target_pose)
+        if not set_result.success:
+            errors.append(f"physics probe set_object_pose failed for {probe_object_id}: {set_result.error}")
+            return False, probe_summary, errors
+
+        z_samples: List[float] = []
+        sample_positions: List[List[float]] = []
+        for _ in range(max(2, sample_count)):
+            time.sleep(max(0.01, sample_dt_s))
+            pose_result = self._client.get_object_pose(probe_object_id)
+            xyz = _pose_xyz(pose_result.payload if pose_result.success else {})
+            if xyz is None:
+                continue
+            z_samples.append(float(xyz[2]))
+            sample_positions.append([float(xyz[0]), float(xyz[1]), float(xyz[2])])
+
+        gravity_response = any(z < (target_xyz[2] - gravity_drop_min_m) for z in z_samples)
+        collision_stop = len(z_samples) >= 2 and abs(z_samples[-1] - z_samples[-2]) <= settle_eps_m
+        post_release_persistence = len(z_samples) >= 1 and abs(z_samples[0] - initial_xyz[2]) > 1e-3
+
+        probe_summary.update(
+            {
+                "initial_position": initial_xyz.tolist(),
+                "target_position": target_xyz.tolist(),
+                "sample_positions": sample_positions,
+                "gravity_response": bool(gravity_response),
+                "collision_stop": bool(collision_stop),
+                "post_release_persistence": bool(post_release_persistence),
+            }
+        )
+
+        if not gravity_response:
+            errors.append("scene physics probe failed: no gravity response after lift")
+        if not collision_stop:
+            errors.append("scene physics probe failed: no collision stop/stabilization observed")
+        if not post_release_persistence:
+            errors.append("scene physics probe failed: immediate snapback to initial pose detected")
+
+        # Restore scene after probe to avoid perturbing data collection.
+        try:
+            self._client.reset_environment()
+        except Exception as exc:
+            errors.append(f"scene reset after physics probe failed: {exc}")
+
+        return len(errors) == 0, probe_summary, errors
+
     def _strict_realism_preflight(self) -> None:
         """Run strict realism preflight checks once per server start."""
         if not getattr(self, "_strict_realism", False):
@@ -5862,8 +6033,51 @@ class GenieSimLocalFramework:
         self._strict_preflight_done = True
 
         errors: List[str] = []
+        self._strict_runtime_patch_health = True
+        self._strict_runtime_patch_details = []
         _max_retries = int(os.getenv("GENIESIM_STRICT_PREFLIGHT_RETRIES", "5"))
         _retry_delay = float(os.getenv("GENIESIM_STRICT_PREFLIGHT_DELAY_S", "0.5"))
+
+        # 0) Runtime patch marker health
+        _patch_ok, _patch_details = self._runtime_patch_health_check()
+        if not _patch_ok:
+            errors.extend(_patch_details)
+        self._strict_runtime_patch_details.extend(_patch_details)
+
+        # 0b) USD physics coverage report admission check (strict mode)
+        _require_report = parse_bool_env(
+            os.getenv("GENIESIM_REQUIRE_USD_PHYSICS_REPORT"),
+            default=True,
+        )
+        _report_path = os.getenv("GENIESIM_USD_PHYSICS_REPORT_PATH", "").strip()
+        _min_cov = float(os.getenv("GENIESIM_MIN_PHYSICS_COVERAGE", "0.98"))
+        if _require_report:
+            if not _report_path:
+                errors.append("GENIESIM_USD_PHYSICS_REPORT_PATH missing in strict mode")
+            else:
+                _report_file = Path(_report_path)
+                if not _report_file.is_file():
+                    errors.append(f"USD physics coverage report not found: {_report_file}")
+                else:
+                    try:
+                        _report_payload = json.loads(_report_file.read_text())
+                        _coverage = float(_report_payload.get("coverage") or 0.0)
+                        _missing = len(_report_payload.get("missing_physics") or [])
+                        _manifest_objs = int(_report_payload.get("objects_with_manifest_physics") or 0)
+                        if _manifest_objs <= 0:
+                            errors.append("USD physics coverage report has zero manifest physics objects")
+                        if _missing > 0:
+                            errors.append(
+                                f"USD physics coverage report has {_missing} missing-physics objects"
+                            )
+                        if _coverage < _min_cov:
+                            errors.append(
+                                f"USD physics coverage {_coverage:.4f} below threshold {_min_cov:.4f}"
+                            )
+                    except Exception as _report_exc:
+                        errors.append(
+                            f"Failed to parse USD physics coverage report {_report_file}: {_report_exc}"
+                        )
 
         # 1) Contact report RPC availability
         try:
@@ -6081,10 +6295,23 @@ class GenieSimLocalFramework:
         except Exception as exc:
             errors.append(f"camera preflight exception: {exc}")
 
+        # 5) Scene-physics dynamics probe
+        _probe_ok, _probe_summary, _probe_errors = self._strict_scene_physics_probe()
+        self._strict_scene_physics_probe_result = _probe_summary
+        if not _probe_ok:
+            errors.extend(_probe_errors)
+
         if errors:
             msg = "Strict realism preflight failed:\n  - " + "\n  - ".join(errors)
-            self.log(msg, "ERROR")
-            raise RuntimeError(msg)
+            self._strict_runtime_patch_health = False
+            self._strict_runtime_patch_details.extend(errors)
+            fail_action = os.getenv("GENIESIM_STRICT_PREFLIGHT_FAIL_ACTION", "raw_only").strip().lower()
+            self._force_raw_only = True
+            if fail_action == "error":
+                self.log(msg, "ERROR")
+                raise RuntimeError(msg)
+            self.log(msg, "WARNING")
+            self.log("Strict preflight failed — forcing raw_preserved mode for this run.", "WARNING")
 
     # =========================================================================
     # Data Collection
@@ -9088,11 +9315,67 @@ class GenieSimLocalFramework:
             if self._modality_profile != "no_rgb":
                 modalities.append("rgb")
 
+            _scene_state_provenances = sorted(
+                {
+                    str((f.get("observation", {}) or {}).get("scene_state_provenance") or "")
+                    for f in frames
+                }
+            )
+            _has_synthetic_scene_state = any(
+                ("kinematic" in _p.lower()) or ("synthetic" in _p.lower())
+                for _p in _scene_state_provenances
+                if _p
+            )
+            _collision_provenances = sorted(
+                {
+                    str(f.get("collision_provenance") or "")
+                    for f in frames
+                    if f.get("collision_provenance") is not None
+                }
+            )
+            _joint_velocity_sources = sorted(
+                {
+                    str((f.get("observation", {}).get("robot_state", {}) or {}).get("joint_velocities_source") or "")
+                    for f in frames
+                    if (f.get("observation", {}).get("robot_state", {}) or {}).get("joint_velocities_source") is not None
+                }
+            )
+            _ee_pose_sources = sorted(
+                {
+                    str(f.get("ee_pose_source") or "")
+                    for f in frames
+                    if f.get("ee_pose_source") is not None
+                }
+            )
+            physics_data_provenance: Dict[str, Any] = {
+                "object_pose_source_policy": (
+                    "server_only_strict"
+                    if not _has_synthetic_scene_state
+                    else "compat_with_client_synthesis"
+                ),
+                "contact_source_policy": (
+                    "physx_contact_report_strict"
+                    if all((_cp == "physx_contact_report") for _cp in _collision_provenances if _cp)
+                    and bool(_collision_provenances)
+                    else "mixed_or_fallback"
+                ),
+                "effort_source_policy": _frame_stats.get("effort_source_policy", _efforts_source),
+                "joint_velocity_source_policy": (
+                    ",".join([_s for _s in _joint_velocity_sources if _s]) if _joint_velocity_sources else "unknown"
+                ),
+                "ee_kinematics_source_policy": (
+                    ",".join([_s for _s in _ee_pose_sources if _s]) if _ee_pose_sources else "unknown"
+                ),
+            }
+
             certification: Dict[str, Any] = {
                 "mode": getattr(self, "_physics_cert_mode", "strict"),
                 "passed": False,
                 "critical_failures": [],
-                "metrics": {"certification_disabled": True},
+                "metrics": {
+                    "certification_disabled": True,
+                    "strict_runtime_patch_health": bool(getattr(self, "_strict_runtime_patch_health", True)),
+                },
                 "gate_versions": {"physics_certification": "1.0.0"},
             }
             task_outcome: Dict[str, Any] = {
@@ -9125,6 +9408,10 @@ class GenieSimLocalFramework:
                             "modality_profile": self._modality_profile,
                             "effort_source_policy": _frame_stats.get("effort_source_policy", _efforts_source),
                             "object_metadata": object_metadata,
+                            "strict_runtime_patch_health": bool(getattr(self, "_strict_runtime_patch_health", True)),
+                            "strict_runtime_patch_details": list(getattr(self, "_strict_runtime_patch_details", []) or []),
+                            "scene_physics_probe_result": getattr(self, "_strict_scene_physics_probe_result", {}) or {},
+                            "physics_data_provenance": physics_data_provenance,
                         },
                         task,
                         mode=getattr(self, "_physics_cert_mode", "strict"),
@@ -9154,6 +9441,22 @@ class GenieSimLocalFramework:
                         "gate_versions": {"physics_certification": "1.0.0"},
                     }
 
+            if getattr(self, "_force_raw_only", False):
+                dataset_tier = "raw_preserved"
+                _cf = certification.setdefault("critical_failures", [])
+                if isinstance(_cf, list) and "STRICT_RUNTIME_PRECHECK_FAILED" not in _cf:
+                    _cf.append("STRICT_RUNTIME_PRECHECK_FAILED")
+                certification["passed"] = False
+                _m = certification.setdefault("metrics", {})
+                if isinstance(_m, dict):
+                    _m["forced_raw_only"] = True
+                    _m["strict_runtime_patch_health"] = bool(
+                        getattr(self, "_strict_runtime_patch_health", False)
+                    )
+                    _m["strict_runtime_patch_details"] = list(
+                        getattr(self, "_strict_runtime_patch_details", []) or []
+                    )
+
             with open(episode_path, "w") as f:
                 json.dump({
                     "schema_version": "2.0",
@@ -9164,6 +9467,7 @@ class GenieSimLocalFramework:
                     "task_outcome": task_outcome,
                     "channel_completeness": channel_completeness,
                     "object_id_map": object_id_map,
+                    "physics_data_provenance": physics_data_provenance,
                     "task_name": task.get("task_name") or llm_metadata.get("task_name") or "unknown_task",
                     "task_type": task.get("task_type"),
                     "target_object": task.get("target_object"),
@@ -9303,6 +9607,7 @@ class GenieSimLocalFramework:
             result["task_outcome"] = task_outcome
             result["channel_completeness"] = channel_completeness
             result["object_id_map"] = object_id_map
+            result["physics_data_provenance"] = physics_data_provenance
             result["output_path"] = str(episode_path)
             result["frame_validation"] = frame_validation
             if vlm_audit:
@@ -10486,14 +10791,23 @@ class GenieSimLocalFramework:
                 _ee_prev = np.array(frames[-1]["ee_pos"], dtype=float)
                 _ee_vel = ((_ee_curr - _ee_prev) / _dt_fd)
                 frame_data["ee_velocity"] = [round(float(v), 6) for v in _ee_vel]
+                frame_data["ee_vel"] = list(frame_data["ee_velocity"])
                 robot_state["ee_velocity"] = frame_data["ee_velocity"]
+                robot_state["ee_vel"] = list(frame_data["ee_velocity"])
                 # Acceleration from velocity finite difference
                 _prev_vel = frames[-1].get("ee_velocity")
                 if _prev_vel is not None:
                     _ee_vel_prev = np.array(_prev_vel, dtype=float)
                     _ee_acc = ((_ee_vel - _ee_vel_prev) / _dt_fd)
                     frame_data["ee_acceleration"] = [round(float(a), 6) for a in _ee_acc]
+                    frame_data["ee_acc"] = list(frame_data["ee_acceleration"])
                     robot_state["ee_acceleration"] = frame_data["ee_acceleration"]
+                    robot_state["ee_acc"] = list(frame_data["ee_acceleration"])
+                else:
+                    frame_data["ee_acceleration"] = [0.0, 0.0, 0.0]
+                    frame_data["ee_acc"] = [0.0, 0.0, 0.0]
+                    robot_state["ee_acceleration"] = [0.0, 0.0, 0.0]
+                    robot_state["ee_acc"] = [0.0, 0.0, 0.0]
 
             # Explicit gripper command: prefer gripper_aperture from waypoint
             # (trajectory planner sets this per-phase), fall back to inferring
@@ -10779,7 +11093,7 @@ class GenieSimLocalFramework:
 
                     _contacts = payload.get("contacts", []) or []
                     if _contacts:
-                        frame_data["collision_contacts"] = [
+                        _contact_rows = [
                             {
                                 "body_a": c.get("body_a", "") if isinstance(c, dict) else getattr(c, "body_a", ""),
                                 "body_b": c.get("body_b", "") if isinstance(c, dict) else getattr(c, "body_b", ""),
@@ -10805,6 +11119,19 @@ class GenieSimLocalFramework:
                             }
                             for c in _contacts[:5]  # Top 5 contacts
                         ]
+                        if _cert_strict:
+                            _strict_contacts = [
+                                _c
+                                for _c in _contact_rows
+                                if str(_c.get("body_a") or "").strip()
+                                and str(_c.get("body_b") or "").strip()
+                                and float(_c.get("force_N") or 0.0) > 0.0
+                            ]
+                            frame_data["collision_contacts"] = _strict_contacts
+                            if _contact_rows and not _strict_contacts:
+                                frame_data["collision_contacts_diagnostic"] = _contact_rows
+                        else:
+                            frame_data["collision_contacts"] = _contact_rows
                     collision_provenance = "physx_contact_report"
                     _contact_report_count += 1
                 else:
@@ -10852,13 +11179,14 @@ class GenieSimLocalFramework:
                             collision_free_physics = False
                             break
             else:
-                # Fallback: use planning-reported collision_free when contact report unavailable
-                planning_collision = self._last_planning_report.get("collision_free")
-                if planning_collision is not None:
-                    collision_free_physics = planning_collision
-                    if collision_provenance == "joint_limits_only":
-                        collision_provenance = self._last_planning_report.get("collision_source", "planning_report")
-                        frame_data["collision_provenance"] = collision_provenance
+                if not _cert_strict:
+                    # Fallback is allowed for raw/compat runs only.
+                    planning_collision = self._last_planning_report.get("collision_free")
+                    if planning_collision is not None:
+                        collision_free_physics = planning_collision
+                        if collision_provenance == "joint_limits_only":
+                            collision_provenance = self._last_planning_report.get("collision_source", "planning_report")
+                            frame_data["collision_provenance"] = collision_provenance
             frame_data["collision_free_physics"] = collision_free_physics
 
             # If not already attached, try attaching using contact report or heuristic
@@ -10891,11 +11219,8 @@ class GenieSimLocalFramework:
 
                 _force_attach = os.getenv("GENIESIM_FORCE_ATTACH_ON_GRASP_PHASE")
                 if _force_attach is None:
-                    # In strict mode without contact reports, force attach is the only
-                    # way to track grasped objects (server doesn't provide contact data).
-                    _force_attach = not _is_production or (
-                        _strict_realism and not _contact_result_available
-                    )
+                    # Strict certification forbids synthetic attach fallback.
+                    _force_attach = False if _cert_strict else (not _is_production)
                 else:
                     _force_attach = _force_attach.strip().lower() in {"1", "true", "yes"}
 
@@ -10918,11 +11243,7 @@ class GenieSimLocalFramework:
 
                 _allow_heuristic_attach = os.getenv("GENIESIM_ALLOW_HEURISTIC_ATTACH")
                 if _allow_heuristic_attach is None:
-                    # In strict mode without contact reports, heuristic attach is needed
-                    # to track grasped objects via EE kinematic offset.
-                    _allow_heuristic_attach = not _is_production or (
-                        _strict_realism and not _contact_result_available
-                    )
+                    _allow_heuristic_attach = False if _cert_strict else (not _is_production)
                 else:
                     _allow_heuristic_attach = _allow_heuristic_attach.strip().lower() in {"1", "true", "yes"}
 
@@ -11324,6 +11645,12 @@ class GenieSimLocalFramework:
                 if frame.get("ee_pos"):
                     frame["ee_vel"] = [0.0, 0.0, 0.0]
                     frame["ee_acc"] = [0.0, 0.0, 0.0]
+                    frame["ee_velocity"] = [0.0, 0.0, 0.0]
+                    frame["ee_acceleration"] = [0.0, 0.0, 0.0]
+                    obs_rs["ee_vel"] = [0.0, 0.0, 0.0]
+                    obs_rs["ee_acc"] = [0.0, 0.0, 0.0]
+                    obs_rs["ee_velocity"] = [0.0, 0.0, 0.0]
+                    obs_rs["ee_acceleration"] = [0.0, 0.0, 0.0]
             else:
                 prev = frames[i - 1]
                 dt = frame["timestamp"] - prev["timestamp"]
@@ -11410,16 +11737,23 @@ class GenieSimLocalFramework:
                         ee_curr = np.array(frame["ee_pos"], dtype=float)
                         ee_prev = np.array(prev["ee_pos"], dtype=float)
                         frame["ee_vel"] = ((ee_curr - ee_prev) / dt).tolist()
+                        frame["ee_velocity"] = list(frame["ee_vel"])
                         # EE acceleration
                         if prev.get("ee_vel"):
                             _prev_ee_vel = np.array(prev["ee_vel"], dtype=float)
                             _ee_vel_curr = np.array(frame["ee_vel"], dtype=float)
                             frame["ee_acc"] = ((_ee_vel_curr - _prev_ee_vel) / dt).tolist()
+                            frame["ee_acceleration"] = list(frame["ee_acc"])
                         else:
                             frame["ee_acc"] = [0.0, 0.0, 0.0]
+                            frame["ee_acceleration"] = [0.0, 0.0, 0.0]
                     # Mirror velocity fields to robot_state (Improvement C)
                     if "ee_vel" in frame:
                         obs_rs["ee_vel"] = frame["ee_vel"]
+                        obs_rs["ee_velocity"] = list(frame["ee_vel"])
+                    if "ee_acc" in frame:
+                        obs_rs["ee_acc"] = frame["ee_acc"]
+                        obs_rs["ee_acceleration"] = list(frame["ee_acc"])
 
         # Smooth velocities and accelerations with Savitzky-Golay filter when
         # enough frames are available.  This reduces finite-difference noise and

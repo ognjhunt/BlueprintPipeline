@@ -102,6 +102,11 @@ def test_physics_certification_passes_clean_server_backed_episode():
     assert report["dataset_tier"] == "physics_certified"
     assert report["critical_failures"] == []
     assert report["task_outcome"]["canonical_task_success"] is True
+    assert report["metrics"]["server_target_source_ratio"] == 1.0
+    assert report["metrics"]["ee_velocity_coverage"] == 1.0
+    assert report["metrics"]["ee_acceleration_coverage"] == 1.0
+    assert report["metrics"]["target_velocity_coverage"] == 1.0
+    assert report["metrics"]["strict_runtime_patch_health"] is True
 
 
 def test_physics_certification_detects_success_contradiction():
@@ -123,6 +128,40 @@ def test_physics_certification_detects_success_contradiction():
 
     assert report["passed"] is False
     assert "TASK_SUCCESS_CONTRADICTION" in report["critical_failures"]
+
+
+def test_physics_certification_fails_when_strict_runtime_precheck_failed():
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2]),
+        _frame(position=[0.11, 0.0, 0.2]),
+    ]
+    meta = _episode_meta()
+    meta["strict_runtime_patch_health"] = False
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+
+    report = run_episode_certification(frames, meta, task, mode="strict")
+
+    assert report["passed"] is False
+    assert "STRICT_RUNTIME_PRECHECK_FAILED" in report["critical_failures"]
+    assert report["dataset_tier"] == "raw_preserved"
+
+
+def test_physics_certification_accepts_ee_velocity_alias_fields():
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2]),
+        _frame(position=[0.11, 0.0, 0.2]),
+    ]
+    for frame in frames:
+        frame.pop("ee_vel", None)
+        frame.pop("ee_acc", None)
+        frame["ee_velocity"] = [0.0, 0.0, 0.0]
+        frame["ee_acceleration"] = [0.0, 0.0, 0.0]
+
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["metrics"]["ee_velocity_coverage"] == 1.0
+    assert report["metrics"]["ee_acceleration_coverage"] == 1.0
 
 
 def test_write_run_certification_report_outputs_json_and_jsonl(tmp_path: Path):

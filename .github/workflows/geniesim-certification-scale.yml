@@ -1,0 +1,75 @@
+name: Genie Sim Certification Scale Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_scene_id:
+        description: "Scene ID under STAGING_DATA_ROOT/scenes"
+        required: false
+        type: string
+  schedule:
+    - cron: "0 8 * * *"
+
+concurrency:
+  group: geniesim-certification-scale-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  certification-scale-audit:
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 180
+    env:
+      STAGING_DATA_ROOT: ${{ secrets.STAGING_DATA_ROOT }}
+      STAGING_SCENE_ID: ${{ inputs.staging_scene_id || secrets.STAGING_SCENE_ID }}
+      STAGING_CERT_SLO_PROFILE: ${{ secrets.STAGING_CERT_SLO_PROFILE || 'production' }}
+      STAGING_CERT_MIN_EPISODES: ${{ secrets.STAGING_CERT_MIN_EPISODES || '10' }}
+      STAGING_CERT_PASS_RATE_OVERRIDE: ${{ secrets.STAGING_CERT_PASS_RATE_OVERRIDE || '' }}
+      NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare artifact directories
+        run: |
+          mkdir -p logs/ci/geniesim
+
+      - name: Authenticate to NVIDIA NGC
+        if: env.NGC_API_KEY != ''
+        run: |
+          echo "$NGC_API_KEY" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
+      - name: Start Genie Sim runtime container
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml up -d
+
+      - name: Run offline certification-scale audit
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml exec -T \
+            -e STAGING_DATA_ROOT="$STAGING_DATA_ROOT" \
+            -e STAGING_SCENE_ID="$STAGING_SCENE_ID" \
+            geniesim-server \
+            /bin/bash -lc 'set -euo pipefail; SCENE_DIR="${STAGING_DATA_ROOT}/scenes/${STAGING_SCENE_ID}"; /isaac-sim/python.sh tools/quality_gates/offline_dataset_audit.py --paths "${SCENE_DIR}/episodes" --data-tier full --strict --workers 8 --output logs/ci/geniesim/certification-scale-audit.json --output-jsonl logs/ci/geniesim/certification-scale-audit.jsonl'
+
+      - name: Enforce certification SLO gate
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml exec -T \
+            -e STAGING_DATA_ROOT="$STAGING_DATA_ROOT" \
+            -e STAGING_SCENE_ID="$STAGING_SCENE_ID" \
+            -e STAGING_CERT_SLO_PROFILE="$STAGING_CERT_SLO_PROFILE" \
+            -e STAGING_CERT_MIN_EPISODES="$STAGING_CERT_MIN_EPISODES" \
+            -e STAGING_CERT_PASS_RATE_OVERRIDE="$STAGING_CERT_PASS_RATE_OVERRIDE" \
+            geniesim-server \
+            /bin/bash -lc 'set -euo pipefail; SCENE_DIR="${STAGING_DATA_ROOT}/scenes/${STAGING_SCENE_ID}"; CMD=(/isaac-sim/python.sh tools/quality_gates/certification_slo_gate.py --search-root "${SCENE_DIR}/episodes" --profile "${STAGING_CERT_SLO_PROFILE}" --min-episodes "${STAGING_CERT_MIN_EPISODES}" --output logs/ci/geniesim/certification-scale-slo-gate.json); if [ -n "${STAGING_CERT_PASS_RATE_OVERRIDE}" ]; then CMD+=(--min-pass-rate "${STAGING_CERT_PASS_RATE_OVERRIDE}"); fi; "${CMD[@]}"'
+
+      - name: Upload certification-scale artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: geniesim-certification-scale-artifacts
+          path: logs/ci/geniesim
+          if-no-files-found: warn
+
+      - name: Shutdown Genie Sim runtime container
+        if: always()
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml down -v
