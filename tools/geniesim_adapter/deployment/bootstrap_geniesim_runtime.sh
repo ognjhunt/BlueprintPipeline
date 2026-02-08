@@ -216,6 +216,7 @@ if [ -d "${PATCHES_DIR}" ]; then
   _apply_patch_script "${PATCHES_DIR}/patch_xforms_safe_rotation.py" "xforms_safe_rotation" "0"
   _apply_patch_script "${PATCHES_DIR}/patch_articulation_guard.py" "articulation_guard" "0"
   _apply_patch_script "${PATCHES_DIR}/patch_articulation_physics_wait.py" "articulation_physics_wait" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_ui_builder_time_import.py" "ui_builder_time_import" "1"
   _apply_patch_script "${PATCHES_DIR}/patch_set_joint_guard.py" "set_joint_guard" "0"
   _apply_patch_script "${PATCHES_DIR}/patch_camera_crash_guard.py" "camera_crash_guard" "0"
   _apply_patch_script "${PATCHES_DIR}/patch_autoplay.py" "autoplay" "0"

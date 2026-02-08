@@ -187,6 +187,7 @@ if [ -d "${PATCHES_DIR}" ]; then
   _apply_patch_script "${PATCHES_DIR}/patch_dynamic_teleport_v5.py" "dynamic_teleport_v5" "1"
   _apply_patch_script "${PATCHES_DIR}/patch_fix_dynamic_prims_overwrite.py" "fix_dynamic_prims_overwrite" "1"
   _apply_patch_script "${PATCHES_DIR}/patch_scene_collision.py" "scene_collision" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_ui_builder_time_import.py" "ui_builder_time_import" "1"
 
   if [ "${GENIESIM_KEEP_OBJECTS_KINEMATIC}" = "1" ]; then
     echo "[geniesim] GENIESIM_KEEP_OBJECTS_KINEMATIC=1 — applying keep_kinematic patch"
