@@ -13,9 +13,17 @@ GENIESIM_START_SERVER=${GENIESIM_START_SERVER:-1}
 GENIESIM_HEALTHCHECK=${GENIESIM_HEALTHCHECK:-1}
 GENIESIM_SERVER_LOG=${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
 GENIESIM_STRICT_RUNTIME_READINESS=${GENIESIM_STRICT_RUNTIME_READINESS:-0}
-GENIESIM_STRICT_FAIL_ACTION=${GENIESIM_STRICT_FAIL_ACTION:-raw_only}
-GENIESIM_RUNTIME_READINESS_JSON=${GENIESIM_RUNTIME_READINESS_JSON:-/tmp/geniesim_runtime_readiness.json}
-GENIESIM_RUNTIME_PRESTART_JSON=${GENIESIM_RUNTIME_PRESTART_JSON:-/tmp/geniesim_runtime_prestart_probe.json}
+GENIESIM_STRICT_FAIL_ACTION=${GENIESIM_STRICT_FAIL_ACTION:-error}
+GENIESIM_KEEP_OBJECTS_KINEMATIC=${GENIESIM_KEEP_OBJECTS_KINEMATIC:-0}
+GENIESIM_RESET_PATCH_BASELINE=${GENIESIM_RESET_PATCH_BASELINE:-1}
+_RUNTIME_READINESS_DEFAULT="/tmp/geniesim_runtime_readiness.json"
+_RUNTIME_PRESTART_DEFAULT="/tmp/geniesim_runtime_prestart_probe.json"
+if [ -d "/workspace/BlueprintPipeline" ]; then
+  _RUNTIME_READINESS_DEFAULT="/workspace/BlueprintPipeline/.geniesim_runtime_readiness.json"
+  _RUNTIME_PRESTART_DEFAULT="/workspace/BlueprintPipeline/.geniesim_runtime_prestart_probe.json"
+fi
+GENIESIM_RUNTIME_READINESS_JSON=${GENIESIM_RUNTIME_READINESS_JSON:-${_RUNTIME_READINESS_DEFAULT}}
+GENIESIM_RUNTIME_PRESTART_JSON=${GENIESIM_RUNTIME_PRESTART_JSON:-${_RUNTIME_PRESTART_DEFAULT}}
 GENIESIM_FORCE_RAW_ONLY_FLAG_FILE=${GENIESIM_FORCE_RAW_ONLY_FLAG_FILE:-/tmp/geniesim_force_raw_only.flag}
 
 if [ ! -x "${ISAAC_SIM_PATH}/python.sh" ]; then
@@ -29,6 +37,79 @@ _mark_force_raw_only() {
   export GENIESIM_FORCE_RAW_ONLY=1
   export PHYSICS_CERT_MODE=compat
   echo "reason=${reason}" > "${GENIESIM_FORCE_RAW_ONLY_FLAG_FILE}"
+}
+
+_critical_patch_failures=()
+_startup_strict=0
+if [ "${GENIESIM_STRICT_RUNTIME_READINESS}" = "1" ]; then
+  _startup_strict=1
+fi
+
+_apply_patch_script() {
+  local _patch_path="$1"
+  local _label="$2"
+  local _critical="$3"
+  if [ ! -f "${_patch_path}" ]; then
+    if [ "${_critical}" = "1" ]; then
+      _critical_patch_failures+=("${_label}: missing script ${_patch_path}")
+    else
+      echo "[geniesim] WARNING: Optional patch script missing: ${_patch_path}"
+    fi
+    return
+  fi
+  if ! "${ISAAC_SIM_PATH}/python.sh" "${_patch_path}"; then
+    if [ "${_critical}" = "1" ]; then
+      _critical_patch_failures+=("${_label}: execution failed")
+    else
+      echo "[geniesim] WARNING: Optional patch failed: ${_label}"
+    fi
+  fi
+}
+
+_file_looks_patched() {
+  local _file="$1"
+  [ -f "${_file}" ] || return 1
+  grep -qE "BPv3_pre_play_kinematic|BPv7_keep_kinematic|scene_collision_injected|BlueprintPipeline contact_report patch|BlueprintPipeline sim_thread_physics_cache patch" "${_file}" 2>/dev/null
+}
+
+_ensure_patch_baseline_and_restore() {
+  local _cc_file="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+  local _grpc_file="${GENIESIM_ROOT}/source/data_collection/server/grpc_server.py"
+  local _cc_base="${_cc_file}.bp_base"
+  local _grpc_base="${_grpc_file}.bp_base"
+
+  for _target in "${_cc_file}" "${_grpc_file}"; do
+    if [ ! -f "${_target}" ]; then
+      _critical_patch_failures+=("baseline_reset: missing target ${_target}")
+      return
+    fi
+  done
+
+  if [ ! -f "${_cc_base}" ]; then
+    if _file_looks_patched "${_cc_file}"; then
+      local _msg="baseline_reset: refusing to snapshot patched command_controller.py (${_cc_file})"
+      echo "[geniesim] ERROR: ${_msg}"
+      _critical_patch_failures+=("${_msg}")
+      return
+    fi
+    cp -f "${_cc_file}" "${_cc_base}"
+    echo "[geniesim] Created patch baseline: ${_cc_base}"
+  fi
+
+  if [ ! -f "${_grpc_base}" ]; then
+    if _file_looks_patched "${_grpc_file}"; then
+      local _msg="baseline_reset: refusing to snapshot patched grpc_server.py (${_grpc_file})"
+      echo "[geniesim] ERROR: ${_msg}"
+      _critical_patch_failures+=("${_msg}")
+      return
+    fi
+    cp -f "${_grpc_file}" "${_grpc_base}"
+    echo "[geniesim] Created patch baseline: ${_grpc_base}"
+  fi
+
+  cp -f "${_cc_base}" "${_cc_file}"
+  cp -f "${_grpc_base}" "${_grpc_file}"
+  echo "[geniesim] Restored runtime patch targets from baseline copies"
 }
 
 # Fast-path: if running in a pre-baked image, skip installation entirely
@@ -87,6 +168,10 @@ if [ ! -f "${_GRPC_EXPECTED}" ] || [ ! -f "${_CC_EXPECTED}" ]; then
   else
     echo "[geniesim] ERROR: Could not find GenieSim server files anywhere."
     echo "[geniesim] Looked for: grpc_server.py under data_collection/server/"
+    if [ "${_startup_strict}" = "1" ]; then
+      echo "[geniesim] ERROR: strict runtime readiness requested; refusing degraded startup."
+      exit 1
+    fi
     echo "[geniesim] Patches will NOT be applied. Continuing with degraded mode."
     _mark_force_raw_only "geniesim_server_files_not_found"
   fi
@@ -102,39 +187,62 @@ for _target_file in "${_GRPC_EXPECTED}" "${_CC_EXPECTED}" "${_DCS_EXPECTED}"; do
   fi
 done
 
+if [ "${GENIESIM_RESET_PATCH_BASELINE}" = "1" ]; then
+  echo "[geniesim] Resetting patch targets from deterministic baseline"
+  _ensure_patch_baseline_and_restore
+  if [ "${#_critical_patch_failures[@]}" -gt 0 ] && [ "${_startup_strict}" = "1" ]; then
+    echo "[geniesim] ERROR: baseline reset failed in strict startup mode"
+    exit 1
+  fi
+fi
+
 # Apply server patches (render config, camera handler, object pose, ee pose, omnigraph dedup)
 PATCHES_DIR="${SCRIPT_DIR}/patches"
 if [ -d "${PATCHES_DIR}" ]; then
   echo "[geniesim] Applying server patches (GENIESIM_ROOT=${GENIESIM_ROOT})..."
-  for patch_script in \
-    "${PATCHES_DIR}/patch_omnigraph_dedup.py" \
-    "${PATCHES_DIR}/patch_data_collector_render_config.py" \
-    "${PATCHES_DIR}/patch_camera_handler.py" \
-    "${PATCHES_DIR}/patch_object_pose_handler.py" \
-    "${PATCHES_DIR}/patch_ee_pose_handler.py" \
-    "${PATCHES_DIR}/patch_stage_diagnostics.py" \
-    "${PATCHES_DIR}/patch_observation_cameras.py" \
-    "${PATCHES_DIR}/patch_contact_report.py" \
-    "${PATCHES_DIR}/patch_joint_efforts_handler.py" \
-    "${PATCHES_DIR}/patch_ee_wrench_handler.py" \
-    "${PATCHES_DIR}/patch_grpc_server.py" \
-    "${PATCHES_DIR}/_apply_safe_float.py" \
-    "${PATCHES_DIR}/patch_xforms_safe_rotation.py" \
-    "${PATCHES_DIR}/patch_articulation_guard.py" \
-    "${PATCHES_DIR}/patch_enable_contacts_on_init.py" \
-    "${PATCHES_DIR}/patch_articulation_physics_wait.py" \
-    "${PATCHES_DIR}/patch_set_joint_guard.py" \
-    "${PATCHES_DIR}/patch_camera_crash_guard.py" \
-    "${PATCHES_DIR}/patch_sim_thread_physics_cache.py" \
-    "${PATCHES_DIR}/patch_autoplay.py" \
-    "${PATCHES_DIR}/patch_register_scene_objects.py" \
-    "${PATCHES_DIR}/patch_deferred_dynamic_restore.py" \
-    "${PATCHES_DIR}/patch_dynamic_teleport_v5.py" \
-    "${PATCHES_DIR}/patch_fix_dynamic_prims_overwrite.py"; do
-    if [ -f "${patch_script}" ]; then
-      "${ISAAC_SIM_PATH}/python.sh" "${patch_script}" || echo "[geniesim] WARNING: ${patch_script} failed (non-fatal)"
+  # Optional compatibility patches.
+  _apply_patch_script "${PATCHES_DIR}/patch_omnigraph_dedup.py" "omnigraph_dedup" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_data_collector_render_config.py" "data_collector_render_config" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_camera_handler.py" "camera_handler" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_object_pose_handler.py" "object_pose_handler" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_ee_pose_handler.py" "ee_pose_handler" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_stage_diagnostics.py" "stage_diagnostics" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_observation_cameras.py" "observation_cameras" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_ee_wrench_handler.py" "ee_wrench_handler" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_grpc_server.py" "grpc_server" "0"
+  _apply_patch_script "${PATCHES_DIR}/_apply_safe_float.py" "safe_float" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_xforms_safe_rotation.py" "xforms_safe_rotation" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_articulation_guard.py" "articulation_guard" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_articulation_physics_wait.py" "articulation_physics_wait" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_set_joint_guard.py" "set_joint_guard" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_camera_crash_guard.py" "camera_crash_guard" "0"
+  _apply_patch_script "${PATCHES_DIR}/patch_autoplay.py" "autoplay" "0"
+
+  # Critical strict chain (real contacts, real efforts, dynamic motion path).
+  _apply_patch_script "${PATCHES_DIR}/patch_contact_report.py" "contact_report" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_joint_efforts_handler.py" "joint_efforts_handler" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_enable_contacts_on_init.py" "enable_contacts_on_init" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_sim_thread_physics_cache.py" "sim_thread_physics_cache" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_register_scene_objects.py" "register_scene_objects" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_deferred_dynamic_restore.py" "deferred_dynamic_restore" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_dynamic_teleport_v5.py" "dynamic_teleport_v5" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_fix_dynamic_prims_overwrite.py" "fix_dynamic_prims_overwrite" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_scene_collision.py" "scene_collision" "1"
+  if [ "${GENIESIM_KEEP_OBJECTS_KINEMATIC}" = "1" ]; then
+    _apply_patch_script "${PATCHES_DIR}/patch_keep_objects_kinematic.py" "keep_objects_kinematic" "0"
+  else
+    echo "[geniesim] GENIESIM_KEEP_OBJECTS_KINEMATIC=0 — keep_kinematic patch disabled"
+  fi
+
+  if [ "${#_critical_patch_failures[@]}" -gt 0 ]; then
+    echo "[geniesim] ERROR: Critical runtime patch application failed:"
+    for _failure in "${_critical_patch_failures[@]}"; do
+      echo "[geniesim] ERROR:   - ${_failure}"
+    done
+    if [ "${_startup_strict}" = "1" ]; then
+      exit 1
     fi
-  done
+  fi
 
   # Verify critical patches were applied
   echo "[geniesim] Verifying patch application..."
@@ -155,6 +263,42 @@ if [ -d "${PATCHES_DIR}" ]; then
   else
     echo "[geniesim] WARNING: sim_thread_physics_cache patch may not have been applied"
   fi
+  if grep -q "BlueprintPipeline contact_reporting_on_init patch" "${_CMD_CTRL}" 2>/dev/null; then
+    echo "[geniesim] ✓ contact_reporting_on_init patch verified in command_controller.py"
+  else
+    echo "[geniesim] WARNING: contact_reporting_on_init patch may not have been applied"
+    if [ "${_startup_strict}" = "1" ]; then
+      exit 1
+    fi
+  fi
+  if grep -q "scene_collision_injected" "${_CMD_CTRL}" 2>/dev/null; then
+    echo "[geniesim] ✓ scene_collision patch verified in command_controller.py"
+  else
+    echo "[geniesim] WARNING: scene_collision patch may not have been applied"
+    if [ "${_startup_strict}" = "1" ]; then
+      exit 1
+    fi
+  fi
+  # Verify scene_collision hook fires BEFORE v3 dynamic restore
+  _sc_line=$(grep -n "_patch_add_scene_collision" "${_CMD_CTRL}" 2>/dev/null | head -1 | cut -d: -f1)
+  _v3_line=$(grep -n "_bp_dynamic_to_restore" "${_CMD_CTRL}" 2>/dev/null | head -1 | cut -d: -f1)
+  if [ -n "${_sc_line}" ] && [ -n "${_v3_line}" ]; then
+    if [ "${_sc_line}" -lt "${_v3_line}" ]; then
+      echo "[geniesim] ✓ scene_collision hook (line ${_sc_line}) fires BEFORE v3 restore (line ${_v3_line})"
+    else
+      echo "[geniesim] ERROR: scene_collision hook (line ${_sc_line}) fires AFTER v3 restore (line ${_v3_line}) — wrong ordering!"
+      if [ "${_startup_strict}" = "1" ]; then
+        exit 1
+      fi
+    fi
+  fi
+  if grep -q "BPv7_keep_kinematic" "${_CMD_CTRL}" 2>/dev/null \
+    && [ "${GENIESIM_KEEP_OBJECTS_KINEMATIC}" != "1" ]; then
+    echo "[geniesim] ERROR: Forbidden marker BPv7_keep_kinematic detected while dynamic motion is required."
+    if [ "${_startup_strict}" = "1" ]; then
+      exit 1
+    fi
+  fi
 
   # Pre-start patch marker readiness probe
   if [ -f "${SCRIPT_DIR}/readiness_probe.py" ]; then
@@ -162,15 +306,14 @@ if [ -d "${PATCHES_DIR}" ]; then
     if ! "${ISAAC_SIM_PATH}/python.sh" "${SCRIPT_DIR}/readiness_probe.py" \
       --skip-grpc \
       --check-patches \
+      --require-patch-set strict \
+      --forbid-patch-set strict \
       --geniesim-root "${GENIESIM_ROOT}" \
       --output "${GENIESIM_RUNTIME_PRESTART_JSON}"; then
       echo "[geniesim] WARNING: Runtime patch pre-start readiness probe failed"
-      if [ "${GENIESIM_STRICT_RUNTIME_READINESS}" = "1" ]; then
-        if [ "${GENIESIM_STRICT_FAIL_ACTION}" = "error" ]; then
-          echo "[geniesim] ERROR: strict runtime readiness requested and pre-start patch probe failed"
-          exit 1
-        fi
-        _mark_force_raw_only "runtime_patch_prestart_probe_failed"
+      if [ "${_startup_strict}" = "1" ]; then
+        echo "[geniesim] ERROR: strict runtime readiness requested and pre-start patch probe failed"
+        exit 1
       fi
     fi
   fi
@@ -244,6 +387,12 @@ export GENIESIM_ROOT
 export ISAAC_SIM_PATH
 export GENIESIM_HOST
 export GENIESIM_PORT
+export GENIESIM_RUNTIME_READINESS_JSON
+export GENIESIM_RUNTIME_PRESTART_JSON
+export GENIESIM_KEEP_OBJECTS_KINEMATIC
+export GENIESIM_RESET_PATCH_BASELINE
+export GENIESIM_STRICT_RUNTIME_READINESS
+export GENIESIM_STRICT_FAIL_ACTION
 
 # Enable Isaac Sim's internal ROS 2 libraries for rclpy
 # Genie Sim's command_controller.py imports rclpy unconditionally
@@ -293,6 +442,8 @@ if [ "${GENIESIM_START_SERVER}" = "1" ] && [ -f "${SCRIPT_DIR}/readiness_probe.p
     --host "${GENIESIM_HOST}"
     --port "${GENIESIM_PORT}"
     --check-patches
+    --require-patch-set strict
+    --forbid-patch-set strict
     --geniesim-root "${GENIESIM_ROOT}"
     --output "${GENIESIM_RUNTIME_READINESS_JSON}"
   )
@@ -302,12 +453,9 @@ if [ "${GENIESIM_START_SERVER}" = "1" ] && [ -f "${SCRIPT_DIR}/readiness_probe.p
   echo "[geniesim] Running post-start runtime readiness probe"
   if ! "${ISAAC_SIM_PATH}/python.sh" "${SCRIPT_DIR}/readiness_probe.py" "${_probe_args[@]}"; then
     echo "[geniesim] WARNING: post-start runtime readiness probe failed"
-    if [ "${GENIESIM_STRICT_RUNTIME_READINESS}" = "1" ]; then
-      if [ "${GENIESIM_STRICT_FAIL_ACTION}" = "error" ]; then
-        echo "[geniesim] ERROR: strict runtime readiness requested and post-start probe failed"
-        exit 1
-      fi
-      _mark_force_raw_only "runtime_patch_poststart_probe_failed"
+    if [ "${_startup_strict}" = "1" ]; then
+      echo "[geniesim] ERROR: strict runtime readiness requested and post-start probe failed"
+      exit 1
     fi
   fi
 fi

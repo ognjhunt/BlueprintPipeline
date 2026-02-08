@@ -55,9 +55,18 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
   cd ~/BlueprintPipeline && bash scripts/vm-start.sh
 "
 
-# 5. Upload + run pipeline script (avoids SSH quoting issues with nohup)
+# 5. Generate readiness report (required for host-side strict preflight)
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+  sudo docker exec geniesim-server /isaac-sim/python.sh \
+    /workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/readiness_probe.py \
+    --strict --output /tmp/geniesim_runtime_readiness.json
+  sudo docker cp geniesim-server:/tmp/geniesim_runtime_readiness.json /tmp/geniesim_runtime_readiness.json
+"
+
+# 6. Upload + run pipeline script (avoids SSH quoting issues with nohup)
 cat > /tmp/run_pipeline.sh << 'SCRIPT'
 #!/bin/bash
+set -euo pipefail
 cd ~/BlueprintPipeline
 export PYTHONPATH=~/BlueprintPipeline:~/BlueprintPipeline/episode-generation-job:$PYTHONPATH
 export GENIESIM_HOST=localhost
@@ -66,13 +75,36 @@ export GENIESIM_SKIP_DEFAULT_LIGHTING=1
 export SKIP_RGB_CAPTURE=true
 export REQUIRE_VALID_RGB=false
 export REQUIRE_CAMERA_DATA=false
+# Object pose timeout: default 5s is too short for server cold-start queries
+export GENIESIM_OBJECT_POSE_TIMEOUT_S=30
+export GENIESIM_OBJECT_POSE_EARLY_FAIL=10
+# Strict realism: REAL physics data, no fallbacks
+# Objects are DYNAMIC (collision is baked offline into scene USD assets)
 export DATA_FIDELITY_MODE=production
 export STRICT_REALISM=true
 export REQUIRE_OBJECT_MOTION=true
 export REQUIRE_REAL_CONTACTS=true
 export REQUIRE_REAL_EFFORTS=true
 export REQUIRE_INTRINSICS=true
+# cuRobo not on host; local numerical IK accepted, server IK via gRPC optional
+export CUROBO_REQUIRED=0
+export GENIESIM_KEEP_OBJECTS_KINEMATIC=0
+export GENIESIM_RESET_PATCH_BASELINE=1
+export GENIESIM_ALLOW_IK_FAILURE_FALLBACK=0
+export GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=0
+# Stop immediately on first task realism failure
+export GENIESIM_STOP_ON_FIRST_TASK_FAILURE=1
+# Strict readiness + host-side readiness report
+export GENIESIM_STRICT_RUNTIME_READINESS=1
+export GENIESIM_STRICT_FAIL_ACTION=error
+export GENIESIM_STRICT_PREFLIGHT_FAIL_ACTION=error
+export GENIESIM_RUNTIME_READINESS_JSON=/tmp/geniesim_runtime_readiness.json
+# Physics probe enabled (dynamic objects respond to gravity)
+export GENIESIM_ENABLE_SCENE_PHYSICS_PROBE=1
+export GENIESIM_REQUIRE_USD_PHYSICS_REPORT=true
+# Timeouts
 export GENIESIM_FIRST_CALL_TIMEOUT_S=600
+export GENIESIM_GRPC_TIMEOUT_S=120
 export CAMERA_REWARMUP_ON_RESET=1
 unset SKIP_QUALITY_GATES 2>/dev/null || true
 nohup python3 tools/run_local_pipeline.py \
@@ -140,15 +172,60 @@ python3 tools/run_local_pipeline.py \
   --use-geniesim --fail-fast
 ```
 
-### Strict production run (RGB disabled only)
+### Strict production run (host-side, RGB disabled, fail-closed)
 
-Use this when you want strict realism checks for everything except RGB color validity:
+Use this profile when efforts, contacts, and object motion must be real PhysX-backed data with no fallback.
+The pipeline runs on the **VM host** (not inside the container) to avoid CPU/GPU resource contention with the Isaac Sim server.
+
+**CRITICAL PREREQUISITES (must complete before running the pipeline):**
+
+1. **Generate readiness report** — the host-side pipeline can't see `/opt/geniesim/` (it's inside the container), so the strict preflight requires a readiness report JSON:
+```bash
+# Run readiness probe INSIDE the container
+sudo docker exec geniesim-server /isaac-sim/python.sh \
+  /workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/readiness_probe.py \
+  --strict --output /tmp/geniesim_runtime_readiness.json
+
+# Copy report to VM host
+sudo docker cp geniesim-server:/tmp/geniesim_runtime_readiness.json /tmp/geniesim_runtime_readiness.json
+```
+
+2. **Object pose timeout** — The server's `_get_object_pose()` calls `articulat_objects.values().initialize()` twice + USD stage ops. On cold start this easily exceeds the 5s default. Set `GENIESIM_OBJECT_POSE_TIMEOUT_S=30`.
+
+3. **Dynamic objects + offline collision** — Collision correctness is baked into scene USD assets during scene assembly/export. Runtime `scene_collision` is validator-only in strict runs. Keep `GENIESIM_KEEP_OBJECTS_KINEMATIC=0` so dynamic-object realism is enforced.
+
+4. **Deterministic patch baseline reset** — On each startup, runtime patch targets are restored from baseline snapshots before patch scripts run:
+```bash
+export GENIESIM_RESET_PATCH_BASELINE=1
+```
+
+5. **Verify patch ordering** — After container restart, verify that the scene_collision hook runs BEFORE the v3 dynamic restore:
+```bash
+sudo docker exec geniesim-server grep -n "_patch_add_scene_collision\|_bp_dynamic_to_restore" \
+  /opt/geniesim/source/data_collection/server/command_controller.py
+# scene_collision line number MUST be < _bp_dynamic_to_restore line number
+```
 
 ```bash
 cd ~/BlueprintPipeline
+
+# 0. Single-run guard
+pgrep -af 'tools/run_local_pipeline.py' && echo "ERROR: pipeline already running" && exit 1 || true
+
 bash scripts/vm-start-xorg.sh
 sudo docker restart geniesim-server >/dev/null
 bash scripts/vm-start.sh
+
+# 0a. Generate readiness report (see prerequisites above)
+sudo docker exec geniesim-server /isaac-sim/python.sh \
+  /workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/readiness_probe.py \
+  --strict --output /tmp/geniesim_runtime_readiness.json
+sudo docker cp geniesim-server:/tmp/geniesim_runtime_readiness.json /tmp/geniesim_runtime_readiness.json
+
+# 0b. Verify v7 keep-kinematic is NOT applied
+v7_count=$(sudo docker exec geniesim-server grep -c "BPv7_keep_kinematic" \
+  /opt/geniesim/source/data_collection/server/command_controller.py 2>/dev/null || echo 0)
+if [ "$v7_count" -gt 0 ]; then echo "ERROR: v7 keep-kinematic is active!"; exit 1; fi
 
 # PYTHONPATH must include both repo root AND episode-generation-job (for data_fidelity module)
 export PYTHONPATH=~/BlueprintPipeline:~/BlueprintPipeline/episode-generation-job:$PYTHONPATH
@@ -158,13 +235,43 @@ export GENIESIM_SKIP_DEFAULT_LIGHTING=1
 export SKIP_RGB_CAPTURE=true
 export REQUIRE_VALID_RGB=false
 export REQUIRE_CAMERA_DATA=false
+
+# Object pose timeout: default 5s is too short for server cold-start queries
+export GENIESIM_OBJECT_POSE_TIMEOUT_S=30
+export GENIESIM_OBJECT_POSE_EARLY_FAIL=10
+
+# Strict realism: REAL physics data, no fallbacks
+# Objects are DYNAMIC (collision is baked offline into scene USD assets)
 export DATA_FIDELITY_MODE=production
 export STRICT_REALISM=true
 export REQUIRE_OBJECT_MOTION=true
 export REQUIRE_REAL_CONTACTS=true
 export REQUIRE_REAL_EFFORTS=true
 export REQUIRE_INTRINSICS=true
+
+# cuRobo not on host; local numerical IK accepted, server IK via gRPC optional
+export CUROBO_REQUIRED=0
+export GENIESIM_KEEP_OBJECTS_KINEMATIC=0
+export GENIESIM_RESET_PATCH_BASELINE=1
+export GENIESIM_ALLOW_IK_FAILURE_FALLBACK=0
+export GENIESIM_ALLOW_LINEAR_FALLBACK_IN_PROD=0
+
+# Stop immediately on first task realism failure
+export GENIESIM_STOP_ON_FIRST_TASK_FAILURE=1
+
+# Strict runtime readiness + readiness report for host-side preflight
+export GENIESIM_STRICT_RUNTIME_READINESS=1
+export GENIESIM_STRICT_FAIL_ACTION=error
+export GENIESIM_STRICT_PREFLIGHT_FAIL_ACTION=error
+export GENIESIM_RUNTIME_READINESS_JSON=/tmp/geniesim_runtime_readiness.json
+
+# Physics probe enabled (dynamic objects respond to gravity)
+export GENIESIM_ENABLE_SCENE_PHYSICS_PROBE=1
+export GENIESIM_REQUIRE_USD_PHYSICS_REPORT=true
+
+# Timeouts
 export GENIESIM_FIRST_CALL_TIMEOUT_S=600
+export GENIESIM_GRPC_TIMEOUT_S=120
 export CAMERA_REWARMUP_ON_RESET=1
 unset SKIP_QUALITY_GATES 2>/dev/null || true
 
@@ -174,8 +281,6 @@ python3 tools/run_local_pipeline.py \
   --force-rerun genie-sim-submit \
   --use-geniesim --fail-fast
 ```
-
-**Results from Feb 7 2026 strict run**: 6/7 tasks completed successfully with `task_success=True`. Quality scores 0.69-0.84. Task 5 (`variation_toaster`) crashed the server repeatedly and was skipped. Object motion validated via EE-manipulation-displacement proxy (0.33-0.34m per task). Total runtime ~45 min for 7 tasks (including retries on task 5).
 
 ### If a run appears stuck at init
 
@@ -586,7 +691,7 @@ All patches are in `tools/geniesim_adapter/deployment/patches/` and applied duri
 
 ### Recent Fixes (2026-02-07)
 
-44. **CRITICAL: Object motion validation fails in cert-strict mode**: In cert-strict mode (`_cert_strict=True`), client-side kinematic object pose tracking is deliberately blocked (lines 11051-11053, 10952, 11273 of `local_framework.py`). This means the server returns static USD positions for kinematic objects, so `validate_object_motion()` always sees `max_displacement=0.0` and raises `DataFidelityError`. **Fix**: Use EE-manipulation-phase displacement as a proxy for object motion. During manipulation phases (`grasp`, `lift`, `transport`, `place`), the end-effector positions come from the real server. If EE displacement exceeds 1cm during these phases, the object must have moved. This does NOT relax the strictness guarantee because it uses only server-backed data.
+44. **CRITICAL: Object motion strictness hardening**: Strict mode now fail-closes for motion-required tasks. EE-displacement proxy and `kinematic_ee_offset*` provenance are rejected in strict runs, and only server-backed target-object displacement passes object-motion validation.
 45. **PYTHONPATH must include `episode-generation-job/`**: The `data_fidelity` module is imported from `episode-generation-job/data_fidelity.py`. Without `~/BlueprintPipeline/episode-generation-job` on PYTHONPATH, the pipeline fails with `ModuleNotFoundError: No module named 'data_fidelity'`. Updated all PYTHONPATH exports in this guide.
 46. **Must sync entire `tools/` directory**: The old individual file sync list was missing `tools/quality_gates/`, `tools/camera_io.py`, and other modules. Pipeline failed at startup with `No module named 'tools.quality_gates.physics_certification'`. Now recommend `gcloud compute scp --recurse` for `tools/`.
 47. **Task 5 (`variation_toaster`) crashes server**: The `variation_toaster` object cannot be resolved (all prim path variants return zero/identity poses). The server crashes during this task repeatedly (UNAVAILABLE / Connection reset by peer). Server auto-restart works but the task keeps failing. Not fixed — 6/7 tasks complete successfully with this task skipped.
@@ -664,7 +769,7 @@ sudo docker exec -d geniesim-server bash -c '
 - **EE pose**: Monkey-patch wrapper ensures safe 2-value return; regex broadened for N-variable unpacking. Previously intermittent, should now be fully handled.
 - **Trajectory**: IK fallback works; cuRobo planner has API version mismatch
 - **Task progression**: Pipeline advances through tasks with auto-restart on server crash. Server startup script has restart loop (max 3). Client triggers `docker restart` when circuit breaker opens. Inter-task health probe detects failures early. Completed tasks are checkpointed so retries skip them. Stall budget resets per task. Proactive server restart available via `GENIESIM_RESTART_EVERY_N_TASKS`.
-- **Object motion**: In cert-strict mode, kinematic objects don't move on server. EE-manipulation-displacement proxy (fix 44) uses server-backed EE positions during grasp/lift/transport phases as evidence of motion. Validated: 0.33-0.34m per task on Feb 7 strict run.
+- **Object motion**: Strict mode requires server-backed target-object displacement only. Kinematic EE-offset and EE-proxy evidence are rejected and terminate the run.
 - **Strict production run**: 6/7 tasks completed (Feb 7 2026). Quality scores 0.69-0.84. All realism gates pass except `variation_toaster` which crashes the server.
 
 ### Downloading data from the VM
@@ -731,3 +836,54 @@ Full list: `regen3d, scale, interactive, simready, usd, inventory-enrichment, re
 | `GENIESIM_RESTART_CMD` | Command to restart server container (default: `sudo docker restart geniesim-server`) | Export before pipeline run |
 | `GENIESIM_RESTART_EVERY_N_TASKS` | Proactive server restart every N tasks (default: `0` = disabled; was `5`, changed to `0` to avoid mid-run Docker restarts causing paused deadlock) | Export before pipeline run |
 | `CAMERA_REWARMUP_ON_RESET` | Re-run camera warmup frames on every capture (default: `0` = disabled) | Dockerfile / export |
+| `GENIESIM_OBJECT_POSE_TIMEOUT_S` | Timeout for individual object pose gRPC queries (default: `5.0` — **too short!** set to `30`) | Export before pipeline run |
+| `GENIESIM_OBJECT_POSE_EARLY_FAIL` | After N consecutive pose query failures, skip remaining objects (default: `2` — set to `10`) | Export before pipeline run |
+| `GENIESIM_RUNTIME_READINESS_JSON` | Path to readiness probe JSON report — **required for host-side strict pipeline** | Export before pipeline run |
+
+## Known Issues & Fixes (Feb 2026)
+
+### 1. Object pose DEADLINE_EXCEEDED (all objects fall back to manifest)
+
+**Symptom**: Every `get_object_pose` gRPC call returns `DEADLINE_EXCEEDED`, all objects use `manifest_fallback` (static positions), objects never move.
+
+**Root cause**: `DEFAULT_GENIESIM_OBJECT_POSE_TIMEOUT_S = 5.0` in `config.py`. The server's `_get_object_pose()` calls `articulat_objects.values().initialize()` twice + USD stage operations, which exceeds 5s on cold start. Combined with `GENIESIM_OBJECT_POSE_EARLY_FAIL=2`, after just 2 timeouts all remaining objects are skipped.
+
+**Fix**: `export GENIESIM_OBJECT_POSE_TIMEOUT_S=30` and `export GENIESIM_OBJECT_POSE_EARLY_FAIL=10`
+
+### 2. Strict preflight fails: "geniesim_root not visible locally"
+
+**Symptom**: `Strict realism preflight failed: geniesim_root not visible locally and no runtime_patch_markers readiness report was found`. Retries 5 times then pipeline fails.
+
+**Root cause**: When running the pipeline on the VM host (not inside the container), `/opt/geniesim/` doesn't exist. The strict preflight needs either the geniesim root directory OR a readiness probe JSON report.
+
+**Fix**: Generate the readiness report inside the container and copy it to the host:
+```bash
+sudo docker exec geniesim-server /isaac-sim/python.sh \
+  /workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/readiness_probe.py \
+  --strict --output /tmp/geniesim_runtime_readiness.json
+sudo docker cp geniesim-server:/tmp/geniesim_runtime_readiness.json /tmp/
+export GENIESIM_RUNTIME_READINESS_JSON=/tmp/geniesim_runtime_readiness.json
+```
+
+### 3. Running pipeline inside container starves Isaac Sim server
+
+**Symptom**: Pipeline and server compete for CPU/GPU → init_robot hangs, object pose queries timeout, everything is slow.
+
+**Root cause**: The Isaac Sim server (GPU physics + rendering) and the pipeline client both need significant CPU/GPU resources. Running both in the same container causes resource contention.
+
+**Fix**: Always run the pipeline on the VM host, connecting to the container's gRPC endpoint at `localhost:50051`. Set `CUROBO_REQUIRED=0` since cuRobo is only available inside the container — server-side IK (cuRobo-based) is used via gRPC instead.
+
+### 4. Dynamic objects fall through surfaces / init hangs (STRICT PATH)
+
+**Symptom**: After v3 restores objects to dynamic, they fall through tables/counters and end up at y=-19m. All IK fails because targets are unreachable.
+
+**Root cause**: Runtime collision mutation in init can destabilize/slow PhysX startup, and patch drift across restarts can produce duplicate/partial injections.
+
+**Fix**: Collision correctness is baked offline in `build_scene_usd.py` and validated by strict readiness (`collision_coverage == 1.0`, `mesh_prims_bad_dynamic_approx == 0`). Runtime `scene_collision` is validator-only and fails strict startup on invalid collision state. Startup now also resets patch targets from deterministic baselines (`GENIESIM_RESET_PATCH_BASELINE=1`) before reapplying patches.
+
+**Verification**: Strict readiness report must include:
+- `mesh_prims_total`
+- `mesh_prims_with_collision`
+- `mesh_prims_bad_dynamic_approx`
+- `collision_coverage`
+and pass with `collision_coverage=1.0`, `mesh_prims_bad_dynamic_approx=0`.

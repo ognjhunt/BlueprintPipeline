@@ -4029,6 +4029,18 @@ class LocalPipelineRunner:
                         f"Genie Sim data collection timed out for robot {current_robot}.",
                         "WARNING",
                     )
+                if bool(getattr(result, "fatal_realism_failure", False)):
+                    _fatal_code = str(
+                        getattr(result, "fatal_realism_code", None)
+                        or "STRICT_REALISM_FAILURE"
+                    )
+                    _fatal_message = str(
+                        getattr(result, "fatal_realism_message", None)
+                        or "strict realism violation"
+                    )
+                    raise NonRetryableError(
+                        f"Fatal realism violation ({_fatal_code}): {_fatal_message}"
+                    )
                 if not result or not result.success:
                     raise RetryableError("Local Genie Sim execution failed")
                 return result

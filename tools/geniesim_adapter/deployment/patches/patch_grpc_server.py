@@ -37,6 +37,7 @@ CAMERA_INTRINSICS_MARKER = "BlueprintPipeline camera_intrinsics grpc patch"
 CAMERA_ENCODING_MARKER = "BlueprintPipeline camera_encoding grpc patch"
 CAMERA_DICT_GUARD_MARKER = "BlueprintPipeline camera_dict_guard grpc patch"
 CAMERA_INFO_MARKER = "BlueprintPipeline grpc_camera_info patch"
+JOINT_POSITION_CONVERT_MARKER = "BlueprintPipeline joint_position_convert grpc patch"
 
 
 def _find_matching_paren(text, start):
@@ -61,8 +62,13 @@ def patch_file():
     with open(GRPC_SERVER, "r") as f:
         content = f.read()
 
-    # Check if fully patched (base + EE pose + camera dict guard)
-    if PATCH_MARKER in content and EE_POSE_MARKER in content and CAMERA_DICT_GUARD_MARKER in content:
+    # Check if fully patched (base + EE pose + camera dict guard + joint convert upgrade)
+    if (
+        PATCH_MARKER in content
+        and EE_POSE_MARKER in content
+        and CAMERA_DICT_GUARD_MARKER in content
+        and JOINT_POSITION_CONVERT_MARKER in content
+    ):
         print("[PATCH] grpc_server.py already fully patched — skipping")
         sys.exit(0)
 
@@ -215,7 +221,21 @@ def patch_file():
             "        if not isinstance(joint_positions, dict):\n"
             "            _jp_type = type(joint_positions)\n"
             "            print(f'[PATCH] get_joint_position got non-dict: {_jp_type}')\n"
-            "            return rsp\n"
+            "            # " + JOINT_POSITION_CONVERT_MARKER + "\n"
+            "            try:\n"
+            "                _cmd = getattr(self, 'server_function', None)\n"
+            "                _ui = getattr(_cmd, 'ui_builder', None) if _cmd else None\n"
+            "                _dof_names = list(getattr(_ui, 'dof_names', []) or [])\n"
+            "                _vals = np.asarray(joint_positions).flatten() if joint_positions is not None else np.asarray([])\n"
+            "                if _dof_names and len(_vals) == len(_dof_names):\n"
+            "                    joint_positions = {str(_dof_names[i]): float(_vals[i]) for i in range(len(_dof_names))}\n"
+            "                    print(f'[PATCH] get_joint_position converted {_jp_type} -> dict ({len(joint_positions)} joints)')\n"
+            "                else:\n"
+            "                    print(f'[PATCH] get_joint_position cannot convert {_jp_type}: dof={len(_dof_names)} values={len(_vals)}')\n"
+            "                    return rsp\n"
+            "            except Exception as _jp_conv_err:\n"
+            "                print(f'[PATCH] get_joint_position conversion failed: {_jp_conv_err}')\n"
+            "                return rsp\n"
             "        for joint_name in joint_positions:"
         )
         if old_get_jp in content:
@@ -260,6 +280,41 @@ def patch_file():
             content = content.replace(old_joint_12, new_joint_12)
             changes += 1
             print("[PATCH] Fixed get_joint_position dict-as-value (12-space)")
+
+    # Upgrade previously patched non-dict guard to conversion-capable logic.
+    if JOINT_POSITION_CONVERT_MARKER not in content:
+        old_guard = (
+            "        if not isinstance(joint_positions, dict):\n"
+            "            _jp_type = type(joint_positions)\n"
+            "            print(f'[PATCH] get_joint_position got non-dict: {_jp_type}')\n"
+            "            return rsp\n"
+            "        for joint_name in joint_positions:"
+        )
+        new_guard = (
+            "        if not isinstance(joint_positions, dict):\n"
+            "            _jp_type = type(joint_positions)\n"
+            "            print(f'[PATCH] get_joint_position got non-dict: {_jp_type}')\n"
+            "            # " + JOINT_POSITION_CONVERT_MARKER + "\n"
+            "            try:\n"
+            "                _cmd = getattr(self, 'server_function', None)\n"
+            "                _ui = getattr(_cmd, 'ui_builder', None) if _cmd else None\n"
+            "                _dof_names = list(getattr(_ui, 'dof_names', []) or [])\n"
+            "                _vals = np.asarray(joint_positions).flatten() if joint_positions is not None else np.asarray([])\n"
+            "                if _dof_names and len(_vals) == len(_dof_names):\n"
+            "                    joint_positions = {str(_dof_names[i]): float(_vals[i]) for i in range(len(_dof_names))}\n"
+            "                    print(f'[PATCH] get_joint_position converted {_jp_type} -> dict ({len(joint_positions)} joints)')\n"
+            "                else:\n"
+            "                    print(f'[PATCH] get_joint_position cannot convert {_jp_type}: dof={len(_dof_names)} values={len(_vals)}')\n"
+            "                    return rsp\n"
+            "            except Exception as _jp_conv_err:\n"
+            "                print(f'[PATCH] get_joint_position conversion failed: {_jp_conv_err}')\n"
+            "                return rsp\n"
+            "        for joint_name in joint_positions:"
+        )
+        if old_guard in content:
+            content = content.replace(old_guard, new_guard, 1)
+            changes += 1
+            print("[PATCH] Upgraded get_joint_position non-dict guard")
 
     # ── EE pose patches (always check, even on already-base-patched files) ──
 

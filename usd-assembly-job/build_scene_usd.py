@@ -1437,32 +1437,37 @@ def fix_internal_physics_conflicts(stage: Usd.Stage) -> int:
 
     Returns the number of fixes applied.
     """
-    scene_prim = stage.GetPrimAtPath("/World/Scene")
-    if not scene_prim or not scene_prim.IsValid():
+    fixed = 0
+    roots = []
+    for root_path in ("/World/Scene", "/World/Objects"):
+        root = stage.GetPrimAtPath(root_path)
+        if root and root.IsValid():
+            roots.append(root)
+    if not roots:
         return 0
 
-    fixed = 0
-    for obj_prim in scene_prim.GetChildren():
-        if not obj_prim.HasAPI(UsdPhysics.RigidBodyAPI):
-            continue
-        parent_kin = obj_prim.GetAttribute("physics:kinematicEnabled")
-        if not parent_kin:
-            continue
-        is_kinematic = parent_kin.Get()
+    for root in roots:
+        for obj_prim in root.GetChildren():
+            if not obj_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                continue
+            parent_kin = obj_prim.GetAttribute("physics:kinematicEnabled")
+            if not parent_kin:
+                continue
+            is_kinematic = parent_kin.Get()
 
-        for desc in Usd.PrimRange(obj_prim):
-            if desc == obj_prim:
-                continue
-            if not desc.HasAPI(UsdPhysics.RigidBodyAPI):
-                continue
-            child_kin = desc.GetAttribute("physics:kinematicEnabled")
-            if child_kin and child_kin.Get() != is_kinematic:
-                child_kin.Set(is_kinematic)
-                fixed += 1
-                logger.info(
-                    "[USD] Fixed internal kinematic conflict: %s -> kinematic=%s",
-                    desc.GetPath(), is_kinematic,
-                )
+            for desc in Usd.PrimRange(obj_prim):
+                if desc == obj_prim:
+                    continue
+                if not desc.HasAPI(UsdPhysics.RigidBodyAPI):
+                    continue
+                child_kin = desc.GetAttribute("physics:kinematicEnabled")
+                if child_kin and child_kin.Get() != is_kinematic:
+                    child_kin.Set(is_kinematic)
+                    fixed += 1
+                    logger.info(
+                        "[USD] Fixed internal kinematic conflict: %s -> kinematic=%s",
+                        desc.GetPath(), is_kinematic,
+                    )
 
     if fixed:
         logger.info("[USD] Fixed %d internal physics conflicts", fixed)
@@ -1530,8 +1535,130 @@ def _validate_usd_stage(stage: Usd.Stage, output_path: Path, objects: List[Dict]
     logger.info("[USD] Stage validation passed: %s", output_path)
 
 
+def _iter_scene_object_prims(stage: Usd.Stage) -> List[Usd.Prim]:
+    """Return object root prims from supported scene scopes."""
+    object_prims: List[Usd.Prim] = []
+    seen: Set[str] = set()
+    for root_path in ("/World/Scene", "/World/Objects"):
+        root_prim = stage.GetPrimAtPath(root_path)
+        if not root_prim or not root_prim.IsValid():
+            continue
+        for child in root_prim.GetChildren():
+            child_path = str(child.GetPath())
+            child_name = child.GetName()
+            if not child_name.startswith("obj_"):
+                continue
+            if child_path in seen:
+                continue
+            seen.add(child_path)
+            object_prims.append(child)
+    return object_prims
+
+
+def _bake_scene_collision_validity(stage: Usd.Stage) -> Dict[str, Any]:
+    """Ensure mesh-level collision validity offline and return strict metrics."""
+    allowed_dynamic_approx = {
+        "convexHull",
+        "convexDecomposition",
+        "boundingCube",
+        "boundingSphere",
+        "sdf",
+        "signedDistanceField",
+    }
+    disallowed_dynamic_approx = {"triangleMesh", "meshSimplification", "none", ""}
+
+    mesh_total = 0
+    mesh_with_collision = 0
+    mesh_bad_dynamic_approx = 0
+    collision_added = 0
+    dynamic_approx_fixed = 0
+
+    object_prims = _iter_scene_object_prims(stage)
+    for obj_prim in object_prims:
+        kin_attr = obj_prim.GetAttribute("physics:kinematicEnabled")
+        is_dynamic = bool(kin_attr and kin_attr.Get() is False)
+
+        for desc in Usd.PrimRange(obj_prim):
+            if not desc.IsA(UsdGeom.Mesh):
+                continue
+            mesh_total += 1
+            try:
+                if not desc.HasAPI(UsdPhysics.CollisionAPI):
+                    col_api = UsdPhysics.CollisionAPI.Apply(desc)
+                    col_api.CreateCollisionEnabledAttr().Set(True)
+                    collision_added += 1
+
+                if desc.HasAPI(UsdPhysics.CollisionAPI):
+                    mesh_with_collision += 1
+
+                approx_attr = desc.GetAttribute("physics:approximation")
+                approx_value = str(approx_attr.Get() or "") if approx_attr else ""
+                if not approx_value:
+                    desired = "convexDecomposition" if is_dynamic else "convexHull"
+                    desc.CreateAttribute(
+                        "physics:approximation", Sdf.ValueTypeNames.Token
+                    ).Set(desired)
+                    approx_value = desired
+                    if is_dynamic:
+                        dynamic_approx_fixed += 1
+                elif is_dynamic and approx_value in disallowed_dynamic_approx:
+                    desc.CreateAttribute(
+                        "physics:approximation", Sdf.ValueTypeNames.Token
+                    ).Set("convexDecomposition")
+                    approx_value = "convexDecomposition"
+                    dynamic_approx_fixed += 1
+
+                if is_dynamic and approx_value not in allowed_dynamic_approx:
+                    mesh_bad_dynamic_approx += 1
+            except Exception as exc:
+                logger.warning(
+                    "[USD] collision bake failed for %s: %s",
+                    desc.GetPath(),
+                    exc,
+                )
+                if is_dynamic:
+                    mesh_bad_dynamic_approx += 1
+
+    support_forced_kinematic = 0
+    for support_path in ("/World/GroundPlane", "/World/groundPlane", "/World/Ground"):
+        support_prim = stage.GetPrimAtPath(support_path)
+        if not support_prim or not support_prim.IsValid():
+            continue
+        if not support_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            continue
+        support_kin = support_prim.GetAttribute("physics:kinematicEnabled")
+        if support_kin and support_kin.Get() is False:
+            support_kin.Set(True)
+            support_forced_kinematic += 1
+
+    collision_coverage = 1.0 if mesh_total == 0 else float(mesh_with_collision) / float(mesh_total)
+    report = {
+        "mesh_prims_total": int(mesh_total),
+        "mesh_prims_with_collision": int(mesh_with_collision),
+        "mesh_prims_bad_dynamic_approx": int(mesh_bad_dynamic_approx),
+        "collision_coverage": round(collision_coverage, 4),
+        "collision_added": int(collision_added),
+        "dynamic_approx_fixed": int(dynamic_approx_fixed),
+        "support_prims_forced_kinematic": int(support_forced_kinematic),
+    }
+    logger.info(
+        "[USD] Collision bake: total=%s with_collision=%s bad_dynamic_approx=%s coverage=%.4f added=%s fixed=%s support_kinematic=%s",
+        report["mesh_prims_total"],
+        report["mesh_prims_with_collision"],
+        report["mesh_prims_bad_dynamic_approx"],
+        report["collision_coverage"],
+        report["collision_added"],
+        report["dynamic_approx_fixed"],
+        report["support_prims_forced_kinematic"],
+    )
+    return report
+
+
 def _validate_physics_coverage(
-    stage: Usd.Stage, output_path: Path, objects: List[Dict]
+    stage: Usd.Stage,
+    output_path: Path,
+    objects: List[Dict],
+    collision_report: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Path]:
     def _has_authored_attr(prim: Usd.Prim, attr_name: str) -> bool:
         attr = prim.GetAttribute(attr_name)
@@ -1545,11 +1672,22 @@ def _validate_physics_coverage(
             return material.GetPrim()
         return None
 
+    def _resolve_object_prim(oid: Any) -> Optional[Usd.Prim]:
+        for base_path in ("/World/Objects", "/World/Scene"):
+            candidate = stage.GetPrimAtPath(f"{base_path}/obj_{oid}")
+            if candidate and candidate.IsValid():
+                return candidate
+        return None
+
     report: Dict[str, Any] = {
         "total_objects": len(objects),
         "objects_with_manifest_physics": 0,
         "objects_with_usd_physics": 0,
         "missing_physics": [],
+        "mesh_prims_total": int((collision_report or {}).get("mesh_prims_total", 0)),
+        "mesh_prims_with_collision": int((collision_report or {}).get("mesh_prims_with_collision", 0)),
+        "mesh_prims_bad_dynamic_approx": int((collision_report or {}).get("mesh_prims_bad_dynamic_approx", 0)),
+        "collision_coverage": float((collision_report or {}).get("collision_coverage", 0.0)),
     }
 
     for obj in objects:
@@ -1566,7 +1704,7 @@ def _validate_physics_coverage(
 
         report["objects_with_manifest_physics"] += 1
 
-        prim = stage.GetPrimAtPath(f"/World/Objects/obj_{oid}")
+        prim = _resolve_object_prim(oid)
         missing: List[str] = []
 
         if not prim or not prim.IsValid():
@@ -1604,6 +1742,7 @@ def _validate_physics_coverage(
     coverage = 0.0
     if report["objects_with_manifest_physics"]:
         coverage = report["objects_with_usd_physics"] / report["objects_with_manifest_physics"]
+    report["coverage"] = round(coverage, 4)
     report["coverage_ratio"] = round(coverage, 4)
 
     report_path = output_path.with_suffix(".physics_report.json")
@@ -2002,12 +2141,18 @@ def build_scene(
         builder.add_cameras(cameras)
         builder.add_objects(objects, layout_objects, room_box)
 
+    with timed_phase("post-reference physics fixups"):
+        physics_conflicts_fixed = builder.fix_internal_physics_conflicts()
+        collision_report = _bake_scene_collision_validity(stage)
+
     root_layer = stage.GetRootLayer()
     custom_data = dict(root_layer.customLayerData or {})
     custom_data["layout_spatial_quality"] = layout_spatial_quality
     physics_report, physics_report_path = _validate_physics_coverage(
-        stage, output_path, objects
+        stage, output_path, objects, collision_report=collision_report
     )
+    custom_data["physics_conflicts_fixed"] = int(physics_conflicts_fixed)
+    custom_data["collision_report"] = collision_report
     custom_data["physics_coverage_report"] = physics_report
     custom_data["physics_coverage_report_path"] = str(physics_report_path)
     root_layer.customLayerData = custom_data

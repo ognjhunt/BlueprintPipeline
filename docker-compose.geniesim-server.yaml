@@ -33,6 +33,9 @@ services:
       GENIESIM_HEALTHCHECK: ${GENIESIM_HEALTHCHECK:-1}
       GENIESIM_SERVER_LOG: ${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
       GENIESIM_CAMERA_REQUIRE_DISPLAY: ${GENIESIM_CAMERA_REQUIRE_DISPLAY:-1}
+      GENIESIM_RUNTIME_READINESS_JSON: ${GENIESIM_RUNTIME_READINESS_JSON:-/workspace/BlueprintPipeline/.geniesim_runtime_readiness.json}
+      GENIESIM_RUNTIME_PRESTART_JSON: ${GENIESIM_RUNTIME_PRESTART_JSON:-/workspace/BlueprintPipeline/.geniesim_runtime_prestart_probe.json}
+      GENIESIM_KEEP_OBJECTS_KINEMATIC: ${GENIESIM_KEEP_OBJECTS_KINEMATIC:-0}
       # DISPLAY must point to an Xorg server with NVIDIA GLX for camera RGB
       # rendering. The host starts Xorg :99 and shares /tmp/.X11-unix.
       DISPLAY: ${DISPLAY:-:99}
@@ -57,7 +60,11 @@ services:
     shm_size: "16gb"
     privileged: true
     healthcheck:
-      test: ["CMD", "/isaac-sim/python.sh", "/workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/readiness_probe.py"]
+      test:
+        [
+          "CMD-SHELL",
+          "/isaac-sim/python.sh /workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/readiness_probe.py --check-patches --geniesim-root ${GENIESIM_ROOT:-/opt/geniesim} --require-patch-set strict --forbid-patch-set strict --output ${GENIESIM_RUNTIME_READINESS_JSON:-/workspace/BlueprintPipeline/.geniesim_runtime_readiness.json}",
+        ]
       interval: 10s
       timeout: 10s
       retries: 18

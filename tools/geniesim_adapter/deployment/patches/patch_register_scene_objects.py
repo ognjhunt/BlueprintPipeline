@@ -11,10 +11,14 @@ snap the object back to its pre-teleport position), the restore is deferred for
 several physics steps so PhysX fully registers the new xformOp position while
 the object is still kinematic.
 """
+import os
 import re
 import sys
 
-CC_PATH = "/opt/geniesim/source/data_collection/server/command_controller.py"
+CC_PATH = os.path.join(
+    os.environ.get("GENIESIM_ROOT", "/opt/geniesim"),
+    "source", "data_collection", "server", "command_controller.py",
+)
 
 MARKER = "# BPv3_pre_play_kinematic"
 MARKER_POSE = "# BPv3_dynamic_teleport"
@@ -25,6 +29,60 @@ MARKER_DEFERRED = "# BPv3_deferred_dynamic_restore"
 DEFERRED_STEPS = 5
 
 
+def _strip_old_stripped_blocks(src: str) -> str:
+    """Remove any old pre-play blocks left behind by marker-stripping sed commands.
+
+    When we `sed 's/BPv3_pre_play_kinematic/BPv3_STRIPPED/g'`, the old code block
+    stays in the file with the new marker name. This causes DUPLICATE pre-play
+    blocks on the next patch application. Remove any block that starts with
+    '# BPv3_STRIPPED' and ends before the next '# BPv3_' or 'self._play()'.
+    """
+    stripped_marker = "# BPv3_STRIPPED"
+    if stripped_marker not in src:
+        return src
+
+    # Find and remove each stripped block
+    # A stripped block starts with the marker line and ends before the
+    # next non-blank line at the same or lower indentation that is NOT
+    # part of the block (try/except, print, etc.)
+    import re as _re_strip
+    lines = src.split('\n')
+    result_lines = []
+    skip_until_outdent = False
+    block_indent = 0
+
+    for line in lines:
+        if stripped_marker in line and not skip_until_outdent:
+            # Start skipping this block
+            skip_until_outdent = True
+            block_indent = len(line) - len(line.lstrip())
+            continue
+
+        if skip_until_outdent:
+            stripped = line.lstrip()
+            if stripped == '':
+                continue  # skip blank lines inside block
+            line_indent = len(line) - len(stripped)
+            if line_indent <= block_indent and not stripped.startswith('#'):
+                # Check if this is the start of a new significant block
+                # (like '# BPv3_pre_play_kinematic' or 'self._play()')
+                if (MARKER in line or 'self._play()' in line
+                        or stripped.startswith('def ')
+                        or stripped.startswith('class ')):
+                    skip_until_outdent = False
+                    result_lines.append(line)
+                    continue
+            # Still inside the stripped block — keep skipping
+            continue
+
+        result_lines.append(line)
+
+    new_src = '\n'.join(result_lines)
+    if stripped_marker not in new_src:
+        print("[PATCH] v3: cleaned up old STRIPPED block(s)")
+    return new_src
+
+
 def apply():
     with open(CC_PATH) as f:
         src = f.read()
@@ -32,6 +90,9 @@ def apply():
     if MARKER in src:
         print("[PATCH] v3 scene_objects: already applied")
         return True
+
+    # Clean up any old STRIPPED blocks from previous marker-stripping
+    src = _strip_old_stripped_blocks(src)
 
     # ── Part 1: Before self._play(), make dynamic objects kinematic ──
     # Find the exact line: "            self._play()" inside _init_robot_cfg
@@ -52,6 +113,8 @@ def apply():
             # PhysX tensor view invalidation during articulation init.
             self._bp_dynamic_to_restore = []
             self._bp_deferred_dynamic_restore = {{}}  # prim_path -> countdown
+            self._bp_kinematic_static = []  # prims forced kinematic permanently
+            self._bp_collision_applied_pre_play = False
             try:
                 _sp_pre = stage.GetPrimAtPath("/World/Scene")
                 if _sp_pre and _sp_pre.IsValid():
@@ -64,8 +127,21 @@ def apply():
                             self._bp_dynamic_to_restore.append(str(_ch_pre.GetPath()))
                 if self._bp_dynamic_to_restore:
                     print(f"[PATCH] Pre-play: {{len(self._bp_dynamic_to_restore)}} objects set to kinematic")
+                # Ensure GroundPlane and other structural prims stay kinematic
+                for _gp_path in ["/World/GroundPlane", "/World/groundPlane", "/World/Ground"]:
+                    _gp = stage.GetPrimAtPath(_gp_path)
+                    if _gp and _gp.IsValid() and _gp.HasAPI(UsdPhysics.RigidBodyAPI):
+                        _gp_ka = _gp.GetAttribute("physics:kinematicEnabled")
+                        if _gp_ka and _gp_ka.Get() == False:
+                            _gp_ka.Set(True)
+                            self._bp_kinematic_static.append(_gp_path)
+                            print(f"[PATCH] Pre-play: forced {{_gp_path}} kinematic (ground plane)")
             except Exception as _e_pp:
                 print(f"[PATCH] Pre-play kinematic toggle failed: {{_e_pp}}")
+
+            # Runtime collision mutation is intentionally disabled.
+            # Collision correctness must be baked into scene USD assets offline.
+            self._bp_collision_applied_pre_play = False
 '''
 
     src = src.replace(play_target, pre_play_code + play_target)

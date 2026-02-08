@@ -84,9 +84,20 @@ def test_start_server_honors_startup_timeout(monkeypatch, tmp_path, caplog):
     log_dir.mkdir()
     recording_dir = tmp_path / "recordings"
     recording_dir.mkdir()
+    geniesim_root = tmp_path / "geniesim_root"
+    geniesim_root.mkdir()
+    server_script = geniesim_root / "source/data_collection/scripts/data_collector_server.py"
+    server_script.parent.mkdir(parents=True, exist_ok=True)
+    server_script.write_text("#!/usr/bin/env python3\n")
+    isaac_sim_path = tmp_path / "isaac-sim"
+    isaac_sim_path.mkdir()
+    isaac_python = isaac_sim_path / "python.sh"
+    isaac_python.write_text("#!/bin/sh\nexit 0\n")
+    isaac_python.chmod(0o755)
 
     config = lf.GenieSimConfig(
-        geniesim_root=tmp_path / "missing_geniesim",
+        geniesim_root=geniesim_root,
+        isaac_sim_path=isaac_sim_path,
         log_dir=log_dir,
         recording_dir=recording_dir,
         server_startup_timeout_s=0.2,
@@ -297,3 +308,165 @@ def test_call_grpc_non_retryable_error_no_retry(monkeypatch):
     assert sleep_calls == []
     assert client._circuit_breaker.failures == 1
     assert client._circuit_breaker.successes == 0
+
+
+def _make_framework(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> lf.GenieSimLocalFramework:
+    monkeypatch.setenv("ALLOW_GENIESIM_MOCK", "1")
+    monkeypatch.setenv("PIPELINE_ENV", "development")
+    monkeypatch.setenv("STRICT_REALISM", "1")
+    recording_dir = tmp_path / "recordings"
+    recording_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    config = lf.GenieSimConfig(
+        geniesim_root=tmp_path / "missing_geniesim_root",
+        recording_dir=recording_dir,
+        log_dir=log_dir,
+        cleanup_tmp=False,
+    )
+    return lf.GenieSimLocalFramework(config=config, verbose=False)
+
+
+@pytest.mark.unit
+def test_runtime_patch_health_check_fails_when_containerized_and_no_readiness_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    framework = _make_framework(tmp_path, monkeypatch)
+    monkeypatch.setenv(
+        "GENIESIM_RUNTIME_READINESS_JSON",
+        str(tmp_path / "missing_runtime_readiness.json"),
+    )
+    monkeypatch.setenv(
+        "GENIESIM_RUNTIME_PRESTART_JSON",
+        str(tmp_path / "missing_runtime_prestart.json"),
+    )
+
+    ok, details = framework._runtime_patch_health_check()
+
+    assert ok is False
+    assert any("no runtime_patch_markers readiness report" in msg for msg in details)
+
+
+@pytest.mark.unit
+def test_strict_effort_semantics_reject_estimated_efforts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    framework = _make_framework(tmp_path, monkeypatch)
+
+    with pytest.raises(lf.FatalRealismError) as excinfo:
+        framework._enforce_strict_effort_semantics(
+            efforts_source="estimated_inverse_dynamics",
+            real_effort_count=0,
+            estimated_effort_count=4,
+            effort_missing_count=0,
+            total_frames=4,
+        )
+
+    assert excinfo.value.reason_code == "STRICT_EFFORTS_SOURCE"
+
+
+@pytest.mark.unit
+def test_strict_contact_semantics_reject_placeholder_contacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    framework = _make_framework(tmp_path, monkeypatch)
+
+    with pytest.raises(lf.FatalRealismError) as excinfo:
+        framework._enforce_strict_contact_semantics(
+            step_idx=12,
+            phase="grasp",
+            manipulation_phase=True,
+            contact_rpc_available=True,
+            strict_contacts=[],
+            collision_provenance="physx_contact_report",
+            contact_forces_payload={
+                "provenance": "physx_contact_report",
+                "available": True,
+            },
+            contact_rows=[],
+        )
+
+    assert excinfo.value.reason_code == "STRICT_CONTACT_PLACEHOLDER"
+
+
+@pytest.mark.unit
+def test_strict_object_motion_semantics_rejects_ee_proxy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    framework = _make_framework(tmp_path, monkeypatch)
+
+    with pytest.raises(lf.FatalRealismError) as excinfo:
+        framework._enforce_strict_object_motion_semantics(
+            requires_motion=True,
+            any_moved=True,
+            max_displacement=0.2,
+            scene_state_provenances=["physx_server"],
+            physics_probe_enabled=True,
+            used_ee_proxy=True,
+        )
+
+    assert excinfo.value.reason_code == "STRICT_OBJECT_MOTION_EE_PROXY"
+
+
+@pytest.mark.unit
+def test_run_data_collection_aborts_immediately_on_fatal_realism(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    framework = _make_framework(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(framework, "_validate_required_environment", lambda *_: None)
+    monkeypatch.setattr(framework, "is_server_running", lambda: True)
+    monkeypatch.setattr(framework._client, "is_connected", lambda: True)
+    monkeypatch.setattr(framework._client, "ping", lambda timeout=10.0: True)
+    monkeypatch.setattr(framework, "_init_robot_on_server", lambda *args, **kwargs: None)
+    monkeypatch.setattr(framework, "_strict_realism_preflight", lambda: None)
+    monkeypatch.setattr(
+        framework,
+        "_build_object_metadata_from_scene_config",
+        lambda **kwargs: {
+            "nodes": [],
+            "dynamic_ids": [],
+            "static_ids": [],
+            "variation_ids": [],
+            "object_sim_roles": {},
+            "object_prim_aliases": {},
+            "manifest_transforms": {},
+        },
+    )
+    monkeypatch.setattr(framework, "_configure_task", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        framework._client,
+        "reset_environment",
+        lambda: lf.GrpcCallResult(success=True, available=True, payload={}),
+    )
+    monkeypatch.setattr(
+        framework,
+        "_run_single_episode",
+        lambda **kwargs: {
+            "success": False,
+            "error": "placeholder contacts",
+            "fatal_realism_failure": True,
+            "fatal_realism_code": "STRICT_CONTACT_PLACEHOLDER",
+            "fatal_realism_message": "placeholder contacts",
+        },
+    )
+
+    result = framework.run_data_collection(
+        task_config={
+            "name": "strict_test",
+            "robot_config": {"type": "g1", "base_position": [0.0, 0.0, 0.0]},
+            "suggested_tasks": [{"task_name": "task_0", "target_object": "toaster"}],
+        },
+        scene_config={"nodes": [], "objects": []},
+        episodes_per_task=1,
+    )
+
+    assert result.success is False
+    assert result.fatal_realism_failure is True
+    assert result.fatal_realism_code == "STRICT_CONTACT_PLACEHOLDER"
+    assert result.episodes_passed == 0

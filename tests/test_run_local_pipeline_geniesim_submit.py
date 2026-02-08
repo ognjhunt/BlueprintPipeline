@@ -1,4 +1,7 @@
 import warnings
+import json
+from pathlib import Path
+from types import SimpleNamespace
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -99,3 +102,58 @@ def test_auto_trigger_import_after_submit(temp_test_dir, monkeypatch):
         PipelineStep.GENIESIM_SUBMIT,
         PipelineStep.GENIESIM_IMPORT,
     ]
+
+
+def test_geniesim_submit_fatal_realism_is_marked_non_retryable(tmp_path, monkeypatch):
+    runner = LocalPipelineRunner(
+        scene_dir=tmp_path,
+        verbose=False,
+        skip_interactive=True,
+        environment_type="kitchen",
+    )
+    geniesim_dir = tmp_path / "geniesim"
+    geniesim_dir.mkdir(parents=True, exist_ok=True)
+    (geniesim_dir / "scene_graph.json").write_text("{}")
+    (geniesim_dir / "asset_index.json").write_text("{}")
+    (geniesim_dir / "task_config.json").write_text("{}")
+    (geniesim_dir / "merged_scene_manifest.json").write_text("{}")
+
+    monkeypatch.setattr(runner, "_resolve_geniesim_robot_types", lambda: ["franka"])
+    monkeypatch.setattr(runner, "_run_with_retry", lambda _step, action: action())
+
+    import tools.geniesim_adapter.local_framework as local_framework_mod
+
+    monkeypatch.setattr(
+        local_framework_mod,
+        "run_geniesim_preflight",
+        lambda *_args, **_kwargs: {"ok": True},
+    )
+    monkeypatch.setattr(
+        local_framework_mod,
+        "run_local_data_collection",
+        lambda **_kwargs: SimpleNamespace(
+            success=False,
+            timed_out=False,
+            fatal_realism_failure=True,
+            fatal_realism_code="STRICT_EFFORTS_SOURCE",
+            fatal_realism_message="missing physx efforts",
+            episodes_collected=0,
+            episodes_passed=0,
+        ),
+    )
+
+    result = runner._run_geniesim_submit()
+
+    assert result.success is False
+    assert result.outputs["job_status"] == "failed"
+
+    job_payload_path = result.outputs["job_payload"]
+    payload = json.loads(Path(job_payload_path).read_text())
+    failure_detail = (
+        payload.get("failure_details", {})
+        .get("by_robot", {})
+        .get("franka", {})
+        .get("error", "")
+    )
+    assert "Fatal realism violation" in failure_detail
+    assert "STRICT_EFFORTS_SOURCE" in failure_detail
