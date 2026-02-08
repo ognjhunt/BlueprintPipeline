@@ -162,6 +162,51 @@ if [ -f "${_SCENE_OBJ_PATCH}" ]; then
   fi
 fi
 
+# ── Apply deferred dynamic restore patch (v4) ──
+# Must run AFTER register_scene_objects (v3) which creates the patterns v4 modifies.
+_DEFERRED_PATCH="/workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/patch_deferred_dynamic_restore.py"
+if [ -f "${_DEFERRED_PATCH}" ]; then
+  _CC="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+  if ! grep -qF "BPv4_deferred_dynamic_restore" "${_CC}" 2>/dev/null; then
+    echo "[geniesim] Applying deferred dynamic restore patch (v4)..."
+    "${ISAAC_SIM_PATH}/python.sh" "${_DEFERRED_PATCH}" 2>&1 || true
+  fi
+fi
+
+# ── Apply dynamic teleport v5 patch ──
+# Fixes usd_objects branch to handle dynamic rigid bodies with kinematic toggle.
+_V5_PATCH="/workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/patch_dynamic_teleport_v5.py"
+if [ -f "${_V5_PATCH}" ]; then
+  _CC="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+  if ! grep -qF "BPv5_dynamic_teleport_usd_objects" "${_CC}" 2>/dev/null; then
+    echo "[geniesim] Applying dynamic teleport v5 patch..."
+    "${ISAAC_SIM_PATH}/python.sh" "${_V5_PATCH}" 2>&1 || true
+  fi
+fi
+
+# ── Apply fix_dynamic_prims_overwrite v6 patch ──
+# Fixes _bp_dynamic_scene_prims being overwritten to empty set by old register code.
+_V6_PATCH="/workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/patch_fix_dynamic_prims_overwrite.py"
+if [ -f "${_V6_PATCH}" ]; then
+  _CC="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+  if ! grep -qF "BPv6_fix_dynamic_prims" "${_CC}" 2>/dev/null; then
+    echo "[geniesim] Applying fix_dynamic_prims_overwrite v6 patch..."
+    "${ISAAC_SIM_PATH}/python.sh" "${_V6_PATCH}" 2>&1 || true
+  fi
+fi
+
+# ── Apply keep_objects_kinematic v7 patch ──
+# Prevents v3 dynamic restore — objects stay kinematic so they don't fall
+# through surfaces lacking collision geometry.
+_V7_PATCH="/workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/patches/patch_keep_objects_kinematic.py"
+if [ -f "${_V7_PATCH}" ]; then
+  _CC="${GENIESIM_ROOT}/source/data_collection/server/command_controller.py"
+  if ! grep -qF "BPv7_keep_kinematic" "${_CC}" 2>/dev/null; then
+    echo "[geniesim] Applying keep_objects_kinematic v7 patch..."
+    "${ISAAC_SIM_PATH}/python.sh" "${_V7_PATCH}" 2>&1 || true
+  fi
+fi
+
 _SERVER_ARGS=""
 [ "${GENIESIM_HEADLESS}" = "1" ] && _SERVER_ARGS="${_SERVER_ARGS} --headless"
 # Enable cuRobo motion planner for server-side IK

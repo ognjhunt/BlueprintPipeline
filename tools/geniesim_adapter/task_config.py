@@ -259,7 +259,7 @@ class TaskConfigGenerator:
 
     Usage:
         generator = TaskConfigGenerator()
-        config = generator.generate(manifest_dict, robot_type="franka")
+        config = generator.generate(manifest_dict, robot_type="g1")
         config.save(Path("output/task_config.json"))
     """
 
@@ -284,7 +284,7 @@ class TaskConfigGenerator:
     def generate(
         self,
         manifest: Dict[str, Any],
-        robot_type: str = "franka",
+        robot_type: str = "g1",
         urdf_path: Optional[str] = None,
         max_tasks: int = 50,
         strict_reachability: bool = False,
@@ -1236,15 +1236,50 @@ Return JSON with this exact structure:
                     "[[min_x, min_y, min_z], [max_x, max_y, max_z]]."
                 )
             else:
-                # Default workspace
+                # Default workspace — will be expanded below if objects exist
                 workspace_bounds = [[-0.5, -0.5, 0.0], [1.0, 1.0, 1.5]]
 
-        # Robot base position (center of workspace)
-        base_position = [
-            (workspace_bounds[0][0] + workspace_bounds[1][0]) / 2,
-            (workspace_bounds[0][1] + workspace_bounds[1][1]) / 2,
-            (workspace_bounds[0][2] + workspace_bounds[1][2]) / 2,
-        ]
+        # Robot base position: prefer centroid of manipulable object positions
+        # (so the robot is within reach of most objects), fall back to
+        # workspace center if no object positions are available.
+        _obj_positions = []
+        for _obj in objects:
+            _pos = _obj.get("transform", {}).get("position")
+            if _pos and isinstance(_pos, dict):
+                _obj_positions.append([
+                    float(_pos.get("x", 0)), float(_pos.get("y", 0)), float(_pos.get("z", 0)),
+                ])
+            elif _pos and isinstance(_pos, (list, tuple)) and len(_pos) >= 3:
+                _obj_positions.append([float(_pos[0]), float(_pos[1]), float(_pos[2])])
+        if _obj_positions:
+            _centroid = [
+                sum(p[0] for p in _obj_positions) / len(_obj_positions),
+                sum(p[1] for p in _obj_positions) / len(_obj_positions),
+                0.0,  # Robot base at floor level
+            ]
+            # Offset 0.55m back from centroid (so objects are within reach)
+            base_position = [_centroid[0] - 0.55, _centroid[1], 0.0]
+            self.log(
+                f"Robot base from object centroid: {[round(v, 3) for v in base_position]} "
+                f"({len(_obj_positions)} objects)",
+            )
+            # Expand workspace_bounds to encompass all object positions + 1m margin
+            _xs = [p[0] for p in _obj_positions]
+            _ys = [p[1] for p in _obj_positions]
+            _zs = [p[2] for p in _obj_positions]
+            workspace_bounds = [
+                [min(_xs) - 1.0, min(_ys) - 1.0, 0.0],
+                [max(_xs) + 1.0, max(_ys) + 1.0, max(_zs) + 1.0],
+            ]
+            self.log(
+                f"Workspace bounds expanded from objects: {[[round(v, 2) for v in b] for b in workspace_bounds]}",
+            )
+        else:
+            base_position = [
+                (workspace_bounds[0][0] + workspace_bounds[1][0]) / 2,
+                (workspace_bounds[0][1] + workspace_bounds[1][1]) / 2,
+                0.0,  # Floor level, not workspace center z
+            ]
 
         return RobotConfig(
             robot_type=robot_type,
@@ -1292,7 +1327,7 @@ Return JSON with this exact structure:
 def generate_task_config(
     manifest_path: Path,
     output_path: Optional[Path] = None,
-    robot_type: str = "franka",
+    robot_type: str = "g1",
     verbose: bool = True,
     strict_reachability: bool = False,
 ) -> GenieSimTaskConfig:

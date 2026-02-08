@@ -126,7 +126,11 @@ if [ -d "${PATCHES_DIR}" ]; then
     "${PATCHES_DIR}/patch_set_joint_guard.py" \
     "${PATCHES_DIR}/patch_camera_crash_guard.py" \
     "${PATCHES_DIR}/patch_sim_thread_physics_cache.py" \
-    "${PATCHES_DIR}/patch_autoplay.py"; do
+    "${PATCHES_DIR}/patch_autoplay.py" \
+    "${PATCHES_DIR}/patch_register_scene_objects.py" \
+    "${PATCHES_DIR}/patch_deferred_dynamic_restore.py" \
+    "${PATCHES_DIR}/patch_dynamic_teleport_v5.py" \
+    "${PATCHES_DIR}/patch_fix_dynamic_prims_overwrite.py"; do
     if [ -f "${patch_script}" ]; then
       "${ISAAC_SIM_PATH}/python.sh" "${patch_script}" || echo "[geniesim] WARNING: ${patch_script} failed (non-fatal)"
     fi

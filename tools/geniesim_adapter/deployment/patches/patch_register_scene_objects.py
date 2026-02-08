@@ -5,14 +5,24 @@ Injects into _init_robot_cfg:
 - BEFORE self._play(): make dynamic objects kinematic (so physics stays stable)
 - AFTER articulation init completes: restore them to dynamic
 
-Also patches _set_object_pose to toggle kinematic for dynamic body teleport.
+Also patches _set_object_pose to use DEFERRED kinematic restore for dynamic body
+teleport. Instead of toggling kinematic=False immediately (which causes PhysX to
+snap the object back to its pre-teleport position), the restore is deferred for
+several physics steps so PhysX fully registers the new xformOp position while
+the object is still kinematic.
 """
+import re
 import sys
 
 CC_PATH = "/opt/geniesim/source/data_collection/server/command_controller.py"
 
 MARKER = "# BPv3_pre_play_kinematic"
 MARKER_POSE = "# BPv3_dynamic_teleport"
+MARKER_DEFERRED = "# BPv3_deferred_dynamic_restore"
+
+# Number of physics steps to keep object kinematic after teleport.
+# At 60 Hz physics, 5 steps = ~83 ms — enough for PhysX to latch the new pose.
+DEFERRED_STEPS = 5
 
 
 def apply():
@@ -41,6 +51,7 @@ def apply():
             # Make dynamic scene objects kinematic before _play() to prevent
             # PhysX tensor view invalidation during articulation init.
             self._bp_dynamic_to_restore = []
+            self._bp_deferred_dynamic_restore = {{}}  # prim_path -> countdown
             try:
                 _sp_pre = stage.GetPrimAtPath("/World/Scene")
                 if _sp_pre and _sp_pre.IsValid():
@@ -97,6 +108,8 @@ def apply():
     src = src.replace(restore_target, restore_target + post_init_code)
 
     # ── Part 3: Patch _set_object_pose for dynamic body teleport ──
+    # Uses DEFERRED restore: sets kinematic=True before teleport, then
+    # schedules kinematic=False after N physics steps via on_physics_step hook.
     old_pose = '''            else:
                 stage = omni.usd.get_context().get_stage()
                 if not stage:
@@ -122,41 +135,134 @@ def apply():
                         pass
                 translate_attr = prim.GetAttribute("xformOp:translate")'''
 
-    # Also need the restore after rotation is set
+    # Also need the deferred restore after rotation is set
     old_pose_end = '''                    orient_attr.Set(quat_type(*rotation_data))'''
 
     # Count occurrences — should be in the else branch of _set_object_pose
     if old_pose in src:
         src = src.replace(old_pose, new_pose, 1)
 
-        # Now add the restore-to-dynamic after orient_attr.Set in that same else block
-        # Find the pose block we just modified (it has our marker)
+        # Now add the DEFERRED restore after orient_attr.Set in that same else block
+        # Instead of immediately setting kinematic=False, schedule it for N steps later
         marker_idx = src.index(MARKER_POSE)
-        # Find the next orient_attr.Set after our marker
         rest_after = src[marker_idx:]
         orient_idx = rest_after.index(old_pose_end)
         abs_orient_end = marker_idx + orient_idx + len(old_pose_end)
 
-        restore_code = '''
+        restore_code = f'''
                 if _is_dyn_tp:
-                    try:
-                        UsdPhysics.RigidBodyAPI(prim).GetKinematicEnabledAttr().Set(False)
-                    except Exception:
-                        pass'''
+                    # Deferred restore: keep kinematic for {DEFERRED_STEPS} physics steps
+                    # so PhysX fully registers the new xformOp position before
+                    # re-enabling dynamic simulation.
+                    _deferred = getattr(self, "_bp_deferred_dynamic_restore", None)
+                    if _deferred is None:
+                        self._bp_deferred_dynamic_restore = {{}}
+                        _deferred = self._bp_deferred_dynamic_restore
+                    _deferred[pose["prim_path"]] = {DEFERRED_STEPS}'''
 
         src = src[:abs_orient_end] + restore_code + src[abs_orient_end:]
-        print("[PATCH] dynamic_teleport: applied")
+        print("[PATCH] dynamic_teleport: applied (deferred restore)")
     elif MARKER_POSE in src:
         print("[PATCH] dynamic_teleport: already applied")
     else:
         # The old pose code might have already been patched by a previous version
         print("[PATCH] WARNING: _set_object_pose fallback not found (may be pre-patched)")
 
+    # ── Part 4: Inject deferred restore hook into on_physics_step ──
+    # This runs on the sim thread every physics step and restores objects
+    # to dynamic after the countdown expires.
+    _inject_deferred_restore_hook(src)
+    # Re-read since _inject writes directly
+    with open(CC_PATH) as f:
+        src = f.read()
+    if MARKER_DEFERRED not in src:
+        # Injection via helper failed; do inline injection
+        src = _inject_deferred_restore_inline(src)
+
     with open(CC_PATH, 'w') as f:
         f.write(src)
 
     print("[PATCH] v3 scene_objects: all patches applied successfully")
     return True
+
+
+def _inject_deferred_restore_inline(src: str) -> str:
+    """Inject the deferred dynamic restore logic into on_physics_step.
+
+    Must work whether or not patch_sim_thread_physics_cache has already
+    added its own on_physics_step hook.
+    """
+    if MARKER_DEFERRED in src:
+        print("[PATCH] deferred_restore hook: already present")
+        return src
+
+    # Find on_physics_step method definition
+    pattern = re.compile(
+        r"^([ \t]+)def on_physics_step\(self.*?\):\s*\n",
+        re.MULTILINE,
+    )
+    match = pattern.search(src)
+    if not match:
+        print("[PATCH] WARNING: on_physics_step not found — deferred restore hook not injected")
+        return src
+
+    method_indent = match.group(1)
+    body_indent = method_indent + "    "
+    insert_pos = match.end()
+
+    # Skip past docstring if present
+    doc_pattern = re.compile(
+        r'^[ \t]*(?:"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\')[ \t]*\n',
+        re.MULTILINE,
+    )
+    doc_match = doc_pattern.match(src[insert_pos:])
+    if doc_match:
+        insert_pos += doc_match.end()
+
+    hook_code = f"""{body_indent}{MARKER_DEFERRED}
+{body_indent}# Process deferred kinematic -> dynamic restores for teleported objects.
+{body_indent}# After N physics steps with kinematic=True, PhysX has registered the
+{body_indent}# new xformOp position; safe to re-enable dynamic simulation.
+{body_indent}try:
+{body_indent}    _bp_ddr = getattr(self, '_bp_deferred_dynamic_restore', None)
+{body_indent}    if _bp_ddr:
+{body_indent}        _bp_ddr_done = []
+{body_indent}        for _bp_ddr_path, _bp_ddr_count in list(_bp_ddr.items()):
+{body_indent}            _bp_ddr_count -= 1
+{body_indent}            if _bp_ddr_count <= 0:
+{body_indent}                try:
+{body_indent}                    import omni.usd
+{body_indent}                    _bp_ddr_stage = omni.usd.get_context().get_stage()
+{body_indent}                    if _bp_ddr_stage:
+{body_indent}                        _bp_ddr_prim = _bp_ddr_stage.GetPrimAtPath(_bp_ddr_path)
+{body_indent}                        if _bp_ddr_prim and _bp_ddr_prim.IsValid():
+{body_indent}                            from pxr import UsdPhysics
+{body_indent}                            UsdPhysics.RigidBodyAPI(_bp_ddr_prim).GetKinematicEnabledAttr().Set(False)
+{body_indent}                            print(f'[DEFERRED_RESTORE] {{_bp_ddr_path}} restored to dynamic')
+{body_indent}                except Exception as _bp_ddr_err:
+{body_indent}                    print(f'[DEFERRED_RESTORE] Error restoring {{_bp_ddr_path}}: {{_bp_ddr_err}}')
+{body_indent}                _bp_ddr_done.append(_bp_ddr_path)
+{body_indent}            else:
+{body_indent}                _bp_ddr[_bp_ddr_path] = _bp_ddr_count
+{body_indent}        for _bp_ddr_d in _bp_ddr_done:
+{body_indent}            _bp_ddr.pop(_bp_ddr_d, None)
+{body_indent}except Exception as _bp_ddr_outer_err:
+{body_indent}    if not getattr(self, '_bp_ddr_err_logged', False):
+{body_indent}        print(f'[DEFERRED_RESTORE] Hook error: {{_bp_ddr_outer_err}}')
+{body_indent}        self._bp_ddr_err_logged = True
+"""
+
+    src = src[:insert_pos] + hook_code + src[insert_pos:]
+    print("[PATCH] deferred_restore hook: injected into on_physics_step")
+    return src
+
+
+def _inject_deferred_restore_hook(src: str) -> bool:
+    """Write patched source with deferred restore hook."""
+    result = _inject_deferred_restore_inline(src)
+    with open(CC_PATH, 'w') as f:
+        f.write(result)
+    return MARKER_DEFERRED in result
 
 
 if __name__ == "__main__":

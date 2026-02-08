@@ -3175,6 +3175,23 @@ class GenieSimGRPCClient:
                     logger.debug(f"[OBS] Manifest fallback matched via part strip: {obj_id} -> {candidate}")
                     break
 
+        # Case-insensitive fallback: compare lowercased keys
+        if transform is None:
+            _obj_lower = obj_id.lower()
+            for _mk, _mv in manifest_transforms.items():
+                if _mk.lower() == _obj_lower:
+                    transform = _mv
+                    logger.debug(f"[OBS] Manifest fallback matched via case-insensitive: {obj_id} -> {_mk}")
+                    break
+            # Also try the numeric-suffix base name (e.g., "Toaster003")
+            if transform is None:
+                _base_lower = obj_id.rsplit("/", 1)[-1].lower()
+                for _mk, _mv in manifest_transforms.items():
+                    if _mk.rsplit("/", 1)[-1].lower() == _base_lower:
+                        transform = _mv
+                        logger.debug(f"[OBS] Manifest fallback matched via base-name: {obj_id} -> {_mk}")
+                        break
+
         if transform is None:
             return None
 
@@ -4096,9 +4113,21 @@ class GenieSimGRPCClient:
 
         pose_message = self._pose_from_data(pose) or se3_pose_pb2.SE3RpyPose()
 
+        # Resolve to full prim path (e.g., "Toaster003" -> "/World/Scene/obj_Toaster003")
+        # so the server can locate the object in its usd_objects dict.
+        resolved_prim_path = object_id
+        if not object_id.startswith("/"):
+            candidates = self._resolve_object_prim_candidates(object_id)
+            # Use the cached resolution if available, otherwise try first candidate with /World/Scene/
+            if hasattr(self, "_resolved_prim_cache") and object_id in self._resolved_prim_cache:
+                resolved_prim_path = self._resolved_prim_cache[object_id]
+            elif candidates:
+                resolved_prim_path = candidates[0]
+            logger.info(f"[set_object_pose] Resolved {object_id} -> {resolved_prim_path}")
+
         def _request() -> SetObjectPoseRsp:
             request = SetObjectPoseReq(
-                object_pose=[ObjectPose(prim_path=object_id, pose=pose_message)],
+                object_pose=[ObjectPose(prim_path=resolved_prim_path, pose=pose_message)],
                 joint_cmd=[],
                 object_joint=[],
             )
@@ -4819,6 +4848,28 @@ class GenieSimGRPCClient:
                             break
                         time.sleep(delay)
                 last_timestamp = float(timestamp)
+
+        # Ensure gripper completes the full cycle: if the last waypoint's
+        # target aperture was open (place phase) but the gripper command
+        # was never issued (due to early abort), issue it now explicitly.
+        if trajectory:
+            _last_wp = trajectory[-1] if not (abort_event and abort_event.is_set()) else None
+            # Also check: did we ever close the gripper?  If so, reopen.
+            _last_aperture = getattr(self, "_last_gripper_aperture", None)
+            if _last_aperture is not None and _last_aperture < 0.5:
+                # Gripper is closed — reopen it for the place phase
+                try:
+                    self.set_gripper_state(width=0.08, force=10.0)
+                    self._last_gripper_aperture = 1.0
+                    logger.info("[GRIPPER] Explicit reopen at trajectory end (aperture was %.1f)", _last_aperture)
+                except Exception as _g_err:
+                    logger.warning("[GRIPPER] Reopen at trajectory end failed: %s", _g_err)
+                # Also detach any attached object
+                try:
+                    self.detach_object()
+                    logger.info("[PLACE] Detached object at trajectory end")
+                except Exception:
+                    pass
 
         if self._first_trajectory_call:
             self._first_trajectory_call = False
@@ -6009,7 +6060,38 @@ class GenieSimLocalFramework:
         if not dynamic_ids:
             return False, {"skipped": False}, ["no dynamic scene objects available for physics probe"]
 
-        probe_object_id = dynamic_ids[0]
+        # Prioritize truly manipulable objects for the probe. Large furniture
+        # (tables, cabinets, refrigerators) is often kinematic even if listed
+        # as "dynamic" in the scene config, so probing them yields false
+        # negatives (no gravity response).
+        _manipulable_keywords = {
+            "pot", "pan", "cup", "mug", "bottle", "can", "toaster",
+            "coffee", "kettle", "plate", "bowl", "box", "jar", "pitcher",
+            "spoon", "fork", "knife", "spatula", "whisk", "lid", "tray",
+        }
+        _infrastructure_keywords = {
+            "table", "cabinet", "refrigerator", "fridge", "dishwasher",
+            "sink", "oven", "rangehood", "hood", "wall", "floor", "ground",
+            "microwave", "shelf",
+        }
+
+        def _probe_priority(obj_id: str) -> int:
+            lower = obj_id.lower()
+            # Strip obj_ prefix and trailing digits for matching
+            import re as _re
+            base = _re.sub(r"\d+$", "", lower.replace("obj_", ""))
+            if any(kw in base for kw in _manipulable_keywords):
+                return 0  # Best: small manipulable objects
+            if any(kw in base for kw in _infrastructure_keywords):
+                return 2  # Worst: large infrastructure
+            return 1  # Unknown: try after manipulable
+
+        dynamic_ids_sorted = sorted(dynamic_ids, key=_probe_priority)
+        probe_object_id = dynamic_ids_sorted[0]
+        logger.info(
+            f"[PHYSICS-PROBE] Selected probe object: {probe_object_id} "
+            f"(from {len(dynamic_ids)} candidates, sorted: {dynamic_ids_sorted[:5]})"
+        )
         lift_m = float(os.getenv("GENIESIM_SCENE_PHYSICS_PROBE_LIFT_M", "0.18"))
         sample_dt_s = float(os.getenv("GENIESIM_SCENE_PHYSICS_PROBE_SAMPLE_DT_S", "0.2"))
         sample_count = int(float(os.getenv("GENIESIM_SCENE_PHYSICS_PROBE_SAMPLES", "6")))
@@ -6034,6 +6116,48 @@ class GenieSimLocalFramework:
                 except Exception:
                     return None
             return None
+
+        # Try up to 3 different objects to find one with real gravity response.
+        # Some objects (tables, cabinets) may be kinematic despite being listed
+        # as dynamic; cycling through candidates ensures we find a truly dynamic one.
+        _max_probe_objects = min(3, len(dynamic_ids_sorted))
+        for _probe_idx in range(_max_probe_objects):
+            probe_object_id = dynamic_ids_sorted[_probe_idx]
+            logger.info(
+                f"[PHYSICS-PROBE] Trying probe object {_probe_idx + 1}/{_max_probe_objects}: {probe_object_id}"
+            )
+            _probe_pass, _probe_summary, _probe_errors = self._run_single_physics_probe(
+                probe_object_id, lift_m, sample_dt_s, sample_count,
+                gravity_drop_min_m, settle_eps_m, _pose_xyz,
+            )
+            if _probe_pass:
+                logger.info(f"[PHYSICS-PROBE] PASSED with object {probe_object_id}")
+                return True, _probe_summary, []
+            # If only gravity failed (not snapback), try next object
+            _gravity_fail = any("gravity" in e for e in _probe_errors)
+            _snapback_fail = any("snapback" in e for e in _probe_errors)
+            if _snapback_fail:
+                # Snapback is a real physics problem, don't try other objects
+                return False, _probe_summary, _probe_errors
+            logger.warning(
+                f"[PHYSICS-PROBE] Object {probe_object_id} failed: {_probe_errors}; "
+                f"trying next candidate"
+            )
+        # All objects failed
+        return False, _probe_summary, _probe_errors
+
+    def _run_single_physics_probe(
+        self,
+        probe_object_id: str,
+        lift_m: float,
+        sample_dt_s: float,
+        sample_count: int,
+        gravity_drop_min_m: float,
+        settle_eps_m: float,
+        _pose_xyz,
+    ) -> Tuple[bool, Dict[str, Any], List[str]]:
+        """Run a physics probe on a single object. Returns (pass, summary, errors)."""
+        errors: List[str] = []
 
         probe_summary: Dict[str, Any] = {
             "probe_object_id": probe_object_id,
@@ -6061,10 +6185,47 @@ class GenieSimLocalFramework:
             "orientation": initial_pose.get("orientation") or {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
         }
 
-        set_result = self._client.set_object_pose(probe_object_id, target_pose)
-        if not set_result.success:
-            errors.append(f"physics probe set_object_pose failed for {probe_object_id}: {set_result.error}")
-            return False, probe_summary, errors
+        # Teleport with retry: the server uses deferred kinematic restore
+        # (keeps object kinematic for ~5 physics steps after teleport so PhysX
+        # registers the new position before re-enabling dynamics). We wait for
+        # the deferred restore to complete, then verify the teleport stuck.
+        teleport_settle_s = float(os.getenv("GENIESIM_SCENE_PHYSICS_PROBE_SETTLE_S", "0.35"))
+        teleport_max_retries = 3
+        teleport_ok = False
+        for _teleport_attempt in range(teleport_max_retries):
+            set_result = self._client.set_object_pose(probe_object_id, target_pose)
+            if not set_result.success:
+                errors.append(f"physics probe set_object_pose failed for {probe_object_id}: {set_result.error}")
+                return False, probe_summary, errors
+            # Wait for deferred restore to complete (server keeps object kinematic
+            # for ~5 physics steps at 60Hz = ~83ms; we wait 350ms for safety)
+            time.sleep(teleport_settle_s)
+            # Verify teleport took effect (object should be near target, not initial pos)
+            verify_result = self._client.get_object_pose(probe_object_id)
+            verify_xyz = _pose_xyz(verify_result.payload if verify_result.success else {})
+            if verify_xyz is not None:
+                dist_to_target = abs(float(verify_xyz[2]) - float(target_xyz[2]))
+                dist_to_initial = abs(float(verify_xyz[2]) - float(initial_xyz[2]))
+                # Object is closer to target than initial, or has moved up from initial
+                if dist_to_target < dist_to_initial or float(verify_xyz[2]) > float(initial_xyz[2]) + 0.02:
+                    teleport_ok = True
+                    break
+                else:
+                    logger.warning(
+                        "Physics probe teleport attempt %d/%d: snapback detected "
+                        "(verify_z=%.4f, target_z=%.4f, initial_z=%.4f), retrying",
+                        _teleport_attempt + 1, teleport_max_retries,
+                        float(verify_xyz[2]), float(target_xyz[2]), float(initial_xyz[2]),
+                    )
+            else:
+                teleport_ok = True  # Can't verify, proceed with sampling
+                break
+
+        if not teleport_ok:
+            logger.warning(
+                "Physics probe teleport failed after %d retries; proceeding with sampling anyway",
+                teleport_max_retries,
+            )
 
         z_samples: List[float] = []
         sample_positions: List[List[float]] = []
@@ -10941,34 +11102,73 @@ class GenieSimLocalFramework:
             # Advance forward-propagated state to this waypoint's target
             current_joint_state = waypoint_joints.copy()
 
-            # End-effector Cartesian pose: prefer real server data, fallback to local FK.
+            # End-effector Cartesian pose: ALWAYS use local FK when available.
+            # The server's ee_pose is frozen (never updates after init_robot),
+            # so we must compute EE from waypoint joint positions via FK.
+            # Use the ACTUAL runtime base position (from _robot_init_params,
+            # which is updated when the robot is repositioned per-task).
+            _rip_bp = getattr(self, "_robot_init_params", {}).get("base_pose", {}).get("position", {})
             _base_pos = np.array(
-                task.get("robot_config", {}).get("base_position", [0, 0, 0]),
+                [float(_rip_bp.get("x", 0)), float(_rip_bp.get("y", 0)), float(_rip_bp.get("z", 0))],
                 dtype=float,
             )
             _mpu = getattr(self, "_meters_per_unit", 1.0)
             if not isinstance(_mpu, (int, float)) or _mpu <= 0:
                 _mpu = 1.0
-            _used_server_ee = False
-            # Check if the server observation contains a real (dynamic) EE pose
-            _server_ee = robot_state.get("ee_pose") or {}
             _fk_source = None
-            if isinstance(_server_ee, dict) and "position" in _server_ee:
-                _sep = _server_ee["position"]
-                if isinstance(_sep, dict) and "x" in _sep:
-                    _ee_srv = [_sep["x"], _sep["y"], _sep["z"]]
-                elif isinstance(_sep, (list, tuple)) and len(_sep) >= 3:
-                    _ee_srv = list(_sep[:3])
-                else:
-                    _ee_srv = None
-                if _ee_srv is not None:
-                    _ee_srv = [float(v) for v in _ee_srv]
+            _fk_computed = False
+            try:
+                fk_joint_positions = None
+                if robot_config is not None and joint_names and hasattr(robot_config, "joint_names"):
+                    config_names = list(robot_config.joint_names)
+                    if config_names and all(name in joint_names for name in config_names):
+                        indices = [joint_names.index(name) for name in config_names]
+                        if max(indices) < len(waypoint_joints):
+                            fk_joint_positions = waypoint_joints[indices]
+                            _fk_source = "indexed_config"
+                if fk_joint_positions is None and arm_indices:
+                    if max(arm_indices) < len(waypoint_joints):
+                        fk_joint_positions = waypoint_joints[arm_indices]
+                        _fk_source = "indexed_arm"
+                    elif len(waypoint_joints) == arm_dof:
+                        fk_joint_positions = waypoint_joints
+                        _fk_source = "direct"
+                if fk_joint_positions is None and len(waypoint_joints) == arm_dof:
+                    fk_joint_positions = waypoint_joints
+                    _fk_source = "direct"
+                if fk_solver is not None and fk_joint_positions is not None:
+                    ee_pos, ee_quat = fk_solver._forward_kinematics(fk_joint_positions)
+                    _ee = (np.asarray(ee_pos, dtype=float) + _base_pos)
                     if _mpu != 1.0:
-                        _ee_srv = [v * _mpu for v in _ee_srv]
-                    # Check if server EE is dynamic (differs from previous frame)
-                    _prev_srv_ee = getattr(self, "_prev_server_ee_pos", None)
-                    self._prev_server_ee_pos = _ee_srv
-                    if _prev_srv_ee is None or not np.allclose(_ee_srv, _prev_srv_ee, atol=1e-6):
+                        _ee = _ee * _mpu
+                    frame_data["ee_pos"] = _ee.tolist()
+                    frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, "tolist") else ee_quat
+                    _fk_computed = True
+                elif getattr(self.config, "robot_type", "").lower() in _FRANKA_TYPES and fk_joint_positions is not None:
+                    ee_pos, ee_quat = _franka_fk(fk_joint_positions)
+                    _ee = (np.asarray(ee_pos, dtype=float) + _base_pos)
+                    if _mpu != 1.0:
+                        _ee = _ee * _mpu
+                    frame_data["ee_pos"] = _ee.tolist()
+                    frame_data["ee_quat"] = ee_quat
+                    _fk_computed = True
+            except Exception:
+                pass
+
+            # Only fall back to server EE if FK was not available
+            if not _fk_computed:
+                _server_ee = robot_state.get("ee_pose") or {}
+                if isinstance(_server_ee, dict) and "position" in _server_ee:
+                    _sep = _server_ee["position"]
+                    if isinstance(_sep, dict) and "x" in _sep:
+                        _ee_srv = [float(_sep["x"]), float(_sep["y"]), float(_sep["z"])]
+                    elif isinstance(_sep, (list, tuple)) and len(_sep) >= 3:
+                        _ee_srv = [float(v) for v in _sep[:3]]
+                    else:
+                        _ee_srv = None
+                    if _ee_srv is not None:
+                        if _mpu != 1.0:
+                            _ee_srv = [v * _mpu for v in _ee_srv]
                         frame_data["ee_pos"] = _ee_srv
                         _seq = _server_ee.get("orientation") or _server_ee.get("quaternion")
                         if _seq:
@@ -10976,49 +11176,6 @@ class GenieSimLocalFramework:
                                 frame_data["ee_quat"] = [_seq.get("w", 1), _seq.get("x", 0), _seq.get("y", 0), _seq.get("z", 0)]
                             else:
                                 frame_data["ee_quat"] = list(_seq)
-                        _used_server_ee = True
-
-            # Fallback: local FK — always compute from joint positions so
-            # ee_pos updates every frame even when server returns static values.
-            if not _used_server_ee:
-                try:
-                    fk_joint_positions = None
-                    if robot_config is not None and joint_names and hasattr(robot_config, "joint_names"):
-                        config_names = list(robot_config.joint_names)
-                        if config_names and all(name in joint_names for name in config_names):
-                            indices = [joint_names.index(name) for name in config_names]
-                            fk_joint_positions = waypoint_joints[indices]
-                            _fk_source = "indexed_config"
-                    if fk_joint_positions is None and arm_indices:
-                        # If waypoint is arm-only (e.g. 7-DOF Franka) and arm_indices
-                        # point beyond its length, use waypoint_joints directly as
-                        # they already represent the arm joint positions.
-                        if max(arm_indices) < len(waypoint_joints):
-                            fk_joint_positions = waypoint_joints[arm_indices]
-                            _fk_source = "indexed_arm"
-                        elif len(waypoint_joints) == arm_dof:
-                            fk_joint_positions = waypoint_joints
-                            _fk_source = "direct"
-                    # Last resort: if waypoint length matches expected arm DOF, use directly
-                    if fk_joint_positions is None and len(waypoint_joints) == arm_dof:
-                        fk_joint_positions = waypoint_joints
-                        _fk_source = "direct"
-                    if fk_solver is not None and fk_joint_positions is not None:
-                        ee_pos, ee_quat = fk_solver._forward_kinematics(fk_joint_positions)
-                        _ee = (np.asarray(ee_pos, dtype=float) + _base_pos)
-                        if _mpu != 1.0:
-                            _ee = _ee * _mpu
-                        frame_data["ee_pos"] = _ee.tolist()
-                        frame_data["ee_quat"] = ee_quat.tolist() if hasattr(ee_quat, "tolist") else ee_quat
-                    elif getattr(self.config, "robot_type", "").lower() in _FRANKA_TYPES and fk_joint_positions is not None:
-                        ee_pos, ee_quat = _franka_fk(fk_joint_positions)
-                        _ee = (np.asarray(ee_pos, dtype=float) + _base_pos)
-                        if _mpu != 1.0:
-                            _ee = _ee * _mpu
-                        frame_data["ee_pos"] = _ee.tolist()
-                        frame_data["ee_quat"] = ee_quat
-                except Exception:
-                    pass
 
             if frame_data.get("ee_pos"):
                 _recent_ee_positions.append(frame_data["ee_pos"])
@@ -11056,9 +11213,9 @@ class GenieSimLocalFramework:
                         except Exception:
                             pass
 
-            if _used_server_ee:
+            if not _fk_computed:
                 _server_ee_frame_count += 1
-            frame_data["ee_pose_source"] = "server" if _used_server_ee else "fk"
+            frame_data["ee_pose_source"] = "fk" if _fk_computed else "server"
             _scene_state_for_count = obs.get("scene_state") or (obs.get("privileged", {}) or {}).get("scene_state")
             if (
                 _scene_state_for_count
@@ -11207,8 +11364,19 @@ class GenieSimLocalFramework:
             # Explicit gripper command: prefer gripper_aperture from waypoint
             # (trajectory planner sets this per-phase), fall back to inferring
             # from gripper joint positions when available.
-            frame_data["gripper_command"] = "open" if gripper_openness > 0.5 else "closed"
+            _gripper_cmd = "open" if gripper_openness > 0.5 else "closed"
+            _gripper_width = gripper_openness * 0.08  # G1 max aperture ~0.08m
+            frame_data["gripper_command"] = _gripper_cmd
             frame_data["gripper_openness"] = round(gripper_openness, 3)
+            # Write gripper_state into robot_state so it appears in observation
+            robot_state["gripper_state"] = {
+                "aperture": round(_gripper_width, 4),
+                "command": _gripper_cmd,
+                "openness": round(gripper_openness, 3),
+                "is_grasping": gripper_openness < 0.1,
+            }
+            robot_state["gripper_command"] = _gripper_cmd
+            robot_state["gripper_openness"] = round(gripper_openness, 3)
 
             # --- Improvement G: Per-frame phase labels ---
             # Use explicit phase from trajectory waypoint (no inference fallback).
@@ -13329,6 +13497,11 @@ class GenieSimLocalFramework:
         # — do NOT fall back to a hard-coded default so the planner aims at the
         #   actual object rather than producing the same trajectory for every task.
         workspace_bounds = self._resolve_workspace_bounds(task)
+        if workspace_bounds is not None:
+            self.log(
+                f"  [BOUNDS] workspace_bounds = {workspace_bounds.round(2).tolist()}",
+                "INFO",
+            )
         target_pos, place_pos = self._resolve_task_waypoints(
             task=task,
             initial_obs=initial_obs,
@@ -13337,12 +13510,76 @@ class GenieSimLocalFramework:
         # _resolve_task_waypoints already resolves place_position from task type
         # template offsets when not explicitly provided.
         if place_pos is None:
-            place_pos = np.array(target_pos, dtype=float) + np.array([0.25, 0.0, 0.0])
+            place_pos = np.array(target_pos, dtype=float) + np.array([0.10, -0.10, 0.0])
         self.log(
             f"  ℹ️  Resolved target_pos={np.asarray(target_pos).round(3).tolist()}, "
             f"place_pos={np.asarray(place_pos).round(3).tolist()}",
             "INFO",
         )
+
+        # =====================================================================
+        # Per-task robot base repositioning for reachability (Fix 1)
+        # G1 humanoid arm reach is ~0.8m.  If the target object is further
+        # away from the current robot base than the comfortable reach radius,
+        # reposition the robot base closer to the target before planning.
+        # =====================================================================
+        _G1_REACH_RADIUS = 0.75  # comfortable reach (actual ~0.8m, leave margin)
+        _G1_SHOULDER_Z_OFFSET = 0.35  # shoulder height above robot base
+        _bp = self._robot_init_params.get("base_pose", {}).get("position", {})
+        _current_base = np.array(
+            [float(_bp.get("x", 0)), float(_bp.get("y", 0)), float(_bp.get("z", 0))],
+            dtype=float,
+        )
+        _target_xy = np.array(target_pos[:2], dtype=float)
+        _base_xy = _current_base[:2]
+        # Use 3D distance (accounting for height) to decide if repositioning is needed
+        _shoulder_pos = _current_base.copy()
+        _shoulder_pos[2] += _G1_SHOULDER_Z_OFFSET
+        _dist_to_target_3d = float(np.linalg.norm(np.array(target_pos, dtype=float) - _shoulder_pos))
+        if _dist_to_target_3d > _G1_REACH_RADIUS:
+            # Position robot so target lands in the right arm's sweet spot.
+            # G1 right arm workspace (in robot local frame, robot facing +X):
+            #   X: [-0.56, 0.56], Y: [-0.71, 0.37], Z: [-0.22, 0.63]
+            # Optimal target position relative to base: [0.3, -0.3, 0.5]
+            # (forward and to the right of the robot)
+            # Therefore: base = target + [-0.3, +0.3, -(target_z - base_z)]
+            _arm_offset_x = 0.3  # target is 0.3m forward from base
+            _arm_offset_y = 0.3  # target is 0.3m to the right (base is 0.3m to the left)
+            _new_base_xy = np.array([
+                _target_xy[0] - _arm_offset_x,
+                _target_xy[1] + _arm_offset_y,
+            ])
+            # Set base Z so target is at ~0.3m above base (leaves headroom for
+            # pre_grasp +0.15m and lift +0.25m within the 0.63m max reach Z).
+            _target_z = float(target_pos[2]) if len(target_pos) > 2 else 0.0
+            _new_base_z = max(0.0, _target_z - 0.30)
+            _new_base = np.array([_new_base_xy[0], _new_base_xy[1], _new_base_z], dtype=float)
+            self.log(
+                f"  Repositioning robot base from {_current_base.round(3).tolist()} "
+                f"to {_new_base.round(3).tolist()} (target_3d={_dist_to_target_3d:.2f}m, "
+                f"target_pos={[round(v,3) for v in target_pos]}, reach {_G1_REACH_RADIUS}m)",
+                "INFO",
+            )
+            _new_base_pose = {
+                "position": {"x": float(_new_base[0]), "y": float(_new_base[1]), "z": float(_new_base[2])},
+                "orientation": self._robot_init_params.get("base_pose", {}).get(
+                    "orientation", {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+                ),
+            }
+            self._init_robot_on_server(
+                self._robot_init_params["robot_cfg_file"],
+                _new_base_pose,
+                self._robot_init_params["scene_usd"],
+            )
+            # Update stored base pose for subsequent reference
+            self._robot_init_params["base_pose"] = _new_base_pose
+            # Brief settle after re-init
+            time.sleep(2.0)
+        else:
+            self.log(
+                f"  Robot base within reach ({_dist_to_target_3d:.2f}m <= {_G1_REACH_RADIUS}m)",
+                "INFO",
+            )
 
         # Get initial joint positions
         initial_joints_result = self._client.get_joint_position()
@@ -13490,6 +13727,12 @@ class GenieSimLocalFramework:
     ) -> bool:
         lower = robot_config.joint_limits_lower
         upper = robot_config.joint_limits_upper
+        # Truncate joints to match config DOF (trajectory may include gripper joints)
+        cfg_dof = len(lower)
+        if len(joints) > cfg_dof:
+            joints = joints[:cfg_dof]
+        elif len(joints) < cfg_dof:
+            return True  # fewer joints than config — skip check
         finite_mask = np.isfinite(lower) & np.isfinite(upper)
         if not np.any(finite_mask):
             return True
@@ -13504,10 +13747,13 @@ class GenieSimLocalFramework:
     ) -> np.ndarray:
         lower = robot_config.joint_limits_lower
         upper = robot_config.joint_limits_upper
-        finite_mask = np.isfinite(lower) & np.isfinite(upper)
+        cfg_dof = len(lower)
+        joints = joints.copy()
+        # Only clamp the DOFs covered by robot config
+        n = min(len(joints), cfg_dof)
+        finite_mask = np.isfinite(lower[:n]) & np.isfinite(upper[:n])
         if np.any(finite_mask):
-            joints = joints.copy()
-            joints[finite_mask] = np.clip(joints[finite_mask], lower[finite_mask], upper[finite_mask])
+            joints[:n][finite_mask] = np.clip(joints[:n][finite_mask], lower[:n][finite_mask], upper[:n][finite_mask])
         return joints
 
     def _validate_trajectory_joint_limits(
@@ -13673,24 +13919,64 @@ class GenieSimLocalFramework:
         bounds = task.get("workspace_bounds")
         if bounds is None:
             bounds = task.get("robot_config", {}).get("workspace_bounds")
+        # Env var override: GENIESIM_WORKSPACE_BOUNDS_JSON always wins if set
+        env_bounds = os.getenv("GENIESIM_WORKSPACE_BOUNDS_JSON")
+        if env_bounds:
+            try:
+                bounds = json.loads(env_bounds)
+                self.log(f"  Using GENIESIM_WORKSPACE_BOUNDS_JSON override: {bounds}")
+            except (json.JSONDecodeError, ValueError) as exc:
+                self.log(f"  ⚠️  Invalid GENIESIM_WORKSPACE_BOUNDS_JSON: {exc}", "WARNING")
         if bounds is None:
             return None
+        result = None
         if isinstance(bounds, dict):
             try:
                 min_pt = np.array([bounds["x"][0], bounds["y"][0], bounds["z"][0]], dtype=float)
                 max_pt = np.array([bounds["x"][1], bounds["y"][1], bounds["z"][1]], dtype=float)
-                return np.stack([min_pt, max_pt], axis=0)
+                result = np.stack([min_pt, max_pt], axis=0)
             except (KeyError, TypeError, ValueError):
                 self.log("  ⚠️  Invalid workspace_bounds dict; ignoring", "WARNING")
                 return None
-        if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+        elif isinstance(bounds, (list, tuple)) and len(bounds) == 2:
             try:
-                return np.array(bounds, dtype=float)
+                result = np.array(bounds, dtype=float)
             except (TypeError, ValueError):
                 self.log("  ⚠️  Invalid workspace_bounds list; ignoring", "WARNING")
                 return None
-        self.log("  ⚠️  Unsupported workspace_bounds format; ignoring", "WARNING")
-        return None
+        else:
+            self.log("  ⚠️  Unsupported workspace_bounds format; ignoring", "WARNING")
+            return None
+        # Expand workspace bounds to encompass actual object positions from
+        # manifest transforms.  The default bounds may be too small (e.g.
+        # [-0.5, 1.0]) while objects sit at y=2.5.  Robot repositioning
+        # handles reachability, so the workspace just needs to be large enough
+        # to avoid clamping real target positions.
+        _mt = getattr(self._client, "_manifest_transforms", None) or getattr(self, "_manifest_transforms", {})
+        if _mt and result is not None:
+            _positions = []
+            for _tv in _mt.values():
+                _tp = _tv if isinstance(_tv, (list, tuple, np.ndarray)) else None
+                if _tp is None and isinstance(_tv, dict):
+                    _tp = [_tv.get("x", 0), _tv.get("y", 0), _tv.get("z", 0)]
+                if _tp is not None:
+                    _positions.append(np.array(_tp[:3], dtype=float))
+            if _positions:
+                _all = np.stack(_positions)
+                _obj_min = _all.min(axis=0) - 1.0
+                _obj_max = _all.max(axis=0) + 1.0
+                _expanded = np.stack([
+                    np.minimum(result[0], _obj_min),
+                    np.maximum(result[1], _obj_max),
+                ])
+                if not np.allclose(_expanded, result):
+                    self.log(
+                        f"  [BOUNDS] Expanded workspace from {result.round(2).tolist()} "
+                        f"to {_expanded.round(2).tolist()} (manifest objects)",
+                        "INFO",
+                    )
+                    result = _expanded
+        return result
 
     def _apply_workspace_bounds(
         self,
@@ -13771,6 +14057,13 @@ class GenieSimLocalFramework:
                         _target, arr.round(3).tolist(),
                     )
                     return arr
+            else:
+                _avail = list(getattr(self._client, "_manifest_transforms", {}).keys())[:10]
+                logger.warning(
+                    "[TRAJ] Manifest fallback returned None for target=%s. "
+                    "Available manifest keys (%d total): %s",
+                    _target, len(getattr(self._client, "_manifest_transforms", {})), _avail,
+                )
         # Last resort: synthesize position from robot config
         if _target:
             _rc_cfg = task.get("robot_config") or {}
@@ -13804,11 +14097,11 @@ class GenieSimLocalFramework:
         else:
             task_key = (task.get("task_type") or task.get("task_name") or "").lower()
             template_offsets = {
-                "pick_place": np.array([0.25, 0.0, 0.0]),
-                "pick-place": np.array([0.25, 0.0, 0.0]),
-                "place": np.array([0.2, 0.0, 0.0]),
-                "organize": np.array([-0.2, 0.2, 0.0]),
-                "stack": np.array([0.0, 0.0, 0.1]),
+                "pick_place": np.array([0.10, -0.10, 0.0]),
+                "pick-place": np.array([0.10, -0.10, 0.0]),
+                "place": np.array([0.10, -0.10, 0.0]),
+                "organize": np.array([-0.10, 0.10, 0.0]),
+                "stack": np.array([0.0, 0.0, 0.08]),
             }
             for key, offset in template_offsets.items():
                 if key in task_key:
@@ -14159,10 +14452,51 @@ Scene objects: {scene_summary}
             task, "place_orientation", target_orientation
         )
 
+        # Transform target/place positions from world to robot-local frame.
+        # The IK solver works in the robot's local frame (base at origin).
+        _bp = self._robot_init_params.get("base_pose", {}).get("position", {})
+        _robot_base = np.array(
+            [float(_bp.get("x", 0)), float(_bp.get("y", 0)), float(_bp.get("z", 0))],
+            dtype=float,
+        )
+        _target_local = np.array(target_position, dtype=float) - _robot_base
+        _place_local = (
+            np.array(place_position, dtype=float) - _robot_base
+            if place_position is not None
+            else None
+        )
+
+        # Clamp local-frame place position to stay within G1 right arm's safe workspace.
+        # Transport waypoint = place + [0, 0, 0.20], retract = place + [0, 0, 0.18],
+        # so place must be well inside bounds to keep all derived waypoints reachable.
+        # G1 workspace: X [-0.56,0.56], Y [-0.71,0.37], Z [-0.22,0.63]
+        # Safe bounds (with margin for transport z+0.20):
+        _G1_SAFE_PLACE_BOUNDS = np.array([
+            [-0.40, -0.55, -0.10],  # lower: leave margin from workspace edge
+            [ 0.40, 0.25, 0.35],    # upper: z=0.35 so transport at z=0.55 is within 0.63
+        ])
+        if _place_local is not None:
+            _place_pre_clamp = _place_local.copy()
+            _place_local = np.clip(_place_local, _G1_SAFE_PLACE_BOUNDS[0], _G1_SAFE_PLACE_BOUNDS[1])
+            if not np.allclose(_place_pre_clamp, _place_local, atol=1e-3):
+                self.log(
+                    f"  [IK] Clamped local place from {np.round(_place_pre_clamp, 3).tolist()} "
+                    f"to {np.round(_place_local, 3).tolist()} (safe workspace bounds)",
+                    "WARNING",
+                )
+
+        self.log(
+            f"  [IK] World target={np.round(target_position, 3).tolist()}, "
+            f"robot_base={np.round(_robot_base, 3).tolist()}, "
+            f"local_target={np.round(_target_local, 3).tolist()}"
+            + (f", local_place={np.round(_place_local, 3).tolist()}" if _place_local is not None else ""),
+            "INFO",
+        )
+
         # Geometric waypoint planner (LLM waypoint planning removed — deterministic is faster & sufficient)
         waypoints = self._build_ik_fallback_waypoints(
-            target_position=target_position,
-            place_position=place_position,
+            target_position=_target_local,
+            place_position=_place_local,
             target_orientation=target_orientation,
             place_orientation=place_orientation,
         )
@@ -14218,11 +14552,56 @@ Scene objects: {scene_summary}
                 if joints is not None:
                     self.log(f"  ✅ Local collision-aware IK solved for {wp.phase.value}", "DEBUG")
 
-            # 3. Local numerical IK
+            # 3. Local numerical IK — try multiple seeds
             if joints is None:
+                # Try with current seed
                 joints = ik_solver.solve(wp.position, wp.orientation, seed_joints)
                 if joints is not None:
                     self.log(f"  ✅ Local numerical IK solved for {wp.phase.value}", "DEBUG")
+
+            if joints is None:
+                # Retry with G1 default arm config as seed
+                _g1_default_seed = np.array([0.0, -0.2, 0.0, -1.2, 0.0, 0.6, 0.0])
+                joints = ik_solver.solve(wp.position, wp.orientation, _g1_default_seed)
+                if joints is not None:
+                    self.log(f"  ✅ Local IK solved for {wp.phase.value} (default seed)", "DEBUG")
+
+            if joints is None:
+                # Retry with random seeds
+                _rng = np.random.default_rng(42)
+                for _seed_idx in range(5):
+                    _rand_seed = _rng.uniform(
+                        robot_config.joint_limits_lower,
+                        robot_config.joint_limits_upper,
+                    )
+                    joints = ik_solver.solve(wp.position, wp.orientation, _rand_seed)
+                    if joints is not None:
+                        self.log(
+                            f"  ✅ Local IK solved for {wp.phase.value} (random seed #{_seed_idx})",
+                            "DEBUG",
+                        )
+                        break
+
+            if joints is None:
+                # Last resort: try position-only IK (ignore orientation)
+                _pos_only_ori = None
+                if hasattr(ik_solver, 'solve_position_only'):
+                    joints = ik_solver.solve_position_only(wp.position, seed_joints)
+                else:
+                    # Relax orientation tolerance by trying nearby orientations
+                    for _ori_attempt in [
+                        np.array([0.707, 0.707, 0.0, 0.0]),   # gripper down
+                        np.array([0.5, 0.5, 0.5, 0.5]),       # diagonal
+                        np.array([0.707, 0.0, 0.707, 0.0]),   # gripper forward-down
+                        np.array([1.0, 0.0, 0.0, 0.0]),       # identity
+                    ]:
+                        joints = ik_solver.solve(wp.position, _ori_attempt, seed_joints)
+                        if joints is not None:
+                            self.log(
+                                f"  ✅ Local IK solved for {wp.phase.value} (relaxed orientation)",
+                                "DEBUG",
+                            )
+                            break
 
             if joints is None:
                 self.log(
@@ -14665,11 +15044,18 @@ Scene objects: {scene_summary}
                 phase_targets.append(target)
 
         # Gripper joint values per phase (robot-specific limits)
+        joint_groups = _resolve_robot_joint_groups(
+            robot_type,
+            joint_names=joint_names,
+            num_joints=num_joints,
+        )
         _grip_lims = joint_groups["gripper_limits"] or (0.0, 0.04)
         _grip_open_val = float(_grip_lims[1]) if _grip_lims else 0.04
         _grip_closed_val = float(_grip_lims[0]) if _grip_lims else 0.0
         # Map phase to gripper target: approach=open, grasp=closed, lift/transport=closed, place=open
         _phase_gripper = [_grip_open_val, _grip_closed_val, _grip_closed_val, _grip_closed_val, _grip_open_val]
+        # Map phase to gripper aperture (0.0=closed, 1.0=open) for explicit gripper commands
+        _phase_aperture = [1.0, 0.0, 0.0, 0.0, 1.0]
 
         # Interpolate between phases to build full trajectory
         trajectory: List[Dict[str, Any]] = []
@@ -14678,9 +15064,12 @@ Scene objects: {scene_summary}
         current_time = 0.0
         total_duration = num_waypoints / fps
 
+        current_aperture = 1.0  # start with gripper open
+
         for phase_idx, (phase_name, _, _, duration_frac) in enumerate(phase_configs):
             target_joints = phase_targets[phase_idx]
             target_grip = _phase_gripper[phase_idx]
+            target_aperture = _phase_aperture[phase_idx]
             phase_duration = duration_frac * total_duration
             phase_steps = max(2, int(round(duration_frac * num_waypoints)))
             start_step = 0 if phase_idx == 0 else 1
@@ -14710,17 +15099,21 @@ Scene objects: {scene_summary}
                                 full_joints.append(grip_val)
                 else:
                     full_joints = _jp_list + [grip_val, grip_val]
+                # Compute aperture for this step (snap at phase boundary)
+                _step_aperture = target_aperture if s > 0.5 else current_aperture
                 trajectory.append(
                     {
                         "joint_positions": full_joints,
                         "timestamp": current_time + t * phase_duration,
                         "phase": phase_name,
+                        "gripper_aperture": _step_aperture,
                     }
                 )
 
             current_time += phase_duration
             current_joints = target_joints
             current_grip = target_grip
+            current_aperture = target_aperture
 
         self.log(
             f"  ℹ️  Multi-phase joint-space fallback: {len(trajectory)} waypoints "
@@ -14776,12 +15169,17 @@ Scene objects: {scene_summary}
             # No collision checking available, but trajectory is within joint limits
             collision_free = True
 
-        if robot_config is not None and not self._within_joint_limits(goal_joints, robot_config):
-            self.log(
-                "  ❌ Joint-space fallback rejected: target joints violate limits.",
-                "ERROR",
-            )
-            return None
+        if robot_config is not None and trajectory:
+            _final_jp = np.array(trajectory[-1]["joint_positions"])
+            _cfg_dof = len(robot_config.joint_limits_lower)
+            if len(_final_jp) > _cfg_dof:
+                _final_jp = _final_jp[:_cfg_dof]
+            if not self._within_joint_limits(_final_jp, robot_config):
+                self.log(
+                    "  ❌ Joint-space fallback rejected: target joints violate limits.",
+                    "ERROR",
+                )
+                return None
 
         self.log(
             "  ✅ Joint-space fallback generated with bounds and clearance heuristics.",
