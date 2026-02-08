@@ -15,6 +15,8 @@ GENIESIM_SERVER_LOG=${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
 GENIESIM_STRICT_RUNTIME_READINESS=${GENIESIM_STRICT_RUNTIME_READINESS:-0}
 GENIESIM_STRICT_FAIL_ACTION=${GENIESIM_STRICT_FAIL_ACTION:-error}
 GENIESIM_KEEP_OBJECTS_KINEMATIC=${GENIESIM_KEEP_OBJECTS_KINEMATIC:-0}
+GENIESIM_SERVER_CUROBO_MODE=${GENIESIM_SERVER_CUROBO_MODE:-auto}
+GENIESIM_CUROBO_FAILOVER_FLAG=${GENIESIM_CUROBO_FAILOVER_FLAG:-${REPO_ROOT}/.geniesim_curobo_failover.flag}
 GENIESIM_RESET_PATCH_BASELINE=${GENIESIM_RESET_PATCH_BASELINE:-1}
 _RUNTIME_READINESS_DEFAULT="/tmp/geniesim_runtime_readiness.json"
 _RUNTIME_PRESTART_DEFAULT="/tmp/geniesim_runtime_prestart_probe.json"
@@ -218,6 +220,45 @@ if [ -d "${PATCHES_DIR}" ]; then
   _apply_patch_script "${PATCHES_DIR}/patch_camera_crash_guard.py" "camera_crash_guard" "0"
   _apply_patch_script "${PATCHES_DIR}/patch_autoplay.py" "autoplay" "0"
 
+  # Bake collision + fix internal physics overrides in USD assets.
+  # This fixes child prims with kinematicEnabled=false that override scene-level settings.
+  _WORKSPACE="${WORKSPACE_DIR:-${REPO_ROOT}}"
+  _SCENE_ASSETS="${_WORKSPACE}/test_scenes/scenes/lightwheel_kitchen/assets"
+  if [ -d "${_SCENE_ASSETS}" ]; then
+    echo "[geniesim] Baking collision into USD assets..."
+    _BAKE_PXR="/isaac-sim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311"
+    if [ -d "${_BAKE_PXR}" ]; then
+      if PYTHONPATH="${_BAKE_PXR}:${PYTHONPATH:-}" \
+         LD_LIBRARY_PATH="${_BAKE_PXR}/bin:${LD_LIBRARY_PATH:-}" \
+         /isaac-sim/kit/python/bin/python3 \
+           "${PATCHES_DIR}/bake_collision_into_assets.py" "${_SCENE_ASSETS}" 2>&1; then
+        echo "[geniesim] ✓ bake_collision completed and verified"
+      else
+        echo "[geniesim] ERROR: bake_collision failed or verification failed"
+        if [ "${_startup_strict}" = "1" ]; then
+          echo "[geniesim] FATAL: bake_collision failure in strict mode — aborting"
+          exit 1
+        else
+          echo "[geniesim] WARNING: continuing without verified collision (non-strict)"
+        fi
+      fi
+    else
+      echo "[geniesim] WARNING: pxr not found at ${_BAKE_PXR} — skipping bake_collision"
+      if [ "${_startup_strict}" = "1" ]; then
+        echo "[geniesim] FATAL: pxr unavailable in strict mode — cannot bake collision"
+        exit 1
+      fi
+    fi
+  fi
+
+  # Also run fix_container_patches.py to fix v7 → v4/v6 markers after patches are applied.
+  _FIX_CONTAINER="${PATCHES_DIR}/fix_container_patches.py"
+  if [ -f "${_FIX_CONTAINER}" ]; then
+    echo "[geniesim] Running post-patch fix (remove v7, add v4/v6 markers)..."
+    /isaac-sim/kit/python/bin/python3 "${_FIX_CONTAINER}" 2>&1 || \
+      echo "[geniesim] WARNING: fix_container_patches failed (non-fatal)"
+  fi
+
   # Critical strict chain (real contacts, real efforts, dynamic motion path).
   _apply_patch_script "${PATCHES_DIR}/patch_contact_report.py" "contact_report" "1"
   _apply_patch_script "${PATCHES_DIR}/patch_joint_efforts_handler.py" "joint_efforts_handler" "1"
@@ -255,8 +296,22 @@ if [ -d "${PATCHES_DIR}" ]; then
   fi
   if grep -q "BlueprintPipeline object_pose patch" "${_CMD_CTRL}" 2>/dev/null; then
     echo "[geniesim] ✓ object_pose patch verified in command_controller.py"
+    _resolver_marker="$(grep -oE 'object_pose_resolver_v[0-9]+' "${_CMD_CTRL}" 2>/dev/null | head -1 || true)"
+    if [ -n "${_resolver_marker}" ]; then
+      echo "[geniesim] ✓ object_pose resolver marker: ${_resolver_marker}"
+    else
+      echo "[geniesim] WARNING: object_pose resolver marker not found"
+    fi
   else
     echo "[geniesim] WARNING: object_pose patch may not have been applied to command_controller.py"
+  fi
+  if grep -q "object_pose_resolver_v4" "${_CMD_CTRL}" 2>/dev/null; then
+    echo "[geniesim] ✓ object_pose_resolver_v4 marker verified in command_controller.py"
+  else
+    echo "[geniesim] WARNING: object_pose_resolver_v4 marker missing"
+    if [ "${_startup_strict}" = "1" ]; then
+      exit 1
+    fi
   fi
   if grep -q "BlueprintPipeline sim_thread_physics_cache patch" "${_CMD_CTRL}" 2>/dev/null; then
     echo "[geniesim] ✓ sim_thread_physics_cache patch verified in command_controller.py"
@@ -390,6 +445,8 @@ export GENIESIM_PORT
 export GENIESIM_RUNTIME_READINESS_JSON
 export GENIESIM_RUNTIME_PRESTART_JSON
 export GENIESIM_KEEP_OBJECTS_KINEMATIC
+export GENIESIM_SERVER_CUROBO_MODE
+export GENIESIM_CUROBO_FAILOVER_FLAG
 export GENIESIM_RESET_PATCH_BASELINE
 export GENIESIM_STRICT_RUNTIME_READINESS
 export GENIESIM_STRICT_FAIL_ACTION

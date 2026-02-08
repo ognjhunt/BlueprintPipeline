@@ -33,6 +33,7 @@ STRICT_REQUIRED_PATCH_MARKERS: Tuple[Tuple[str, str], ...] = (
     ("source/data_collection/server/command_controller.py", "BPv5_dynamic_teleport_usd_objects"),
     ("source/data_collection/server/command_controller.py", "BPv6_fix_dynamic_prims"),
     ("source/data_collection/server/command_controller.py", "[PATCH] scene_collision_injected"),
+    ("source/data_collection/server/command_controller.py", "object_pose_resolver_v4"),
 )
 
 STRICT_FORBIDDEN_PATCH_MARKERS: Tuple[Tuple[str, str], ...] = (

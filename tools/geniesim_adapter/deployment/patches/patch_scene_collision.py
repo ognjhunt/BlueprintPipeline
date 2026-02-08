@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Patch: scene-collision validator hook for strict runtime safety.
+"""Patch: scene-collision fix + validation hook for strict runtime safety.
 
-This patch no longer mutates collision at runtime. Runtime collision mutation
-can deadlock init/play in strict runs. Instead, it validates collision coverage
-and dynamic approximation quality and fails strict startup if invalid.
+This patch adds CollisionAPI to mesh prims that are missing it, then validates
+collision coverage. It runs on the sim thread (handle_init_robot) BEFORE v3's
+dynamic restore, so collision is in place before objects become dynamic.
+
+If coverage < 1.0 after fix AND strict mode is on, startup aborts.
 """
 import os
 import re
@@ -15,8 +17,7 @@ TARGET = os.path.join(
 MARKER = "# [PATCH] scene_collision_injected"
 
 # Version tag — bumped whenever the method body changes.
-# The apply() function uses this to detect stale code and force a re-inject.
-VERSION_TAG = "# scene_collision_v4"
+VERSION_TAG = "# scene_collision_v5"
 
 
 def _read(path):
@@ -29,35 +30,42 @@ def _write(path, content):
         f.write(content)
 
 
-# Validation-only method body. Uses omni.usd.get_context().get_stage()
-# and computes collision metrics without mutating the scene.
+# Fix-and-validate method body. Runs on the sim thread inside handle_init_robot,
+# BEFORE v3's dynamic restore. Adds CollisionAPI to any mesh that's missing it,
+# then validates coverage.
 COLLISION_SETUP_CODE = '''
     # [PATCH] scene_collision_injected
     def _patch_add_scene_collision(self):
-        """Validate scene collision coverage and dynamic approximations.
+        """Add missing CollisionAPI to mesh prims, then validate coverage.
 
-        Runtime mutation is intentionally disabled; collision must be baked into
-        scene USD assets offline.
+        Runs on the sim thread BEFORE v3 dynamic restore. Safe to mutate
+        because physics hasn't started yet (pre-_play or post-init).
         """
-        # scene_collision_v4
+        # scene_collision_v5
         import sys as _sys_sc
         try:
             import os
             import omni.usd
-            from pxr import Usd, UsdGeom, UsdPhysics
+            from pxr import Usd, UsdGeom, UsdPhysics, Sdf
             stage = omni.usd.get_context().get_stage()
             if stage is None:
-                print("[PATCH] scene_collision: no stage available for validation")
+                print("[PATCH] scene_collision: no stage available")
                 _sys_sc.stdout.flush()
                 return
 
+            # Process both /World/Scene and /World (for GroundPlane etc.)
+            roots_to_check = []
             scene_root = stage.GetPrimAtPath("/World/Scene")
-            if not scene_root or not scene_root.IsValid():
-                scene_root = stage.GetPrimAtPath("/World/Objects")
-                if not scene_root or not scene_root.IsValid():
-                    print("[PATCH] scene_collision: no scene/object root found")
-                    _sys_sc.stdout.flush()
-                    return
+            if scene_root and scene_root.IsValid():
+                roots_to_check.append(scene_root)
+            objects_root = stage.GetPrimAtPath("/World/Objects")
+            if objects_root and objects_root.IsValid():
+                roots_to_check.append(objects_root)
+
+            if not roots_to_check:
+                print("[PATCH] scene_collision: no scene/object root found")
+                _sys_sc.stdout.flush()
+                return
 
             allowed_dynamic_approx = {
                 "convexHull",
@@ -67,59 +75,110 @@ COLLISION_SETUP_CODE = '''
                 "sdf",
                 "signedDistanceField",
             }
-            disallowed_dynamic_approx = {"triangleMesh", "meshSimplification", "none", ""}
 
             mesh_total = 0
             mesh_with_collision = 0
+            collision_added = 0
+            approx_fixed = 0
             bad_dynamic_approx = 0
             dynamic_mesh_total = 0
 
-            for child in scene_root.GetChildren():
-                if not child.HasAPI(UsdPhysics.RigidBodyAPI):
-                    continue
+            for scene_root in roots_to_check:
+                for child in scene_root.GetChildren():
+                    # Process ALL children, not just those with RigidBodyAPI
+                    # Kinematic objects also need collision for dynamic objects to rest on them
+                    is_dynamic = False
+                    if child.HasAPI(UsdPhysics.RigidBodyAPI):
+                        kin_attr = child.GetAttribute("physics:kinematicEnabled")
+                        if kin_attr and kin_attr.Get() is False:
+                            is_dynamic = True
 
-                is_dynamic = False
-                kin_attr = child.GetAttribute("physics:kinematicEnabled")
-                if kin_attr and kin_attr.Get() is False:
-                    is_dynamic = True
+                    for desc in Usd.PrimRange(child):
+                        if not desc.IsA(UsdGeom.Mesh):
+                            continue
+                        mesh_total += 1
 
-                for desc in Usd.PrimRange(child):
-                    if not desc.IsA(UsdGeom.Mesh):
-                        continue
-                    mesh_total += 1
-                    has_collision = desc.HasAPI(UsdPhysics.CollisionAPI)
-                    if has_collision:
-                        mesh_with_collision += 1
+                        # --- FIX: Add CollisionAPI if missing ---
+                        if not desc.HasAPI(UsdPhysics.CollisionAPI):
+                            try:
+                                col_api = UsdPhysics.CollisionAPI.Apply(desc)
+                                col_api.CreateCollisionEnabledAttr().Set(True)
+                                collision_added += 1
+                            except Exception as _e_col:
+                                print("[PATCH] scene_collision: failed to add collision to %s: %s" % (desc.GetPath(), _e_col))
 
-                    if is_dynamic:
-                        dynamic_mesh_total += 1
+                        if desc.HasAPI(UsdPhysics.CollisionAPI):
+                            mesh_with_collision += 1
+
+                        # --- FIX: Set approximation for meshes missing it ---
                         approx_attr = desc.GetAttribute("physics:approximation")
                         approx_value = ""
                         if approx_attr:
                             approx_value = str(approx_attr.Get() or "")
-                        if (approx_value in disallowed_dynamic_approx) or (
-                            approx_value and approx_value not in allowed_dynamic_approx
-                        ) or (not approx_value):
-                            bad_dynamic_approx += 1
+
+                        if is_dynamic:
+                            dynamic_mesh_total += 1
+                            if not approx_value or approx_value in ("triangleMesh", "meshSimplification", "none", ""):
+                                try:
+                                    desc.CreateAttribute(
+                                        "physics:approximation",
+                                        Sdf.ValueTypeNames.Token,
+                                    ).Set("convexHull")
+                                    approx_fixed += 1
+                                except Exception:
+                                    bad_dynamic_approx += 1
+                            elif approx_value not in allowed_dynamic_approx:
+                                bad_dynamic_approx += 1
+                        else:
+                            # Kinematic objects: set convexHull if missing
+                            if not approx_value or approx_value in ("triangleMesh", "meshSimplification", "none", ""):
+                                try:
+                                    desc.CreateAttribute(
+                                        "physics:approximation",
+                                        Sdf.ValueTypeNames.Token,
+                                    ).Set("convexHull")
+                                    approx_fixed += 1
+                                except Exception:
+                                    pass
+
+            # Also ensure GroundPlane has collision
+            for gp_path in ["/World/GroundPlane", "/World/groundPlane", "/World/Ground"]:
+                gp = stage.GetPrimAtPath(gp_path)
+                if gp and gp.IsValid():
+                    if not gp.HasAPI(UsdPhysics.CollisionAPI):
+                        try:
+                            col_api = UsdPhysics.CollisionAPI.Apply(gp)
+                            col_api.CreateCollisionEnabledAttr().Set(True)
+                            collision_added += 1
+                            print("[PATCH] scene_collision: added collision to %s" % gp_path)
+                        except Exception as _e_gp:
+                            print("[PATCH] scene_collision: failed to add collision to %s: %s" % (gp_path, _e_gp))
 
             collision_coverage = 1.0 if mesh_total == 0 else float(mesh_with_collision) / float(mesh_total)
             summary = {
                 "mesh_prims_total": int(mesh_total),
                 "mesh_prims_with_collision": int(mesh_with_collision),
+                "collision_added": int(collision_added),
+                "approx_fixed": int(approx_fixed),
                 "mesh_prims_bad_dynamic_approx": int(bad_dynamic_approx),
                 "collision_coverage": float(collision_coverage),
                 "dynamic_mesh_prims_total": int(dynamic_mesh_total),
             }
             self._bp_scene_collision_summary = summary
             print(
-                "[PATCH] scene_collision validate: mesh_total=%d with_collision=%d bad_dynamic_approx=%d coverage=%.4f"
+                "[PATCH] scene_collision: mesh_total=%d with_collision=%d added=%d approx_fixed=%d bad_approx=%d coverage=%.4f"
                 % (
                     summary["mesh_prims_total"],
                     summary["mesh_prims_with_collision"],
+                    summary["collision_added"],
+                    summary["approx_fixed"],
                     summary["mesh_prims_bad_dynamic_approx"],
                     summary["collision_coverage"],
                 )
             )
+
+            if collision_added == 0 and mesh_with_collision == mesh_total:
+                print("[PATCH] scene_collision: all meshes already had collision — bake worked correctly")
 
             strict_runtime = str(os.getenv("GENIESIM_STRICT_RUNTIME_READINESS", "0")).strip().lower() in (
                 "1", "true", "yes", "on"
@@ -128,9 +187,9 @@ COLLISION_SETUP_CODE = '''
                 summary["collision_coverage"] < 1.0 or summary["mesh_prims_bad_dynamic_approx"] > 0
             ):
                 raise RuntimeError(
-                    "strict collision validation failed: "
-                    f"coverage={summary['collision_coverage']:.4f}, "
-                    f"bad_dynamic_approx={summary['mesh_prims_bad_dynamic_approx']}"
+                    "strict collision validation failed after fix attempt: "
+                    "coverage=%.4f, bad_dynamic_approx=%d"
+                    % (summary["collision_coverage"], summary["mesh_prims_bad_dynamic_approx"])
                 )
             _sys_sc.stdout.flush()
         except Exception as e:
@@ -147,7 +206,6 @@ HOOK_CODE = '''
 
 def _strip_old_method(code):
     """Remove the old _patch_add_scene_collision method body entirely."""
-    # Find the method definition
     method_start_pattern = re.compile(
         r'^([ \t]+)def _patch_add_scene_collision\(self\):', re.MULTILINE
     )
@@ -158,8 +216,6 @@ def _strip_old_method(code):
     method_indent = len(match.group(1))
     start = match.start()
 
-    # Find the end of the method: next line with same or less indentation
-    # that starts a new def, class, or is a non-blank non-comment line
     lines = code[match.end():].split('\n')
     end_offset = match.end()
     for i, line in enumerate(lines):
@@ -179,7 +235,6 @@ def _strip_old_method(code):
 
 def _strip_old_hook(code):
     """Remove old hook call lines from handle_init_robot."""
-    # Remove various forms of the hook call
     patterns = [
         "            # [PATCH] scene_collision_hook — MUST run BEFORE v3 dynamic restore\n"
         "            self._patch_add_scene_collision()\n",
@@ -199,7 +254,6 @@ def apply():
     code = _read(TARGET)
 
     if MARKER in code:
-        # Already applied — check if it's the latest version
         if VERSION_TAG in code:
             # Check hook ordering
             hook_line = "# [PATCH] scene_collision_hook"
@@ -208,53 +262,44 @@ def apply():
                 hook_idx = code.index(hook_line)
                 restore_idx = code.index(restore_line)
                 if hook_idx > restore_idx:
-                    # Wrong order — fix it
                     code = _strip_old_hook(code)
                     code = _inject_hook_before_restore(code)
-                    print("[PATCH] scene_collision: fixed hook ordering (v3)")
+                    print("[PATCH] scene_collision: fixed hook ordering (v5)")
                     return
-            print("[PATCH] scene_collision v3 already applied — skipping")
+            print("[PATCH] scene_collision v5 already applied — skipping")
             return
 
-        # OLD version detected — nuclear upgrade: strip everything and re-inject
-        print("[PATCH] scene_collision: upgrading to v3 (nuclear replace)...")
+        # OLD version — nuclear upgrade
+        print("[PATCH] scene_collision: upgrading to v5 (nuclear replace)...")
         code, stripped = _strip_old_method(code)
         if stripped:
             print("[PATCH] scene_collision: removed old method body")
         code = _strip_old_hook(code)
-        # Remove the old marker so we can re-inject cleanly
-        # (the marker is inside the method body which we just stripped)
-        # Fall through to fresh injection below
 
-    # Fresh injection (either first time or after nuclear strip)
-    # 1. Add the method to the class — before handle_init_robot
+    # Fresh injection
     anchor = "def handle_init_robot(self"
     idx = code.find(anchor)
     if idx == -1:
         print("[PATCH] scene_collision: could not find handle_init_robot")
         return
 
-    # Find the start of the line (go back to the indentation)
     line_start = code.rfind("\n", 0, idx) + 1
     code = code[:line_start] + COLLISION_SETUP_CODE + "\n" + code[line_start:]
 
-    # 2. Hook into handle_init_robot BEFORE v3's dynamic restore loop
     code = _inject_hook_before_restore(code)
 
 
 def _inject_hook_before_restore(code):
     """Inject the scene_collision hook BEFORE v3's dynamic restore block."""
 
-    # Strategy: Find v3's restore block marker and insert before it
     v3_restore_marker = "# Restore dynamic objects after articulation is stable"
     v3_idx = code.find(v3_restore_marker)
 
     if v3_idx != -1:
-        # Insert our hook call right before v3's restore block
         line_start = code.rfind("\n", 0, v3_idx) + 1
         code = code[:line_start] + HOOK_CODE + "\n" + code[line_start:]
         _write(TARGET, code)
-        print("[PATCH] scene_collision v3: injected BEFORE v3 dynamic restore")
+        print("[PATCH] scene_collision v5: injected BEFORE v3 dynamic restore")
         return code
 
     # Fallback: v3 may not be applied yet. Use dof_names anchor.
@@ -270,7 +315,7 @@ def _inject_hook_before_restore(code):
         if line_end != -1:
             code = code[:line_end + 1] + HOOK_CODE + "\n" + code[line_end + 1:]
             _write(TARGET, code)
-            print("[PATCH] scene_collision v3: injected after dof_names (v3 not yet applied)")
+            print("[PATCH] scene_collision v5: injected after dof_names (v3 not yet applied)")
             return code
 
     # Last resort: insert before data_to_send
@@ -279,10 +324,10 @@ def _inject_hook_before_restore(code):
         line_start = code.rfind("\n", 0, send_idx) + 1
         code = code[:line_start] + HOOK_CODE + "\n" + code[line_start:]
         _write(TARGET, code)
-        print("[PATCH] scene_collision v3: WARNING — injected before data_to_send (fallback)")
+        print("[PATCH] scene_collision v5: WARNING — injected before data_to_send (fallback)")
         return code
 
-    print("[PATCH] scene_collision v3: FAILED — could not find injection point")
+    print("[PATCH] scene_collision v5: FAILED — could not find injection point")
     return code
 
 

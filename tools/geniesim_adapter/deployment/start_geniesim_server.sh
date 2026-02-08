@@ -20,6 +20,8 @@ GENIESIM_CAMERA_REQUIRE_DISPLAY=${GENIESIM_CAMERA_REQUIRE_DISPLAY:-1}
 GENIESIM_STRICT_RUNTIME_READINESS=${GENIESIM_STRICT_RUNTIME_READINESS:-0}
 GENIESIM_STRICT_FAIL_ACTION=${GENIESIM_STRICT_FAIL_ACTION:-error}
 GENIESIM_KEEP_OBJECTS_KINEMATIC=${GENIESIM_KEEP_OBJECTS_KINEMATIC:-0}
+GENIESIM_SERVER_CUROBO_MODE=${GENIESIM_SERVER_CUROBO_MODE:-auto}
+GENIESIM_CUROBO_FAILOVER_FLAG=${GENIESIM_CUROBO_FAILOVER_FLAG:-${REPO_ROOT}/.geniesim_curobo_failover.flag}
 
 _RUNTIME_READINESS_DEFAULT="/tmp/geniesim_runtime_readiness.json"
 _RUNTIME_PRESTART_DEFAULT="/tmp/geniesim_runtime_prestart_probe.json"
@@ -48,6 +50,8 @@ export GENIESIM_RUNTIME_PRESTART_JSON
 export GENIESIM_KEEP_OBJECTS_KINEMATIC
 export GENIESIM_STRICT_RUNTIME_READINESS
 export GENIESIM_STRICT_FAIL_ACTION
+export GENIESIM_SERVER_CUROBO_MODE
+export GENIESIM_CUROBO_FAILOVER_FLAG
 
 # Source pre-baked ROS 2 env if available, otherwise detect at runtime.
 if [ -f /etc/geniesim-ros2.env ]; then
@@ -221,11 +225,16 @@ if [ -d "${PATCHES_DIR}" ]; then
   _check_patch_marker "${_CMD_CTRL}" "BPv5_dynamic_teleport_usd_objects"
   _check_patch_marker "${_CMD_CTRL}" "BPv6_fix_dynamic_prims"
   _check_patch_marker "${_CMD_CTRL}" "BlueprintPipeline object_pose patch"
+  _check_patch_marker "${_CMD_CTRL}" "object_pose_resolver_v4"
   _check_patch_marker "${_CMD_CTRL}" "[PATCH] scene_collision_injected"
   _check_patch_marker "${_DCS_SERVER}" "BlueprintPipeline render config patch"
   if [ "${GENIESIM_KEEP_OBJECTS_KINEMATIC}" != "1" ] \
     && grep -qF "BPv7_keep_kinematic" "${_CMD_CTRL}" 2>/dev/null; then
     _missing_patches+=("forbidden marker BPv7_keep_kinematic present (${_CMD_CTRL})")
+  fi
+  _resolver_marker="$(grep -oE 'object_pose_resolver_v[0-9]+' "${_CMD_CTRL}" 2>/dev/null | head -1 || true)"
+  if [ -n "${_resolver_marker}" ]; then
+    echo "[geniesim] object_pose resolver marker: ${_resolver_marker}"
   fi
   if [ "${#_missing_patches[@]}" -gt 0 ]; then
     echo "[geniesim] ERROR: Runtime patch marker verification failed:" >&2
@@ -256,16 +265,49 @@ if [ -d "${PATCHES_DIR}" ]; then
   fi
 fi
 
-_SERVER_ARGS=""
-[ "${GENIESIM_HEADLESS}" = "1" ] && _SERVER_ARGS="${_SERVER_ARGS} --headless"
-# Enable cuRobo motion planner for server-side IK
-_SERVER_ARGS="${_SERVER_ARGS} --enable_curobo"
-# Enable physics for dynamic rigid bodies
-_SERVER_ARGS="${_SERVER_ARGS} --enable_physics"
+_SERVER_BASE_ARGS=""
+[ "${GENIESIM_HEADLESS}" = "1" ] && _SERVER_BASE_ARGS="${_SERVER_BASE_ARGS} --headless"
+# Always enable physics for dynamic rigid bodies
+_SERVER_BASE_ARGS="${_SERVER_BASE_ARGS} --enable_physics"
 # Only pass --publish_ros when ROS 2 is actually available
 if [ "${GENIESIM_SKIP_ROS_RECORDING:-0}" != "1" ]; then
-  _SERVER_ARGS="${_SERVER_ARGS} --publish_ros"
+  _SERVER_BASE_ARGS="${_SERVER_BASE_ARGS} --publish_ros"
 fi
+
+_curobo_mode_raw="$(printf '%s' "${GENIESIM_SERVER_CUROBO_MODE}" | tr '[:upper:]' '[:lower:]')"
+case "${_curobo_mode_raw}" in
+  auto|on|off) ;;
+  *)
+    echo "[geniesim] WARNING: invalid GENIESIM_SERVER_CUROBO_MODE='${GENIESIM_SERVER_CUROBO_MODE}', defaulting to auto"
+    _curobo_mode_raw="auto"
+    ;;
+esac
+echo "[geniesim] cuRobo startup mode: ${_curobo_mode_raw} (flag: ${GENIESIM_CUROBO_FAILOVER_FLAG})"
+_curobo_auto_failover_active=0
+
+_resolve_server_args() {
+  local _launch_mode="${_curobo_mode_raw}"
+  local _args="${_SERVER_BASE_ARGS}"
+
+  if [ "${_launch_mode}" = "auto" ]; then
+    if [ "${_curobo_auto_failover_active}" = "1" ]; then
+      _launch_mode="off"
+    elif [ -f "${GENIESIM_CUROBO_FAILOVER_FLAG}" ]; then
+      _launch_mode="off"
+      _curobo_auto_failover_active=1
+      rm -f "${GENIESIM_CUROBO_FAILOVER_FLAG}" 2>/dev/null || true
+      echo "[geniesim] cuRobo auto-failover requested — launching without --enable_curobo"
+    else
+      _launch_mode="on"
+    fi
+  fi
+
+  if [ "${_launch_mode}" = "on" ]; then
+    _args="${_args} --enable_curobo"
+  fi
+
+  printf '%s' "${_args}"
+}
 
 # ── Headless rendering setup ──
 # Camera RGB rendering requires a display with NVIDIA GLX support.
@@ -314,7 +356,9 @@ _restart_count=0
 echo "[geniesim] Starting Genie Sim server with restart loop (max ${GENIESIM_MAX_SERVER_RESTARTS} restarts)"
 
 while true; do
+  _SERVER_ARGS="$(_resolve_server_args)"
   echo "[geniesim] $(date '+%Y-%m-%d %H:%M:%S') Launching server (restart #${_restart_count}, logs: ${GENIESIM_SERVER_LOG})"
+  echo "[geniesim] Launch args: ${_SERVER_ARGS}"
 
   "${ISAAC_SIM_PATH}/python.sh" \
     "${GENIESIM_ROOT}/source/data_collection/scripts/data_collector_server.py" \

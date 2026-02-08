@@ -81,6 +81,8 @@ Environment Variables:
     GENIESIM_VALIDATE_FRAMES: Validate recorded frames before saving (default: 0)
     GENIESIM_FAIL_ON_FRAME_VALIDATION: Fail episode when frame validation errors exist (default: 0)
     GENIESIM_MAX_INIT_RESTARTS: Max init-only restarts before giving up (default: GENIESIM_MAX_RESTARTS)
+    GENIESIM_SERVER_CUROBO_MODE: Server startup cuRobo mode (auto|on|off; default: auto)
+    GENIESIM_INIT_ROBOT_FAILOVER_TIMEOUT_S: init_robot timeout before cuRobo auto-failover restart (default: 120)
 """
 
 import base64
@@ -1496,7 +1498,11 @@ class GenieSimGRPCClient:
             self.port,
         )
 
-    def _attempt_server_restart(self, count_toward_budget: bool = True) -> bool:
+    def _attempt_server_restart(
+        self,
+        count_toward_budget: bool = True,
+        force_curobo_off: bool = False,
+    ) -> bool:
         """Attempt to restart the Docker container running the Genie Sim server.
 
         Returns True if restart succeeded and gRPC became available again.
@@ -1504,6 +1510,7 @@ class GenieSimGRPCClient:
         """
         import time as _time
         import subprocess as _sp
+        import shlex as _shlex
 
         max_restarts = int(os.environ.get("GENIESIM_MAX_RESTARTS", "3"))
         max_init_restarts = int(os.environ.get("GENIESIM_MAX_INIT_RESTARTS", str(max_restarts)))
@@ -1534,6 +1541,50 @@ class GenieSimGRPCClient:
             "GENIESIM_RESTART_CMD",
             "sudo docker restart geniesim-server",
         )
+        curobo_mode = str(os.environ.get("GENIESIM_SERVER_CUROBO_MODE", "auto") or "auto").strip().lower()
+        if force_curobo_off:
+            if curobo_mode != "auto":
+                logger.warning(
+                    "[RESTART] force_curobo_off requested but GENIESIM_SERVER_CUROBO_MODE=%s; "
+                    "continuing with normal restart",
+                    curobo_mode,
+                )
+            else:
+                failover_flag_path = os.environ.get(
+                    "GENIESIM_CUROBO_FAILOVER_FLAG",
+                    "/workspace/BlueprintPipeline/.geniesim_curobo_failover.flag",
+                )
+                failover_flag_dir = os.path.dirname(failover_flag_path) or "/tmp"
+                failover_cmd = os.environ.get("GENIESIM_CUROBO_FAILOVER_FLAG_CMD", "").strip()
+                if not failover_cmd:
+                    _qdir = _shlex.quote(failover_flag_dir)
+                    _qflag = _shlex.quote(failover_flag_path)
+                    failover_cmd = (
+                        "sudo docker exec geniesim-server /bin/bash -lc "
+                        f"\"mkdir -p {_qdir} && touch {_qflag}\""
+                    )
+                logger.warning(
+                    "[RESTART] Requesting cuRobo failover for next server launch (flag=%s)",
+                    failover_flag_path,
+                )
+                try:
+                    _flag_result = _sp.run(
+                        failover_cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    if _flag_result.returncode != 0:
+                        logger.warning(
+                            "[RESTART] Failed to set cuRobo failover flag (rc=%d): %s",
+                            _flag_result.returncode,
+                            _flag_result.stderr.strip(),
+                        )
+                    else:
+                        logger.info("[RESTART] cuRobo failover flag prepared successfully")
+                except Exception as _flag_exc:
+                    logger.warning("[RESTART] Exception while setting cuRobo failover flag: %s", _flag_exc)
         if count_toward_budget:
             restart_label = f"#{self._restart_count + 1}"
         else:
@@ -5886,8 +5937,13 @@ class GenieSimLocalFramework:
         # Store robot type on client for full-body expansion
         self._client._robot_type = getattr(self.config, "robot_type", "")
         expected_joint_count = self._expected_joint_count_for_robot(robot_cfg_file)
+        _init_curobo_mode = str(os.environ.get("GENIESIM_SERVER_CUROBO_MODE", "auto") or "auto").strip().lower()
+        if _init_curobo_mode not in {"auto", "on", "off"}:
+            _init_curobo_mode = "auto"
+        _init_curobo_failover_used = False
 
         def _run_init_sequence(sequence_label: str) -> None:
+            nonlocal _init_curobo_failover_used
             self.log(f"Running init sequence ({sequence_label})")
             # Verify gRPC channel is connected before attempting init_robot.
             if not self._client.connect():
@@ -5896,12 +5952,16 @@ class GenieSimLocalFramework:
             # init_robot will succeed. Retry with exponential backoff.
             _max_init_attempts = 5
             _init_backoff = 5.0  # start at 5s, multiply by 1.5 up to 60s
-            _init_abort_timeout_s = float(
+            _init_abort_timeout_default_s = float(
                 os.environ.get(
                     "GENIESIM_INIT_ABORT_TIMEOUT_S",
                     str(self._client._first_call_timeout),
                 )
             )
+            _init_failover_timeout_s = float(
+                os.environ.get("GENIESIM_INIT_ROBOT_FAILOVER_TIMEOUT_S", "120")
+            )
+            _init_abort_timeout_s = min(_init_abort_timeout_default_s, _init_failover_timeout_s)
             _init_abort_timeout_s = max(_init_abort_timeout_s, self._client.timeout + 5.0)
 
             def _is_init_timeout_error(error_text: str) -> bool:
@@ -5952,6 +6012,32 @@ class GenieSimLocalFramework:
                         f"after {_elapsed:.1f}s (guard={_init_abort_timeout_s:.1f}s): {_error_text}",
                         "WARNING",
                     )
+                    if _init_curobo_mode == "auto":
+                        if not _init_curobo_failover_used:
+                            self.log(
+                                "init_robot timeout in cuRobo auto mode; requesting one-shot "
+                                "server restart without cuRobo.",
+                                "WARNING",
+                            )
+                            _init_curobo_failover_used = True
+                            if (
+                                hasattr(self._client, "_attempt_server_restart")
+                                and self._client._attempt_server_restart(
+                                    count_toward_budget=False,
+                                    force_curobo_off=True,
+                                )
+                            ):
+                                self.log(
+                                    "Server restarted in cuRobo failover mode; retrying init_robot",
+                                    "WARNING",
+                                )
+                                continue
+                            raise RuntimeError(
+                                "init_robot timed out and cuRobo failover restart failed; aborting strict run"
+                            )
+                        raise RuntimeError(
+                            "init_robot timed out after cuRobo failover restart; aborting strict run"
+                        )
                     if (
                         hasattr(self._client, "_attempt_server_restart")
                         and self._client._attempt_server_restart(count_toward_budget=False)

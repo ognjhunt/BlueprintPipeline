@@ -126,23 +126,18 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
             translation = world_xform.ExtractTranslation()
             position = [float(translation[0]), float(translation[1]), float(translation[2])]
 
-            # Extract rotation as quaternion from the matrix
-            # Get the 3x3 rotation matrix and convert to quaternion
-            rotation_matrix = Gf.Matrix3d(
-                world_xform[0][0], world_xform[0][1], world_xform[0][2],
-                world_xform[1][0], world_xform[1][1], world_xform[1][2],
-                world_xform[2][0], world_xform[2][1], world_xform[2][2],
-            )
-            # Orthonormalize to handle scale/shear
-            rotation = rotation_matrix.GetOrthonormalized()
-            quat = Gf.Rotation(rotation).GetQuaternion()
-            quat_normalized = quat.GetNormalized()
-            rotation = [
-                float(quat_normalized.GetReal()),
-                float(quat_normalized.GetImaginary()[0]),
-                float(quat_normalized.GetImaginary()[1]),
-                float(quat_normalized.GetImaginary()[2]),
-            ]
+            # Extract rotation as quaternion from world matrix.
+            # Avoid Gf.Rotation(Matrix3d) ctor mismatch seen in runtime logs.
+            try:
+                quat = Gf.Transform(world_xform).GetRotation().GetQuat().GetNormalized()
+                rotation = [
+                    float(quat.GetReal()),
+                    float(quat.GetImaginary()[0]),
+                    float(quat.GetImaginary()[1]),
+                    float(quat.GetImaginary()[2]),
+                ]
+            except Exception:
+                rotation = [1.0, 0.0, 0.0, 0.0]
 
             # Cache the transform
             cls = type(self)
@@ -208,19 +203,33 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
         because the USD context may change before the transform is used.
         The cached transform is stored in _bp_transform_cache.
 
-        If the exact path exists, we still prefer a dynamic alias prim
-        (obj_obj_<name>) when available.  Otherwise, search for prims whose
-        name (last path component) matches the requested path's name, then
-        score candidates: prefer Xformable prims under /World/ with shorter
-        paths.  Falls back to substring matching if no exact name match is found.
+        Resolver policy v4: canonicalize nested scene paths to object roots,
+        then prefer object-root prims for object-level queries.
+        Child descendants such as knobs/lids/doors frequently produce unstable
+        rigid-body registration and noisy transforms.
+        # object_pose_resolver_v4
         \"\"\"
         try:
+            import re
             from pxr import UsdGeom
 
             # Use cached scene stage if available
             stage = self._bp_get_scene_stage()
             if stage is None:
                 return requested_path
+
+            requested_path = str(requested_path or "")
+
+            # Canonicalize nested scene object paths:
+            #   /World/Scene/obj_Foo/Bar/Baz -> /World/Scene/obj_Foo
+            _nested_scene_obj = re.match(r"^(/World/Scene/obj_[^/]+)/.+$", requested_path)
+            if _nested_scene_obj:
+                _root_path = _nested_scene_obj.group(1)
+                _root_prim = stage.GetPrimAtPath(_root_path)
+                if _root_prim and _root_prim.IsValid() and _root_prim.IsA(UsdGeom.Xformable):
+                    self._bp_extract_transform(_root_prim, _root_path)
+                    print(f"[PATCH] Canonicalized nested scene prim: {requested_path} -> {_root_path}")
+                    return _root_path
 
             # Extract target name (last path component)
             target_name = requested_path.rstrip("/").rsplit("/", 1)[-1]
@@ -240,22 +249,35 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
             target_with_obj = f"obj_{base_name}" if not base_name.startswith("obj_") else base_name
             target_with_obj_obj = f"obj_obj_{base_name}" if not str(base_name).startswith("obj_obj_") else base_name
 
-            # Exact match (with dynamic alias preference)
+            # Prefer stable object-root prims first (avoid child knobs/lids/etc.).
+            _root_candidates = [
+                f"/World/Scene/{target_with_obj_obj}",
+                f"/World/Scene/{target_with_obj}",
+                f"/World/Objects/{target_with_obj_obj}",
+                f"/World/Objects/{target_with_obj}",
+                f"/World/{target_with_obj_obj}",
+                f"/World/{target_with_obj}",
+            ]
+            for _root_path in _root_candidates:
+                _root_prim = stage.GetPrimAtPath(_root_path)
+                if _root_prim and _root_prim.IsValid() and _root_prim.IsA(UsdGeom.Xformable):
+                    self._bp_extract_transform(_root_prim, _root_path)
+                    print(f"[PATCH] Prefer object root: {requested_path} -> {_root_path}")
+                    return _root_path
+
+            # Exact match
             prim = stage.GetPrimAtPath(requested_path)
             if prim and prim.IsValid():
-                _parent = requested_path.rsplit("/", 1)[0]
-                _alias_candidates = [
-                    f"{_parent}/{target_with_obj_obj}",
-                    f"/World/Scene/{target_with_obj_obj}",
-                ]
-                for _alias_path in _alias_candidates:
-                    if _alias_path == requested_path:
-                        continue
-                    _alias_prim = stage.GetPrimAtPath(_alias_path)
-                    if _alias_prim and _alias_prim.IsValid():
-                        self._bp_extract_transform(_alias_prim, _alias_path)
-                        print(f"[PATCH] Prefer dynamic alias: {requested_path} -> {_alias_path}")
-                        return _alias_path
+                # Prevent child-prim exact matches under /World/Scene/obj_* from
+                # bypassing object-root canonicalization.
+                _nested_match = re.match(r"^(/World/Scene/obj_[^/]+)/.+$", requested_path)
+                if _nested_match:
+                    _root_path = _nested_match.group(1)
+                    _root_prim = stage.GetPrimAtPath(_root_path)
+                    if _root_prim and _root_prim.IsValid() and _root_prim.IsA(UsdGeom.Xformable):
+                        self._bp_extract_transform(_root_prim, _root_path)
+                        print(f"[PATCH] Prefer object root over exact nested match: {requested_path} -> {_root_path}")
+                        return _root_path
                 # CRITICAL: Extract and cache transform NOW while stage is valid
                 self._bp_extract_transform(prim, requested_path)
                 return requested_path
@@ -297,9 +319,19 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                 # Prefer paths containing "obj_" (scene objects follow this convention)
                 if "/obj_" in path:
                     s += 25
-                # Prefer dynamic alias bodies over static visual roots.
+                # Prefer object aliases.
                 if "/obj_obj_" in path:
                     s += 120
+                # Prefer root-ish object prims; heavily penalize nested collider/visual prims.
+                _leaf = path.rsplit("/", 1)[-1].lower()
+                if path.count("/") <= 4:
+                    s += 140
+                if path.count("/") > 5:
+                    s -= (path.count("/") - 5) * 40
+                if "/collider/" in path or "/visuals/" in path or "/mtl/" in path:
+                    s -= 200
+                if any(_tok in _leaf for _tok in ("knob", "lid", "button", "handle", "spout", "lever", "container")):
+                    s -= 160
                 # Prefer shorter paths (less deeply nested)
                 s -= path.count("/")
                 return s
@@ -309,41 +341,6 @@ OBJECT_POSE_HELPER = textwrap.dedent("""\
                     continue
                 scored = sorted(candidates, key=lambda c: _score(c[0], c[1]), reverse=True)
                 best_path, best_prim = scored[0]
-                # If we landed on a static visual root, prefer a plausible
-                # dynamic descendant (usually where live rigid body motion is).
-                if "/World/Scene/obj_" in best_path and "/obj_obj_" not in best_path:
-                    _desc_best = None
-                    _desc_score = -1e9
-                    for _p in stage.Traverse():
-                        _p_path = str(_p.GetPath())
-                        if not _p_path.startswith(best_path + "/"):
-                            continue
-                        if "/mtl/" in _p_path:
-                            continue
-                        _name_l = _p_path.rsplit("/", 1)[-1].lower()
-                        if base_name.lower() not in _name_l and "obj_obj_" not in _name_l:
-                            continue
-                        _s = 0
-                        try:
-                            if _p.IsA(UsdGeom.Xformable):
-                                _s += 80
-                        except Exception:
-                            pass
-                        try:
-                            from pxr import UsdPhysics
-                            if _p.HasAPI(UsdPhysics.RigidBodyAPI):
-                                _s += 140
-                        except Exception:
-                            pass
-                        if "/obj_obj_" in _p_path:
-                            _s += 120
-                        _s -= _p_path.count("/")
-                        if _s > _desc_score:
-                            _desc_score = _s
-                            _desc_best = (_p_path, _p)
-                    if _desc_best is not None:
-                        print(f"[PATCH] Prefer dynamic descendant: {best_path} -> {_desc_best[0]}")
-                        best_path, best_prim = _desc_best
                 if len(scored) > 1:
                     print(f"[PATCH] Prim path {label} candidates for '{target_name}' (base='{base_name}'): "
                           f"{[c[0] for c in scored[:5]]}")
@@ -436,6 +433,8 @@ PATCH_MARKER = "BlueprintPipeline object_pose patch"
 OBJECT_POSE_V2_MARKER = "BlueprintPipeline object_pose override v2"
 DYNAMIC_ALIAS_MARKER = "Prefer dynamic alias"
 DYNAMIC_DESC_MARKER = "Prefer dynamic descendant"
+RESOLVER_V3_MARKER = "object_pose_resolver_v3"
+RESOLVER_V4_MARKER = "object_pose_resolver_v4"
 LIVE_TIME_MARKER = "BlueprintPipeline object_pose live_timecode patch"
 STAGE_CAPTURE_LIGHT_MARKER = "BlueprintPipeline object_pose stage_capture_light v2"
 
@@ -579,6 +578,20 @@ PHYSICS_POSE_HELPER = textwrap.dedent("""\
             if not prim or not prim.IsValid():
                 return None, None
 
+            # Object-level pose queries should use object roots, not deep child
+            # meshes/colliders/visuals where dynamic_control frequently fails.
+            _lp = str(prim_path).lower()
+            if (
+                "/collider/" in _lp
+                or "/visuals/" in _lp
+                or "/mtl/" in _lp
+                or (
+                    _lp.startswith("/world/scene/obj_")
+                    and _lp.count("/") > 3
+                )
+            ):
+                return None, None
+
             # Optional auto-enable path (disabled by default for init stability)
             if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
                 import os
@@ -642,19 +655,19 @@ def patch_file():
     has_live_time = "def _bp_live_timecode" in content
     has_physics_v2 = "def _bp_ensure_physics_on_prim" in content
     has_stage_capture_light = STAGE_CAPTURE_LIGHT_MARKER in content
+    has_resolver_v3 = RESOLVER_V3_MARKER in content
+    has_resolver_v4 = RESOLVER_V4_MARKER in content
 
-    # If we have an older version of the patch (missing physics v2), strip
+    # If we have an older version of the patch, strip
     # all BlueprintPipeline blocks and re-apply from scratch.
-    has_dynamic_desc = DYNAMIC_DESC_MARKER in content
     force_reapply = has_patch_marker and (
         not has_physics_v2
         or not has_object_pose_v2
-        or not has_dynamic_alias
-        or not has_dynamic_desc
         or not has_stage_capture_light
+        or (not has_resolver_v4)
     )
     if force_reapply:
-        print("[PATCH] Detected older patch version (missing physics v2) - upgrading")
+        print("[PATCH] Detected older object_pose patch version - upgrading")
         # Remove all BEGIN...END blocks
         for block_label in [
             "BlueprintPipeline object_pose patch",

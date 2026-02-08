@@ -83,6 +83,7 @@ def test_run_probe_strict_patch_sets_include_required_and_forbidden(tmp_path: Pa
             "# BPv5_dynamic_teleport_usd_objects\n"
             "# BPv6_fix_dynamic_prims\n"
             "# [PATCH] scene_collision_injected\n"
+            "# object_pose_resolver_v4\n"
         ),
     )
     physics_report = tmp_path / "physics_report.json"
@@ -115,6 +116,62 @@ def test_run_probe_strict_patch_sets_include_required_and_forbidden(tmp_path: Pa
     assert "strict" in patch_checks[0].get("required_sets", [])
     assert "strict" in patch_checks[0].get("forbidden_sets", [])
     assert patch_checks[0].get("forbidden_hits") == []
+
+
+def test_run_probe_strict_patch_sets_fail_without_object_pose_resolver_v4(tmp_path: Path) -> None:
+    root = tmp_path / "geniesim"
+    grpc_file = root / "source/data_collection/server/grpc_server.py"
+    cmd_file = root / "source/data_collection/server/command_controller.py"
+
+    _write(
+        grpc_file,
+        (
+            "# BlueprintPipeline contact_report patch\n"
+            "# BlueprintPipeline joint_efforts patch\n"
+        ),
+    )
+    _write(
+        cmd_file,
+        (
+            "# BlueprintPipeline object_pose patch\n"
+            "# BlueprintPipeline sim_thread_physics_cache patch\n"
+            "# BlueprintPipeline contact_reporting_on_init patch\n"
+            "# BPv3_pre_play_kinematic\n"
+            "# BPv4_deferred_dynamic_restore\n"
+            "# BPv5_dynamic_teleport_usd_objects\n"
+            "# BPv6_fix_dynamic_prims\n"
+            "# [PATCH] scene_collision_injected\n"
+        ),
+    )
+    physics_report = tmp_path / "physics_report.json"
+    physics_report.write_text(
+        '{"objects_with_manifest_physics": 2, "objects_with_usd_physics": 2, "coverage": 1.0, "missing_physics": [], "mesh_prims_total": 4, "mesh_prims_with_collision": 4, "mesh_prims_bad_dynamic_approx": 0, "collision_coverage": 1.0}'
+    )
+
+    args = Namespace(
+        host="localhost",
+        port="50051",
+        timeout=0.01,
+        geniesim_root=str(root),
+        skip_grpc=True,
+        check_patches=True,
+        require_patch=[],
+        forbid_patch=[],
+        require_patch_set=[],
+        forbid_patch_set=[],
+        strict_runtime=True,
+        physics_report=str(physics_report),
+        min_physics_coverage=0.98,
+        output="",
+    )
+    passed, payload = readiness_probe.run_probe(args)
+    assert passed is False
+    checks = payload.get("checks", [])
+    patch_checks = [c for c in checks if c.get("name") == "runtime_patch_markers"]
+    assert len(patch_checks) == 1
+    assert patch_checks[0]["passed"] is False
+    missing = patch_checks[0].get("missing", [])
+    assert any("object_pose_resolver_v4" in marker for marker in missing)
 
 
 def test_check_physics_coverage_report_thresholds(tmp_path: Path) -> None:
