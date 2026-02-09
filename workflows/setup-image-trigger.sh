@@ -182,7 +182,6 @@ gcloud eventarc triggers create ${TRIGGER_NAME} \
     --destination-workflow-location=${REGION} \
     --event-filters="type=google.cloud.storage.object.v1.finalized" \
     --event-filters="bucket=${BUCKET}" \
-    --event-filters-path-pattern="name=scenes/*/images/*" \
     --event-data-content-type="application/json"
 
 echo -e "${GREEN}EventArc trigger created${NC}"

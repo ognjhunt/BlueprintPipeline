@@ -232,11 +232,11 @@ bash run_pipeline.sh
 # Stop: kill "$(cat /tmp/pipeline_run.pid)"
 ```
 
-### Stop VM (saves costs)
+### Stop VM (saves ~$1.17/hr)
 ```bash
 gcloud compute instances stop isaac-sim-ubuntu --zone=us-east1-b
 ```
-When status is `TERMINATED`, CPU/GPU billing stops. Disk and static IP charges still apply.
+The g2-standard-32 with L4 GPU costs **$1.17/hr on-demand** ($0.47/hr spot) in us-east1. When status is `TERMINATED`, CPU/GPU billing stops. Disk and static IP charges still apply.
 
 ## Display Path For Camera RGB
 

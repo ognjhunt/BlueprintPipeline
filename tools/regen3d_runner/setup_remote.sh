@@ -35,12 +35,17 @@ fi
 cd "${REPO_DIR}"
 
 # ─── Step 2: Install mamba if not present ────────────────────────────────────
+# Add known conda/mamba paths to PATH FIRST (previous installs survive across SSH sessions)
+for p in "$HOME/miniforge3/bin" "$HOME/mambaforge/bin" "$HOME/miniconda3/bin" "$HOME/anaconda3/bin"; do
+    [ -d "$p" ] && export PATH="$p:$PATH"
+done
+
 if ! command -v mamba &>/dev/null; then
     if ! command -v conda &>/dev/null; then
         echo "[SETUP] Installing Miniforge (mamba)..."
         INSTALLER="/tmp/miniforge.sh"
         curl -fsSL https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -o "${INSTALLER}"
-        bash "${INSTALLER}" -b -p "$HOME/miniforge3"
+        bash "${INSTALLER}" -b -u -p "$HOME/miniforge3"
         rm -f "${INSTALLER}"
         export PATH="$HOME/miniforge3/bin:$PATH"
         echo "[SETUP] Miniforge installed"
@@ -49,11 +54,6 @@ if ! command -v mamba &>/dev/null; then
         conda install -y -n base -c conda-forge mamba
     fi
 fi
-
-# Ensure mamba/conda is on PATH
-for p in "$HOME/miniforge3/bin" "$HOME/mambaforge/bin" "$HOME/miniconda3/bin" "$HOME/anaconda3/bin"; do
-    [ -d "$p" ] && export PATH="$p:$PATH"
-done
 
 # ─── Step 3: Create Python 3.10 environment ─────────────────────────────────
 if [ ! -d "${VENV_DIR}" ]; then
@@ -64,14 +64,53 @@ else
 fi
 
 # ─── Step 4: Install dependencies ───────────────────────────────────────────
-echo "[SETUP] Installing PyTorch + CUDA 12.1..."
+# Detect CUDA version and select matching PyTorch index
+CUDA_MAJOR=$(nvcc --version 2>/dev/null | grep -oP 'release \K\d+' || echo "12")
+echo "[SETUP] Detected CUDA major version: ${CUDA_MAJOR}"
+if [ "${CUDA_MAJOR}" -ge 13 ]; then
+    # CUDA 13.x — use cu124 builds (forward compatible)
+    TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+    echo "[SETUP] Using PyTorch CUDA 12.4 index (forward-compatible with CUDA ${CUDA_MAJOR})"
+else
+    TORCH_INDEX="https://download.pytorch.org/whl/cu121"
+    echo "[SETUP] Using PyTorch CUDA 12.1 index"
+fi
+
+echo "[SETUP] Installing PyTorch..."
 mamba run -p "${VENV_DIR}" pip install --no-cache-dir \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    torch torchvision torchaudio --index-url "${TORCH_INDEX}"
 
 echo "[SETUP] Installing PyTorch3D..."
 mamba run -p "${VENV_DIR}" pip install --no-cache-dir fvcore iopath
-mamba run -p "${VENV_DIR}" pip install --no-cache-dir \
-    "git+https://github.com/facebookresearch/pytorch3d.git"
+
+# PyTorch3D requires nvcc version matching PyTorch's CUDA. The VM may have a newer
+# system CUDA (e.g., 13.x) while PyTorch uses 12.4. Install matching CUDA toolkit
+# via conda and build with that.
+PYTORCH_CUDA_VER=$(mamba run -p "${VENV_DIR}" python -c "import torch; print(torch.version.cuda)" 2>/dev/null || echo "12.4")
+echo "[SETUP] PyTorch CUDA version: ${PYTORCH_CUDA_VER}"
+
+# Install matching CUDA toolkit in the env (provides nvcc)
+CUDA_MAJOR_MINOR=$(echo "${PYTORCH_CUDA_VER}" | cut -d. -f1-2)
+echo "[SETUP] Installing CUDA toolkit ${CUDA_MAJOR_MINOR} via conda..."
+mamba install -p "${VENV_DIR}" -y -c nvidia "cuda-toolkit=${CUDA_MAJOR_MINOR}" 2>/dev/null || \
+    mamba install -p "${VENV_DIR}" -y -c nvidia "cuda-nvcc=${CUDA_MAJOR_MINOR}" 2>/dev/null || \
+    echo "[SETUP] WARNING: Could not install matching CUDA toolkit"
+
+# Build PyTorch3D with the env's CUDA toolkit
+echo "[SETUP] Building PyTorch3D from source..."
+CUDA_HOME_ENV="${VENV_DIR}"
+mamba run -p "${VENV_DIR}" \
+    env FORCE_CUDA=1 CUDA_HOME="${CUDA_HOME_ENV}" TORCH_CUDA_ARCH_LIST="8.9" \
+    pip install --no-cache-dir --no-build-isolation \
+    "git+https://github.com/facebookresearch/pytorch3d.git" || {
+    echo "[SETUP] WARNING: PyTorch3D GPU build failed. Installing CPU-only fallback..."
+    MAX_JOBS=1 mamba run -p "${VENV_DIR}" \
+        env FORCE_CUDA=0 \
+        pip install --no-cache-dir --no-build-isolation \
+        "git+https://github.com/facebookresearch/pytorch3d.git" || {
+        echo "[SETUP] WARNING: PyTorch3D install failed entirely. Some features may not work."
+    }
+}
 
 echo "[SETUP] Installing requirements.txt..."
 if [ -f "${REPO_DIR}/requirements.txt" ]; then
