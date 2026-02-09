@@ -250,6 +250,11 @@ def _harvest_background(
         warnings.append("No background mesh found")
         return False
 
+    size_kb = bg_mesh.stat().st_size / 1024
+    logger.info(
+        f"[HARVEST] Background mesh source: {bg_mesh.name} ({size_kb:.1f} KB)"
+    )
+
     # Copy mesh
     target_name = "mesh.glb" if bg_mesh.suffix == ".glb" else f"mesh{bg_mesh.suffix}"
     shutil.copy2(bg_mesh, background_dir / target_name)
@@ -265,13 +270,16 @@ def _harvest_background(
     }
     (background_dir / "pose.json").write_text(json.dumps(pose, indent=2))
 
-    # Compute background bounds
-    bounds = {
-        "min": [-5.0, 0.0, -5.0],
-        "max": [5.0, 3.0, 5.0],
-        "center": [0.0, 1.5, 0.0],
-        "size": [10.0, 3.0, 10.0],
-    }
+    # Compute bounds from actual mesh geometry; fall back to scene envelope
+    bounds = _compute_bounds(background_dir / target_name, transform=None)
+    if bounds["min"] == [-0.5, -0.5, -0.5]:
+        # trimesh unavailable or failed — use default scene envelope
+        bounds = {
+            "min": [-5.0, 0.0, -5.0],
+            "max": [5.0, 3.0, 5.0],
+            "center": [0.0, 1.5, 0.0],
+            "size": [10.0, 3.0, 10.0],
+        }
     (background_dir / "bounds.json").write_text(json.dumps(bounds, indent=2))
 
     return True

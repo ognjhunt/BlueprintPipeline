@@ -83,46 +83,89 @@ mamba run -p "${VENV_DIR}" pip install --no-cache-dir \
 echo "[SETUP] Installing PyTorch3D..."
 mamba run -p "${VENV_DIR}" pip install --no-cache-dir fvcore iopath
 
-# PyTorch3D requires nvcc version matching PyTorch's CUDA. The VM may have a newer
-# system CUDA (e.g., 13.x) while PyTorch uses 12.4. Install matching CUDA toolkit
-# via conda and build with that.
-PYTORCH_CUDA_VER=$(mamba run -p "${VENV_DIR}" python -c "import torch; print(torch.version.cuda)" 2>/dev/null || echo "12.4")
-echo "[SETUP] PyTorch CUDA version: ${PYTORCH_CUDA_VER}"
+# PyTorch3D build strategy:
+# 1. Use system CUDA (nvcc) with CUDA_HOME=/usr/local/cuda
+# 2. Bypass PyTorch's CUDA version mismatch check (torch cu124 vs system nvcc 13.x)
+# 3. Patch PyTorch3D setup.py to apply CUDA 13 visibility flags regardless of torch.version.cuda
+# 4. Disable conda's bundled linker (too old for CUDA 13 object files)
+echo "[SETUP] Building PyTorch3D from source with system CUDA..."
 
-# Install matching CUDA toolkit in the env (provides nvcc)
-CUDA_MAJOR_MINOR=$(echo "${PYTORCH_CUDA_VER}" | cut -d. -f1-2)
-echo "[SETUP] Installing CUDA toolkit ${CUDA_MAJOR_MINOR} via conda..."
-mamba install -p "${VENV_DIR}" -y -c nvidia "cuda-toolkit=${CUDA_MAJOR_MINOR}" 2>/dev/null || \
-    mamba install -p "${VENV_DIR}" -y -c nvidia "cuda-nvcc=${CUDA_MAJOR_MINOR}" 2>/dev/null || \
-    echo "[SETUP] WARNING: Could not install matching CUDA toolkit"
+# Patch PyTorch's CUDA mismatch check to allow system nvcc != torch CUDA version
+CPP_EXT="${VENV_DIR}/lib/python3.10/site-packages/torch/utils/cpp_extension.py"
+if [ -f "${CPP_EXT}" ] && ! grep -q 'PYTORCH_SKIP_CUDA_MISMATCH_CHECK' "${CPP_EXT}"; then
+    echo "[SETUP] Patching PyTorch CUDA version check..."
+    cp "${CPP_EXT}" "${CPP_EXT}.bak"
+    python3 -c "
+content = open('${CPP_EXT}').read()
+old = 'if cuda_ver.major != torch_cuda_version.major:'
+new = 'if cuda_ver.major != torch_cuda_version.major and os.environ.get(\"PYTORCH_SKIP_CUDA_MISMATCH_CHECK\") not in [\"1\", \"true\", \"yes\"]:'
+if old in content:
+    open('${CPP_EXT}', 'w').write(content.replace(old, new))
+    print('[SETUP] PyTorch CUDA check patched')
+"
+fi
 
-# Build PyTorch3D with the env's CUDA toolkit
-echo "[SETUP] Building PyTorch3D from source..."
-CUDA_HOME_ENV="${VENV_DIR}"
-mamba run -p "${VENV_DIR}" \
-    env FORCE_CUDA=1 CUDA_HOME="${CUDA_HOME_ENV}" TORCH_CUDA_ARCH_LIST="8.9" \
-    pip install --no-cache-dir --no-build-isolation \
-    "git+https://github.com/facebookresearch/pytorch3d.git" || {
-    echo "[SETUP] WARNING: PyTorch3D GPU build failed. Installing CPU-only fallback..."
-    MAX_JOBS=1 mamba run -p "${VENV_DIR}" \
-        env FORCE_CUDA=0 \
-        pip install --no-cache-dir --no-build-isolation \
-        "git+https://github.com/facebookresearch/pytorch3d.git" || {
-        echo "[SETUP] WARNING: PyTorch3D install failed entirely. Some features may not work."
-    }
+# Disable conda's bundled linker (causes 'hidden symbol' errors with CUDA 13 objects)
+CONDA_LD="${VENV_DIR}/compiler_compat/ld"
+if [ -f "${CONDA_LD}" ] && [ ! -f "${CONDA_LD}.bak" ]; then
+    echo "[SETUP] Disabling conda linker (using system ld instead)..."
+    mv "${CONDA_LD}" "${CONDA_LD}.bak"
+fi
+
+# Clone PyTorch3D, patch setup.py for CUDA 13 visibility flags, then build
+PT3D_BUILD="/tmp/pytorch3d_build"
+rm -rf "${PT3D_BUILD}"
+git clone --filter=blob:none https://github.com/facebookresearch/pytorch3d.git "${PT3D_BUILD}"
+
+# Patch: force CUDA 13 visibility flags even when torch.version.cuda reports 12.x
+python3 -c "
+f = '${PT3D_BUILD}/setup.py'
+content = open(f).read()
+old = 'if major >= 13:'
+new = 'if major >= 12:  # Patched: force CUDA 13 visibility flags (system nvcc is 13.x)'
+if old in content:
+    open(f, 'w').write(content.replace(old, new))
+    print('[SETUP] PyTorch3D setup.py patched for CUDA 13 visibility')
+"
+
+cd "${PT3D_BUILD}"
+FORCE_CUDA=1 \
+PYTORCH_SKIP_CUDA_MISMATCH_CHECK=1 \
+CUDA_HOME=/usr/local/cuda \
+TORCH_CUDA_ARCH_LIST="8.9" \
+PATH="/usr/local/cuda/bin:${PATH}" \
+"${VENV_DIR}/bin/pip" install --no-cache-dir --no-build-isolation . || {
+    echo "[SETUP] ERROR: PyTorch3D build failed"
+    tail -30 /tmp/pytorch3d_build.log 2>/dev/null || true
+    exit 1
 }
+cd "${REPO_DIR}"
+rm -rf "${PT3D_BUILD}"
+
+echo "[SETUP] Bootstrapping pip inside conda env..."
+PYTHONNOUSERSITE=1 "${VENV_DIR}/bin/python" -m ensurepip --upgrade 2>/dev/null || true
 
 echo "[SETUP] Installing requirements.txt..."
 if [ -f "${REPO_DIR}/requirements.txt" ]; then
-    mamba run -p "${VENV_DIR}" pip install --no-cache-dir \
+    PYTHONNOUSERSITE=1 "${VENV_DIR}/bin/python" -m pip install --no-cache-dir \
         -r "${REPO_DIR}/requirements.txt"
 fi
 
+# Install segmentor-specific requirements
+if [ -f "${REPO_DIR}/segmentor/requirements.txt" ]; then
+    echo "[SETUP] Installing segmentor requirements..."
+    PYTHONNOUSERSITE=1 "${VENV_DIR}/bin/python" -m pip install --no-cache-dir \
+        -r "${REPO_DIR}/segmentor/requirements.txt"
+fi
+
 # Force numpy < 2.0 for compatibility
-mamba run -p "${VENV_DIR}" pip install --no-cache-dir "numpy<2.0"
+PYTHONNOUSERSITE=1 "${VENV_DIR}/bin/python" -m pip install --no-cache-dir "numpy<2.0"
 
 # Install google-genai for nanoBanana inpainting
-mamba run -p "${VENV_DIR}" pip install --no-cache-dir google-genai
+PYTHONNOUSERSITE=1 "${VENV_DIR}/bin/python" -m pip install --no-cache-dir google-genai
+
+# Install rembg for background removal
+PYTHONNOUSERSITE=1 "${VENV_DIR}/bin/python" -m pip install --no-cache-dir rembg segment_anything
 
 # ─── Step 5: Download SAM weights ───────────────────────────────────────────
 SAM_WEIGHTS="${REPO_DIR}/segmentor/sam_vit_h_4b8939.pth"
@@ -156,5 +199,67 @@ if torch.cuda.is_available():
 
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "${SENTINEL_FILE}"
 echo "[SETUP] Wrote setup sentinel: ${SENTINEL_FILE}"
+
+# ─── Step 8: SAM3 segmentation environment (Python 3.12) ─────────────────
+# SAM3 requires Python 3.12+, PyTorch 2.7+, and transformers 5.1+.
+# We create a separate venv so the 3D-RE-GEN venv (Python 3.10) is untouched.
+
+SAM3_VENV="${REPO_DIR}/venv_sam3"
+SAM3_SENTINEL="${REPO_DIR}/.bp_sam3_setup_ok"
+
+if [ -f "${SAM3_SENTINEL}" ]; then
+    echo "[SETUP] SAM3 environment already set up"
+else
+    echo "[SETUP] Creating SAM3 environment (Python 3.12)..."
+
+    if [ ! -d "${SAM3_VENV}" ]; then
+        mamba create -p "${SAM3_VENV}" python=3.12 -y
+    fi
+
+    echo "[SETUP] Installing SAM3 dependencies (PyTorch 2.7 + CUDA 12.6)..."
+    PYTHONNOUSERSITE=1 "${SAM3_VENV}/bin/pip" install --no-cache-dir \
+        torch==2.7.0 torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu126
+
+    echo "[SETUP] Installing HuggingFace transformers (SAM3 support)..."
+    PYTHONNOUSERSITE=1 "${SAM3_VENV}/bin/pip" install --no-cache-dir \
+        "transformers>=5.1.0" \
+        pillow accelerate timm
+
+    echo "[SETUP] Pre-downloading SAM3 model weights (~3.4 GB)..."
+    PYTHONNOUSERSITE=1 "${SAM3_VENV}/bin/python" -c "
+from transformers import Sam3Model, Sam3Processor
+print('[SETUP] Downloading SAM3 model...')
+Sam3Model.from_pretrained('facebook/sam3')
+Sam3Processor.from_pretrained('facebook/sam3')
+print('[SETUP] SAM3 model cached successfully')
+" || {
+        echo "[SETUP] WARNING: SAM3 model download failed — will retry at first use"
+    }
+
+    echo "[SETUP] Pre-downloading DepthAnythingV2 model..."
+    PYTHONNOUSERSITE=1 "${SAM3_VENV}/bin/python" -c "
+from transformers import pipeline
+print('[SETUP] Downloading DepthAnythingV2...')
+pipeline('depth-estimation', model='depth-anything/Depth-Anything-V2-Large-hf')
+print('[SETUP] DepthAnythingV2 cached successfully')
+" || {
+        echo "[SETUP] WARNING: DepthAnythingV2 download failed — will retry at first use"
+    }
+
+    # Verify SAM3 venv works
+    echo "[SETUP] Verifying SAM3 venv..."
+    PYTHONNOUSERSITE=1 "${SAM3_VENV}/bin/python" -c "
+import torch
+print(f'SAM3 venv: Python {__import__(\"sys\").version}')
+print(f'PyTorch {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+import transformers
+print(f'Transformers {transformers.__version__}')
+"
+
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > "${SAM3_SENTINEL}"
+    echo "[SETUP] SAM3 environment ready (sentinel: ${SAM3_SENTINEL})"
+fi
 
 echo "[SETUP] 3D-RE-GEN bootstrap complete!"

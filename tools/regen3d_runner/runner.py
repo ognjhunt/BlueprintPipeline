@@ -4,8 +4,9 @@ Manages the full lifecycle of a 3D-RE-GEN reconstruction:
 1. Ensure the remote VM is ready (SSH, GPU, repo cloned, deps installed)
 2. Upload the source image
 3. Generate a config.yaml tailored to this scene
-4. Execute the 3D-RE-GEN pipeline (steps 1-7)
-5. Download and harvest outputs into adapter-expected format
+4. (Optional) Run SAM3 segmentation to replace Step 1
+5. Execute the 3D-RE-GEN pipeline (steps 2-7 or 1-7)
+6. Download and harvest outputs into adapter-expected format
 
 Reference:
     - Paper: https://arxiv.org/abs/2512.17459
@@ -46,7 +47,9 @@ logger = logging.getLogger(__name__)
 # Path to the config template relative to this file
 _TEMPLATE_PATH = Path(__file__).parent / "config_template.yaml"
 _SETUP_SCRIPT_PATH = Path(__file__).parent / "setup_remote.sh"
+_SAM3_SCRIPT_PATH = Path(__file__).parent / "segmentation_sam3.py"
 _SETUP_SENTINEL = ".bp_regen3d_setup_ok"
+_SAM3_SETUP_SENTINEL = ".bp_sam3_setup_ok"
 
 
 @dataclass
@@ -55,7 +58,7 @@ class Regen3DConfig:
 
     # Remote VM
     vm_host: str = "isaac-sim-ubuntu"
-    vm_zone: str = "us-east1-b"
+    vm_zone: str = "us-east1-d"
     repo_path: str = "/home/nikhil/3D-RE-GEN"
 
     # Pipeline steps (1-9; typically 1-7 to skip render+eval)
@@ -73,14 +76,27 @@ class Regen3DConfig:
 
     # Gemini for nanoBanana inpainting
     gemini_api_key: str = ""
-    gemini_model_id: str = "gemini-2.5-flash-image-preview"
+    gemini_model_id: str = "gemini-2.5-flash-image"
 
-    # Segmentation labels
+    # Segmentation labels (fallback when auto_labels fails)
     labels: List[str] = field(
         default_factory=lambda: [
             "chair", "table", "sofa", "plant in pot", "lamp", "floor"
         ]
     )
+
+    # Segmentation backend: "sam3" (new) or "grounded_sam" (original Step 1)
+    seg_backend: str = "sam3"
+
+    # Use Gemini to auto-detect labels from the input image
+    auto_labels: bool = True
+
+    # SAM3-specific settings
+    sam3_threshold: float = 0.4
+    sam3_model: str = "facebook/sam3"
+
+    # Require background mesh (full scene mode)
+    require_background: bool = True
 
     # Auto-start VM if stopped
     auto_start_vm: bool = False
@@ -96,9 +112,11 @@ class Regen3DConfig:
         )
         labels = [l.strip() for l in labels_str.split(",") if l.strip()]
 
+        seg_backend = os.getenv("REGEN3D_SEG_BACKEND", "sam3").lower()
+
         return cls(
             vm_host=os.getenv("REGEN3D_VM_HOST", "isaac-sim-ubuntu"),
-            vm_zone=os.getenv("REGEN3D_VM_ZONE", "us-east1-b"),
+            vm_zone=os.getenv("REGEN3D_VM_ZONE", "us-east1-d"),
             repo_path=os.getenv("REGEN3D_REPO_PATH", "/home/nikhil/3D-RE-GEN"),
             steps=steps,
             timeout_s=int(os.getenv("REGEN3D_TIMEOUT_S", "1800")),
@@ -112,9 +130,16 @@ class Regen3DConfig:
             in ("true", "1", "yes"),
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
             gemini_model_id=os.getenv(
-                "REGEN3D_GEMINI_MODEL", "gemini-2.5-flash-image-preview"
+                "REGEN3D_GEMINI_MODEL", "gemini-2.5-flash-image"
             ),
             labels=labels,
+            seg_backend=seg_backend,
+            auto_labels=os.getenv("REGEN3D_AUTO_LABELS", "true").lower()
+            in ("true", "1", "yes"),
+            sam3_threshold=float(os.getenv("REGEN3D_SAM3_THRESHOLD", "0.4")),
+            sam3_model=os.getenv("REGEN3D_SAM3_MODEL", "facebook/sam3"),
+            require_background=os.getenv("REGEN3D_REQUIRE_BACKGROUND", "true").lower()
+            in ("true", "1", "yes"),
             auto_start_vm=os.getenv("REGEN3D_AUTO_START_VM", "").lower()
             in ("true", "1", "yes"),
         )
@@ -203,17 +228,32 @@ class Regen3DRunner:
 
             # Step 4: Generate and upload config
             remote_output_dir = f"{self.config.repo_path}/output_{scene_id}"
+
+            # Step 4a: Auto-detect labels with Gemini (if enabled)
+            if self.config.seg_backend == "sam3" and self.config.auto_labels:
+                self._resolve_auto_labels(input_image)
+
             self._generate_and_upload_config(
                 remote_image_path, remote_output_dir, scene_id
             )
 
+            # Step 4b: Run SAM3 segmentation (replaces 3D-RE-GEN Step 1)
+            if self.config.seg_backend == "sam3":
+                self._run_sam3_segmentation(
+                    remote_image_path, remote_output_dir
+                )
+
             # Step 5: Run the pipeline
+            effective_steps = self.config.steps
+            if self.config.seg_backend == "sam3" and 1 in effective_steps:
+                effective_steps = [s for s in effective_steps if s != 1]
+                self.log("SAM3 active — skipping 3D-RE-GEN Step 1")
             self.log(
-                f"Starting 3D-RE-GEN pipeline (steps {self.config.steps}) "
+                f"Starting 3D-RE-GEN pipeline (steps {effective_steps}) "
                 f"for scene: {scene_id}"
             )
             rc, stdout, stderr = self._execute_pipeline(
-                scene_id, remote_output_dir
+                scene_id, remote_output_dir, steps_override=effective_steps
             )
 
             if rc != 0:
@@ -249,6 +289,25 @@ class Regen3DRunner:
                 f"{duration:.1f}s, bg={harvest.has_background}, "
                 f"cam={harvest.has_camera}"
             )
+
+            # Validate background mesh for full scene mode
+            if not harvest.has_background:
+                msg = (
+                    "Background mesh not produced by 3D-RE-GEN. "
+                    "Full scene mode requires background for lighting and physics."
+                )
+                if self.config.require_background:
+                    return ReconstructionResult(
+                        success=False,
+                        scene_id=scene_id,
+                        objects_count=harvest.objects_count,
+                        duration_seconds=duration,
+                        output_dir=regen3d_dir,
+                        error=msg,
+                        harvest_result=harvest,
+                    )
+                else:
+                    self.log(msg, "WARNING")
 
             return ReconstructionResult(
                 success=True,
@@ -437,24 +496,32 @@ class Regen3DRunner:
             self._vm.ssh_exec(env_cmd, stream_logs=False, check=True)
 
     def _execute_pipeline(
-        self, scene_id: str, remote_output_dir: str
+        self,
+        scene_id: str,
+        remote_output_dir: str,
+        steps_override: Optional[List[int]] = None,
     ) -> tuple:
         """Execute the 3D-RE-GEN pipeline on the remote VM.
 
         Returns:
             Tuple of (return_code, stdout, stderr).
         """
-        steps_arg = " ".join(str(s) for s in self.config.steps)
+        steps = steps_override or self.config.steps
+        steps_arg = " ".join(str(s) for s in steps)
         repo = shlex.quote(self.config.repo_path)
         venv = f"{self.config.repo_path}/venv_py310"
 
         # Build the command
         # Source env keys if present, create output dir, run pipeline
+        # PYTHONNOUSERSITE=1 is critical: the VM has stale packages in
+        # ~/.local/lib/python3.10/ that conflict with the conda env.
         command = (
             f"cd {repo} && "
             f"[ -f .env_keys ] && source .env_keys ; "
+            f"export PATH=$HOME/miniforge3/bin:$PATH && "
+            f"export PYTHONNOUSERSITE=1 && "
             f"mkdir -p {shlex.quote(remote_output_dir)} && "
-            f"mamba run -p {shlex.quote(venv)} python run.py -p {steps_arg}"
+            f"./venv_py310/bin/python run.py -p {steps_arg}"
         )
 
         return self._vm.ssh_exec(
@@ -463,6 +530,136 @@ class Regen3DRunner:
             stream_logs=self.verbose,
             check=False,
         )
+
+    def _resolve_auto_labels(self, input_image: Path) -> None:
+        """Use Gemini to auto-detect object labels from the input image."""
+        self.log("Running Gemini auto-labeling...")
+        try:
+            from tools.regen3d_runner.gemini_label_generator import (
+                generate_labels_from_image,
+            )
+            labels = generate_labels_from_image(
+                str(input_image),
+                fallback_labels=self.config.labels,
+            )
+            self.config.labels = labels
+            self.log(f"Auto-labels ({len(labels)}): {labels}")
+        except Exception as exc:
+            self.log(
+                f"Gemini auto-labeling failed ({exc}), using configured labels",
+                "WARNING",
+            )
+
+    def _setup_sam3_env(self) -> None:
+        """Ensure the SAM3 Python 3.12 venv exists on the remote VM."""
+        sentinel = f"{self.config.repo_path}/{_SAM3_SETUP_SENTINEL}"
+        rc, stdout, _ = self._vm.ssh_exec(
+            f"test -f {shlex.quote(sentinel)} && echo EXISTS",
+            stream_logs=False,
+            check=False,
+        )
+        if "EXISTS" in stdout:
+            self.log("SAM3 environment already set up on VM")
+            return
+
+        self.log("Setting up SAM3 environment on remote VM...")
+        # The setup_remote.sh handles SAM3 venv creation.
+        # Re-run it to ensure SAM3 section is executed.
+        self._vm.scp_upload(_SETUP_SCRIPT_PATH, "/tmp/setup_regen3d.sh")
+        self._vm.ssh_exec(
+            f"bash /tmp/setup_regen3d.sh {shlex.quote(self.config.repo_path)}",
+            timeout=1200,
+            stream_logs=True,
+            check=True,
+        )
+        self.log("SAM3 environment setup complete")
+
+    def _run_sam3_segmentation(
+        self,
+        remote_image_path: str,
+        remote_output_dir: str,
+    ) -> None:
+        """Run SAM3 text-prompted segmentation on the remote VM.
+
+        Uploads segmentation_sam3.py and executes it in the venv_sam3
+        environment. Populates {remote_output_dir}/findings/ with masks
+        and depth, replacing 3D-RE-GEN's built-in Step 1.
+        """
+        # Ensure SAM3 venv is ready
+        self._setup_sam3_env()
+
+        # Upload the SAM3 segmentation script
+        remote_script = "/tmp/segmentation_sam3.py"
+        self._vm.scp_upload(_SAM3_SCRIPT_PATH, remote_script)
+
+        # Build labels argument
+        labels_csv = ",".join(self.config.labels)
+
+        # Run SAM3 in the venv_sam3 environment
+        venv_sam3 = f"{self.config.repo_path}/venv_sam3"
+        command = (
+            f"export PYTHONNOUSERSITE=1 && "
+            f"{shlex.quote(venv_sam3)}/bin/python {shlex.quote(remote_script)} "
+            f"--image {shlex.quote(remote_image_path)} "
+            f"--output {shlex.quote(remote_output_dir)} "
+            f"--labels {shlex.quote(labels_csv)} "
+            f"--threshold {self.config.sam3_threshold} "
+            f"--model {shlex.quote(self.config.sam3_model)} "
+            f"--device {shlex.quote(self.config.device)}"
+        )
+
+        self.log("Running SAM3 segmentation...")
+        rc, stdout, stderr = self._vm.ssh_exec(
+            command,
+            timeout=600,  # 10 minutes for segmentation + depth
+            stream_logs=self.verbose,
+            check=False,
+        )
+
+        if rc != 0:
+            # Check for failure marker
+            failed_marker = f"{remote_output_dir}/findings/.sam3_failed"
+            rc2, marker_content, _ = self._vm.ssh_exec(
+                f"cat {shlex.quote(failed_marker)} 2>/dev/null",
+                stream_logs=False,
+                check=False,
+            )
+            if rc2 == 0 and marker_content.strip():
+                self.log(
+                    f"SAM3 failed: {marker_content.strip()}. "
+                    f"Falling back to 3D-RE-GEN Step 1.",
+                    "WARNING",
+                )
+                # Re-add Step 1 so the original pipeline handles segmentation
+                if 1 not in self.config.steps:
+                    self.config.steps = [1] + self.config.steps
+                self.config.seg_backend = "grounded_sam"
+                return
+
+            raise VMExecutorError(
+                f"SAM3 segmentation failed (exit {rc}): "
+                f"{stderr[-1000:] if stderr else 'no stderr'}"
+            )
+
+        # Verify output
+        check_cmd = (
+            f"ls {shlex.quote(remote_output_dir)}/findings/fullSize/*.png "
+            f"2>/dev/null | wc -l"
+        )
+        rc, count_str, _ = self._vm.ssh_exec(
+            check_cmd, stream_logs=False, check=False
+        )
+        mask_count = int(count_str.strip()) if count_str.strip().isdigit() else 0
+        self.log(f"SAM3 produced {mask_count} object masks")
+
+        if mask_count == 0:
+            self.log(
+                "SAM3 produced 0 masks — falling back to 3D-RE-GEN Step 1",
+                "WARNING",
+            )
+            if 1 not in self.config.steps:
+                self.config.steps = [1] + self.config.steps
+            self.config.seg_backend = "grounded_sam"
 
     def _download_outputs(
         self, remote_output_dir: str, local_dir: Path

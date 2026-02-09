@@ -51,7 +51,7 @@ main:
           - primaryGkeCluster: '${default(sys.get_env("PRIMARY_GKE_CLUSTER"), "blueprint-cluster")}'
           - secondaryGkeCluster: '${default(sys.get_env("SECONDARY_GKE_CLUSTER"), "blueprint-cluster-secondary")}'
           - primaryGkeZone: '${default(sys.get_env("PRIMARY_GKE_ZONE"), "us-central1-a")}'
-          - secondaryGkeZone: '${default(sys.get_env("SECONDARY_GKE_ZONE"), "us-east1-b")}'
+          - secondaryGkeZone: '${default(sys.get_env("SECONDARY_GKE_ZONE"), "us-east1-d")}'
           - gkeCluster: '${primaryGkeCluster}'
           - gkeZone: '${primaryGkeZone}'
           - namespace: "blueprint"

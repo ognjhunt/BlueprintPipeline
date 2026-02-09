@@ -29,6 +29,7 @@ labels:
 {labels}
 
 polygon_refinement: false
+interactive_edit: false
 threshold: 0.25
 iou_threshold: 0.5
 detector_id: "IDEA-Research/grounding-dino-base"

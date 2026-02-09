@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class VMConfig:
     """Configuration for a remote GCE VM."""
     host: str = "isaac-sim-ubuntu"
-    zone: str = "us-east1-b"
+    zone: str = "us-east1-d"
     user: str = ""  # empty = gcloud default
     ssh_timeout_s: int = 30
     max_ssh_retries: int = 3
