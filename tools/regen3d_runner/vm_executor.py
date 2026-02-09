@@ -102,7 +102,7 @@ class VMExecutor:
             VMExecutorError: If command fails and check=True.
         """
         ssh_cmd = self._build_ssh_cmd(command, timeout)
-        last_error = None
+        last_error: Optional[BaseException] = None
 
         for attempt in range(1, self.config.max_ssh_retries + 1):
             try:
@@ -113,26 +113,42 @@ class VMExecutor:
                     )
 
                 if stream_logs:
-                    return self._exec_streaming(ssh_cmd, timeout, check)
+                    rc, stdout, stderr = self._exec_streaming(ssh_cmd, timeout, check)
                 else:
-                    return self._exec_capture(ssh_cmd, timeout, check)
+                    rc, stdout, stderr = self._exec_capture(ssh_cmd, timeout, check)
+
+                # Retry transport-level SSH failures even when check=False.
+                if rc == 255:
+                    err = SSHConnectionError(
+                        f"SSH connection failed (exit 255): {stderr[-300:] if stderr else ''}"
+                    )
+                    if attempt < self.config.max_ssh_retries:
+                        wait = self.config.retry_backoff_s * attempt
+                        logger.warning(
+                            f"[VM] SSH connection failed (exit 255), retrying in {wait}s..."
+                        )
+                        time.sleep(wait)
+                        last_error = err
+                        continue
+                    if check:
+                        raise err
+
+                return rc, stdout, stderr
 
             except subprocess.TimeoutExpired:
                 raise CommandTimeoutError(
                     f"Command timed out after {timeout}s: {command[:100]}"
                 )
-            except subprocess.CalledProcessError as exc:
-                # Exit code 255 = SSH connection failure (per MEMORY.md)
-                if exc.returncode == 255 and attempt < self.config.max_ssh_retries:
-                    last_error = exc
+            except SSHConnectionError as exc:
+                last_error = exc
+                if attempt < self.config.max_ssh_retries:
                     wait = self.config.retry_backoff_s * attempt
                     logger.warning(
-                        f"[VM] SSH connection failed (exit 255), "
-                        f"retrying in {wait}s..."
+                        f"[VM] SSH connection failed, retrying in {wait}s..."
                     )
                     time.sleep(wait)
                     continue
-                raise
+                break
 
         raise SSHConnectionError(
             f"SSH connection failed after {self.config.max_ssh_retries} attempts: "
@@ -196,6 +212,10 @@ class VMExecutor:
         rc = proc.returncode
 
         if check and rc != 0:
+            if rc == 255:
+                raise SSHConnectionError(
+                    f"SSH connection failed (exit 255): {stderr[-300:] if stderr else ''}"
+                )
             # Check for OOM
             combined = stdout + stderr
             if "CUDA out of memory" in combined or "OutOfMemoryError" in combined:

@@ -2351,8 +2351,23 @@ class LocalPipelineRunner:
 
         self.log(f"Input image: {input_image}")
 
-        # Load config from env (regen3d_reconstruct.env)
+        # Load reconstruction defaults from configs/regen3d_reconstruct.env
+        regen3d_env_path = Path(__file__).resolve().parents[1] / "configs" / "regen3d_reconstruct.env"
+        if regen3d_env_path.is_file():
+            load_dotenv(dotenv_path=regen3d_env_path, override=False)
+            self.log(f"Loaded REGEN3D env defaults from {regen3d_env_path}")
+        else:
+            self.log(
+                f"REGEN3D env defaults not found at {regen3d_env_path}; using current process env",
+                "WARNING",
+            )
+
         config = Regen3DConfig.from_env()
+        self.log(
+            "REGEN3D config: "
+            f"vm={config.vm_host} zone={config.vm_zone} repo={config.repo_path} "
+            f"steps={config.steps} timeout_s={config.timeout_s} device={config.device}"
+        )
         runner = Regen3DRunner(config=config, verbose=self.verbose)
 
         result = runner.run_reconstruction(

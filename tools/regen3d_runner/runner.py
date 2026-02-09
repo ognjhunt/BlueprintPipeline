@@ -19,11 +19,14 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import yaml
 
 from tools.regen3d_runner.vm_executor import (
     VMConfig,
@@ -43,6 +46,7 @@ logger = logging.getLogger(__name__)
 # Path to the config template relative to this file
 _TEMPLATE_PATH = Path(__file__).parent / "config_template.yaml"
 _SETUP_SCRIPT_PATH = Path(__file__).parent / "setup_remote.sh"
+_SETUP_SENTINEL = ".bp_regen3d_setup_ok"
 
 
 @dataclass
@@ -225,6 +229,8 @@ class Regen3DRunner:
 
             # Step 6: Download outputs
             local_native_dir = output_dir / "_native_output"
+            if local_native_dir.exists():
+                shutil.rmtree(local_native_dir)
             self._download_outputs(remote_output_dir, local_native_dir)
 
             # Step 7: Harvest into adapter format
@@ -326,9 +332,10 @@ class Regen3DRunner:
 
     def _setup_remote(self) -> None:
         """Bootstrap 3D-RE-GEN on the remote VM if needed."""
-        # Check if repo already exists and has venv
+        # Require explicit setup completion sentinel, not only venv presence.
+        setup_sentinel = f"{self.config.repo_path}/{_SETUP_SENTINEL}"
         rc, stdout, _ = self._vm.ssh_exec(
-            f"test -d {shlex.quote(self.config.repo_path)}/venv_py310 && echo EXISTS",
+            f"test -f {shlex.quote(setup_sentinel)} && echo EXISTS",
             stream_logs=False,
             check=False,
         )
@@ -381,7 +388,9 @@ class Regen3DRunner:
         template = _TEMPLATE_PATH.read_text()
 
         # Format labels as YAML list
-        labels_yaml = "\n".join(f" - {label}" for label in self.config.labels)
+        labels_yaml = "\n".join(
+            f"  - {json.dumps(label)}" for label in self.config.labels
+        )
 
         # Substitute placeholders
         config_content = template.format(
@@ -393,9 +402,15 @@ class Regen3DRunner:
             jobs_per_gpu=self.config.jobs_per_gpu,
             labels=labels_yaml,
             gemini_model_id=self.config.gemini_model_id,
-            use_vggt=str(self.config.use_vggt),
+            use_vggt=str(self.config.use_vggt).lower(),
             use_hunyuan21=str(self.config.use_hunyuan21).lower(),
         )
+
+        # Validate rendered YAML before uploading to remote.
+        try:
+            yaml.safe_load(config_content)
+        except Exception as exc:
+            raise ValueError(f"Generated config.yaml is invalid: {exc}") from exc
 
         # Write to temp file and upload
         import tempfile

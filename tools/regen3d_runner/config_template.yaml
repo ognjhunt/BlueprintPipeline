@@ -25,7 +25,8 @@ temp: "{temp_dir}"
 # Segmentation and Upscaling Configuration
 #######################################################################################################################
 upscale_input_image: false
-labels: {labels}
+labels:
+{labels}
 
 polygon_refinement: false
 threshold: 0.25

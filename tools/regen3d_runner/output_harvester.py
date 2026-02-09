@@ -88,6 +88,8 @@ def harvest_regen3d_native_output(
     depth_dir = target_dir / "depth"
 
     for d in [objects_dir, background_dir, camera_dir, depth_dir]:
+        if d.exists():
+            shutil.rmtree(d)
         d.mkdir(parents=True, exist_ok=True)
 
     # --- Harvest objects ---
@@ -173,6 +175,23 @@ def _harvest_objects(
     # Load transforms from the combined scene or individual optimization results
     transforms = _load_object_transforms(native_dir)
 
+    missing_or_invalid: List[str] = []
+    for obj_name in sorted(object_glbs):
+        matrix = transforms.get(obj_name)
+        if matrix is None:
+            missing_or_invalid.append(obj_name)
+            continue
+        if np.asarray(matrix).shape != (4, 4):
+            missing_or_invalid.append(obj_name)
+
+    if missing_or_invalid:
+        joined = ", ".join(sorted(missing_or_invalid))
+        raise ValueError(
+            "Missing valid 4x4 transforms for reconstructed objects: "
+            f"{joined}. Ensure 3D-RE-GEN emitted glb/scene/transforms.json "
+            "or per-object transform.json files."
+        )
+
     for idx, (obj_name, glb_path) in enumerate(sorted(object_glbs.items())):
         obj_id = f"obj_{idx}"
         obj_dir = objects_dir / obj_id
@@ -182,7 +201,7 @@ def _harvest_objects(
         shutil.copy2(glb_path, obj_dir / "mesh.glb")
 
         # Write pose.json
-        transform = transforms.get(obj_name)
+        transform = transforms[obj_name]
         pose = _build_pose_json(transform, obj_name)
         (obj_dir / "pose.json").write_text(json.dumps(pose, indent=2))
 
@@ -413,11 +432,11 @@ def _build_pose_json(
 ) -> Dict[str, Any]:
     """Build a pose.json dict from a transform matrix."""
     if transform is not None:
-        matrix = np.array(transform)
+        matrix = np.array(transform, dtype=np.float64)
         if matrix.shape != (4, 4):
-            matrix = np.eye(4)
+            matrix = np.eye(4, dtype=np.float64)
     else:
-        matrix = np.eye(4)
+        matrix = np.eye(4, dtype=np.float64)
 
     # Decompose transform
     translation = matrix[:3, 3].tolist()

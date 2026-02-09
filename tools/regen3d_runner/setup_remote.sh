@@ -15,6 +15,7 @@ set -euo pipefail
 
 REPO_DIR="${1:-$HOME/3D-RE-GEN}"
 VENV_DIR="${REPO_DIR}/venv_py310"
+SENTINEL_FILE="${REPO_DIR}/.bp_regen3d_setup_ok"
 
 echo "[SETUP] 3D-RE-GEN bootstrap starting..."
 echo "[SETUP] Repo dir: ${REPO_DIR}"
@@ -45,7 +46,7 @@ if ! command -v mamba &>/dev/null; then
         echo "[SETUP] Miniforge installed"
     else
         echo "[SETUP] conda found, installing mamba into base..."
-        conda install -y -n base -c conda-forge mamba 2>/dev/null || true
+        conda install -y -n base -c conda-forge mamba
     fi
 fi
 
@@ -65,26 +66,24 @@ fi
 # ─── Step 4: Install dependencies ───────────────────────────────────────────
 echo "[SETUP] Installing PyTorch + CUDA 12.1..."
 mamba run -p "${VENV_DIR}" pip install --no-cache-dir \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 \
-    2>/dev/null || echo "[SETUP] PyTorch already installed"
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 echo "[SETUP] Installing PyTorch3D..."
-mamba run -p "${VENV_DIR}" pip install --no-cache-dir fvcore iopath 2>/dev/null || true
+mamba run -p "${VENV_DIR}" pip install --no-cache-dir fvcore iopath
 mamba run -p "${VENV_DIR}" pip install --no-cache-dir \
-    "git+https://github.com/facebookresearch/pytorch3d.git" \
-    2>/dev/null || echo "[SETUP] PyTorch3D already installed"
+    "git+https://github.com/facebookresearch/pytorch3d.git"
 
 echo "[SETUP] Installing requirements.txt..."
 if [ -f "${REPO_DIR}/requirements.txt" ]; then
     mamba run -p "${VENV_DIR}" pip install --no-cache-dir \
-        -r "${REPO_DIR}/requirements.txt" 2>/dev/null || true
+        -r "${REPO_DIR}/requirements.txt"
 fi
 
 # Force numpy < 2.0 for compatibility
-mamba run -p "${VENV_DIR}" pip install --no-cache-dir "numpy<2.0" 2>/dev/null || true
+mamba run -p "${VENV_DIR}" pip install --no-cache-dir "numpy<2.0"
 
 # Install google-genai for nanoBanana inpainting
-mamba run -p "${VENV_DIR}" pip install --no-cache-dir google-genai 2>/dev/null || true
+mamba run -p "${VENV_DIR}" pip install --no-cache-dir google-genai
 
 # ─── Step 5: Download SAM weights ───────────────────────────────────────────
 SAM_WEIGHTS="${REPO_DIR}/segmentor/sam_vit_h_4b8939.pth"
@@ -115,5 +114,8 @@ if torch.cuda.is_available():
     print(f'GPU: {torch.cuda.get_device_name(0)}')
     print(f'VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB')
 "
+
+date -u +"%Y-%m-%dT%H:%M:%SZ" > "${SENTINEL_FILE}"
+echo "[SETUP] Wrote setup sentinel: ${SENTINEL_FILE}"
 
 echo "[SETUP] 3D-RE-GEN bootstrap complete!"
