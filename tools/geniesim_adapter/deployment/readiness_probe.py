@@ -26,12 +26,14 @@ DEFAULT_PATCH_MARKERS: Tuple[Tuple[str, str], ...] = (
 STRICT_REQUIRED_PATCH_MARKERS: Tuple[Tuple[str, str], ...] = (
     ("source/data_collection/server/grpc_server.py", "BlueprintPipeline contact_report patch"),
     ("source/data_collection/server/grpc_server.py", "BlueprintPipeline joint_efforts"),
+    ("source/data_collection/server/grpc_server.py", "BPv_dynamic_grasp_toggle"),
     ("source/data_collection/server/command_controller.py", "BlueprintPipeline contact_reporting_on_init patch"),
     ("source/data_collection/server/command_controller.py", "BlueprintPipeline sim_thread_physics_cache patch"),
     ("source/data_collection/server/command_controller.py", "BPv3_pre_play_kinematic"),
     ("source/data_collection/server/command_controller.py", "BPv4_deferred_dynamic_restore"),
     ("source/data_collection/server/command_controller.py", "BPv5_dynamic_teleport_usd_objects"),
     ("source/data_collection/server/command_controller.py", "BPv6_fix_dynamic_prims"),
+    ("source/data_collection/server/command_controller.py", "BPv_dynamic_grasp_toggle"),
     ("source/data_collection/server/command_controller.py", "[PATCH] scene_collision_injected"),
     ("source/data_collection/server/command_controller.py", "object_pose_resolver_v4"),
 )

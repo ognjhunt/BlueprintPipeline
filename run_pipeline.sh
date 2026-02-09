@@ -31,19 +31,11 @@ export GENIESIM_PORT=50051
 export GENIESIM_SKIP_DEFAULT_LIGHTING=1
 unset SKIP_QUALITY_GATES 2>/dev/null || true
 
-# ── gRPC readiness check ──
+# ── gRPC readiness check (use clean PYTHONPATH to avoid import conflicts) ──
 echo "[run_pipeline] Checking gRPC readiness on ${GENIESIM_HOST}:${GENIESIM_PORT}..."
 _grpc_ready=0
 for i in $(seq 1 30); do
-  if python3 -c "
-import grpc, sys
-ch = grpc.insecure_channel('${GENIESIM_HOST}:${GENIESIM_PORT}')
-try:
-    grpc.channel_ready_future(ch).result(timeout=2)
-    sys.exit(0)
-except:
-    sys.exit(1)
-" 2>/dev/null; then
+  if PYTHONPATH="" python3 -c "import grpc,sys; ch=grpc.insecure_channel('${GENIESIM_HOST}:${GENIESIM_PORT}'); grpc.channel_ready_future(ch).result(timeout=2); sys.exit(0)" 2>/dev/null; then
     _grpc_ready=1
     break
   fi

@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Patch: Dynamic grasp toggle — make target objects dynamic during grasp only.
+
+ROOT CAUSE: GENIESIM_KEEP_OBJECTS_KINEMATIC=1 prevents objects from falling
+through surfaces, but also prevents PhysX from generating real contact forces
+and varying joint efforts during manipulation. This produces frozen effort
+data and empty contact reports.
+
+FIX: Add a gRPC-accessible command to toggle specific objects between
+kinematic and dynamic states. The client (local_framework.py) sends
+toggle commands at grasp start and release end. The actual USD prim
+modification runs on the sim thread via on_command_step() dispatch
+to avoid the known USD threading deadlock.
+
+PROTOCOL:
+  1. Client sends: set_object_dynamic(prim_path, is_dynamic=True) before grasp
+  2. Server queues the request
+  3. on_command_step() processes it on sim thread:
+     - Sets physics:kinematicEnabled = (not is_dynamic) on the USD prim
+     - Zeros velocity to prevent explosive forces
+  4. Client sends: set_object_dynamic(prim_path, is_dynamic=False) after release
+
+This patch must run AFTER patch_keep_objects_kinematic.py.
+"""
+import sys
+import os
+
+CC_PATH = os.environ.get(
+    "GENIESIM_CC_PATH",
+    "/opt/geniesim/source/data_collection/server/command_controller.py",
+)
+
+GRPC_PATH = os.environ.get(
+    "GENIESIM_GRPC_PATH",
+    "/opt/geniesim/source/data_collection/server/grpc_server.py",
+)
+
+MARKER = "# BPv_dynamic_grasp_toggle"
+
+
+def apply():
+    # --- Patch command_controller.py: add toggle handler on sim thread ---
+    with open(CC_PATH) as f:
+        cc_src = f.read()
+
+    if MARKER in cc_src:
+        print("[PATCH] dynamic_grasp_toggle: already applied to command_controller.py")
+    else:
+        # Find the on_command_step method to inject our handler
+        inject_point = "def on_command_step(self):"
+        if inject_point not in cc_src:
+            print("[PATCH] FAILED: could not find on_command_step in command_controller.py")
+            return False
+
+        # Add the toggle queue and handler
+        toggle_queue_init = f"""
+        {MARKER}
+        # Dynamic grasp toggle: queue of (prim_path, is_dynamic) tuples
+        if not hasattr(self, '_bp_dynamic_toggle_queue'):
+            self._bp_dynamic_toggle_queue = []
+"""
+
+        toggle_handler = f"""
+            {MARKER}
+            # Process dynamic grasp toggle requests (runs on sim thread — safe for USD)
+            if hasattr(self, '_bp_dynamic_toggle_queue') and self._bp_dynamic_toggle_queue:
+                _toggles = list(self._bp_dynamic_toggle_queue)
+                self._bp_dynamic_toggle_queue.clear()
+                for _prim_path, _is_dynamic in _toggles:
+                    try:
+                        from pxr import UsdPhysics, Gf
+                        _stage = None
+                        if hasattr(self, 'sim_app') and self.sim_app:
+                            _ctx = self.sim_app.get_active_context()
+                            if _ctx:
+                                _stage = _ctx.get_stage()
+                        if _stage is None and hasattr(self, '_stage'):
+                            _stage = self._stage
+                        if _stage is None:
+                            import omni.usd
+                            _stage = omni.usd.get_context().get_stage()
+                        if _stage is None:
+                            print(f"[TOGGLE] FAILED: no USD stage for {{_prim_path}}")
+                            continue
+                        _prim = _stage.GetPrimAtPath(_prim_path)
+                        if not _prim or not _prim.IsValid():
+                            print(f"[TOGGLE] FAILED: invalid prim {{_prim_path}}")
+                            continue
+                        _rb_api = UsdPhysics.RigidBodyAPI(_prim)
+                        if _rb_api:
+                            _kin_attr = _rb_api.GetKinematicEnabledAttr()
+                            if _kin_attr:
+                                _kin_attr.Set(not _is_dynamic)
+                            # Zero velocity to prevent explosive forces on toggle
+                            if _is_dynamic:
+                                _vel_attr = _rb_api.GetVelocityAttr()
+                                if _vel_attr:
+                                    _vel_attr.Set(Gf.Vec3f(0, 0, 0))
+                                _ang_attr = _rb_api.GetAngularVelocityAttr()
+                                if _ang_attr:
+                                    _ang_attr.Set(Gf.Vec3f(0, 0, 0))
+                            print(f"[TOGGLE] {{_prim_path}} -> {{'dynamic' if _is_dynamic else 'kinematic'}}")
+                    except Exception as _e:
+                        print(f"[TOGGLE] ERROR for {{_prim_path}}: {{_e}}")
+"""
+
+        # Inject queue init after class __init__ or first method
+        # Find the on_physics_step method to inject before the command dispatch
+        if "def on_physics_step(self" in cc_src:
+            cc_src = cc_src.replace(
+                "def on_physics_step(self",
+                toggle_queue_init + "    def on_physics_step(self",
+                1,
+            )
+        else:
+            # Fallback: inject before on_command_step
+            cc_src = cc_src.replace(
+                inject_point,
+                toggle_queue_init + "    " + inject_point,
+                1,
+            )
+
+        # Inject the toggle handler at the start of on_command_step
+        cc_src = cc_src.replace(
+            inject_point,
+            inject_point + toggle_handler,
+            1,
+        )
+
+        with open(CC_PATH, "w") as f:
+            f.write(cc_src)
+        print("[PATCH] dynamic_grasp_toggle: APPLIED to command_controller.py")
+
+    # --- Patch grpc_server.py: add toggle RPC handler ---
+    with open(GRPC_PATH) as f:
+        grpc_src = f.read()
+
+    if MARKER in grpc_src:
+        print("[PATCH] dynamic_grasp_toggle: already applied to grpc_server.py")
+    else:
+        # Add a handler for the toggle command via the generic handler mechanism
+        toggle_rpc = f"""
+    {MARKER}
+    def _bp_handle_dynamic_toggle(self, prim_path, is_dynamic):
+        \"\"\"Queue a dynamic/kinematic toggle for the sim thread.\"\"\"
+        _cc = getattr(self, 'command_controller', None)
+        if _cc is None:
+            _cc = getattr(self, '_command_controller', None)
+        if _cc is None:
+            print("[TOGGLE-RPC] No command_controller reference")
+            return False
+        if not hasattr(_cc, '_bp_dynamic_toggle_queue'):
+            _cc._bp_dynamic_toggle_queue = []
+        _cc._bp_dynamic_toggle_queue.append((str(prim_path), bool(is_dynamic)))
+        print(f"[TOGGLE-RPC] Queued: {{prim_path}} -> {{'dynamic' if is_dynamic else 'kinematic'}}")
+        return True
+"""
+        # Find a good injection point in grpc_server.py
+        if "class " in grpc_src:
+            # Find the last method definition to append our handler
+            import re
+            # Insert before the last closing of the class
+            last_def = list(re.finditer(r"\n    def ", grpc_src))
+            if last_def:
+                insert_pos = last_def[-1].start()
+                grpc_src = grpc_src[:insert_pos] + toggle_rpc + grpc_src[insert_pos:]
+            else:
+                # Append to end of file
+                grpc_src += toggle_rpc
+
+        with open(GRPC_PATH, "w") as f:
+            f.write(grpc_src)
+        print("[PATCH] dynamic_grasp_toggle: APPLIED to grpc_server.py")
+
+    return True
+
+
+if __name__ == "__main__":
+    sys.exit(0 if apply() else 1)

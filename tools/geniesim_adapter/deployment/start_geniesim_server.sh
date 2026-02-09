@@ -20,7 +20,7 @@ GENIESIM_CAMERA_REQUIRE_DISPLAY=${GENIESIM_CAMERA_REQUIRE_DISPLAY:-1}
 GENIESIM_STRICT_RUNTIME_READINESS=${GENIESIM_STRICT_RUNTIME_READINESS:-0}
 GENIESIM_STRICT_FAIL_ACTION=${GENIESIM_STRICT_FAIL_ACTION:-error}
 GENIESIM_KEEP_OBJECTS_KINEMATIC=${GENIESIM_KEEP_OBJECTS_KINEMATIC:-0}
-GENIESIM_SERVER_CUROBO_MODE=${GENIESIM_SERVER_CUROBO_MODE:-auto}
+GENIESIM_SERVER_CUROBO_MODE=${GENIESIM_SERVER_CUROBO_MODE:-off}
 GENIESIM_CUROBO_FAILOVER_FLAG=${GENIESIM_CUROBO_FAILOVER_FLAG:-${REPO_ROOT}/.geniesim_curobo_failover.flag}
 
 _RUNTIME_READINESS_DEFAULT="/tmp/geniesim_runtime_readiness.json"
@@ -188,6 +188,7 @@ if [ -d "${PATCHES_DIR}" ]; then
   _apply_patch_script "${PATCHES_DIR}/patch_fix_dynamic_prims_overwrite.py" "fix_dynamic_prims_overwrite" "1"
   _apply_patch_script "${PATCHES_DIR}/patch_scene_collision.py" "scene_collision" "1"
   _apply_patch_script "${PATCHES_DIR}/patch_ui_builder_time_import.py" "ui_builder_time_import" "1"
+  _apply_patch_script "${PATCHES_DIR}/patch_curobo_config_type.py" "curobo_config_type_fix" "0"
 
   if [ "${GENIESIM_KEEP_OBJECTS_KINEMATIC}" = "1" ]; then
     echo "[geniesim] GENIESIM_KEEP_OBJECTS_KINEMATIC=1 — applying keep_kinematic patch"
@@ -195,6 +196,7 @@ if [ -d "${PATCHES_DIR}" ]; then
   else
     echo "[geniesim] GENIESIM_KEEP_OBJECTS_KINEMATIC=0 — leaving dynamic object motion enabled"
   fi
+  _apply_patch_script "${PATCHES_DIR}/patch_dynamic_grasp_toggle.py" "dynamic_grasp_toggle" "1"
 
   _startup_strict=0
   if [ "${GENIESIM_PATCH_CHECK_STRICT}" = "1" ] || [ "${GENIESIM_STRICT_RUNTIME_READINESS}" = "1" ]; then
@@ -225,6 +227,8 @@ if [ -d "${PATCHES_DIR}" ]; then
   _check_patch_marker "${_CMD_CTRL}" "BPv4_deferred_dynamic_restore"
   _check_patch_marker "${_CMD_CTRL}" "BPv5_dynamic_teleport_usd_objects"
   _check_patch_marker "${_CMD_CTRL}" "BPv6_fix_dynamic_prims"
+  _check_patch_marker "${_CMD_CTRL}" "BPv_dynamic_grasp_toggle"
+  _check_patch_marker "${_GRPC_SERVER}" "BPv_dynamic_grasp_toggle"
   _check_patch_marker "${_CMD_CTRL}" "BlueprintPipeline object_pose patch"
   _check_patch_marker "${_CMD_CTRL}" "object_pose_resolver_v4"
   _check_patch_marker "${_CMD_CTRL}" "[PATCH] scene_collision_injected"

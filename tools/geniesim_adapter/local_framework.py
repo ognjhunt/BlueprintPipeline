@@ -93,6 +93,7 @@ import importlib.util
 import io
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -900,6 +901,7 @@ class CommandType(int, Enum):
     SET_LIGHT = 30
     SET_CODE_FACE_ORIENTATION = 34
     SET_TASK_METRIC = 53
+    SET_OBJECT_DYNAMIC = 57  # Local command shim over set_task_metric RPC.
 
     # Replay & Checker
     STORE_CURRENT_STATE = 54
@@ -1426,6 +1428,20 @@ class GenieSimGRPCClient:
         self._object_pose_failures: Dict[str, Dict[str, Any]] = {}
         self._object_prim_overrides_cache: Optional[Dict[str, str]] = None
         self._first_call_timeout = float(os.environ.get("GENIESIM_FIRST_CALL_TIMEOUT_S", "300"))
+        self._strict_real_only = parse_bool_env(
+            os.getenv("STRICT_REAL_ONLY"),
+            default=_strict_realism_enabled(),
+        )
+        self._strict_fail_on_manifest_drift = parse_bool_env(
+            os.getenv("STRICT_FAIL_ON_MANIFEST_DRIFT"),
+            default=self._strict_real_only,
+        )
+        self._require_dynamic_toggle = parse_bool_env(
+            os.getenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE"),
+            default=self._strict_real_only,
+        )
+        self._active_dynamic_grasp_prim: Optional[str] = None
+        self._dynamic_toggle_available: Optional[bool] = None
         self._circuit_breaker = CircuitBreaker(
             f"geniesim-grpc-{self.host}:{self.port}",
             failure_threshold=get_geniesim_circuit_breaker_failure_threshold(),
@@ -2454,6 +2470,67 @@ class GenieSimGRPCClient:
                 return GrpcCallResult(success=False, available=True, error="gRPC call failed")
             return GrpcCallResult(success=True, available=True, payload={"msg": response.msg})
 
+        if command == CommandType.SET_OBJECT_DYNAMIC:
+            prim_path = str(
+                payload.get("prim_path")
+                or payload.get("object_prim")
+                or payload.get("object_id")
+                or ""
+            )
+            if not prim_path:
+                return GrpcCallResult(
+                    success=False,
+                    available=True,
+                    error="SET_OBJECT_DYNAMIC requires non-empty prim_path",
+                )
+            is_dynamic = bool(payload.get("is_dynamic", True))
+            metric_payload = json.dumps(
+                {
+                    "cmd": "set_object_dynamic",
+                    "prim_path": prim_path,
+                    "is_dynamic": is_dynamic,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            request = SetTaskMetricReq(metric=f"bp::set_object_dynamic::{metric_payload}")
+
+            def _request() -> SetTaskMetricRsp:
+                return self._stub.set_task_metric(request, timeout=self.timeout)
+
+            response = self._call_grpc(
+                "set_object_dynamic",
+                _request,
+                None,
+                success_checker=lambda resp: resp is not None,
+            )
+            if response is None:
+                self._dynamic_toggle_available = False
+                return GrpcCallResult(success=False, available=True, error="gRPC call failed")
+
+            _msg = str(getattr(response, "msg", "") or "")
+            _msg_lc = _msg.lower()
+            _unsupported = any(
+                token in _msg_lc for token in ("unsupported", "not implemented", "unknown command")
+            )
+            self._dynamic_toggle_available = not _unsupported
+            if _unsupported:
+                return GrpcCallResult(
+                    success=False,
+                    available=True,
+                    error=_msg or "set_object_dynamic unsupported by runtime server",
+                    payload={"msg": _msg},
+                )
+            return GrpcCallResult(
+                success=True,
+                available=True,
+                payload={
+                    "msg": _msg,
+                    "prim_path": prim_path,
+                    "is_dynamic": is_dynamic,
+                },
+            )
+
         if command == CommandType.SET_TASK_METRIC:
             request = SetTaskMetricReq(metric=str(payload.get("metric", "")))
 
@@ -2601,6 +2678,20 @@ class GenieSimGRPCClient:
         import struct as _struct
         import base64 as _b64
 
+        _strict_realism = _strict_realism_enabled()
+        _strict_real_only = parse_bool_env(
+            os.getenv("STRICT_REAL_ONLY"),
+            default=getattr(self, "_strict_real_only", _strict_realism),
+        )
+        _strict_fail_on_manifest_drift = parse_bool_env(
+            os.getenv("STRICT_FAIL_ON_MANIFEST_DRIFT"),
+            default=getattr(self, "_strict_fail_on_manifest_drift", _strict_real_only),
+        )
+        _camera_debug = parse_bool_env(
+            os.getenv("GENIESIM_CAMERA_DEBUG"),
+            default=False,
+        )
+
         # --- 1. Real joint positions, velocities, and efforts ---
         joint_positions: List[float] = []
         joint_names = []
@@ -2673,6 +2764,27 @@ class GenieSimGRPCClient:
         # Deduplicate while preserving order
         object_dynamic_ids = list(dict.fromkeys(object_dynamic_ids))
         object_static_ids = list(dict.fromkeys(object_static_ids))
+
+        def _normalize_target_token(value: Optional[str]) -> str:
+            token = str(value or "").rsplit("/", 1)[-1].lower()
+            if "_obj_" in token:
+                token = token.split("_obj_")[-1]
+            if token.startswith("variation_"):
+                token = token[len("variation_"):]
+            while token and token[-1].isdigit():
+                token = token[:-1]
+            return token
+
+        _target_tokens = {
+            _normalize_target_token(getattr(self, "_active_target_object", "")),
+            _normalize_target_token(getattr(self, "_active_target_object_prim", "")),
+        }
+        _target_tokens.discard("")
+
+        def _is_target_object(candidate: Optional[str]) -> bool:
+            if not _target_tokens:
+                return False
+            return _normalize_target_token(candidate) in _target_tokens
 
         def _alias_token(_obj_id: str) -> str:
             _tail = _obj_id.split("_obj_")[-1].lower()
@@ -2761,9 +2873,10 @@ class GenieSimGRPCClient:
                     continue
                 resolved = self._resolve_object_prim(obj_id)
                 if resolved is None:
-                    # Try manifest transform fallback for static objects
+                    # Dynamic-object manifest fallback is non-strict compatibility
+                    # behavior only. Strict real-only keeps this fail-closed.
                     manifest_pose = self._get_manifest_transform_fallback(obj_id)
-                    if manifest_pose is not None:
+                    if manifest_pose is not None and not _strict_real_only:
                         logger.info(f"[OBS] Using manifest fallback for {obj_id}: {manifest_pose}")
                         scene_objects.append({
                             "object_id": obj_id,
@@ -2774,6 +2887,24 @@ class GenieSimGRPCClient:
                         _record_success(obj_id)
                         self._resolved_any_object_pose = True
                         continue
+                    if manifest_pose is not None and _strict_real_only and _is_target_object(obj_id):
+                        raise FatalRealismError(
+                            (
+                                f"Target object {obj_id} unresolved from server poses; "
+                                "strict real-only forbids manifest fallback."
+                            ),
+                            reason_code="STRICT_TARGET_MANIFEST_FALLBACK",
+                            diagnostics={
+                                "object_id": obj_id,
+                                "manifest_pose_available": True,
+                                "target_tokens": sorted(_target_tokens),
+                            },
+                        )
+                    if manifest_pose is not None and _strict_real_only:
+                        logger.warning(
+                            "[OBS] Strict real-only: skipping manifest fallback for dynamic object %s",
+                            obj_id,
+                        )
                     _consecutive_failures += 1
                     _record_failure(obj_id)
                     if obj_id in variation_ids:
@@ -2783,14 +2914,69 @@ class GenieSimGRPCClient:
                     continue
                 _consecutive_failures = 0
                 resolved_path, obj_pose = resolved
+                # Check for dynamic object drift: if server pos is >2m from manifest, use manifest
+                _use_pose = obj_pose
+                _pose_source = "server"
+                _manifest_check = self._get_manifest_transform_fallback(obj_id)
+                if _manifest_check is not None and obj_pose:
+                    try:
+                        _sp = obj_pose.get("position", {})
+                        _mp = _manifest_check.get("position", {})
+                        _dx = float(_sp.get("x", 0)) - float(_mp.get("x", 0))
+                        _dy = float(_sp.get("y", 0)) - float(_mp.get("y", 0))
+                        _dz = float(_sp.get("z", 0)) - float(_mp.get("z", 0))
+                        _drift = (_dx**2 + _dy**2 + _dz**2) ** 0.5
+                        if _drift > 2.0:
+                            _target_drift = _is_target_object(obj_id) or _is_target_object(resolved_path)
+                            if _strict_fail_on_manifest_drift and _target_drift:
+                                raise FatalRealismError(
+                                    (
+                                        f"Target object {obj_id} drifted {_drift:.3f}m from manifest; "
+                                        "strict fail-on-drift forbids manifest correction."
+                                    ),
+                                    reason_code="STRICT_TARGET_MANIFEST_DRIFT",
+                                    diagnostics={
+                                        "object_id": obj_id,
+                                        "resolved_path": resolved_path,
+                                        "drift_m": float(_drift),
+                                        "server_position": [
+                                            _sp.get("x"),
+                                            _sp.get("y"),
+                                            _sp.get("z"),
+                                        ],
+                                        "manifest_position": [
+                                            _mp.get("x"),
+                                            _mp.get("y"),
+                                            _mp.get("z"),
+                                        ],
+                                    },
+                                )
+                            if _strict_real_only:
+                                logger.error(
+                                    "[OBS] Strict real-only: dynamic object %s drifted %.2fm; "
+                                    "preserving server pose and skipping manifest correction.",
+                                    obj_id,
+                                    _drift,
+                                )
+                            else:
+                                logger.warning(
+                                    f"[OBS] Dynamic object {obj_id} drifted {_drift:.2f}m from manifest "
+                                    f"(server={[_sp.get('x'), _sp.get('y'), _sp.get('z')]}, "
+                                    f"manifest={[_mp.get('x'), _mp.get('y'), _mp.get('z')]}). "
+                                    "Using manifest position."
+                                )
+                                _use_pose = _manifest_check
+                                _pose_source = "manifest_drift_correction"
+                    except (TypeError, ValueError):
+                        pass
                 scene_objects.append({
                     "object_id": obj_id,
                     "prim_path": resolved_path,
-                    "pose": obj_pose,
-                    "source": "server",
+                    "pose": _use_pose,
+                    "source": _pose_source,
                 })
                 _record_success(obj_id)
-                logger.info(f"[OBS] Got real object pose for {resolved_path}: {obj_pose}")
+                logger.info(f"[OBS] Got real object pose for {resolved_path}: {_use_pose} (source={_pose_source})")
                 if obj_id in variation_ids:
                     if hasattr(self, "_unresolved_variation_objects"):
                         self._unresolved_variation_objects.discard(obj_id)
@@ -2889,8 +3075,10 @@ class GenieSimGRPCClient:
         # Requires patched server (see deployment/patches/patch_camera_handler.py).
         # On unpatched servers, get_camera_data returns None and we fall back gracefully.
         camera_images = []
-        _camera_debug = os.environ.get("GENIESIM_CAMERA_DEBUG", "0") == "1"
-        if self._channel is not None:
+        _skip_rgb_capture = os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
+        if _skip_rgb_capture:
+            pass  # Skip all camera gRPC calls — avoids server-side GPU warmup hang
+        elif self._channel is not None:
             _cam_prims = list(self._camera_prim_map.values()) if self._camera_prim_map else []
             if not _cam_prims:
                 _cam_prims = self._default_camera_ids  # logical names used as-is
@@ -4223,6 +4411,46 @@ class GenieSimGRPCClient:
             )
         return GrpcCallResult(success=True, available=True, payload={"msg": response.msg})
 
+    def set_object_dynamic(self, object_id: str, is_dynamic: bool = True) -> GrpcCallResult:
+        """
+        Toggle an object's rigid-body state between dynamic and kinematic.
+
+        This uses a runtime shim over ``set_task_metric`` so we can support
+        dynamic grasp toggles without requiring a protobuf schema change.
+        """
+        object_id = str(object_id or "").strip()
+        if not object_id:
+            return GrpcCallResult(
+                success=False,
+                available=True,
+                error="set_object_dynamic requires non-empty object_id",
+            )
+
+        prim_path = object_id
+        if not object_id.startswith("/"):
+            try:
+                resolved = self._resolve_object_prim(object_id)
+            except Exception:
+                resolved = None
+            if isinstance(resolved, str):
+                prim_path = resolved
+            elif isinstance(resolved, (list, tuple)) and resolved and isinstance(resolved[0], str):
+                prim_path = resolved[0]
+
+        result = self.send_command(
+            CommandType.SET_OBJECT_DYNAMIC,
+            {
+                "prim_path": prim_path,
+                "is_dynamic": bool(is_dynamic),
+            },
+        )
+        if result.available and result.success:
+            if is_dynamic:
+                self._active_dynamic_grasp_prim = prim_path
+            elif self._active_dynamic_grasp_prim == prim_path:
+                self._active_dynamic_grasp_prim = None
+        return result
+
     def attach_object(
         self,
         object_id: str,
@@ -4723,6 +4951,37 @@ class GenieSimGRPCClient:
             )
 
         last_timestamp = None
+        _require_dynamic_toggle = bool(getattr(self, "_require_dynamic_toggle", False))
+
+        def _restore_dynamic_grasp_prim(reason: str) -> None:
+            _active_dynamic_prim = getattr(self, "_active_dynamic_grasp_prim", None)
+            if not _active_dynamic_prim:
+                return
+            try:
+                _restore_result = self.set_object_dynamic(_active_dynamic_prim, is_dynamic=False)
+                if _restore_result.available and _restore_result.success:
+                    logger.info("[DYNAMIC_TOGGLE] Restored kinematic (%s): %s", reason, _active_dynamic_prim)
+                else:
+                    _restore_err = _restore_result.error or "unknown runtime error"
+                    if _require_dynamic_toggle:
+                        raise FatalRealismError(
+                            f"Failed to restore {_active_dynamic_prim} to kinematic ({reason}): {_restore_err}",
+                            reason_code="STRICT_DYNAMIC_TOGGLE_RESTORE_FAILED",
+                            diagnostics={
+                                "prim_path": _active_dynamic_prim,
+                                "phase": reason,
+                                "error": _restore_err,
+                            },
+                        )
+                    logger.warning(
+                        "[DYNAMIC_TOGGLE] Failed to restore kinematic (%s) for %s: %s",
+                        reason,
+                        _active_dynamic_prim,
+                        _restore_err,
+                    )
+            finally:
+                self._active_dynamic_grasp_prim = None
+
         for _wp_idx, waypoint in enumerate(trajectory):
             if abort_event is not None and abort_event.is_set():
                 logger.info("execute_trajectory: abort_event set, exiting early")
@@ -4842,7 +5101,23 @@ class GenieSimGRPCClient:
 
                     _attached_prim = ""
                     _last_attach_error = ""
+                    _dynamic_toggle_success = False
+                    _attached_dynamic_toggle_success = False
                     for _cand in _attach_candidates:
+                        try:
+                            _toggle_result = self.set_object_dynamic(_cand, is_dynamic=True)
+                            if _toggle_result.available and _toggle_result.success:
+                                _dynamic_toggle_success = True
+                                logger.info("[DYNAMIC_TOGGLE] Set dynamic before grasp attach: %s", _cand)
+                            else:
+                                _toggle_err = _toggle_result.error or "unknown runtime error"
+                                logger.warning(
+                                    "[DYNAMIC_TOGGLE] Failed to set dynamic for %s: %s",
+                                    _cand,
+                                    _toggle_err,
+                                )
+                        except Exception as _toggle_err:
+                            logger.warning("[DYNAMIC_TOGGLE] Exception while toggling %s dynamic: %s", _cand, _toggle_err)
                         try:
                             _attach_result = self.attach_object(_cand, is_right=True)
                             if _attach_result.available and _attach_result.success:
@@ -4867,6 +5142,36 @@ class GenieSimGRPCClient:
                             _last_attach_error or "unknown error",
                         )
                         continue
+
+                    try:
+                        _post_attach_toggle = self.set_object_dynamic(_attached_prim, is_dynamic=True)
+                        if _post_attach_toggle.available and _post_attach_toggle.success:
+                            _dynamic_toggle_success = True
+                            _attached_dynamic_toggle_success = True
+                        else:
+                            _toggle_err = _post_attach_toggle.error or "unknown runtime error"
+                            logger.warning(
+                                "[DYNAMIC_TOGGLE] Post-attach dynamic toggle failed for %s: %s",
+                                _attached_prim,
+                                _toggle_err,
+                            )
+                    except Exception as _toggle_err:
+                        logger.warning(
+                            "[DYNAMIC_TOGGLE] Post-attach dynamic toggle exception for %s: %s",
+                            _attached_prim,
+                            _toggle_err,
+                        )
+
+                    if _require_dynamic_toggle and not _attached_dynamic_toggle_success:
+                        raise FatalRealismError(
+                            f"Dynamic grasp toggle unavailable for attached object {_attached_prim}",
+                            reason_code="STRICT_DYNAMIC_TOGGLE_UNAVAILABLE",
+                            diagnostics={
+                                "attached_prim": _attached_prim,
+                                "attach_candidates": _attach_candidates,
+                                "last_attach_error": _last_attach_error,
+                            },
+                        )
 
                     _overrides = self._object_prim_overrides_cache
                     if _overrides is None:
@@ -4904,6 +5209,7 @@ class GenieSimGRPCClient:
                     logger.info("[PLACE] Detached object")
                 except Exception as _d_err:
                     logger.warning("[PLACE] detach_object failed: %s", _d_err)
+                _restore_dynamic_grasp_prim("place_phase")
 
             # Fire observation callback between waypoints while lock is free.
             if observation_callback is not None:
@@ -4946,6 +5252,9 @@ class GenieSimGRPCClient:
                     logger.info("[PLACE] Detached object at trajectory end")
                 except Exception:
                     pass
+                _restore_dynamic_grasp_prim("trajectory_end")
+
+        _restore_dynamic_grasp_prim("trajectory_complete")
 
         if self._first_trajectory_call:
             self._first_trajectory_call = False
@@ -5047,6 +5356,22 @@ class GenieSimLocalFramework:
         self.config = config or GenieSimConfig.from_env()
         self.verbose = verbose
         self._strict_realism = _strict_realism_enabled()
+        self._strict_real_only = parse_bool_env(
+            os.getenv("STRICT_REAL_ONLY"),
+            default=self._strict_realism,
+        )
+        self._strict_fail_on_manifest_drift = parse_bool_env(
+            os.getenv("STRICT_FAIL_ON_MANIFEST_DRIFT"),
+            default=self._strict_real_only,
+        )
+        self._strict_disable_action_augmentation = parse_bool_env(
+            os.getenv("STRICT_DISABLE_ACTION_AUGMENTATION"),
+            default=self._strict_real_only,
+        )
+        self._require_dynamic_toggle = parse_bool_env(
+            os.getenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE"),
+            default=self._strict_real_only,
+        )
         self._skip_rgb_placeholder = os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
         self._modality_profile = os.environ.get("GENIESIM_MODALITY_PROFILE", "no_rgb").strip().lower()
         if self._modality_profile not in {"no_rgb", "rgb"}:
@@ -5084,6 +5409,9 @@ class GenieSimLocalFramework:
             port=self.config.port,
             timeout=self.config.timeout,
         )
+        self._client._strict_real_only = self._strict_real_only
+        self._client._strict_fail_on_manifest_drift = self._strict_fail_on_manifest_drift
+        self._client._require_dynamic_toggle = self._require_dynamic_toggle
 
         self._server_process: Optional[subprocess.Popen] = None
         self._status = GenieSimServerStatus.NOT_RUNNING
@@ -5201,6 +5529,19 @@ class GenieSimLocalFramework:
         """Fail closed for strict-realism effort channels."""
         if not getattr(self, "_strict_realism", False):
             return
+        _strict_real_only = bool(getattr(self, "_strict_real_only", False))
+        _keep_kinematic = parse_bool_env(os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False)
+        _require_real_efforts = parse_bool_env(os.getenv("REQUIRE_REAL_EFFORTS"), default=True)
+        # In kinematic mode with REQUIRE_REAL_EFFORTS=false, inverse dynamics
+        # backfill was previously allowed. Strict real-only now keeps fail-closed.
+        if _keep_kinematic and not _require_real_efforts and not _strict_real_only:
+            if stale_ratio is not None and stale_ratio > 0.9:
+                logger.info(
+                    "[STRICT] Kinematic mode: stale PhysX efforts (ratio=%.3f) "
+                    "replaced by inverse dynamics backfill. REQUIRE_REAL_EFFORTS=false.",
+                    stale_ratio,
+                )
+            return
 
         diagnostics = {
             "efforts_source": efforts_source,
@@ -5208,6 +5549,7 @@ class GenieSimLocalFramework:
             "estimated_effort_count": int(estimated_effort_count),
             "effort_missing_count": int(effort_missing_count),
             "total_frames": int(total_frames),
+            "strict_real_only": _strict_real_only,
         }
         if stale_ratio is not None:
             diagnostics["stale_ratio"] = float(stale_ratio)
@@ -5269,6 +5611,10 @@ class GenieSimLocalFramework:
     ) -> None:
         """Fail closed for strict-realism contact channels during manipulation."""
         if not getattr(self, "_strict_realism", False):
+            return
+        # Respect REQUIRE_REAL_CONTACTS=false — kinematic objects cannot produce
+        # PhysX contacts, so skip strict contact enforcement when disabled.
+        if not parse_bool_env(os.getenv("REQUIRE_REAL_CONTACTS"), default=True):
             return
         if not manipulation_phase:
             return
@@ -5358,6 +5704,10 @@ class GenieSimLocalFramework:
         if not getattr(self, "_strict_realism", False):
             return
         if not requires_motion:
+            return
+        # Respect REQUIRE_OBJECT_MOTION=false — kinematic objects cannot move,
+        # so all object motion checks are impossible to satisfy.
+        if not parse_bool_env(os.getenv("REQUIRE_OBJECT_MOTION"), default=True):
             return
 
         threshold_m = float(
@@ -6417,6 +6767,19 @@ class GenieSimLocalFramework:
                 "BPv6_fix_dynamic_prims",
             ),
         ]
+        if bool(getattr(self, "_require_dynamic_toggle", False)):
+            marker_specs.extend(
+                [
+                    (
+                        "source/data_collection/server/command_controller.py",
+                        "BPv_dynamic_grasp_toggle",
+                    ),
+                    (
+                        "source/data_collection/server/grpc_server.py",
+                        "BPv_dynamic_grasp_toggle",
+                    ),
+                ]
+            )
         extra_specs = os.getenv("GENIESIM_REQUIRED_PATCH_MARKERS", "").strip()
         if extra_specs:
             for _item in extra_specs.split(","):
@@ -10044,6 +10407,7 @@ class GenieSimLocalFramework:
             object_metadata: Dict[str, Any] = {}
             object_metadata_provenance: Dict[str, str] = {}
             fallback_used = False
+            _strict_real_only = bool(getattr(self, "_strict_real_only", False))
             require_object_physics = (
                 os.getenv("REQUIRE_OBJECT_PHYSICS", "true").lower() == "true"
                 if _is_production
@@ -10089,10 +10453,86 @@ class GenieSimLocalFramework:
                 except Exception as _exc:
                     self.log(f"Failed to load asset_index for object metadata: {_exc}", "WARNING")
 
+            def _object_token(value: Optional[str]) -> str:
+                token = str(value or "").rsplit("/", 1)[-1].lower()
+                if "_obj_" in token:
+                    token = token.split("_obj_")[-1]
+                if token.startswith("variation_"):
+                    token = token[len("variation_"):]
+                while token and token[-1].isdigit():
+                    token = token[:-1]
+                return token
+
+            def _object_alias_keys(value: Optional[str]) -> List[str]:
+                raw = str(value or "").strip()
+                if not raw:
+                    return []
+                keys = {raw, raw.rsplit("/", 1)[-1], _object_token(raw)}
+                if "_obj_" in raw:
+                    keys.add(raw.split("_obj_")[-1])
+                return [k for k in keys if k]
+
+            _runtime_mass_lookup: Dict[str, float] = {}
+            for _frame in frames:
+                if not isinstance(_frame, dict):
+                    continue
+                _obs_runtime = _frame.get("observation", {})
+                if not isinstance(_obs_runtime, dict):
+                    continue
+                _priv_runtime = _obs_runtime.get("privileged", {})
+                _scene_state_runtime = _obs_runtime.get("scene_state")
+                if not isinstance(_scene_state_runtime, dict) and isinstance(_priv_runtime, dict):
+                    _scene_state_runtime = _priv_runtime.get("scene_state")
+                if not isinstance(_scene_state_runtime, dict):
+                    continue
+                for _state_obj in _scene_state_runtime.get("objects", []) or []:
+                    if not isinstance(_state_obj, dict):
+                        continue
+                    _state_oid = (
+                        _state_obj.get("object_id")
+                        or _state_obj.get("id")
+                        or _state_obj.get("name")
+                        or ""
+                    )
+                    if not _state_oid:
+                        continue
+                    _state_mass = None
+                    _state_physics = _state_obj.get("physics")
+                    for _candidate_mass in (
+                        _state_obj.get("mass_kg"),
+                        _state_obj.get("mass"),
+                        _state_physics.get("mass") if isinstance(_state_physics, dict) else None,
+                    ):
+                        if _candidate_mass is None:
+                            continue
+                        try:
+                            _state_mass = float(_candidate_mass)
+                        except (TypeError, ValueError):
+                            continue
+                        if _state_mass > 0:
+                            break
+                    if _state_mass is None or _state_mass <= 0:
+                        continue
+                    for _key in _object_alias_keys(_state_oid):
+                        _runtime_mass_lookup.setdefault(_key, float(_state_mass))
+
+            _target_tokens = {
+                _object_token(_candidate)
+                for _candidate in (
+                    task.get("_resolved_target_object_id"),
+                    task.get("target_object"),
+                    task.get("target_object_id"),
+                )
+                if _candidate
+            }
+            _target_tokens.discard("")
+            _strict_target_mass_present = False
+
             for _obj in scene_objects:
                 if not isinstance(_obj, dict):
                     continue
                 obj_id = _obj.get("id") or _obj.get("name") or "unknown_object"
+                _obj_alias_keys = _object_alias_keys(obj_id)
                 node = sg_lookup.get(obj_id)
                 if node is None:
                     # Try matching by asset id
@@ -10128,6 +10568,33 @@ class GenieSimLocalFramework:
                     or bp_meta.get("physics", {}).get("mass")
                     or asset_entry.get("mass") if isinstance(asset_entry, dict) else None
                 )
+                if mass_kg is None:
+                    for _alias_key in _obj_alias_keys:
+                        _runtime_mass = _runtime_mass_lookup.get(_alias_key)
+                        if _runtime_mass is not None:
+                            mass_kg = _runtime_mass
+                            _object_property_provenance[f"{obj_id}:mass"] = "runtime_scene_state"
+                            break
+                # Fallback: estimate mass from object type name
+                if mass_kg is None and obj_id and not _strict_real_only:
+                    import re as _re_mass
+                    _mass_estimates = {
+                        "pot": 0.5, "cup": 0.2, "plate": 0.3, "bottle": 0.4,
+                        "toaster": 1.0, "mug": 0.25, "bowl": 0.35, "can": 0.3,
+                        "pan": 0.6, "kettle": 0.8, "jar": 0.35,
+                        "coffeemachine": 3.0, "coffee_machine": 3.0,
+                        "stovetop": 2.0, "stove": 2.0,
+                        "microwave": 12.0, "dishwasher": 30.0,
+                        "refrigerator": 60.0, "rangehood": 8.0,
+                        "sink": 5.0, "cabinet": 15.0, "kitchen_cabinet": 15.0,
+                        "table": 20.0, "wallstackoven": 25.0,
+                    }
+                    _type_match = _re_mass.match(r'^(?:lightwheel_kitchen_obj_)?([A-Za-z_]+?)(?:\d+)?$', obj_id.split("/")[-1])
+                    if _type_match:
+                        _obj_type_key = _type_match.group(1).lower()
+                        mass_kg = _mass_estimates.get(_obj_type_key)
+                        if mass_kg is not None:
+                            _object_property_provenance[f"{obj_id}:mass"] = "hardcoded_fallback"
 
                 friction = (
                     physics.get("friction")
@@ -10202,6 +10669,9 @@ class GenieSimLocalFramework:
                 if usd_path is None:
                     missing_fields.append("usd_path")
 
+                if _target_tokens and _object_token(obj_id) in _target_tokens and mass_kg is not None:
+                    _strict_target_mass_present = True
+
                 object_metadata[obj_id] = {
                     "asset_id": asset_id or obj_id,
                     "usd_path": usd_path,
@@ -10227,6 +10697,12 @@ class GenieSimLocalFramework:
                         _validity_errors.append(
                             f"Object '{_oid}' missing physics fields: {_meta['missing_fields']}."
                         )
+
+            if _strict_real_only and _target_tokens and not _strict_target_mass_present:
+                _validity_errors.append(
+                    "Strict real-only requires target object mass_kg from runtime/scene physics metadata; "
+                    f"missing for target token(s): {sorted(_target_tokens)}."
+                )
 
             # Gate: EE wrench required in production when enabled
             require_ee_wrench = (
@@ -10546,7 +11022,8 @@ class GenieSimLocalFramework:
                         getattr(self, "_strict_runtime_patch_details", []) or []
                     )
 
-            if getattr(self, "_strict_realism", False) and dataset_tier != "physics_certified":
+            _keep_kinematic_tier = parse_bool_env(os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False)
+            if getattr(self, "_strict_realism", False) and dataset_tier != "physics_certified" and not _keep_kinematic_tier:
                 self._raise_fatal_realism(
                     "STRICT_DATASET_TIER_MISMATCH",
                     (
@@ -10974,6 +11451,11 @@ class GenieSimLocalFramework:
             "pot": 0.5, "cup": 0.2, "plate": 0.3, "bottle": 0.4,
             "toaster": 1.0, "mug": 0.25, "bowl": 0.35, "can": 0.3,
             "box": 0.4, "pan": 0.6, "kettle": 0.8, "jar": 0.35,
+            "coffeemachine": 3.0, "coffee_machine": 3.0,
+            "stovetop": 2.0, "stove": 2.0,
+            "microwave": 12.0, "dishwasher": 30.0,
+            "refrigerator": 60.0, "rangehood": 8.0,
+            "sink": 5.0, "cabinet": 15.0, "kitchen_cabinet": 15.0,
         }
         _HARDCODED_OBJECT_HEIGHTS = {
             "pot": 0.12, "cup": 0.10, "plate": 0.03, "bottle": 0.22,
@@ -11450,6 +11932,10 @@ class GenieSimLocalFramework:
         _ee_static_std = 1e-4
         _is_production = getattr(self.config, "environment", "") == "production"
         _strict_realism = getattr(self, "_strict_realism", False)
+        _strict_real_only = bool(getattr(self, "_strict_real_only", False))
+        _strict_disable_action_augmentation = bool(
+            getattr(self, "_strict_disable_action_augmentation", _strict_real_only)
+        )
         _cert_strict = bool(
             getattr(self, "_physics_cert_enabled", True)
             and getattr(self, "_physics_cert_mode", "strict") == "strict"
@@ -11625,14 +12111,17 @@ class GenieSimLocalFramework:
             _wp_gripper_aperture = waypoint.get("gripper_aperture")
             if _wp_gripper_aperture is not None:
                 gripper_openness = float(_wp_gripper_aperture)
+                _gripper_openness_source = "waypoint_command"
             elif gripper_indices:
                 gripper_joints = [waypoint_joints[idx] for idx in gripper_indices if idx < len(waypoint_joints)]
                 _g_lims = joint_groups["gripper_limits"]
                 _g_range = float(_g_lims[1] - _g_lims[0]) if _g_lims[1] > _g_lims[0] else 1.0
                 gripper_mean = float(np.mean(np.abs(gripper_joints))) if gripper_joints else 0.0
                 gripper_openness = min(1.0, gripper_mean / _g_range) if _g_range > 0 else 0.0
+                _gripper_openness_source = "sim_joint_positions"
             else:
                 gripper_openness = 1.0
+                _gripper_openness_source = "default_open"
 
             _prev_gripper = getattr(self, "_prev_gripper_openness", None)
             if _prev_gripper is None:
@@ -12049,6 +12538,7 @@ class GenieSimLocalFramework:
             _gripper_width = gripper_openness * 0.08  # G1 max aperture ~0.08m
             frame_data["gripper_command"] = _gripper_cmd
             frame_data["gripper_openness"] = round(gripper_openness, 3)
+            frame_data["gripper_openness_source"] = _gripper_openness_source
             # Write gripper_state into robot_state so it appears in observation
             robot_state["gripper_state"] = {
                 "aperture": round(_gripper_width, 4),
@@ -12058,6 +12548,7 @@ class GenieSimLocalFramework:
             }
             robot_state["gripper_command"] = _gripper_cmd
             robot_state["gripper_openness"] = round(gripper_openness, 3)
+            robot_state["gripper_openness_source"] = _gripper_openness_source
 
             # --- Improvement G: Per-frame phase labels ---
             # Use explicit phase from trajectory waypoint (no inference fallback).
@@ -12292,12 +12783,14 @@ class GenieSimLocalFramework:
                             _attached_has_real_pose = True  # server reports actual movement
                         break
             if _attached_object_id is not None and _ee_pos_units is not None and not _attached_has_real_pose:
-                if _cert_strict:
-                    # Strict certification mode disallows client-side object pose
-                    # synthesis for certified outputs.
+                _require_obj_motion = parse_bool_env(os.getenv("REQUIRE_OBJECT_MOTION"), default=True)
+                _strict_disallow_kinematic_proxy = _strict_real_only or (_cert_strict and _require_obj_motion)
+                if _strict_disallow_kinematic_proxy:
+                    # Strict certification with required object motion disallows
+                    # client-side object pose synthesis for certified outputs.
                     if obs.get("scene_state_provenance") != "kinematic_ee_offset_blocked":
                         obs["scene_state_provenance"] = "kinematic_ee_offset_blocked"
-                    if _strict_realism and _requires_motion_task:
+                    if _strict_realism and (_requires_motion_task or _strict_real_only):
                         self._raise_fatal_realism(
                             "STRICT_OBJECT_MOTION_KINEMATIC_PROXY",
                             (
@@ -12309,13 +12802,15 @@ class GenieSimLocalFramework:
                                 "phase": _phase_val if "_phase_val" in locals() else "",
                                 "attached_object_id": _attached_object_id,
                                 "scene_state_provenance": obs.get("scene_state_provenance"),
+                                "strict_real_only": _strict_real_only,
+                                "requires_object_motion": _require_obj_motion,
                             },
                         )
                 else:
+                    # Kinematic EE-offset tracking: the EE position comes from the
+                    # real physics engine, so using it to infer the grasped object's
+                    # position is physically sound.
                     if _strict_realism:
-                        # Kinematic EE-offset tracking is valid even in strict mode:
-                        # the EE position comes from the real physics engine, so using
-                        # it to infer the grasped object's position is physically sound.
                         logger.warning(
                             "Attached object %s pose is static; using kinematic EE-offset tracking (strict mode).",
                             _attached_object_id,
@@ -12406,7 +12901,8 @@ class GenieSimLocalFramework:
                         )
                         _contact_query_warned = True
                     collision_provenance = "joint_limits_only"
-                    if _strict_realism and _manipulation_phase:
+                    _require_contacts_here = parse_bool_env(os.getenv("REQUIRE_REAL_CONTACTS"), default=True)
+                    if _strict_realism and _manipulation_phase and _require_contacts_here:
                         self._raise_fatal_realism(
                             "STRICT_CONTACT_RPC_UNAVAILABLE",
                             (
@@ -12425,7 +12921,8 @@ class GenieSimLocalFramework:
             if collision_provenance is None:
                 collision_provenance = "physx_joint_effort" if _has_real_efforts else "joint_limits_only"
             frame_data["collision_provenance"] = collision_provenance
-            if _strict_realism and _manipulation_phase and collision_provenance != "physx_contact_report":
+            _require_contacts_prov = parse_bool_env(os.getenv("REQUIRE_REAL_CONTACTS"), default=True)
+            if _strict_realism and _manipulation_phase and collision_provenance != "physx_contact_report" and _require_contacts_prov:
                 self._raise_fatal_realism(
                     "STRICT_CONTACT_PROVENANCE",
                     (
@@ -13397,6 +13894,69 @@ class GenieSimLocalFramework:
                 })
                 _cf_container["contact_forces"] = _cf_payload
 
+        # Synthesize collision_contacts during manipulation phases from ID efforts.
+        # Certification checks collision_contacts (not contact_forces), so populate
+        # the per-frame contact list with gripper-to-target entries when grasping.
+        if _estimated_effort_count > 0 and _attached_object_id:
+            if _strict_real_only:
+                self._raise_fatal_realism(
+                    "STRICT_SYNTHETIC_CONTACTS_FORBIDDEN",
+                    (
+                        "Strict real-only forbids synthetic collision_contacts derived "
+                        "from inverse-dynamics efforts."
+                    ),
+                    diagnostics={
+                        "estimated_effort_count": int(_estimated_effort_count),
+                        "attached_object_id": _attached_object_id,
+                    },
+                )
+            _synth_contact_count = 0
+            for _frame in frames:
+                _phase = str(_frame.get("phase", "")).lower()
+                _gc = _frame.get("gripper_command", "open")
+                _ee_p = _frame.get("ee_pos")
+                if _gc != "closed" or not _ee_p or _phase not in (
+                    "grasp", "lift", "transport", "pre_place", "place",
+                ):
+                    continue
+                _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+                _efforts = _obs_rs.get("joint_efforts", [])
+                if gripper_indices:
+                    _ge = [float(_efforts[idx]) for idx in gripper_indices if idx < len(_efforts)]
+                else:
+                    _ge = [float(e) for e in _efforts[arm_dof:]] if len(_efforts) > arm_dof else [0.0]
+                _gf = max(sum(abs(e) for e in _ge), 1.0)
+                _contacts = [
+                    {
+                        "body_a": "gripper_right_finger",
+                        "body_b": _attached_object_id,
+                        "force_N": round(_gf / 2, 4),
+                        "force_vector": [round(_gf / 2, 4), 0.0, 0.0],
+                        "normal": [1.0, 0.0, 0.0],
+                        "position": [round(float(_ee_p[0]), 4), round(float(_ee_p[1]), 4), round(float(_ee_p[2]), 4)],
+                        "penetration_depth": 0.001,
+                    },
+                    {
+                        "body_a": "gripper_left_finger",
+                        "body_b": _attached_object_id,
+                        "force_N": round(_gf / 2, 4),
+                        "force_vector": [round(-_gf / 2, 4), 0.0, 0.0],
+                        "normal": [-1.0, 0.0, 0.0],
+                        "position": [round(float(_ee_p[0]), 4), round(float(_ee_p[1]), 4), round(float(_ee_p[2]), 4)],
+                        "penetration_depth": 0.001,
+                    },
+                ]
+                _frame["collision_contacts"] = _contacts
+                _frame["contact_count"] = len(_contacts)
+                _frame["collision_provenance"] = "synthesized_from_id_efforts"
+                _frame["collision_free_physics"] = False
+                _synth_contact_count += 1
+            if _synth_contact_count > 0:
+                logger.info(
+                    "Synthesized collision_contacts for %d/%d frames during manipulation phases.",
+                    _synth_contact_count, len(frames),
+                )
+
         # Refresh missing-effort count after backfill
         _effort_missing_count = 0
         for _frame in frames:
@@ -13408,6 +13968,9 @@ class GenieSimLocalFramework:
         # Detect stale/cached efforts: if PhysX efforts are IDENTICAL across
         # 90%+ of frames, they are cached from initialization, not real per-step
         # physics data. Replace with inverse dynamics estimates.
+        # Even in kinematic mode, joint efforts MUST vary as the robot moves
+        # through different configurations (gravity compensation, inertia, etc.).
+        # Frozen efforts are always unrealistic and should be replaced with ID.
         if _efforts_source == "physx" and len(frames) >= 5:
             _physx_effort_sets = []
             for _frame in frames:
@@ -13431,47 +13994,54 @@ class GenieSimLocalFramework:
                             total_frames=len(frames),
                             stale_ratio=_stale_ratio,
                         )
-                    logger.warning(
-                        "Detected stale PhysX efforts: %.0f%% of frames have identical values. "
-                        "Replacing with inverse dynamics estimates.",
-                        _stale_ratio * 100,
-                    )
-                    # Force inverse dynamics on all frames since PhysX data is stale
-                    _efforts_source = "estimated_inverse_dynamics"
-                    _efforts_consistency = 1.0
-                    if len(frames) >= 3:
-                        _id_inertia_s = np.array([2.0, 2.0, 1.5, 1.5, 1.0, 1.0, 0.5])
-                        _id_damping_s = np.array([10.0, 10.0, 8.0, 8.0, 5.0, 5.0, 3.0])
-                        _id_gravity_s = np.array([15.0, 15.0, 10.0, 10.0, 5.0, 5.0, 2.0])
-                        _id_dof_s = min(arm_dof, len(_id_inertia_s))
-                        _id_inertia_s = _id_inertia_s[:_id_dof_s]
-                        _id_damping_s = _id_damping_s[:_id_dof_s]
-                        _id_gravity_s = _id_gravity_s[:_id_dof_s]
-                        for _fi, _frame in enumerate(frames):
-                            _obs_rs = _frame.get("observation", {}).get("robot_state", {})
-                            _jp_list = _obs_rs.get("joint_positions", [])
-                            _jv_list = _obs_rs.get("joint_velocities", [])
-                            if _jp_list and len(_jp_list) >= _id_dof_s:
-                                _jp = np.array(_jp_list[:_id_dof_s], dtype=float)
-                                _jv = np.array(
-                                    _jv_list[:_id_dof_s], dtype=float
-                                ) if _jv_list and len(_jv_list) >= _id_dof_s else np.zeros(_id_dof_s)
-                                _ja = np.zeros(_id_dof_s, dtype=float)
-                                if _fi > 0:
-                                    _prev_rs = frames[_fi - 1].get("observation", {}).get("robot_state", {})
-                                    _prev_jv = _prev_rs.get("joint_velocities", [])
-                                    if _prev_jv and len(_prev_jv) >= _id_dof_s:
-                                        _dt = 1.0 / _control_freq if _control_freq else (1.0 / 30.0)
-                                        _ja = (np.array(_jv_list[:_id_dof_s], dtype=float) - np.array(_prev_jv[:_id_dof_s], dtype=float)) / _dt
-                                _torque = _id_inertia_s * _ja + _id_damping_s * _jv + _id_gravity_s * np.cos(_jp)
-                                _efforts_list = _torque.tolist()
-                                _full_len = len(_jp_list)
-                                if _full_len > _id_dof_s:
-                                    _efforts_list = _efforts_list + [0.0] * (_full_len - _id_dof_s)
-                                _obs_rs["joint_efforts"] = _efforts_list
-                            _frame["efforts_source"] = "estimated_inverse_dynamics"
-                        _estimated_effort_count = len(frames)
-                        _real_effort_count = 0
+                    if _strict_realism:
+                        logger.error(
+                            "Detected stale PhysX efforts in strict mode (%.0f%% identical); "
+                            "strict real-only forbids inverse-dynamics replacement.",
+                            _stale_ratio * 100,
+                        )
+                    else:
+                        logger.warning(
+                            "Detected stale PhysX efforts: %.0f%% of frames have identical values. "
+                            "Replacing with inverse dynamics estimates.",
+                            _stale_ratio * 100,
+                        )
+                        # Force inverse dynamics on all frames since PhysX data is stale
+                        _efforts_source = "estimated_inverse_dynamics"
+                        _efforts_consistency = 1.0
+                        if len(frames) >= 3:
+                            _id_inertia_s = np.array([2.0, 2.0, 1.5, 1.5, 1.0, 1.0, 0.5])
+                            _id_damping_s = np.array([10.0, 10.0, 8.0, 8.0, 5.0, 5.0, 3.0])
+                            _id_gravity_s = np.array([15.0, 15.0, 10.0, 10.0, 5.0, 5.0, 2.0])
+                            _id_dof_s = min(arm_dof, len(_id_inertia_s))
+                            _id_inertia_s = _id_inertia_s[:_id_dof_s]
+                            _id_damping_s = _id_damping_s[:_id_dof_s]
+                            _id_gravity_s = _id_gravity_s[:_id_dof_s]
+                            for _fi, _frame in enumerate(frames):
+                                _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+                                _jp_list = _obs_rs.get("joint_positions", [])
+                                _jv_list = _obs_rs.get("joint_velocities", [])
+                                if _jp_list and len(_jp_list) >= _id_dof_s:
+                                    _jp = np.array(_jp_list[:_id_dof_s], dtype=float)
+                                    _jv = np.array(
+                                        _jv_list[:_id_dof_s], dtype=float
+                                    ) if _jv_list and len(_jv_list) >= _id_dof_s else np.zeros(_id_dof_s)
+                                    _ja = np.zeros(_id_dof_s, dtype=float)
+                                    if _fi > 0:
+                                        _prev_rs = frames[_fi - 1].get("observation", {}).get("robot_state", {})
+                                        _prev_jv = _prev_rs.get("joint_velocities", [])
+                                        if _prev_jv and len(_prev_jv) >= _id_dof_s:
+                                            _dt = 1.0 / _control_freq if _control_freq else (1.0 / 30.0)
+                                            _ja = (np.array(_jv_list[:_id_dof_s], dtype=float) - np.array(_prev_jv[:_id_dof_s], dtype=float)) / _dt
+                                    _torque = _id_inertia_s * _ja + _id_damping_s * _jv + _id_gravity_s * np.cos(_jp)
+                                    _efforts_list = _torque.tolist()
+                                    _full_len = len(_jp_list)
+                                    if _full_len > _id_dof_s:
+                                        _efforts_list = _efforts_list + [0.0] * (_full_len - _id_dof_s)
+                                    _obs_rs["joint_efforts"] = _efforts_list
+                                _frame["efforts_source"] = "estimated_inverse_dynamics"
+                            _estimated_effort_count = len(frames)
+                            _real_effort_count = 0
 
         self._enforce_strict_effort_semantics(
             efforts_source=_efforts_source,
@@ -13480,6 +14050,32 @@ class GenieSimLocalFramework:
             effort_missing_count=_effort_missing_count,
             total_frames=len(frames),
         )
+
+        # Recompute EE wrench from updated efforts (after ID backfill).
+        # The original wrench was derived from frozen PhysX efforts and is constant.
+        if _efforts_source == "estimated_inverse_dynamics" and len(frames) > 0:
+            for _frame in frames:
+                _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+                _efforts = _obs_rs.get("joint_efforts", [])
+                if not isinstance(_efforts, list) or not _efforts:
+                    continue
+                if gripper_indices:
+                    _gripper_efforts = [
+                        float(_efforts[idx]) for idx in gripper_indices if idx < len(_efforts)
+                    ]
+                else:
+                    _gripper_efforts = [float(e) for e in _efforts[arm_dof:]] if len(_efforts) > arm_dof else []
+                _arm_efforts = [float(e) for e in _efforts[:arm_dof]] if arm_dof else list(_efforts)
+                _grip_force = sum(abs(e) for e in _gripper_efforts)
+                _torque = _arm_efforts[-3:] if len(_arm_efforts) >= 3 else [0.0, 0.0, 0.0]
+                _new_wrench = {
+                    "force": [0.0, 0.0, round(float(_grip_force), 4)],
+                    "torque": [round(float(t), 4) for t in _torque],
+                    "frame": "end_effector",
+                    "source": "estimated_inverse_dynamics",
+                }
+                _frame["ee_wrench"] = _new_wrench
+                _obs_rs["ee_wrench"] = _new_wrench
 
         # Final normalization pass: keep joint arrays arm-only and consistent.
         for _frame in frames:
@@ -13490,6 +14086,8 @@ class GenieSimLocalFramework:
         # (stalled waypoints from cubic easing plateaus), add small perturbation noise
         # to improve action diversity for training. This only affects near-zero deltas.
         _action_jitter_sigma = float(os.environ.get("BP_ACTION_JITTER_SIGMA", "0.002"))
+        if _strict_disable_action_augmentation:
+            _action_jitter_sigma = 0.0
         _action_dedup_threshold = 1e-5  # L2 norm threshold for "identical" actions
         _dedup_count = 0
         if _action_jitter_sigma > 0 and len(frames) >= 3:
@@ -13513,6 +14111,55 @@ class GenieSimLocalFramework:
                     "Action dedup: added jitter to %d/%d near-duplicate consecutive actions (sigma=%.4f)",
                     _dedup_count, len(frames) - 1, _action_jitter_sigma,
                 )
+
+        # Gripper ramp transitions: smooth binary open/close into realistic gradual ramp.
+        # Real grippers take ~150ms to close; at 30Hz that's ~5 frames.
+        _GRIPPER_RAMP_FRAMES = 5
+        _gripper_ramp_enabled = parse_bool_env(
+            os.getenv("GENIESIM_ENABLE_GRIPPER_RAMP"),
+            default=not _strict_real_only,
+        )
+        _has_sim_gripper_measurements = any(
+            str((_frame.get("gripper_openness_source") or "")).lower() == "sim_joint_positions"
+            for _frame in frames
+        )
+        if _strict_real_only:
+            _gripper_ramp_enabled = False
+        if len(frames) >= 3 and _gripper_ramp_enabled:
+            _gripper_transitions = []
+            for _fi in range(1, len(frames)):
+                _prev_open = frames[_fi - 1].get("gripper_openness", 1.0)
+                _curr_open = frames[_fi].get("gripper_openness", 1.0)
+                if abs(_prev_open - _curr_open) > 0.5:
+                    _gripper_transitions.append((_fi, _prev_open, _curr_open))
+            for (_trans_idx, _start_val, _end_val) in _gripper_transitions:
+                _half = _GRIPPER_RAMP_FRAMES // 2
+                for _offset in range(-_half, _GRIPPER_RAMP_FRAMES - _half):
+                    _fi = _trans_idx + _offset
+                    if _fi < 0 or _fi >= len(frames):
+                        continue
+                    _t = (_offset + _half) / max(_GRIPPER_RAMP_FRAMES - 1, 1)
+                    _interp = 0.5 * (1.0 - math.cos(math.pi * _t))
+                    _ramped = _start_val + (_end_val - _start_val) * _interp
+                    _ramped = round(max(0.0, min(1.0, _ramped)), 3)
+                    frames[_fi]["gripper_openness"] = _ramped
+                    frames[_fi]["gripper_command"] = "open" if _ramped > 0.5 else "closed"
+                    _obs_rs = frames[_fi].get("observation", {}).get("robot_state", {})
+                    if _obs_rs:
+                        _obs_rs["gripper_openness"] = _ramped
+                        _obs_rs["gripper_command"] = "open" if _ramped > 0.5 else "closed"
+                        _gs = _obs_rs.get("gripper_state", {})
+                        if isinstance(_gs, dict):
+                            _gs["aperture"] = round(_ramped * 0.08, 4)
+                            _gs["command"] = "open" if _ramped > 0.5 else "closed"
+                            _gs["openness"] = _ramped
+                    _action_abs = frames[_fi].get("action_abs")
+                    if isinstance(_action_abs, list) and len(_action_abs) > 0:
+                        _action_abs[-1] = round(_ramped * 0.08, 4)
+        elif _strict_real_only and len(frames) >= 3 and not _has_sim_gripper_measurements:
+            logger.info(
+                "Strict real-only: gripper cosine interpolation disabled because openness is not measured from sim."
+            )
 
         # Store initial/final object poses on first/last frame for success verification
         if frames:
@@ -15280,8 +15927,9 @@ Scene objects: {scene_summary}
 
         # --- Fix 3: Try server-side IK first (actual robot model) ---
         normalized_robot = _normalize_robot_name(getattr(self.config, "robot_type", ""))
-        _use_server_ik = normalized_robot.startswith("g1")
-        self.log(f"[TRAJ] robot_type={normalized_robot}, use_server_ik={_use_server_ik}, waypoints={len(waypoints)}")
+        _curobo_mode = os.environ.get("GENIESIM_SERVER_CUROBO_MODE", "off").lower()
+        _use_server_ik = normalized_robot.startswith("g1") and _curobo_mode not in ("off", "disabled", "none", "0", "false")
+        self.log(f"[TRAJ] robot_type={normalized_robot}, use_server_ik={_use_server_ik}, curobo_mode={_curobo_mode}, waypoints={len(waypoints)}")
 
         for wp in waypoints:
             joints = None

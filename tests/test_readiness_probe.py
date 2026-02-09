@@ -70,6 +70,7 @@ def test_run_probe_strict_patch_sets_include_required_and_forbidden(tmp_path: Pa
         (
             "# BlueprintPipeline contact_report patch\n"
             "# BlueprintPipeline joint_efforts patch\n"
+            "# BPv_dynamic_grasp_toggle\n"
         ),
     )
     _write(
@@ -82,6 +83,7 @@ def test_run_probe_strict_patch_sets_include_required_and_forbidden(tmp_path: Pa
             "# BPv4_deferred_dynamic_restore\n"
             "# BPv5_dynamic_teleport_usd_objects\n"
             "# BPv6_fix_dynamic_prims\n"
+            "# BPv_dynamic_grasp_toggle\n"
             "# [PATCH] scene_collision_injected\n"
             "# object_pose_resolver_v4\n"
         ),
@@ -128,6 +130,7 @@ def test_run_probe_strict_patch_sets_fail_without_object_pose_resolver_v4(tmp_pa
         (
             "# BlueprintPipeline contact_report patch\n"
             "# BlueprintPipeline joint_efforts patch\n"
+            "# BPv_dynamic_grasp_toggle\n"
         ),
     )
     _write(
@@ -140,6 +143,7 @@ def test_run_probe_strict_patch_sets_fail_without_object_pose_resolver_v4(tmp_pa
             "# BPv4_deferred_dynamic_restore\n"
             "# BPv5_dynamic_teleport_usd_objects\n"
             "# BPv6_fix_dynamic_prims\n"
+            "# BPv_dynamic_grasp_toggle\n"
             "# [PATCH] scene_collision_injected\n"
         ),
     )

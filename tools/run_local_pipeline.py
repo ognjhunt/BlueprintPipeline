@@ -26,6 +26,7 @@ Usage:
     python tools/run_local_pipeline.py --scene-dir ./scene --import-poller
 
 Pipeline Steps:
+    0. regen3d-reconstruct - (Optional) Run 3D-RE-GEN on GPU VM (image -> 3D)
     1. regen3d   - Adapt 3D-RE-GEN outputs to BlueprintPipeline format
     2. scale     - (Optional) Scale calibration
     3. interactive - Particulate articulation (requires PARTICULATE_ENDPOINT)
@@ -188,6 +189,7 @@ def _safe_write_text(path: Path, payload: str, context: str) -> None:
 
 class PipelineStep(str, Enum):
     """Pipeline steps in execution order."""
+    REGEN3D_RECONSTRUCT = "regen3d-reconstruct"  # Run 3D-RE-GEN on remote GPU VM
     REGEN3D = "regen3d"
     SCALE = "scale"
     INTERACTIVE = "interactive"
@@ -362,6 +364,11 @@ class LocalPipelineRunner:
     ) -> Dict[PipelineStep, List[PipelineStep]]:
         """Return step dependency map for the current run."""
         dependencies: Dict[PipelineStep, List[PipelineStep]] = {
+            PipelineStep.REGEN3D: (
+                [PipelineStep.REGEN3D_RECONSTRUCT]
+                if PipelineStep.REGEN3D_RECONSTRUCT in steps
+                else []
+            ),
             PipelineStep.SCALE: [PipelineStep.REGEN3D],
             PipelineStep.INTERACTIVE: [PipelineStep.REGEN3D],
             PipelineStep.SIMREADY: [PipelineStep.REGEN3D],
@@ -1696,9 +1703,17 @@ class LocalPipelineRunner:
 
         # Check prerequisites
         if not self.regen3d_dir.is_dir():
-            self.log(f"ERROR: 3D-RE-GEN output not found at {self.regen3d_dir}", "ERROR")
-            self.log("Run: python fixtures/generate_mock_regen3d.py first", "ERROR")
-            return False
+            if PipelineStep.REGEN3D_RECONSTRUCT in steps:
+                self.log("regen3d/ dir will be created by regen3d-reconstruct step")
+                self.regen3d_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                self.log(f"ERROR: 3D-RE-GEN output not found at {self.regen3d_dir}", "ERROR")
+                self.log(
+                    "Run: python fixtures/generate_mock_regen3d.py first, "
+                    "or add regen3d-reconstruct to --steps",
+                    "ERROR",
+                )
+                return False
 
         if not self._preflight_articulation_requirements(steps):
             return False
@@ -2073,6 +2088,7 @@ class LocalPipelineRunner:
     def _map_jobs_to_steps(self, job_sequence: List[str]) -> List[PipelineStep]:
         """Map pipeline selector job names to local runner steps."""
         mapping = {
+            "regen3d-reconstruct-job": PipelineStep.REGEN3D_RECONSTRUCT,
             "regen3d-job": PipelineStep.REGEN3D,
             "scale-job": PipelineStep.SCALE,
             "interactive-job": PipelineStep.INTERACTIVE,
@@ -2196,7 +2212,12 @@ class LocalPipelineRunner:
         self.log(f"\n--- Running step: {step.value} ---")
 
         try:
-            if step == PipelineStep.REGEN3D:
+            if step == PipelineStep.REGEN3D_RECONSTRUCT:
+                result = self._run_with_timeout(
+                    PipelineStep.REGEN3D_RECONSTRUCT,
+                    self._run_regen3d_reconstruct,
+                )
+            elif step == PipelineStep.REGEN3D:
                 result = self._run_with_timeout(PipelineStep.REGEN3D, self._run_regen3d_adapter)
             elif step == PipelineStep.SCALE:
                 result = self._run_with_retry(PipelineStep.SCALE, self._run_scale)
@@ -2289,6 +2310,82 @@ class LocalPipelineRunner:
         self._current_step = None
 
         return result
+
+    def _run_regen3d_reconstruct(self) -> StepResult:
+        """Run 3D-RE-GEN reconstruction on a remote GPU VM.
+
+        Takes a source image from scene_dir/input/ and runs the full
+        3D-RE-GEN pipeline (arXiv:2512.17459) to produce 3D assets in
+        the regen3d/ directory.
+        """
+        from tools.regen3d_runner import Regen3DRunner, Regen3DConfig
+
+        # Find input image
+        input_dir = self.scene_dir / "input"
+        input_image = None
+        for name in ["room.jpg", "room.png", "scene.jpg", "scene.png",
+                      "source_image.jpg", "source_image.png"]:
+            candidate = input_dir / name
+            if candidate.is_file():
+                input_image = candidate
+                break
+
+        # Also check scene_dir root
+        if input_image is None:
+            for name in ["room.jpg", "room.png", "source_image.jpg", "source_image.png"]:
+                candidate = self.scene_dir / name
+                if candidate.is_file():
+                    input_image = candidate
+                    break
+
+        if input_image is None:
+            return StepResult(
+                step=PipelineStep.REGEN3D_RECONSTRUCT,
+                success=False,
+                duration_seconds=0,
+                message=(
+                    f"No input image found. Place an image at "
+                    f"{input_dir}/room.jpg or {input_dir}/room.png"
+                ),
+            )
+
+        self.log(f"Input image: {input_image}")
+
+        # Load config from env (regen3d_reconstruct.env)
+        config = Regen3DConfig.from_env()
+        runner = Regen3DRunner(config=config, verbose=self.verbose)
+
+        result = runner.run_reconstruction(
+            input_image=input_image,
+            scene_id=self.scene_id,
+            output_dir=self.regen3d_dir,
+            environment_type=self.environment_type,
+        )
+
+        if not result.success:
+            return StepResult(
+                step=PipelineStep.REGEN3D_RECONSTRUCT,
+                success=False,
+                duration_seconds=result.duration_seconds,
+                message=f"3D-RE-GEN reconstruction failed: {result.error}",
+            )
+
+        self.log(
+            f"3D-RE-GEN reconstruction complete: "
+            f"{result.objects_count} objects in {result.duration_seconds:.1f}s"
+        )
+
+        return StepResult(
+            step=PipelineStep.REGEN3D_RECONSTRUCT,
+            success=True,
+            duration_seconds=result.duration_seconds,
+            message=f"3D-RE-GEN reconstruction: {result.objects_count} objects",
+            outputs={
+                "objects_count": result.objects_count,
+                "output_dir": str(result.output_dir),
+                "input_image": str(input_image),
+            },
+        )
 
     def _run_regen3d_adapter(self) -> StepResult:
         """Run the 3D-RE-GEN adapter."""
@@ -5332,6 +5429,11 @@ class LocalPipelineRunner:
 
     def _expected_output_paths(self, step: PipelineStep) -> List[Path]:
         """Expected output paths for checkpoint validation."""
+        if step == PipelineStep.REGEN3D_RECONSTRUCT:
+            return [
+                self.regen3d_dir / "scene_info.json",
+                self.regen3d_dir / "objects",
+            ]
         if step == PipelineStep.REGEN3D:
             return [
                 self.assets_dir / "scene_manifest.json",

@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,3 +99,60 @@ def test_get_observation_uses_logical_object_ids(monkeypatch):
     obj = objects[0]
     assert obj["object_id"] == "lightwheel_kitchen_obj_Test"
     assert obj["prim_path"] == "/World/Scene/obj_Test"
+
+
+def test_set_object_dynamic_uses_task_metric_shim():
+    client = lf.GenieSimGRPCClient(host="localhost", port=1234, timeout=1.0)
+    client._connected = True
+
+    captured = {}
+
+    class _Stub:
+        def set_task_metric(self, request, timeout=None):
+            captured["metric"] = request.metric
+            captured["timeout"] = timeout
+            return SimpleNamespace(msg="queued")
+
+    client._stub = _Stub()
+
+    result_on = client.set_object_dynamic("/World/Scene/obj_Toaster003", is_dynamic=True)
+    assert result_on.success is True
+    assert "bp::set_object_dynamic::" in captured.get("metric", "")
+    assert client._active_dynamic_grasp_prim == "/World/Scene/obj_Toaster003"
+
+    result_off = client.set_object_dynamic("/World/Scene/obj_Toaster003", is_dynamic=False)
+    assert result_off.success is True
+    assert client._active_dynamic_grasp_prim is None
+
+
+def test_get_observation_strict_target_manifest_drift_fails(monkeypatch):
+    monkeypatch.setenv("STRICT_REALISM", "1")
+    monkeypatch.setenv("STRICT_REAL_ONLY", "1")
+    monkeypatch.setenv("STRICT_FAIL_ON_MANIFEST_DRIFT", "1")
+    monkeypatch.setenv("SKIP_RGB_CAPTURE", "1")
+
+    client = lf.GenieSimGRPCClient(host="localhost", port=1234, timeout=1.0)
+    client._channel = object()
+    client._scene_object_ids_dynamic = ["lightwheel_kitchen_obj_Toaster003"]
+    client._scene_object_ids_static = []
+    client._scene_variation_object_ids = []
+    client._active_target_object = "lightwheel_kitchen_obj_Toaster003"
+    client._active_target_object_prim = "/World/Scene/obj_Toaster003"
+
+    client.get_joint_position = lambda *_args, **_kwargs: lf.GrpcCallResult(
+        success=True, available=True, payload=[0.0]
+    )
+    client.get_ee_pose = lambda *_args, **_kwargs: lf.GrpcCallResult(
+        success=True, available=True, payload={}
+    )
+    client._resolve_object_prim = lambda _obj_id: (
+        "/World/Scene/obj_Toaster003",
+        {"position": {"x": 3.5, "y": 0.0, "z": 0.0}},
+    )
+    client._get_manifest_transform_fallback = lambda _obj_id: {
+        "position": {"x": 0.0, "y": 0.0, "z": 0.0}
+    }
+
+    with pytest.raises(lf.FatalRealismError) as exc:
+        client.get_observation()
+    assert exc.value.reason_code == "STRICT_TARGET_MANIFEST_DRIFT"

@@ -71,7 +71,7 @@ _apply_patch_script() {
 _file_looks_patched() {
   local _file="$1"
   [ -f "${_file}" ] || return 1
-  grep -qE "BPv3_pre_play_kinematic|BPv7_keep_kinematic|scene_collision_injected|BlueprintPipeline contact_report patch|BlueprintPipeline sim_thread_physics_cache patch" "${_file}" 2>/dev/null
+  grep -qE "BPv3_pre_play_kinematic|BPv7_keep_kinematic|BPv_dynamic_grasp_toggle|scene_collision_injected|BlueprintPipeline contact_report patch|BlueprintPipeline sim_thread_physics_cache patch" "${_file}" 2>/dev/null
 }
 
 _ensure_patch_baseline_and_restore() {
@@ -275,6 +275,7 @@ if [ -d "${PATCHES_DIR}" ]; then
   else
     echo "[geniesim] GENIESIM_KEEP_OBJECTS_KINEMATIC=0 — keep_kinematic patch disabled"
   fi
+  _apply_patch_script "${PATCHES_DIR}/patch_dynamic_grasp_toggle.py" "dynamic_grasp_toggle" "1"
 
   if [ "${#_critical_patch_failures[@]}" -gt 0 ]; then
     echo "[geniesim] ERROR: Critical runtime patch application failed:"
@@ -346,6 +347,15 @@ if [ -d "${PATCHES_DIR}" ]; then
       if [ "${_startup_strict}" = "1" ]; then
         exit 1
       fi
+    fi
+  fi
+  if grep -q "BPv_dynamic_grasp_toggle" "${_CMD_CTRL}" 2>/dev/null \
+    && grep -q "BPv_dynamic_grasp_toggle" "${_GRPC_SERVER}" 2>/dev/null; then
+    echo "[geniesim] ✓ dynamic_grasp_toggle patch verified in command_controller.py and grpc_server.py"
+  else
+    echo "[geniesim] WARNING: dynamic_grasp_toggle patch may not have been fully applied"
+    if [ "${_startup_strict}" = "1" ]; then
+      exit 1
     fi
   fi
   if grep -q "BPv7_keep_kinematic" "${_CMD_CTRL}" 2>/dev/null \

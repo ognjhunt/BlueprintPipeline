@@ -282,6 +282,36 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
             _skip_rgb_init = _os.environ.get("SKIP_RGB_CAPTURE", "").lower() in ("1", "true", "yes")
 
+            # When SKIP_RGB_CAPTURE is true, skip ALL GPU rendering (warmup, priming,
+            # render products). Return the black-frame fallback immediately with
+            # the proper flattened format the gRPC server expects.
+            if _skip_rgb_init:
+                _cam_info = result.get("camera_info", {})
+                _skip_result = {
+                    "width": _cam_info.get("width", _w),
+                    "height": _cam_info.get("height", _h),
+                    "fx": _cam_info.get("fx", _fx),
+                    "fy": _cam_info.get("fy", _fy),
+                    "ppx": _cam_info.get("ppx", _ppx),
+                    "ppy": _cam_info.get("ppy", _ppy),
+                    "intrinsics_source": _cam_info.get("intrinsics_source", "default"),
+                    "extrinsic": _cam_info.get("extrinsic"),
+                    "calibration_id": "",
+                    "camera_prim_path": camera_prim_path,
+                    "camera_info": _cam_info,
+                    "rgb": bytes(_h * _w * 3),
+                    "rgb_shape": [_h, _w, 3],
+                    "rgb_dtype": "uint8",
+                    "rgb_encoding": "raw_rgb_uint8",
+                    "depth": bytes(_h * _w * 4),
+                    "depth_shape": [_h, _w],
+                    "depth_dtype": "float32",
+                    "depth_encoding": "raw_depth_float32",
+                }
+                print(f"[PATCH] SKIP_RGB_CAPTURE=true — returning immediately (no GPU rendering) for {camera_prim_path}")
+                self.data_to_send = _skip_result
+                return
+
             # Cache render products and annotators across calls.
             # If the cached product returned None data previously, invalidate
             # and re-create it (the camera prim may have become available).
