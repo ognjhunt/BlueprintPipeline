@@ -1,0 +1,576 @@
+# image-to-scene-pipeline.yaml
+#
+# Google Cloud Workflows pipeline that:
+#   1. Triggers on image upload to scenes/{scene_id}/images/{any_name}.{png|jpg|jpeg}
+#   2. Starts the GPU VM if stopped
+#   3. Launches run_pipeline_gcs.sh via Cloud Build + gcloud compute ssh
+#   4. Waits for reconstruction completion/failure marker for this object generation
+#
+# EventArc setup: workflows/setup-image-trigger.sh
+
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: "INFO"
+        next: extract
+
+    - extract:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - objectGeneration: '${if(event.data.generation != null, string(event.data.generation), "0")}'
+          - objectGenerationInt: '${int(if(event.data.generation != null, string(event.data.generation), "0"))}'
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
+          - vmName: "isaac-sim-ubuntu"
+          - vmZone: "us-east1-b"
+          - pipelineTimeoutSeconds: 2700
+          - pollIntervalSeconds: 30
+          - startTime: '${time.format(sys.now())}'
+          - elapsedSeconds: 0
+        next: filter_image_uploads
+
+    - filter_image_uploads:
+        switch:
+          - condition: '${text.match_regex(object, "^scenes/[^/]+/images/[^/]+\\.([Pp][Nn][Gg]|[Jj][Pp][Ee]?[Gg])$")}'
+            next: derive
+        next: skip
+
+    - derive:
+        assign:
+          - parts: '${text.split(object, "/")}'
+          - sceneId: ${parts[1]}
+          - scenePrefix: '${"scenes/" + sceneId}'
+          - completionMarker: '${scenePrefix + "/.reconstruction_complete"}'
+          - failureMarker: '${scenePrefix + "/.reconstruction_failed"}'
+          - errorCode: ""
+          - errorMsg: ""
+          - buildId: ""
+        next: check_already_processed
+
+    - check_already_processed:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${completionMarker}
+            alt: "media"
+          result: existingCompletionPayload
+        except:
+          as: e
+          steps:
+            - check_not_found:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: clear_failure_marker_before_run
+                next: check_existing_marker_error
+        next: parse_existing_completion_marker
+
+    - check_existing_marker_error:
+        assign:
+          - errorCode: "marker_check_failed"
+          - errorMsg: '${"Failed checking completion marker for scene " + sceneId + ": " + e.message}'
+        next: write_failure_and_raise
+
+    - parse_existing_completion_marker:
+        try:
+          assign:
+            - completionData: '${json.decode(existingCompletionPayload)}'
+            - completedGeneration: '${if(completionData.input_generation != null, string(completionData.input_generation), if(completionData.metadata != null and completionData.metadata.input_generation != null, string(completionData.metadata.input_generation), "0"))}'
+            - completedGenerationInt: '${int(completedGeneration)}'
+        except:
+          as: parseErr
+          steps:
+            - fallback_existing_marker_generation:
+                assign:
+                  - completedGeneration: "0"
+                  - completedGenerationInt: 0
+        next: completion_generation_switch
+
+    - completion_generation_switch:
+        switch:
+          - condition: '${objectGenerationInt <= completedGenerationInt}'
+            next: skip_already_processed
+        next: log_rerun_and_clear_markers
+
+    - skip_already_processed:
+        call: sys.log
+        args:
+          text: '${"Skipping stale/duplicate image generation " + objectGeneration + " for scene " + sceneId + " (latest completed generation: " + string(completedGenerationInt) + ")"}'
+          severity: "INFO"
+        next: skip
+
+    - log_rerun_and_clear_markers:
+        call: sys.log
+        args:
+          text: '${"Newer image generation detected for scene " + sceneId + ": incoming=" + objectGeneration + ", previous=" + string(completedGenerationInt) + ". Clearing stale markers and re-running."}'
+          severity: "INFO"
+        next: delete_completion_marker
+
+    - delete_completion_marker:
+        try:
+          call: googleapis.storage.v1.objects.delete
+          args:
+            bucket: ${bucket}
+            object: ${completionMarker}
+        except:
+          as: deleteCompletionErr
+          steps:
+            - ignore_missing_completion_marker:
+                switch:
+                  - condition: '${deleteCompletionErr.code == 404}'
+                    next: clear_failure_marker_before_run
+                next: delete_completion_marker_error
+        next: clear_failure_marker_before_run
+
+    - delete_completion_marker_error:
+        assign:
+          - errorCode: "marker_cleanup_failed"
+          - errorMsg: '${"Failed clearing previous completion marker for scene " + sceneId + ": " + deleteCompletionErr.message}'
+        next: write_failure_and_raise
+
+    - clear_failure_marker_before_run:
+        try:
+          call: googleapis.storage.v1.objects.delete
+          args:
+            bucket: ${bucket}
+            object: ${failureMarker}
+        except:
+          as: deleteFailureErr
+          steps:
+            - ignore_missing_failure_marker:
+                switch:
+                  - condition: '${deleteFailureErr.code == 404}'
+                    next: log_start
+                next: delete_failure_marker_error
+        next: log_start
+
+    - delete_failure_marker_error:
+        assign:
+          - errorCode: "marker_cleanup_failed"
+          - errorMsg: '${"Failed clearing previous failure marker for scene " + sceneId + ": " + deleteFailureErr.message}'
+        next: write_failure_and_raise
+
+    - log_start:
+        call: sys.log
+        args:
+          text: '${"Image-to-scene pipeline triggered for scene " + sceneId + " (object: " + object + ", generation: " + objectGeneration + ")"}'
+          severity: "INFO"
+        next: emit_metrics_start
+
+    - emit_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "image-to-scene-pipeline"
+            job: "run_pipeline_gcs"
+            scene_id: ${sceneId}
+            timeout_seconds: ${pipelineTimeoutSeconds}
+            status: "STARTED"
+            start_time: ${startTime}
+            input_object: ${object}
+            input_generation: ${objectGeneration}
+          severity: "INFO"
+        next: check_vm_status
+
+    - check_vm_status:
+        try:
+          call: googleapis.compute.v1.instances.get
+          args:
+            project: ${projectId}
+            zone: ${vmZone}
+            instance: ${vmName}
+          result: vmInfo
+        except:
+          as: e
+          steps:
+            - handle_vm_error:
+                assign:
+                  - errorCode: "vm_status_failed"
+                  - errorMsg: '${"Failed to get VM status: " + e.message}'
+                next: write_failure_and_raise
+        next: evaluate_vm_status
+
+    - evaluate_vm_status:
+        switch:
+          - condition: '${vmInfo.status == "RUNNING"}'
+            next: run_pipeline_via_cloud_build
+          - condition: '${vmInfo.status == "TERMINATED" or vmInfo.status == "STOPPED"}'
+            next: start_vm
+        next: vm_unexpected_state
+
+    - vm_unexpected_state:
+        assign:
+          - errorCode: "vm_unexpected_state"
+          - errorMsg: '${"VM " + vmName + " in unexpected state: " + vmInfo.status}'
+        next: write_failure_and_raise
+
+    - start_vm:
+        call: sys.log
+        args:
+          text: '${"Starting VM " + vmName + " in " + vmZone + "..."}'
+          severity: "INFO"
+        next: start_vm_api
+
+    - start_vm_api:
+        try:
+          call: googleapis.compute.v1.instances.start
+          args:
+            project: ${projectId}
+            zone: ${vmZone}
+            instance: ${vmName}
+          result: startOp
+        except:
+          as: e
+          steps:
+            - handle_start_error:
+                assign:
+                  - errorCode: "vm_start_failed"
+                  - errorMsg: '${"Failed to start VM: " + e.message}'
+                next: write_failure_and_raise
+        next: wait_vm_boot
+
+    - wait_vm_boot:
+        call: sys.sleep
+        args:
+          seconds: 60
+        next: run_pipeline_via_cloud_build
+
+    - run_pipeline_via_cloud_build:
+        try:
+          call: googleapis.cloudbuild.v1.projects.builds.create
+          args:
+            projectId: ${projectId}
+            body:
+              timeout: '${string(pipelineTimeoutSeconds + 900) + "s"}'
+              steps:
+                - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+                  entrypoint: "bash"
+                  env:
+                    - '${"PROJECT_ID=" + projectId}'
+                    - '${"VM_NAME=" + vmName}'
+                    - '${"VM_ZONE=" + vmZone}'
+                    - '${"SCENE_ID=" + sceneId}'
+                    - '${"BUCKET=" + bucket}'
+                    - '${"OBJECT_NAME=" + object}'
+                    - '${"OBJECT_GENERATION=" + objectGeneration}'
+                  args:
+                    - "-c"
+                    - |
+                      set -euo pipefail
+
+                      SCENE_ID_Q=$(printf '%q' "${SCENE_ID}")
+                      BUCKET_Q=$(printf '%q' "${BUCKET}")
+                      OBJECT_NAME_Q=$(printf '%q' "${OBJECT_NAME}")
+                      OBJECT_GENERATION_Q=$(printf '%q' "${OBJECT_GENERATION}")
+
+                      REMOTE_CMD="cd ~/BlueprintPipeline && bash run_pipeline_gcs.sh ${SCENE_ID_Q} ${BUCKET_Q} ${OBJECT_NAME_Q} ${OBJECT_GENERATION_Q}"
+
+                      gcloud compute ssh "${VM_NAME}" \
+                        --project="${PROJECT_ID}" \
+                        --zone="${VM_ZONE}" \
+                        --command="${REMOTE_CMD}"
+          result: buildResult
+        except:
+          as: e
+          steps:
+            - handle_build_create_error:
+                assign:
+                  - errorCode: "pipeline_launch_failed"
+                  - errorMsg: '${"Failed to launch pipeline via Cloud Build: " + e.message}'
+                next: write_failure_and_raise
+        next: init_build_poll
+
+    - init_build_poll:
+        assign:
+          - buildId: '${if(buildResult.metadata != null and buildResult.metadata.build != null and buildResult.metadata.build.id != null, buildResult.metadata.build.id, if(buildResult.id != null, buildResult.id, ""))}'
+          - buildPollStartTime: '${time.format(sys.now())}'
+          - buildPollTimeoutSeconds: ${pipelineTimeoutSeconds + 900}
+        next: check_build_id
+
+    - check_build_id:
+        switch:
+          - condition: '${buildId == ""}'
+            next: missing_build_id
+        next: check_build_status
+
+    - missing_build_id:
+        assign:
+          - errorCode: "pipeline_launch_failed"
+          - errorMsg: '${"Cloud Build returned no build ID for scene " + sceneId}'
+        next: write_failure_and_raise
+
+    - check_build_status:
+        call: googleapis.cloudbuild.v1.projects.builds.get
+        args:
+          projectId: ${projectId}
+          id: ${buildId}
+        result: buildStatus
+        next: build_status_switch
+
+    - build_status_switch:
+        switch:
+          - condition: '${buildStatus.status == "SUCCESS"}'
+            next: poll_for_completion
+          - condition: '${buildStatus.status == "FAILURE" or buildStatus.status == "TIMEOUT" or buildStatus.status == "CANCELLED" or buildStatus.status == "INTERNAL_ERROR" or buildStatus.status == "EXPIRED"}'
+            next: build_failed
+        next: check_build_poll_timeout
+
+    - check_build_poll_timeout:
+        assign:
+          - buildPollNow: '${time.format(sys.now())}'
+          - buildPollElapsedSeconds: '${time.parse(buildPollNow) - time.parse(buildPollStartTime)}'
+        next: build_poll_timeout_switch
+
+    - build_poll_timeout_switch:
+        switch:
+          - condition: '${buildPollElapsedSeconds >= buildPollTimeoutSeconds}'
+            next: build_poll_timed_out
+        next: wait_build_poll
+
+    - wait_build_poll:
+        call: sys.sleep
+        args:
+          seconds: 20
+        next: check_build_status
+
+    - build_failed:
+        assign:
+          - errorCode: "pipeline_build_failed"
+          - errorMsg: '${"Pipeline Cloud Build failed for scene " + sceneId + " (build " + buildId + ", status=" + buildStatus.status + ")"}'
+        next: write_failure_and_raise
+
+    - build_poll_timed_out:
+        assign:
+          - errorCode: "pipeline_build_timeout"
+          - errorMsg: '${"Pipeline Cloud Build polling timed out for scene " + sceneId + " (build " + buildId + ")"}'
+        next: write_failure_and_raise
+
+    - poll_for_completion:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${completionMarker}
+            alt: "media"
+          result: completionPayloadRaw
+        except:
+          as: e
+          steps:
+            - completion_not_found_switch:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: check_for_failure
+                next: poll_error
+        next: parse_completion_payload
+
+    - parse_completion_payload:
+        try:
+          assign:
+            - completionPayload: '${json.decode(completionPayloadRaw)}'
+            - completionGeneration: '${if(completionPayload.input_generation != null, string(completionPayload.input_generation), if(completionPayload.metadata != null and completionPayload.metadata.input_generation != null, string(completionPayload.metadata.input_generation), "0"))}'
+            - completionGenerationInt: '${int(completionGeneration)}'
+        except:
+          as: completionParseErr
+          steps:
+            - stale_completion_payload:
+                assign:
+                  - completionGenerationInt: 0
+        next: completion_marker_generation_switch
+
+    - completion_marker_generation_switch:
+        switch:
+          - condition: '${completionGenerationInt >= objectGenerationInt}'
+            next: pipeline_succeeded
+        next: check_timeout
+
+    - check_for_failure:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${failureMarker}
+            alt: "media"
+          result: failurePayloadRaw
+        except:
+          as: e
+          steps:
+            - failure_not_found_switch:
+                switch:
+                  - condition: '${e.code == 404}'
+                    next: check_timeout
+                next: poll_error
+        next: parse_failure_payload
+
+    - parse_failure_payload:
+        try:
+          assign:
+            - failurePayload: '${json.decode(failurePayloadRaw)}'
+            - failureGeneration: '${if(failurePayload.input_generation != null, string(failurePayload.input_generation), if(failurePayload.context != null and failurePayload.context.input_generation != null, string(failurePayload.context.input_generation), "0"))}'
+            - failureGenerationInt: '${int(failureGeneration)}'
+        except:
+          as: failureParseErr
+          steps:
+            - default_failure_generation:
+                assign:
+                  - failureGenerationInt: ${objectGenerationInt}
+        next: failure_marker_generation_switch
+
+    - failure_marker_generation_switch:
+        switch:
+          - condition: '${failureGenerationInt >= objectGenerationInt}'
+            next: pipeline_failed_with_marker
+        next: check_timeout
+
+    - poll_error:
+        call: sys.log
+        args:
+          text: '${"GCS marker poll error for scene " + sceneId + ": " + e.message}'
+          severity: "WARNING"
+        next: check_timeout
+
+    - check_timeout:
+        assign:
+          - elapsedSeconds: '${time.parse(time.format(sys.now())) - time.parse(startTime)}'
+        next: timeout_switch
+
+    - timeout_switch:
+        switch:
+          - condition: '${elapsedSeconds >= pipelineTimeoutSeconds}'
+            next: pipeline_timed_out
+        next: poll_sleep
+
+    - poll_sleep:
+        call: sys.sleep
+        args:
+          seconds: ${pollIntervalSeconds}
+        next: poll_for_completion
+
+    - pipeline_succeeded:
+        assign:
+          - endTime: '${time.format(sys.now())}'
+          - durationSeconds: '${time.parse(endTime) - time.parse(startTime)}'
+        next: emit_metrics_success
+
+    - emit_metrics_success:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "image-to-scene-pipeline"
+            job: "run_pipeline_gcs"
+            scene_id: ${sceneId}
+            timeout_seconds: ${pipelineTimeoutSeconds}
+            duration_seconds: ${durationSeconds}
+            timeout_usage_ratio: '${durationSeconds / pipelineTimeoutSeconds}'
+            timed_out: false
+            status: "SUCCEEDED"
+            start_time: ${startTime}
+            end_time: ${endTime}
+            input_object: ${object}
+            input_generation: ${objectGeneration}
+            build_id: ${buildId}
+          severity: "INFO"
+        next: done
+
+    - pipeline_failed_with_marker:
+        assign:
+          - errorCode: "pipeline_failed"
+          - errorMsg: '${"Pipeline failed for scene " + sceneId + " (failure marker found)"}'
+        next: write_failure_and_raise
+
+    - pipeline_timed_out:
+        assign:
+          - errorCode: "pipeline_timeout"
+          - errorMsg: '${"Pipeline timed out after " + string(pipelineTimeoutSeconds) + "s for scene " + sceneId}'
+        next: write_failure_and_raise
+
+    - write_failure_and_raise:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${failureMarker}
+            uploadType: "media"
+            body: ${json.encode({
+              "scene_id": sceneId,
+              "status": "failed",
+              "timestamp": time.format(sys.now()),
+              "input_object": object,
+              "input_generation": objectGeneration,
+              "error": {
+                "code": errorCode,
+                "message": errorMsg,
+                "type": "workflow_failure"
+              },
+              "context": {
+                "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                "build_id": buildId,
+                "timeout_seconds": pipelineTimeoutSeconds,
+                "elapsed_seconds": elapsedSeconds
+              }
+            })}
+        except:
+          as: writeErr
+          steps:
+            - log_failure_write_error:
+                call: sys.log
+                args:
+                  text: '${"Failed to write failure marker: " + writeErr.message}'
+                  severity: "WARNING"
+        next: emit_metrics_failure
+
+    - emit_metrics_failure:
+        assign:
+          - endTime: '${time.format(sys.now())}'
+          - durationSeconds: '${time.parse(endTime) - time.parse(startTime)}'
+        next: log_failure_metrics
+
+    - log_failure_metrics:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "image-to-scene-pipeline"
+            job: "run_pipeline_gcs"
+            scene_id: ${sceneId}
+            timeout_seconds: ${pipelineTimeoutSeconds}
+            duration_seconds: ${durationSeconds}
+            timeout_usage_ratio: '${durationSeconds / pipelineTimeoutSeconds}'
+            timed_out: '${durationSeconds >= pipelineTimeoutSeconds}'
+            status: "FAILED"
+            start_time: ${startTime}
+            end_time: ${endTime}
+            error: ${errorMsg}
+            input_object: ${object}
+            input_generation: ${objectGeneration}
+            build_id: ${buildId}
+          severity: "ERROR"
+        next: raise_pipeline_error
+
+    - raise_pipeline_error:
+        raise: ${errorMsg}
+
+    - done:
+        return:
+          status: "SUCCESS"
+          scene_id: ${sceneId}
+          message: '${"Image-to-scene pipeline completed for scene " + sceneId}'
+          outputs:
+            completion_marker: ${completionMarker}
+            scene_prefix: ${scenePrefix}
+            input_object: ${object}
+            input_generation: ${objectGeneration}
+
+    - skip:
+        return:
+          status: "SKIPPED"
+          message: '${"Not an eligible image upload event: " + object}'

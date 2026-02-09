@@ -61,6 +61,15 @@ class Paths:
     RANDOMIZATIONS = "isaac_lab/randomizations.py"
     REWARD_FUNCTIONS = "isaac_lab/reward_functions.py"
 
+    # 3D-RE-GEN reconstruction (regen3d-reconstruct step)
+    REGEN3D_DIR = "regen3d"
+    IMAGES_DIR = "images"
+    IMAGES_ROOM = "images/room.png"
+
+    # Completion markers (written to GCS for EventArc triggers)
+    RECONSTRUCTION_COMPLETE = ".reconstruction_complete"
+    RECONSTRUCTION_FAILED = ".reconstruction_failed"
+
     # Genie Sim 3.0 (default data generation backend)
     GENIESIM_DIR = "geniesim"
     SCENE_GRAPH = "geniesim/scene_graph.json"

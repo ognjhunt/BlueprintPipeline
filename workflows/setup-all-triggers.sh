@@ -89,6 +89,7 @@ run_setup_script() {
 }
 
 # Run all setup scripts in order
+run_setup_script "setup-image-trigger.sh" "Image-to-Scene Pipeline"
 run_setup_script "setup-usd-assembly-trigger.sh" "USD Assembly Pipeline"
 run_setup_script "setup-genie-sim-export-trigger.sh" "Genie Sim Export Pipeline"
 run_setup_script "setup-arena-export-trigger.sh" "Arena Export Pipeline"
@@ -131,6 +132,7 @@ if [ ${fail_count} -eq 0 ]; then
     echo -e "${GREEN}═════════════════════════════════════════════════════════════${NC}"
     echo ""
     echo "Pipeline Triggers Created:"
+    echo "  0. image-upload-pipeline-trigger → Trigger on scenes/{scene_id}/images/* uploads"
     echo "  1. usd-assembly-trigger      → Trigger on .regen3d_complete"
     echo "  2. genie-sim-export-trigger  → Trigger on .variation_pipeline_complete"
     echo "  3. arena-export-* (3 triggers) → Trigger on .usd_complete, .geniesim_complete, .isaac_lab_complete (ignores .geniesim_submitted)"

@@ -311,6 +311,13 @@ class LocalPipelineRunner:
         self.debug = os.getenv("BP_DEBUG", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
         self.enable_checkpoint_hashes = resolve_checkpoint_hash_setting()
 
+        # GCS sync (set up later via configure_gcs_sync)
+        self._gcs_sync = None
+        self._gcs_download_inputs = False
+        self._gcs_upload_outputs = False
+        self._gcs_input_object: Optional[str] = None
+        self._gcs_input_generation: Optional[str] = None
+
         # Derive scene ID from directory name
         self.scene_id = self.scene_dir.name
         self.run_id = os.getenv("BP_RUN_ID") or str(uuid4())
@@ -357,6 +364,60 @@ class LocalPipelineRunner:
         else:
             self._step_circuit_breaker = None
         self._step_circuit_breaker_persistence_path: Optional[Path] = None
+
+    def configure_gcs_sync(
+        self,
+        bucket_name: str,
+        download_inputs: bool = False,
+        upload_outputs: bool = False,
+        input_object: Optional[str] = None,
+        input_generation: Optional[str] = None,
+        upload_concurrency: Optional[int] = None,
+    ) -> None:
+        """Configure GCS sync for downloading inputs and uploading outputs.
+
+        Args:
+            bucket_name: GCS bucket name (e.g., ``blueprint-8c1ca.appspot.com``).
+            download_inputs: Download input image from GCS before running.
+            upload_outputs: Upload step outputs to GCS after each step.
+            input_object: Preferred scene image object path (relative or gs:// URI).
+            input_generation: Source GCS object generation for idempotence tracking.
+            upload_concurrency: Number of parallel uploads for each synced directory.
+        """
+        try:
+            from tools.gcs_sync import GCSSync
+        except ImportError:
+            from gcs_sync import GCSSync  # type: ignore[no-redef]
+
+        if upload_concurrency is None:
+            try:
+                upload_concurrency = parse_int_env(
+                    os.getenv("GCS_UPLOAD_CONCURRENCY"),
+                    default=4,
+                    min_value=1,
+                    name="GCS_UPLOAD_CONCURRENCY",
+                )
+            except ValueError as exc:
+                raise NonRetryableError(str(exc)) from exc
+
+        self._gcs_sync = GCSSync(
+            bucket_name=bucket_name,
+            scene_id=self.scene_id,
+            local_scene_dir=self.scene_dir,
+            concurrency=upload_concurrency,
+            input_object=input_object,
+            input_generation=input_generation,
+        )
+        self._gcs_download_inputs = download_inputs
+        self._gcs_upload_outputs = upload_outputs
+        self._gcs_input_object = input_object
+        self._gcs_input_generation = input_generation
+        self.log(
+            "[GCS] Sync configured: "
+            f"bucket={bucket_name}, download={download_inputs}, upload={upload_outputs}, "
+            f"input_object={input_object}, input_generation={input_generation}, "
+            f"upload_concurrency={upload_concurrency}"
+        )
 
     def _resolve_step_dependencies(
         self,
@@ -1699,7 +1760,23 @@ class LocalPipelineRunner:
         self.log(f"Scene directory: {self.scene_dir}")
         self.log(f"Scene ID: {self.scene_id}")
         self.log(f"Steps: {[s.value for s in steps]}")
+        if self._gcs_sync:
+            self.log(f"GCS bucket: {self._gcs_sync.bucket_name}")
+            self.log(f"GCS upload: {self._gcs_upload_outputs}")
         self.log("=" * 60)
+
+        # Download inputs from GCS if requested
+        if self._gcs_sync and self._gcs_download_inputs:
+            try:
+                self.log("[GCS] Downloading input image from GCS...")
+                input_path = self._gcs_sync.download_inputs(preferred_object=self._gcs_input_object)
+                self.log(f"[GCS] Input image downloaded: {input_path}")
+            except FileNotFoundError as exc:
+                self.log(f"[GCS] ERROR: {exc}", "ERROR")
+                return False
+            except Exception as exc:
+                self.log(f"[GCS] ERROR: Failed to download inputs: {exc}", "ERROR")
+                return False
 
         # Check prerequisites
         if not self.regen3d_dir.is_dir():
@@ -1829,6 +1906,22 @@ class LocalPipelineRunner:
                     output_paths=self._expected_output_paths(step),
                     store_output_hashes=self.enable_checkpoint_hashes,
                 )
+                # Upload step outputs to GCS if configured
+                if self._gcs_sync and self._gcs_upload_outputs:
+                    try:
+                        self.log(f"[GCS] Uploading outputs for step {step.value}...")
+                        sync_result = self._gcs_sync.upload_step_outputs(step.value)
+                        self.log(
+                            f"[GCS] Uploaded {sync_result.files_synced} files for {step.value}"
+                        )
+                        if sync_result.errors:
+                            for err in sync_result.errors[:5]:
+                                self.log(f"[GCS] Upload error: {err}", "WARNING")
+                    except Exception as exc:
+                        self.log(
+                            f"[GCS] WARNING: GCS upload failed for {step.value}: {exc}",
+                            "WARNING",
+                        )
             if step == PipelineStep.REGEN3D and self._pending_articulation_preflight:
                 if not self._preflight_articulation_requirements(steps):
                     return False
@@ -1850,6 +1943,41 @@ class LocalPipelineRunner:
                 should_continue = _execute_step(PipelineStep.GENIESIM_IMPORT)
                 if not should_continue:
                     break
+
+        # Write GCS completion/failure marker
+        if self._gcs_sync and self._gcs_upload_outputs:
+            total_time = sum(r.duration_seconds for r in self.results)
+            passed = sum(1 for r in self.results if r.success)
+            metadata = {
+                "steps_passed": passed,
+                "steps_total": len(self.results),
+                "duration_seconds": round(total_time, 1),
+                "steps": [
+                    {"name": r.step.value, "success": r.success, "duration_s": round(r.duration_seconds, 1)}
+                    for r in self.results
+                ],
+            }
+            if self._gcs_sync.input_object:
+                metadata["input_object"] = self._gcs_sync.input_object
+            if self._gcs_sync.input_generation:
+                metadata["input_generation"] = self._gcs_sync.input_generation
+            try:
+                if all_success:
+                    self._gcs_sync.write_completion_marker(
+                        ".reconstruction_complete", metadata=metadata,
+                    )
+                    self.log("[GCS] Wrote .reconstruction_complete marker")
+                else:
+                    failed_steps = [r.step.value for r in self.results if not r.success]
+                    self._gcs_sync.write_failure_marker(
+                        ".reconstruction_failed",
+                        error_message=f"Pipeline steps failed: {', '.join(failed_steps)}",
+                        error_code="pipeline_step_failure",
+                        context=metadata,
+                    )
+                    self.log("[GCS] Wrote .reconstruction_failed marker")
+            except Exception as exc:
+                self.log(f"[GCS] WARNING: Failed to write marker: {exc}", "WARNING")
 
         # Print summary
         self._print_summary()
@@ -2311,6 +2439,46 @@ class LocalPipelineRunner:
 
         return result
 
+    def _find_input_image(self) -> Optional[Path]:
+        """Find the best source image for regen3d reconstruction."""
+        supported_exts = {".png", ".jpg", ".jpeg"}
+        input_dir = self.scene_dir / "input"
+        candidates: List[Path] = []
+
+        if input_dir.is_dir():
+            candidates.extend(
+                path for path in input_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in supported_exts
+            )
+
+        # Backwards compatibility: allow source image in scene root.
+        if not candidates and self.scene_dir.is_dir():
+            candidates.extend(
+                path for path in self.scene_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in supported_exts
+            )
+
+        if not candidates:
+            return None
+
+        preferred_name = None
+        if self._gcs_sync and self._gcs_sync.input_object:
+            preferred_name = Path(self._gcs_sync.input_object).name
+        if preferred_name:
+            for path in candidates:
+                if path.name == preferred_name:
+                    return path
+
+        if len(candidates) > 1:
+            names = ", ".join(path.name for path in sorted(candidates)[:5])
+            self.log(
+                f"Multiple input images found; choosing newest by mtime. Candidates: {names}",
+                "WARNING",
+            )
+
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return candidates[0]
+
     def _run_regen3d_reconstruct(self) -> StepResult:
         """Run 3D-RE-GEN reconstruction on a remote GPU VM.
 
@@ -2320,23 +2488,9 @@ class LocalPipelineRunner:
         """
         from tools.regen3d_runner import Regen3DRunner, Regen3DConfig
 
-        # Find input image
+        # Find input image.
         input_dir = self.scene_dir / "input"
-        input_image = None
-        for name in ["room.jpg", "room.png", "scene.jpg", "scene.png",
-                      "source_image.jpg", "source_image.png"]:
-            candidate = input_dir / name
-            if candidate.is_file():
-                input_image = candidate
-                break
-
-        # Also check scene_dir root
-        if input_image is None:
-            for name in ["room.jpg", "room.png", "source_image.jpg", "source_image.png"]:
-                candidate = self.scene_dir / name
-                if candidate.is_file():
-                    input_image = candidate
-                    break
+        input_image = self._find_input_image()
 
         if input_image is None:
             return StepResult(
@@ -2345,7 +2499,7 @@ class LocalPipelineRunner:
                 duration_seconds=0,
                 message=(
                     f"No input image found. Place an image at "
-                    f"{input_dir}/room.jpg or {input_dir}/room.png"
+                    f"{input_dir}/<any_name>.png|jpg|jpeg"
                 ),
             )
 
@@ -5696,6 +5850,46 @@ def main():
         help="Reset the step circuit breaker state before running",
     )
     parser.add_argument(
+        "--gcs-bucket",
+        type=str,
+        default=None,
+        help="GCS bucket for input download / output upload (e.g., blueprint-8c1ca.appspot.com)",
+    )
+    parser.add_argument(
+        "--gcs-download-inputs",
+        action="store_true",
+        help="Download input image from GCS before running (requires --gcs-bucket)",
+    )
+    parser.add_argument(
+        "--gcs-upload-outputs",
+        action="store_true",
+        help="Upload step outputs to GCS after each step (requires --gcs-bucket)",
+    )
+    parser.add_argument(
+        "--gcs-input-object",
+        type=str,
+        default=None,
+        help=(
+            "Preferred triggering input object path in GCS "
+            '(e.g., "scenes/{scene_id}/images/my_image.jpeg")'
+        ),
+    )
+    parser.add_argument(
+        "--gcs-input-generation",
+        type=str,
+        default=None,
+        help="GCS generation for the triggering input object (for idempotence metadata)",
+    )
+    parser.add_argument(
+        "--gcs-upload-concurrency",
+        type=int,
+        default=None,
+        help=(
+            "Parallel upload workers for GCS sync (defaults to GCS_UPLOAD_CONCURRENCY "
+            "or 4)"
+        ),
+    )
+    parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="Reduce output verbosity",
@@ -5769,6 +5963,29 @@ def main():
         ),
         fail_fast=args.fail_fast,
     )
+
+    # Configure GCS sync if requested
+    if args.gcs_bucket:
+        runner.configure_gcs_sync(
+            bucket_name=args.gcs_bucket,
+            download_inputs=args.gcs_download_inputs,
+            upload_outputs=args.gcs_upload_outputs,
+            input_object=args.gcs_input_object,
+            input_generation=args.gcs_input_generation,
+            upload_concurrency=args.gcs_upload_concurrency,
+        )
+    elif (
+        args.gcs_download_inputs
+        or args.gcs_upload_outputs
+        or args.gcs_input_object
+        or args.gcs_input_generation
+        or args.gcs_upload_concurrency is not None
+    ):
+        print(
+            "ERROR: --gcs-download-inputs, --gcs-upload-outputs, --gcs-input-object, "
+            "--gcs-input-generation, and --gcs-upload-concurrency require --gcs-bucket"
+        )
+        sys.exit(1)
 
     if args.import_poller:
         success = runner.run_geniesim_import_poller(
