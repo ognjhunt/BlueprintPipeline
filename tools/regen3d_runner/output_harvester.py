@@ -185,12 +185,24 @@ def _harvest_objects(
             missing_or_invalid.append(obj_name)
 
     if missing_or_invalid:
-        joined = ", ".join(sorted(missing_or_invalid))
-        raise ValueError(
-            "Missing valid 4x4 transforms for reconstructed objects: "
-            f"{joined}. Ensure 3D-RE-GEN emitted glb/scene/transforms.json "
-            "or per-object transform.json files."
-        )
+        # 3D-RE-GEN bakes transforms directly into GLBs when no separate
+        # transform files are emitted. Use identity transforms — the objects
+        # in glb/ are already in world-space poses.
+        if len(missing_or_invalid) == len(object_glbs):
+            logger.warning(
+                "[HARVEST] No transform files found — using identity transforms "
+                "(3D-RE-GEN bakes poses into GLBs)"
+            )
+            for obj_name in missing_or_invalid:
+                transforms[obj_name] = np.eye(4)
+            missing_or_invalid.clear()
+        else:
+            joined = ", ".join(sorted(missing_or_invalid))
+            raise ValueError(
+                "Missing valid 4x4 transforms for reconstructed objects: "
+                f"{joined}. Ensure 3D-RE-GEN emitted glb/scene/transforms.json "
+                "or per-object transform.json files."
+            )
 
     for idx, (obj_name, glb_path) in enumerate(sorted(object_glbs.items())):
         obj_id = f"obj_{idx}"
@@ -308,21 +320,48 @@ def _harvest_camera(
     if camera_npz.is_file():
         try:
             data = np.load(str(camera_npz), allow_pickle=True)
-            # Extract intrinsics matrix if available
-            if "K" in data:
-                K = data["K"].tolist()
-                if not has_camera:
-                    intrinsics = {
-                        "matrix": K if isinstance(K[0], list) else [K],
-                        "width": 1920,
-                        "height": 1080,
-                    }
-                    (camera_dir / "intrinsics.json").write_text(
-                        json.dumps(intrinsics, indent=2)
-                    )
-                    has_camera = True
 
-            # Extract extrinsics if available
+            # VGGT format: focal + image_size + extrinsic (4x4)
+            if "focal" in data and "image_size" in data and not has_camera:
+                focal = float(data["focal"])
+                img_size = data["image_size"]  # [width, height]
+                w, h = int(img_size[0]), int(img_size[1])
+                cx, cy = w / 2.0, h / 2.0
+                intrinsics = {
+                    "matrix": [
+                        [focal, 0.0, cx],
+                        [0.0, focal, cy],
+                        [0.0, 0.0, 1.0],
+                    ],
+                    "width": w,
+                    "height": h,
+                }
+                (camera_dir / "intrinsics.json").write_text(
+                    json.dumps(intrinsics, indent=2)
+                )
+                has_camera = True
+
+            if "extrinsic" in data:
+                extr = np.array(data["extrinsic"])
+                if extr.shape == (4, 4):
+                    extrinsics = {"matrix": extr.tolist()}
+                    (camera_dir / "extrinsics.json").write_text(
+                        json.dumps(extrinsics, indent=2)
+                    )
+
+            # Legacy format: K + R + t
+            if "K" in data and not has_camera:
+                K = data["K"].tolist()
+                intrinsics = {
+                    "matrix": K if isinstance(K[0], list) else [K],
+                    "width": 1920,
+                    "height": 1080,
+                }
+                (camera_dir / "intrinsics.json").write_text(
+                    json.dumps(intrinsics, indent=2)
+                )
+                has_camera = True
+
             if "R" in data and "t" in data:
                 R = np.array(data["R"])
                 t = np.array(data["t"])
