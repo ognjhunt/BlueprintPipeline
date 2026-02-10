@@ -62,6 +62,23 @@ def _extract_task(episode: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _load_env_file(path: Path) -> None:
+    """Source a KEY=value env file into os.environ (ignoring comments/blanks)."""
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                continue
+            os.environ[key] = value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=str, help="Directory containing (or containing subdirs with) task_*_ep*.json")
@@ -92,7 +109,21 @@ def main() -> int:
         action="store_true",
         help="Also write normalized episode JSONs under OUT_DIR/normalized_episodes/ (originals are untouched)",
     )
+    parser.add_argument(
+        "--env-file",
+        type=str,
+        default=None,
+        help="Path to a KEY=value env file to source before certification (e.g. configs/realism_strict.env)",
+    )
     args = parser.parse_args()
+
+    if args.env_file:
+        env_path = Path(args.env_file).resolve()
+        if not env_path.is_file():
+            print(f"ERROR: env file {env_path} not found")
+            return 1
+        _load_env_file(env_path)
+        print(f"Sourced env file: {env_path}")
 
     run_dir = Path(args.run_dir).resolve()
     if not run_dir.is_dir():

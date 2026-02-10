@@ -142,7 +142,7 @@ def apply():
             f.write(cc_src)
         print("[PATCH] dynamic_grasp_toggle: APPLIED to command_controller.py")
 
-    # --- Patch grpc_server.py: add toggle RPC handler ---
+    # --- Patch grpc_server.py: add toggle RPC handler + set_task_metric dispatch ---
     with open(GRPC_PATH) as f:
         grpc_src = f.read()
 
@@ -157,6 +157,13 @@ def apply():
         _cc = getattr(self, 'command_controller', None)
         if _cc is None:
             _cc = getattr(self, '_command_controller', None)
+        if _cc is None:
+            # Try server_function (GenieSim convention)
+            _sf = getattr(self, 'server_function', None)
+            if _sf:
+                _cc = getattr(_sf, 'command_controller', None)
+                if _cc is None:
+                    _cc = getattr(_sf, '_command_controller', None)
         if _cc is None:
             print("[TOGGLE-RPC] No command_controller reference")
             return False
@@ -178,6 +185,46 @@ def apply():
             else:
                 # Append to end of file
                 grpc_src += toggle_rpc
+
+        # --- CRITICAL: Patch set_task_metric to dispatch bp::set_object_dynamic:: commands ---
+        # Without this, the client sends set_task_metric("bp::set_object_dynamic::...") but
+        # the server just returns "metric set" without processing the toggle command.
+        _stm_dispatch = f"""
+        {MARKER} — set_task_metric dispatch
+        _metric_str = str(getattr(req, 'metric', '') or '')
+        if _metric_str.startswith('bp::set_object_dynamic::'):
+            try:
+                import json as _bp_json
+                _bp_payload_str = _metric_str.split('::', 2)[2]
+                _bp_payload = _bp_json.loads(_bp_payload_str)
+                _bp_prim = _bp_payload.get('prim_path', '')
+                _bp_dyn = bool(_bp_payload.get('is_dynamic', True))
+                if hasattr(self, '_bp_handle_dynamic_toggle'):
+                    _bp_ok = self._bp_handle_dynamic_toggle(_bp_prim, _bp_dyn)
+                    if _bp_ok:
+                        return SetTaskMetricRsp(msg=f"bp::dynamic_toggle::ok::{{_bp_prim}}")
+                    else:
+                        return SetTaskMetricRsp(msg="bp::dynamic_toggle::failed::no_command_controller")
+                else:
+                    print("[TOGGLE-RPC] _bp_handle_dynamic_toggle not found on server instance")
+                    return SetTaskMetricRsp(msg="bp::dynamic_toggle::unsupported")
+            except Exception as _bp_err:
+                print(f"[TOGGLE-RPC] set_task_metric dispatch error: {{_bp_err}}")
+                return SetTaskMetricRsp(msg=f"bp::dynamic_toggle::error::{{_bp_err}}")
+"""
+        # Find the set_task_metric method body and inject dispatch at the start
+        import re as _re
+        _stm_match = _re.search(
+            r'(def set_task_metric\(self[^)]*\)[^:]*:)\s*\n',
+            grpc_src,
+        )
+        if _stm_match:
+            _inject_after = _stm_match.end()
+            grpc_src = grpc_src[:_inject_after] + _stm_dispatch + grpc_src[_inject_after:]
+            print("[PATCH] dynamic_grasp_toggle: injected set_task_metric dispatch")
+        else:
+            print("[PATCH] WARNING: could not find set_task_metric method in grpc_server.py")
+            print("[PATCH] The dynamic toggle will NOT work without manual set_task_metric patching!")
 
         with open(GRPC_PATH, "w") as f:
             f.write(grpc_src)

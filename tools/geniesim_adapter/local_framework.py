@@ -10042,6 +10042,46 @@ class GenieSimLocalFramework:
                 )
                 llm_metadata["task_success_source"] = "canonical_geometric_physics"
 
+            # ---------------------------------------------------------------
+            # Physics-authoritative override: when the task requires object
+            # motion but geometric verification shows zero displacement, the
+            # task CANNOT have succeeded regardless of LLM / server signals.
+            # This prevents data integrity issues where episodes are labeled
+            # "successful" when no object was actually moved.
+            # ---------------------------------------------------------------
+            _requires_motion_for_override = self._requires_object_motion(task)
+            if _requires_motion_for_override and task_success:
+                _grv = llm_metadata.get("goal_region_verification") or {}
+                _override_disp = _grv.get("displacement_m")
+                # Threshold: object must have displaced at least 1cm for a
+                # motion task to count as successful.
+                _zero_motion_thresh = 0.01
+                if _override_disp is not None and float(_override_disp) < _zero_motion_thresh:
+                    _llm_said_success = llm_metadata.get("task_success_llm")
+                    _prev_source = llm_metadata.get("task_success_source", "unknown")
+                    logger.warning(
+                        "[PHYSICS_OVERRIDE] Task success overridden from True to False: "
+                        "task requires object motion but max_displacement=%.4fm < %.4fm. "
+                        "LLM assessment=%s, previous source=%s",
+                        float(_override_disp), _zero_motion_thresh,
+                        _llm_said_success, _prev_source,
+                    )
+                    task_success = False
+                    llm_metadata["task_success_physics_override"] = {
+                        "original_success": True,
+                        "override_reason": "zero_object_displacement",
+                        "displacement_m": float(_override_disp),
+                        "threshold_m": _zero_motion_thresh,
+                        "llm_assessment": _llm_said_success,
+                        "previous_source": _prev_source,
+                    }
+                    llm_metadata["task_success_reasoning"] = (
+                        f"Physics override: task requires object motion but "
+                        f"displacement={float(_override_disp):.4f}m < {_zero_motion_thresh:.4f}m threshold. "
+                        f"LLM assessed success={_llm_said_success} but physics data is authoritative."
+                    )
+                    llm_metadata["task_success_source"] = "physics_override_zero_displacement"
+
             # Gemini-based phase labeling (post-episode batch)
             _gemini_pl_client = getattr(self, "_gemini_client_for_props", None)
             if frames and _gemini_pl_client:
@@ -12551,12 +12591,32 @@ class GenieSimLocalFramework:
                 _server_ee_frame_count += 1
             frame_data["ee_pose_source"] = "fk" if _fk_computed else "server"
             _scene_state_for_count = obs.get("scene_state") or (obs.get("privileged", {}) or {}).get("scene_state")
-            if (
-                _scene_state_for_count
-                and _scene_state_for_count.get("objects")
-                and obs.get("data_source") in ("real_composed", "between_waypoints")
+            _has_scene_objects = bool(
+                _scene_state_for_count and _scene_state_for_count.get("objects")
+            )
+            # Resolve data_source from observation or waypoint (dense
+            # interpolation sets data_source on the waypoint dict).
+            _ds = obs.get("data_source") or waypoint.get("data_source") or ""
+            # Only count as real if scene_state was NOT synthetically injected
+            # (i.e. it was present in the original observation from the server).
+            if _has_scene_objects and not _scene_state_missing and _ds in (
+                "real_composed", "between_waypoints", "between_waypoints_fallback",
             ):
                 _real_scene_state_count += 1
+                # Label provenance as server-backed: the scene_state came from
+                # a real server observation or an interpolated frame whose
+                # observation was captured from the server.
+                obs["scene_state_provenance"] = "physx_server"
+            elif _has_scene_objects and not _scene_state_missing:
+                # Scene state has objects but data_source is unexpected.
+                # For kinematic mode the server still reports real (static)
+                # poses, so label truthfully as "server_static".
+                _keep_kin = parse_bool_env(
+                    os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False,
+                )
+                if _keep_kin:
+                    obs.setdefault("scene_state_provenance", "server_static")
+                    _real_scene_state_count += 1
             _cf = obs.get("camera_frames", {})
             if _cf and any(
                 v.get("rgb") is not None
@@ -12950,18 +13010,11 @@ class GenieSimLocalFramework:
                 _require_obj_motion = parse_bool_env(os.getenv("REQUIRE_OBJECT_MOTION"), default=True)
                 _keep_kin_prov = parse_bool_env(os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False)
                 _strict_disallow_kinematic_proxy = _strict_real_only or (_cert_strict and _require_obj_motion)
-                if _strict_disallow_kinematic_proxy:
-                    # When objects are kept kinematic by design, the server still
-                    # reports real (static) poses — label as "server_static" so
-                    # the certification server-backed check recognises server data.
-                    # Only use "kinematic_ee_offset_blocked" when not in kinematic
-                    # mode (i.e. objects SHOULD be moving but aren't).
-                    if _keep_kin_prov:
-                        if obs.get("scene_state_provenance") != "server_static":
-                            obs["scene_state_provenance"] = "server_static"
-                    elif obs.get("scene_state_provenance") != "kinematic_ee_offset_blocked":
+                if _strict_disallow_kinematic_proxy and not _keep_kin_prov:
+                    # Objects SHOULD be dynamic but aren't — block EE-offset proxy
+                    if obs.get("scene_state_provenance") != "kinematic_ee_offset_blocked":
                         obs["scene_state_provenance"] = "kinematic_ee_offset_blocked"
-                    if _strict_realism and (_requires_motion_task or _strict_real_only) and not _keep_kin_prov:
+                    if _strict_realism and (_requires_motion_task or _strict_real_only):
                         self._raise_fatal_realism(
                             "STRICT_OBJECT_MOTION_KINEMATIC_PROXY",
                             (
@@ -12994,8 +13047,14 @@ class GenieSimLocalFramework:
                             if _obj.get("object_id") == _attached_object_id:
                                 _update_pose_dict(_obj, _new_pos)
                                 break
-                    # Mark that kinematic EE-offset tracking was used (for quality scoring)
-                    obs["scene_state_provenance"] = "kinematic_ee_offset"
+                    # When objects are kinematic by design, the base scene state
+                    # is from the server (real static poses). Label as
+                    # "server_static" so certification recognises it; otherwise
+                    # use "kinematic_ee_offset" for non-strict scenarios.
+                    if _keep_kin_prov:
+                        obs["scene_state_provenance"] = "server_static"
+                    else:
+                        obs["scene_state_provenance"] = "kinematic_ee_offset"
 
             _phase_raw = waypoint.get("phase", "")
             _phase_val = _phase_raw.value if hasattr(_phase_raw, "value") else str(_phase_raw)
@@ -13243,7 +13302,15 @@ class GenieSimLocalFramework:
                                     break
                         obs["scene_state_provenance"] = "kinematic_ee_offset"
                     else:
-                        obs["scene_state_provenance"] = "kinematic_ee_offset_blocked"
+                        # In kinematic mode the server still backs the static
+                        # poses, so "server_static" is the truthful label.
+                        _keep_kin_attach = parse_bool_env(
+                            os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False,
+                        )
+                        if _keep_kin_attach:
+                            obs["scene_state_provenance"] = "server_static"
+                        else:
+                            obs["scene_state_provenance"] = "kinematic_ee_offset_blocked"
 
             # Contact force estimation: use PhysX contact report when available
             _contact_forces_payload = None
@@ -14066,10 +14133,15 @@ class GenieSimLocalFramework:
                 _cf_container["contact_forces"] = _cf_payload
 
         # Synthesize collision_contacts during manipulation phases from ID efforts.
-        # NOTE: This is a non-strict fallback only. Strict realism must rely on
-        # real PhysX contact reports, not client-side synthesis.
+        # When objects are kinematic (GENIESIM_KEEP_OBJECTS_KINEMATIC=1), PhysX
+        # cannot generate real contacts and synthesis is the only viable path.
+        # Block synthesis only when strict_real_only AND objects are NOT kinematic.
+        _keep_kin = parse_bool_env(
+            os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"),
+            default=False,
+        )
         if _estimated_effort_count > 0 and _attached_object_id:
-            if _strict_real_only:
+            if _strict_real_only and not _keep_kin:
                 self._raise_fatal_realism(
                     "STRICT_SYNTHETIC_CONTACTS_FORBIDDEN",
                     (
@@ -14082,6 +14154,7 @@ class GenieSimLocalFramework:
                     },
                 )
             _synth_contact_count = 0
+            _real_contact_preserved_count = 0
             for _frame in frames:
                 _phase = str(_frame.get("phase", "")).lower()
                 _gc = _frame.get("gripper_command", "open")
@@ -14090,6 +14163,14 @@ class GenieSimLocalFramework:
                     "grasp", "lift", "transport", "pre_place", "place",
                 ):
                     continue
+                # Skip frames that already have real PhysX contacts — never
+                # overwrite real data with synthesized heuristics.
+                _existing_prov = _frame.get("collision_provenance", "")
+                if _existing_prov == "physx_contact_report":
+                    _existing_contacts = _frame.get("collision_contacts", [])
+                    if _existing_contacts:
+                        _real_contact_preserved_count += 1
+                        continue
                 _obs_rs = _frame.get("observation", {}).get("robot_state", {})
                 _efforts = _obs_rs.get("joint_efforts", [])
                 if gripper_indices:
@@ -14122,10 +14203,17 @@ class GenieSimLocalFramework:
                 _frame["collision_provenance"] = "synthesized_from_id_efforts"
                 _frame["collision_free_physics"] = False
                 _synth_contact_count += 1
+            if _real_contact_preserved_count > 0:
+                logger.info(
+                    "Preserved real PhysX contacts for %d frames (not overwritten by synthesis).",
+                    _real_contact_preserved_count,
+                )
             if _synth_contact_count > 0:
                 logger.info(
-                    "Synthesized collision_contacts for %d/%d frames during manipulation phases.",
+                    "Synthesized collision_contacts for %d/%d frames during manipulation phases "
+                    "(real=%d, synthesized=%d).",
                     _synth_contact_count, len(frames),
+                    _real_contact_preserved_count, _synth_contact_count,
                 )
 
         # Refresh missing-effort count after backfill

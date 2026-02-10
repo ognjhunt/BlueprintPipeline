@@ -43,9 +43,26 @@ if [ ! -d "${GENIESIM_ROOT}/.git" ]; then
   exit 1
 fi
 
-# Remove stale raw-only flag from previous sessions so that new runs
+# Remove stale raw-only flag files from previous sessions so that new runs
 # start with a clean slate (STRICT_RUNTIME_PRECHECK_FAILED fix).
-rm -f /tmp/geniesim_force_raw_only.flag
+RAW_ONLY_FLAG_FILE="${GENIESIM_FORCE_RAW_ONLY_FLAG_FILE:-/tmp/geniesim_force_raw_only.flag}"
+if [ -f "${RAW_ONLY_FLAG_FILE}" ]; then
+  NOW_S="$(date +%s)"
+  # Linux: stat -c %Y, BSD/macOS: stat -f %m
+  MTIME_S="$(stat -c %Y "${RAW_ONLY_FLAG_FILE}" 2>/dev/null || stat -f %m "${RAW_ONLY_FLAG_FILE}" 2>/dev/null || true)"
+  if [ -n "${MTIME_S}" ]; then
+    AGE_S="$((NOW_S - MTIME_S))"
+    STALE_THRESHOLD_S=600
+    if [ "${AGE_S}" -gt "${STALE_THRESHOLD_S}" ]; then
+      echo "[start_geniesim_server] Removing stale raw-only flag (${AGE_S}s old): ${RAW_ONLY_FLAG_FILE}"
+      rm -f "${RAW_ONLY_FLAG_FILE}" || true
+    else
+      echo "[start_geniesim_server] Raw-only flag present (${AGE_S}s old); keeping: ${RAW_ONLY_FLAG_FILE}"
+    fi
+  else
+    echo "[start_geniesim_server] Raw-only flag present but mtime unavailable; keeping: ${RAW_ONLY_FLAG_FILE}"
+  fi
+fi
 
 export GENIESIM_ROOT
 export ISAAC_SIM_PATH

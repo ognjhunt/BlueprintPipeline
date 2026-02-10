@@ -130,6 +130,40 @@ def test_physics_certification_detects_success_contradiction():
     assert "TASK_SUCCESS_CONTRADICTION" in report["critical_failures"]
 
 
+def test_physics_certification_tracks_llm_physics_override():
+    """When local_framework already overrode task_success due to zero displacement,
+    certification should record the LLM-physics contradiction in metrics."""
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2]),
+        _frame(position=[0.1, 0.0, 0.2]),
+    ]
+    meta = _episode_meta()
+    meta["task_success"] = False  # Already overridden by physics
+    meta["task_success_physics_override"] = {
+        "original_success": True,
+        "override_reason": "zero_object_displacement",
+        "displacement_m": 0.0,
+        "threshold_m": 0.01,
+        "llm_assessment": True,
+        "previous_source": "canonical_geometric_physics",
+    }
+    meta["goal_region_verification"] = {
+        "grasp_detected": True,
+        "object_lifted_5cm": False,
+        "placed_in_goal": False,
+        "stable_at_end": True,
+        "gripper_released": True,
+        "displacement_m": 0.0,
+    }
+    task = {"task_type": "pick_place", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, meta, task, mode="strict")
+    metrics = report.get("metrics", {})
+    assert metrics.get("llm_physics_contradiction") is True
+    assert metrics.get("llm_physics_override_reason") == "zero_object_displacement"
+    # task_success is False, so TASK_SUCCESS_CONTRADICTION should NOT fire
+    assert "TASK_SUCCESS_CONTRADICTION" not in report.get("critical_failures", [])
+
+
 def test_physics_certification_fails_when_strict_runtime_precheck_failed():
     frames = [
         _frame(position=[0.1, 0.0, 0.2]),
@@ -205,10 +239,26 @@ def test_physics_certification_fails_static_target_motion_task():
     assert report["dataset_tier"] == "raw_preserved"
 
 
-def test_phase_b_env_does_not_skip_motion_gate(monkeypatch):
-    # Phase B grasp-toggle env vars must not disable strict motion gating.
+def test_phase_b_env_skips_motion_gate_when_kinematic(monkeypatch):
+    # Kinematic objects cannot displace — motion gate is skipped.
     monkeypatch.setenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE", "1")
     monkeypatch.setenv("GENIESIM_KEEP_OBJECTS_KINEMATIC", "1")
+
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], closed=True),
+        _frame(position=[0.1, 0.0, 0.2], closed=True),
+        _frame(position=[0.1, 0.0, 0.2], closed=False),
+    ]
+    task = {"task_type": "pick_place", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert "EE_TARGET_GEOMETRY_IMPLAUSIBLE" not in report["critical_failures"]
+
+
+def test_motion_gate_fires_when_not_kinematic(monkeypatch):
+    # Without kinematic mode, zero displacement on a pick_place task must fail.
+    monkeypatch.delenv("GENIESIM_KEEP_OBJECTS_KINEMATIC", raising=False)
+    monkeypatch.delenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE", raising=False)
 
     frames = [
         _frame(position=[0.1, 0.0, 0.2], closed=True),
@@ -240,6 +290,38 @@ def test_phase_b_env_does_not_skip_contact_gate(monkeypatch):
 
     assert report["passed"] is False
     assert "CONTACT_PLACEHOLDER_OR_EMPTY" in report["critical_failures"]
+
+
+def test_phase_b_env_does_not_skip_kinematic_pose_gate(monkeypatch):
+    # Phase B grasp-toggle env vars must not relax kinematic pose gating in strict mode.
+    monkeypatch.setenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE", "1")
+    monkeypatch.setenv("GENIESIM_KEEP_OBJECTS_KINEMATIC", "1")
+
+    frames = [
+        _frame(source="kinematic_ee_offset_blocked", effort_value=0.1),
+        _frame(source="kinematic_ee_offset_blocked", effort_value=0.2),
+    ]
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is False
+    assert "KINEMATIC_OBJECT_POSE_USED" in report["critical_failures"]
+
+
+def test_phase_b_env_does_not_skip_scene_state_server_backing_gate(monkeypatch):
+    # Phase B grasp-toggle env vars must not relax server-backed ratio gating in strict mode.
+    monkeypatch.setenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE", "1")
+    monkeypatch.setenv("GENIESIM_KEEP_OBJECTS_KINEMATIC", "1")
+
+    frames = [
+        _frame(scene_provenance="synthetic_fallback", effort_value=0.1),
+        _frame(scene_provenance="synthetic_fallback", effort_value=0.2),
+    ]
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is False
+    assert "SCENE_STATE_NOT_SERVER_BACKED" in report["critical_failures"]
 
 
 def test_physics_certification_requires_camera_when_flagged():

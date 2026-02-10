@@ -1,14 +1,15 @@
-from tools.quality_gates.episode_normalization import normalize_episode_for_certification
+from tools.quality_gates.episode_normalization import (
+    normalize_episode_for_certification,
+    _retro_downgrade_task_success,
+)
 from tools.quality_gates.physics_certification import run_episode_certification
 
 
-def test_normalize_episode_for_certification_allows_offline_recert_phase_b(monkeypatch):
-    # Match the Phase B / kinematic assumptions used by scripts/recertify_episodes.py
-    monkeypatch.setenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE", "1")
-    monkeypatch.setenv("GENIESIM_KEEP_OBJECTS_KINEMATIC", "1")
-    monkeypatch.setenv("SKIP_STALE_EFFORT_CHANNEL_GATE", "true")
-    monkeypatch.setenv("SKIP_CAMERA_HARDCAP", "true")
-
+def test_normalize_episode_for_certification_fills_sparse_fields_but_does_not_fake_physics() -> None:
+    # Raw episodes can be missing `object_poses` and have sparse joint/EE channels.
+    # Normalization should fill what can be derived deterministically, but strict
+    # physics certification must still fail when the episode lacks real contacts
+    # and measurable target motion.
     episode = {
         "episode_id": "task_0_ep0000",
         "task_name": "task_0",
@@ -109,7 +110,46 @@ def test_normalize_episode_for_certification_allows_offline_recert_phase_b(monke
         mode="strict",
     )
 
-    assert report["passed"] is True
-    assert report["critical_failures"] == []
-    # The align-to-EE fallback should make the EE-target min distance plausible.
-    assert report["metrics"]["ee_target_min_distance_m"] == 0.0
+    assert report["passed"] is False
+    assert "CONTACT_PLACEHOLDER_OR_EMPTY" in report["critical_failures"]
+    assert "EE_TARGET_GEOMETRY_IMPLAUSIBLE" in report["critical_failures"]
+
+
+def test_retro_downgrade_overrides_success_when_zero_displacement() -> None:
+    """When goal_region_verification shows zero displacement for a motion task,
+    _retro_downgrade_task_success should override task_success to False."""
+    episode = {
+        "task_success": True,
+        "task_type": "pick_place",
+        "goal_region_verification": {
+            "grasp_detected": True,
+            "object_lifted_5cm": False,
+            "placed_in_goal": False,
+            "stable_at_end": True,
+            "gripper_released": True,
+            "displacement_m": 0.0,
+        },
+    }
+    _retro_downgrade_task_success(episode)
+    assert episode["task_success"] is False
+    assert episode["task_success_source"] == "physics_override_zero_displacement"
+    assert "task_success_physics_override" in episode
+    assert episode["task_success_physics_override"]["override_reason"] == "zero_object_displacement"
+
+
+def test_retro_downgrade_keeps_success_when_displacement_above_threshold() -> None:
+    """When displacement is above 1cm, success should not be overridden."""
+    episode = {
+        "task_success": True,
+        "task_type": "pick_place",
+        "goal_region_verification": {
+            "grasp_detected": True,
+            "object_lifted_5cm": True,
+            "placed_in_goal": True,
+            "stable_at_end": True,
+            "gripper_released": True,
+            "displacement_m": 0.15,
+        },
+    }
+    _retro_downgrade_task_success(episode)
+    assert episode["task_success"] is True
