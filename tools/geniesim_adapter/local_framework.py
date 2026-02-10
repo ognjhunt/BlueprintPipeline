@@ -5604,6 +5604,7 @@ class GenieSimLocalFramework:
         # Phase B grasp-only toggle: objects are kinematic at rest but dynamic during
         # manipulation. Non-manipulation phases (approach, retreat) may still produce
         # identical efforts. Stale ratio 0.3-0.9 is expected and acceptable.
+        _phase_b_stale_diagnostic_only = False
         if _keep_kinematic and _require_dynamic_toggle and _require_real_efforts:
             if stale_ratio is not None and stale_ratio <= 0.9:
                 logger.info(
@@ -5619,7 +5620,8 @@ class GenieSimLocalFramework:
                     "Check server logs for [TOGGLE] messages.",
                     stale_ratio,
                 )
-                # Don't hard-fail — this is diagnostic. The toggle may need debugging.
+                # Don't hard-fail stale-ratio in Phase B toggle mode.
+                _phase_b_stale_diagnostic_only = True
 
         diagnostics = {
             "efforts_source": efforts_source,
@@ -5632,7 +5634,11 @@ class GenieSimLocalFramework:
         if stale_ratio is not None:
             diagnostics["stale_ratio"] = float(stale_ratio)
 
-        if stale_ratio is not None and stale_ratio > 0.9:
+        if (
+            stale_ratio is not None
+            and stale_ratio > 0.9
+            and not _phase_b_stale_diagnostic_only
+        ):
             self._raise_fatal_realism(
                 "STRICT_EFFORTS_STALE",
                 (

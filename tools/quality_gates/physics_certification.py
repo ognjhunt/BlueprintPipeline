@@ -628,13 +628,13 @@ def run_episode_certification(
     )
     if stale_physx:
         # Phase B grasp-only toggle: non-manipulation frames may still have
-        # identical efforts.  Accept stale ratio up to 0.9 when toggle is active.
+        # identical efforts.  Accept stale ratio below 0.95 when toggle is active.
         if _phase_b_toggle and _keep_kinematic:
             _stale_ratio = stale_effort_stats.get("stale_effort_pair_ratio", 1.0)
             if _stale_ratio >= 0.95:
                 # Toggle didn't reduce staleness enough — still flag.
                 gate_failures.append("CHANNEL_INCOMPLETE")
-            # Otherwise: 0.3-0.9 is acceptable for grasp-only dynamic window.
+            # Otherwise: 0.3-0.94 is acceptable for grasp-only dynamic window.
         elif _skip_stale_effort_gate:
             pass  # Explicitly skipped via config.
         else:

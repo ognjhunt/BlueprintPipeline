@@ -56,10 +56,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.logging_config import init_logging
-
-# Configure logging
-init_logging()
 logger = logging.getLogger(__name__)
 
 # Import timeout utilities
