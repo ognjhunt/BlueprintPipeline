@@ -44,6 +44,9 @@ tests/pytest.log
 dead_letter/
 cost_data/
 
+# Scene-specific generated outputs (by scene ID)
+scenes/*/
+
 # Test scene generated outputs
 test_scenes/scenes/*/episodes/
 test_scenes/scenes/*/.checkpoints/
