@@ -21,6 +21,7 @@ import logging
 import os
 import shlex
 import shutil
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,6 +29,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
 from tools.regen3d_runner.vm_executor import (
     VMConfig,
@@ -58,13 +64,14 @@ class Regen3DConfig:
 
     # Remote VM
     vm_host: str = "isaac-sim-ubuntu"
-    vm_zone: str = "us-east1-d"
-    repo_path: str = "/home/nikhil/3D-RE-GEN"
+    vm_zone: str = "us-east1-c"
+    repo_path: str = "/home/nijelhunt1/3D-RE-GEN"
 
     # Pipeline steps (1-9; typically 1-7 to skip render+eval)
     steps: List[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 7])
 
     # Execution
+    setup_timeout_s: int = 3600  # First-time setup can take >20m (PyTorch3D build)
     timeout_s: int = 1800  # 30 minutes
     device: str = "cuda:0"
     jobs_per_gpu: int = 1
@@ -78,12 +85,13 @@ class Regen3DConfig:
     # Gemini for nanoBanana inpainting
     gemini_api_key: str = ""
     gemini_model_id: str = "gemini-2.5-flash-image"
+    huggingface_token: str = ""
 
     # Segmentation labels (populated dynamically by Gemini auto-labeling)
     labels: List[str] = field(default_factory=list)
 
     # Segmentation backend: "sam3" (new) or "grounded_sam" (original Step 1)
-    seg_backend: str = "sam3"
+    seg_backend: str = "grounded_sam"
 
     # SAM3-specific settings
     sam3_threshold: float = 0.4
@@ -91,6 +99,9 @@ class Regen3DConfig:
 
     # Require background mesh (full scene mode)
     require_background: bool = True
+
+    # Optionally repair missing VGGT background cloud before Step 7
+    repair_missing_emptyroom_pointcloud: bool = False
 
     # Auto-start VM if stopped
     auto_start_vm: bool = False
@@ -104,13 +115,14 @@ class Regen3DConfig:
         labels_str = os.getenv("REGEN3D_LABELS", "")
         labels = [l.strip() for l in labels_str.split(",") if l.strip()]
 
-        seg_backend = os.getenv("REGEN3D_SEG_BACKEND", "sam3").lower()
+        seg_backend = os.getenv("REGEN3D_SEG_BACKEND", "grounded_sam").lower()
 
         return cls(
             vm_host=os.getenv("REGEN3D_VM_HOST", "isaac-sim-ubuntu"),
-            vm_zone=os.getenv("REGEN3D_VM_ZONE", "us-east1-d"),
-            repo_path=os.getenv("REGEN3D_REPO_PATH", "/home/nikhil/3D-RE-GEN"),
+            vm_zone=os.getenv("REGEN3D_VM_ZONE", "us-east1-c"),
+            repo_path=os.getenv("REGEN3D_REPO_PATH", "/home/nijelhunt1/3D-RE-GEN"),
             steps=steps,
+            setup_timeout_s=int(os.getenv("REGEN3D_SETUP_TIMEOUT_S", "3600")),
             timeout_s=int(os.getenv("REGEN3D_TIMEOUT_S", "1800")),
             device=os.getenv("REGEN3D_DEVICE", "cuda:0"),
             jobs_per_gpu=int(os.getenv("REGEN3D_JOBS_PER_GPU", "1")),
@@ -126,11 +138,20 @@ class Regen3DConfig:
             gemini_model_id=os.getenv(
                 "REGEN3D_GEMINI_MODEL", "gemini-2.5-flash-image"
             ),
+            huggingface_token=(
+                os.getenv("HF_TOKEN", "")
+                or os.getenv("HF_HUB_TOKEN", "")
+                or os.getenv("HUGGINGFACE_HUB_TOKEN", "")
+            ),
             labels=labels,
             seg_backend=seg_backend,
             sam3_threshold=float(os.getenv("REGEN3D_SAM3_THRESHOLD", "0.4")),
             sam3_model=os.getenv("REGEN3D_SAM3_MODEL", "facebook/sam3"),
             require_background=os.getenv("REGEN3D_REQUIRE_BACKGROUND", "true").lower()
+            in ("true", "1", "yes"),
+            repair_missing_emptyroom_pointcloud=os.getenv(
+                "REGEN3D_REPAIR_EMPTYROOM_PC", "false"
+            ).lower()
             in ("true", "1", "yes"),
             auto_start_vm=os.getenv("REGEN3D_AUTO_START_VM", "").lower()
             in ("true", "1", "yes"),
@@ -253,13 +274,52 @@ class Regen3DRunner:
             if self.config.seg_backend == "sam3" and 1 in effective_steps:
                 effective_steps = [s for s in effective_steps if s != 1]
                 self.log("SAM3 active — skipping 3D-RE-GEN Step 1")
-            self.log(
-                f"Starting 3D-RE-GEN pipeline (steps {effective_steps}) "
-                f"for scene: {scene_id}"
-            )
-            rc, stdout, stderr = self._execute_pipeline(
-                scene_id, remote_output_dir, steps_override=effective_steps
-            )
+
+            rc = 0
+            stderr = ""
+            if 7 in effective_steps:
+                pre_steps = [s for s in effective_steps if s != 7]
+                if pre_steps:
+                    self.log(
+                        f"Starting 3D-RE-GEN pipeline (steps {pre_steps}) "
+                        f"for scene: {scene_id}"
+                    )
+                    rc, _, stderr = self._execute_pipeline(
+                        scene_id,
+                        remote_output_dir,
+                        steps_override=pre_steps,
+                    )
+                    if rc != 0:
+                        return ReconstructionResult(
+                            success=False,
+                            scene_id=scene_id,
+                            objects_count=0,
+                            duration_seconds=time.monotonic() - start_time,
+                            output_dir=output_dir,
+                            error=f"3D-RE-GEN pipeline failed before Step 7 (exit {rc})",
+                            remote_log=stderr[-2000:] if stderr else "",
+                        )
+
+                if self.config.repair_missing_emptyroom_pointcloud:
+                    self._ensure_step7_background_pointcloud(remote_output_dir)
+
+                self.log(
+                    f"Starting 3D-RE-GEN pipeline (steps [7]) "
+                    f"for scene: {scene_id}"
+                )
+                rc, _, stderr = self._execute_pipeline(
+                    scene_id,
+                    remote_output_dir,
+                    steps_override=[7],
+                )
+            else:
+                self.log(
+                    f"Starting 3D-RE-GEN pipeline (steps {effective_steps}) "
+                    f"for scene: {scene_id}"
+                )
+                rc, _, stderr = self._execute_pipeline(
+                    scene_id, remote_output_dir, steps_override=effective_steps
+                )
 
             if rc != 0:
                 return ReconstructionResult(
@@ -271,6 +331,9 @@ class Regen3DRunner:
                     error=f"3D-RE-GEN pipeline failed (exit {rc})",
                     remote_log=stderr[-2000:] if stderr else "",
                 )
+
+            # Step 5.5: Create GLB symlinks on VM before downloading
+            self._create_glb_symlinks(remote_output_dir)
 
             # Step 6: Download outputs
             local_native_dir = output_dir / "_native_output"
@@ -419,7 +482,7 @@ class Regen3DRunner:
         # Execute setup script
         self._vm.ssh_exec(
             f"bash /tmp/setup_regen3d.sh {shlex.quote(self.config.repo_path)}",
-            timeout=1200,  # 20 minutes for first-time setup
+            timeout=self.config.setup_timeout_s,
             stream_logs=True,
             check=True,
         )
@@ -493,14 +556,47 @@ class Regen3DRunner:
         finally:
             temp_path.unlink(missing_ok=True)
 
-        # Set GEMINI_API_KEY on the remote VM if available
+        # Upload API keys for remote steps if configured.
+        self._upload_remote_env_keys()
+
+    def _upload_remote_env_keys(self) -> None:
+        """Upload optional API keys to remote .env_keys with restrictive perms."""
+        exports: List[str] = []
         if self.config.gemini_api_key:
-            # Write to a temp env file that run.py can source
-            env_cmd = (
-                f"echo 'export GEMINI_API_KEY={shlex.quote(self.config.gemini_api_key)}' "
-                f"> {shlex.quote(self.config.repo_path)}/.env_keys"
+            exports.append(
+                f"export GEMINI_API_KEY={shlex.quote(self.config.gemini_api_key)}"
             )
-            self._vm.ssh_exec(env_cmd, stream_logs=False, check=True)
+        if self.config.huggingface_token:
+            hf_quoted = shlex.quote(self.config.huggingface_token)
+            exports.extend(
+                [
+                    f"export HF_TOKEN={hf_quoted}",
+                    f"export HF_HUB_TOKEN={hf_quoted}",
+                    f"export HUGGINGFACE_HUB_TOKEN={hf_quoted}",
+                ]
+            )
+
+        if not exports:
+            return
+
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".env", delete=False
+        ) as env_file:
+            env_file.write("\n".join(exports) + "\n")
+            env_path = Path(env_file.name)
+
+        try:
+            remote_env_path = f"{self.config.repo_path}/.env_keys"
+            self._vm.scp_upload(env_path, remote_env_path)
+            self._vm.ssh_exec(
+                f"chmod 600 {shlex.quote(remote_env_path)}",
+                stream_logs=False,
+                check=True,
+            )
+        finally:
+            env_path.unlink(missing_ok=True)
 
     def _execute_pipeline(
         self,
@@ -564,12 +660,15 @@ class Regen3DRunner:
             return
 
         self.log("Setting up SAM3 environment on remote VM...")
+        self._upload_remote_env_keys()
         # The setup_remote.sh handles SAM3 venv creation.
         # Re-run it to ensure SAM3 section is executed.
         self._vm.scp_upload(_SETUP_SCRIPT_PATH, "/tmp/setup_regen3d.sh")
+        repo = shlex.quote(self.config.repo_path)
         self._vm.ssh_exec(
-            f"bash /tmp/setup_regen3d.sh {shlex.quote(self.config.repo_path)}",
-            timeout=1200,
+            f"cd {repo} && [ -f .env_keys ] && source .env_keys ; "
+            f"bash /tmp/setup_regen3d.sh {repo}",
+            timeout=self.config.setup_timeout_s,
             stream_logs=True,
             check=True,
         )
@@ -579,13 +678,21 @@ class Regen3DRunner:
         self,
         remote_image_path: str,
         remote_output_dir: str,
-    ) -> None:
+        *,
+        strict_failure: bool = False,
+    ) -> Dict[str, Any]:
         """Run SAM3 text-prompted segmentation on the remote VM.
 
         Uploads segmentation_sam3.py and executes it in the venv_sam3
         environment. Populates {remote_output_dir}/findings/ with masks
         and depth, replacing 3D-RE-GEN's built-in Step 1.
         """
+        result: Dict[str, Any] = {
+            "mask_count": 0,
+            "fallback_used": False,
+            "error": None,
+        }
+
         # Ensure SAM3 venv is ready
         self._setup_sam3_env()
 
@@ -598,7 +705,9 @@ class Regen3DRunner:
 
         # Run SAM3 in the venv_sam3 environment
         venv_sam3 = f"{self.config.repo_path}/venv_sam3"
+        repo = shlex.quote(self.config.repo_path)
         command = (
+            f"cd {repo} && [ -f .env_keys ] && source .env_keys ; "
             f"export PYTHONNOUSERSITE=1 && "
             f"{shlex.quote(venv_sam3)}/bin/python {shlex.quote(remote_script)} "
             f"--image {shlex.quote(remote_image_path)} "
@@ -625,6 +734,15 @@ class Regen3DRunner:
                 stream_logs=False,
                 check=False,
             )
+            marker_error = marker_content.strip() if rc2 == 0 else ""
+            error_msg = marker_error or (
+                stderr[-1000:] if stderr else f"SAM3 segmentation failed (exit {rc})"
+            )
+            result["error"] = error_msg
+
+            if strict_failure:
+                raise VMExecutorError(f"SAM3 segmentation failed: {error_msg}")
+
             if rc2 == 0 and marker_content.strip():
                 self.log(
                     f"SAM3 failed: {marker_content.strip()}. "
@@ -635,7 +753,8 @@ class Regen3DRunner:
                 if 1 not in self.config.steps:
                     self.config.steps = [1] + self.config.steps
                 self.config.seg_backend = "grounded_sam"
-                return
+                result["fallback_used"] = True
+                return result
 
             raise VMExecutorError(
                 f"SAM3 segmentation failed (exit {rc}): "
@@ -651,9 +770,13 @@ class Regen3DRunner:
             check_cmd, stream_logs=False, check=False
         )
         mask_count = int(count_str.strip()) if count_str.strip().isdigit() else 0
+        result["mask_count"] = mask_count
         self.log(f"SAM3 produced {mask_count} object masks")
 
         if mask_count == 0:
+            if strict_failure:
+                result["error"] = "SAM3 produced 0 masks"
+                raise VMExecutorError("SAM3 produced 0 masks")
             self.log(
                 "SAM3 produced 0 masks — falling back to 3D-RE-GEN Step 1",
                 "WARNING",
@@ -661,6 +784,79 @@ class Regen3DRunner:
             if 1 not in self.config.steps:
                 self.config.steps = [1] + self.config.steps
             self.config.seg_backend = "grounded_sam"
+            result["fallback_used"] = True
+            result["error"] = "SAM3 produced 0 masks"
+
+        return result
+
+    def _ensure_step7_background_pointcloud(self, remote_output_dir: str) -> None:
+        """Create points_emptyRoom.ply from available VGGT sparse clouds if missing."""
+        sparse_dir = f"{remote_output_dir}/vggt/sparse"
+        empty_room = f"{sparse_dir}/points_emptyRoom.ply"
+        rc, stdout, _ = self._vm.ssh_exec(
+            f"test -f {shlex.quote(empty_room)} && echo EXISTS",
+            stream_logs=False,
+            check=False,
+        )
+        if "EXISTS" in stdout:
+            return
+
+        for candidate in ("points_merged.ply", "points.ply"):
+            candidate_path = f"{sparse_dir}/{candidate}"
+            rc, stdout, _ = self._vm.ssh_exec(
+                f"test -f {shlex.quote(candidate_path)} && echo EXISTS",
+                stream_logs=False,
+                check=False,
+            )
+            if "EXISTS" not in stdout:
+                continue
+
+            rc, _, stderr = self._vm.ssh_exec(
+                f"cp {shlex.quote(candidate_path)} {shlex.quote(empty_room)}",
+                stream_logs=False,
+                check=False,
+            )
+            if rc == 0:
+                self.log(
+                    f"Created missing points_emptyRoom.ply from {candidate}",
+                    "WARNING",
+                )
+            else:
+                self.log(
+                    f"Failed to create points_emptyRoom.ply from {candidate}: "
+                    f"{stderr[-200:] if stderr else 'unknown error'}",
+                    "WARNING",
+                )
+            return
+
+        self.log(
+            "points_emptyRoom.ply missing and no compatible fallback point cloud found",
+            "WARNING",
+        )
+
+    def _create_glb_symlinks(self, remote_output_dir: str) -> None:
+        """Create {name}.glb -> {name}_shape.glb symlinks on the remote VM.
+
+        Hunyuan3D-2.1 outputs files as {name}_shape.glb but downstream code
+        expects {name}.glb. This creates symlinks so both names resolve.
+        """
+        cmd = (
+            f"for dir in {remote_output_dir}/3D/*/; do "
+            f"name=$(basename \"$dir\"); "
+            f"shape_glb=\"$dir/${{name}}_shape.glb\"; "
+            f"link_glb=\"$dir/${{name}}.glb\"; "
+            f"if [ -f \"$shape_glb\" ] && [ ! -e \"$link_glb\" ]; then "
+            f"ln -s \"${{name}}_shape.glb\" \"$link_glb\" && "
+            f"echo \"Symlinked: $link_glb -> ${{name}}_shape.glb\"; "
+            f"fi; "
+            f"done"
+        )
+        rc, stdout, stderr = self._vm.ssh_exec(
+            cmd, stream_logs=False, check=False
+        )
+        if stdout.strip():
+            for line in stdout.strip().splitlines():
+                self.log(line)
 
     def _download_outputs(
         self, remote_output_dir: str, local_dir: Path
@@ -711,3 +907,294 @@ class Regen3DRunner:
             check=False,
         )
         self.log(f"Cleaned up remote directories for {scene_id}")
+
+    def setup_sam3_only(self) -> None:
+        """Set up the SAM3 environment on the remote VM without running a reconstruction.
+
+        Useful for pre-warming the VM so the first SAM3 reconstruction doesn't
+        spend 10-15 minutes on setup.
+        """
+        self.log("Pre-warming SAM3 environment on remote VM...")
+        self._ensure_vm_ready()
+        self._setup_sam3_env()
+        self.log("SAM3 environment is ready. Set REGEN3D_SEG_BACKEND=sam3 to use it.")
+
+    def _count_remote_masks(self, remote_output_dir: str) -> int:
+        """Count masks in findings/fullSize on the remote VM."""
+        cmd = (
+            f"ls {shlex.quote(remote_output_dir)}/findings/fullSize/*.png "
+            f"2>/dev/null | wc -l"
+        )
+        _, count_str, _ = self._vm.ssh_exec(cmd, stream_logs=False, check=False)
+        return int(count_str.strip()) if count_str.strip().isdigit() else 0
+
+    def _download_findings_if_present(
+        self,
+        remote_output_dir: str,
+        local_output_dir: Path,
+    ) -> bool:
+        """Download findings/ directory if it exists."""
+        rc, stdout, _ = self._vm.ssh_exec(
+            f"test -d {shlex.quote(remote_output_dir)}/findings && echo EXISTS",
+            stream_logs=False,
+            check=False,
+        )
+        if "EXISTS" not in stdout:
+            return False
+        local_output_dir.mkdir(parents=True, exist_ok=True)
+        self._vm.scp_download_dir(
+            f"{remote_output_dir}/findings",
+            local_output_dir / "findings",
+        )
+        return True
+
+    def compare_backends(
+        self,
+        input_image: Path,
+        output_dir: Path,
+    ) -> Dict[str, Any]:
+        """Run both segmentation backends on the same image and compare outputs."""
+        input_image = Path(input_image)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if not input_image.is_file():
+            raise FileNotFoundError(f"Input image not found: {input_image}")
+
+        self.log("Starting A/B segmentation comparison...")
+        self._ensure_vm_ready()
+        self._setup_remote()
+
+        # Generate labels once (shared between both backends)
+        self._resolve_auto_labels(input_image)
+        self.log(f"Labels for comparison: {self.config.labels}")
+
+        # Upload image
+        scene_id = f"ab_compare_{int(time.time())}"
+        remote_image_path = f"/tmp/{scene_id}_input{input_image.suffix}"
+        self._vm.scp_upload(input_image, remote_image_path)
+
+        local_out_a = output_dir / "grounded_sam"
+        local_out_b = output_dir / "sam3"
+        remote_out_a = f"{self.config.repo_path}/output_{scene_id}_grounded_sam"
+        remote_out_b = f"{self.config.repo_path}/output_{scene_id}_sam3"
+
+        results: Dict[str, Any] = {
+            "scene_id": scene_id,
+            "input_image": str(input_image),
+            "labels": self.config.labels,
+            "grounded_sam": {
+                "status": "failed",
+                "error": "not_run",
+                "fallback_used": False,
+                "mask_count": 0,
+                "duration_s": 0.0,
+                "exit_code": 1,
+                "output_dir": str(local_out_a),
+            },
+            "sam3": {
+                "status": "failed",
+                "error": "not_run",
+                "fallback_used": False,
+                "mask_count": 0,
+                "duration_s": 0.0,
+                "exit_code": 1,
+                "output_dir": str(local_out_b),
+            },
+        }
+
+        try:
+            # --- Backend A: grounded_sam (3D-RE-GEN Step 1) ---
+            self.log("=" * 60)
+            self.log("Running backend A: grounded_sam (GroundingDINO + SAM1)")
+            self.log("=" * 60)
+            t0 = time.monotonic()
+            try:
+                self._generate_and_upload_config(
+                    remote_image_path, remote_out_a, scene_id
+                )
+                rc_a, _, stderr_a = self._execute_pipeline(
+                    scene_id, remote_out_a, steps_override=[1]
+                )
+                dur_a = time.monotonic() - t0
+                count_a = self._count_remote_masks(remote_out_a)
+                self._download_findings_if_present(remote_out_a, local_out_a)
+                results["grounded_sam"].update(
+                    {
+                        "status": "success" if rc_a == 0 else "failed",
+                        "error": None if rc_a == 0 else (
+                            stderr_a[-800:] if stderr_a else f"exit {rc_a}"
+                        ),
+                        "mask_count": count_a,
+                        "duration_s": round(dur_a, 1),
+                        "exit_code": rc_a,
+                    }
+                )
+            except Exception as exc:
+                dur_a = time.monotonic() - t0
+                results["grounded_sam"].update(
+                    {
+                        "status": "failed",
+                        "error": str(exc),
+                        "duration_s": round(dur_a, 1),
+                        "exit_code": 1,
+                    }
+                )
+            self.log(
+                f"grounded_sam: {results['grounded_sam']['mask_count']} masks "
+                f"in {results['grounded_sam']['duration_s']:.1f}s "
+                f"(status={results['grounded_sam']['status']})"
+            )
+
+            # --- Backend B: SAM3 ---
+            self.log("=" * 60)
+            self.log("Running backend B: sam3 (SAM3 text-prompted)")
+            self.log("=" * 60)
+            t0 = time.monotonic()
+            try:
+                self._vm.ssh_exec(
+                    f"mkdir -p {shlex.quote(remote_out_b)}",
+                    stream_logs=False,
+                    check=True,
+                )
+                sam3_result = self._run_sam3_segmentation(
+                    remote_image_path,
+                    remote_out_b,
+                    strict_failure=True,
+                )
+                dur_b = time.monotonic() - t0
+                count_b = self._count_remote_masks(remote_out_b)
+                self._download_findings_if_present(remote_out_b, local_out_b)
+                results["sam3"].update(
+                    {
+                        "status": "success",
+                        "error": sam3_result["error"],
+                        "fallback_used": sam3_result["fallback_used"],
+                        "mask_count": count_b,
+                        "duration_s": round(dur_b, 1),
+                        "exit_code": 0,
+                    }
+                )
+            except Exception as exc:
+                dur_b = time.monotonic() - t0
+                count_b = self._count_remote_masks(remote_out_b)
+                self._download_findings_if_present(remote_out_b, local_out_b)
+                results["sam3"].update(
+                    {
+                        "status": "failed",
+                        "error": str(exc),
+                        "mask_count": count_b,
+                        "duration_s": round(dur_b, 1),
+                        "exit_code": 1,
+                    }
+                )
+            self.log(
+                f"sam3: {results['sam3']['mask_count']} masks "
+                f"in {results['sam3']['duration_s']:.1f}s "
+                f"(status={results['sam3']['status']})"
+            )
+        finally:
+            # Cleanup remote
+            self._vm.ssh_exec(
+                f"rm -rf {shlex.quote(remote_out_a)} {shlex.quote(remote_out_b)} "
+                f"{shlex.quote(remote_image_path)}",
+                stream_logs=False, check=False,
+            )
+
+        results["success"] = (
+            results["grounded_sam"]["status"] == "success"
+            and results["sam3"]["status"] == "success"
+        )
+
+        # Write comparison summary
+        summary_path = output_dir / "comparison.json"
+        with open(summary_path, "w") as f:
+            json.dump(results, f, indent=2)
+
+        self.log("=" * 60)
+        self.log("A/B COMPARISON RESULTS")
+        self.log(
+            f"  grounded_sam: {results['grounded_sam']['mask_count']} masks, "
+            f"{results['grounded_sam']['duration_s']:.1f}s, "
+            f"status={results['grounded_sam']['status']}"
+        )
+        self.log(
+            f"  sam3:         {results['sam3']['mask_count']} masks, "
+            f"{results['sam3']['duration_s']:.1f}s, "
+            f"status={results['sam3']['status']}"
+        )
+        self.log(f"  Output:       {output_dir}")
+        self.log(
+            f"  Compare masks visually in {local_out_a}/findings/fullSize/ vs "
+            f"{local_out_b}/findings/fullSize/"
+        )
+        self.log("=" * 60)
+        return results
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+
+def _load_runner_env_defaults() -> None:
+    """Load repository .env defaults for standalone runner CLI."""
+    repo_root = Path(__file__).resolve().parents[2]
+    load_dotenv(dotenv_path=repo_root / ".env", override=False)
+    load_dotenv(
+        dotenv_path=repo_root / "configs" / "regen3d_reconstruct.env",
+        override=False,
+    )
+
+
+def _cli():
+    """Minimal CLI for maintenance tasks."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="3D-RE-GEN runner — maintenance utilities",
+    )
+    parser.add_argument(
+        "--setup-sam3",
+        action="store_true",
+        help="Set up the SAM3 segmentation environment on the remote VM "
+        "(Python 3.12 venv, PyTorch 2.7, SAM3 model download). "
+        "Takes ~10-15 min on first run, instant thereafter.",
+    )
+    parser.add_argument(
+        "--compare",
+        metavar="IMAGE",
+        help="Run both segmentation backends (grounded_sam and sam3) on the "
+        "given image and produce a side-by-side comparison of masks.",
+    )
+    parser.add_argument(
+        "--compare-output",
+        metavar="DIR",
+        default=None,
+        help="Output directory for --compare results "
+        "(default: ~/Downloads/seg_comparison/)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO)
+    _load_runner_env_defaults()
+
+    if args.setup_sam3:
+        runner = Regen3DRunner()
+        runner.setup_sam3_only()
+    elif args.compare:
+        from pathlib import Path as _Path
+        image_path = _Path(args.compare)
+        out_dir = _Path(
+            args.compare_output
+            or _Path.home() / "Downloads" / "seg_comparison"
+        )
+        runner = Regen3DRunner()
+        results = runner.compare_backends(image_path, out_dir)
+        print(json.dumps(results, indent=2))
+        if not results.get("success", False):
+            sys.exit(1)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    _cli()

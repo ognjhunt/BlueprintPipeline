@@ -27,7 +27,7 @@ main:
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - vmName: "isaac-sim-ubuntu"
-          - vmZone: "us-east1-d"
+          - vmZone: "us-east1-c"
           - pipelineTimeoutSeconds: 2700
           - pollIntervalSeconds: 30
           - startTime: '${time.format(sys.now())}'

@@ -42,17 +42,28 @@ The orchestrator workflow calls each sub-workflow directly via the `googleapis.w
 ### Stage 1: VM Reconstruction (~20-45 min)
 
 **What it does:**
-1. Checks GPU VM status (`isaac-sim-ubuntu` in `us-east1-b`)
+1. Checks GPU VM status (`isaac-sim-ubuntu` in `us-east1-c`)
 2. Starts the VM if stopped (waits 60s for boot)
 3. Launches `run_pipeline_gcs.sh` on the VM via Cloud Build SSH
 4. Polls for `.reconstruction_complete` marker in GCS
 
 **What runs on the VM:**
 - Downloads the uploaded image from GCS
-- Runs 3D-RE-GEN reconstruction (NeRF → mesh)
+- Runs 3D-RE-GEN reconstruction pipeline (7 steps):
+  1. **Segmentation**: Gemini auto-labeling + GroundingDINO + SAM1 (detects and segments objects)
+  2. **Inpainting**: Gemini 2.5 Flash generates empty room + object-isolated images
+  3. **Camera estimation**: VGGT monocular depth/camera estimation
+  4. **Shape generation**: Hunyuan3D-2.1 generates GLB meshes per object (~34s each)
+  5. **Point cloud extraction**: Extracts per-object point clouds from VGGT depth
+  6. **Pose matching**: Differentiable rendering aligns GLBs to image (150 iters per object, ~4.5 min each)
+  7. **Scene assembly**: Combines all posed GLBs into `combined_scene.glb`
 - Generates SimReady assets (materials, physics)
 - Assembles initial USD scene
 - Uploads results back to GCS
+
+**Known issues:**
+- Hunyuan3D-2.1 outputs `{name}_shape.glb` but downstream code expects `{name}.glb`. Patches on VM auto-create symlinks.
+- VM service account has `devstorage.read_only` scope — needs `cloud-platform` for GCS writes. Currently uploads via Mac-side gsutil.
 
 **Completion marker:** `scenes/<scene_id>/.reconstruction_complete`
 
@@ -261,15 +272,16 @@ gcloud workflows executions describe <execution_id> \
 
 ### VM won't start (Stage 1)
 
-- Check VM quota in `us-east1-b` (g2-standard-32 needs 32 vCPUs + 1 L4 GPU)
-- Check if VM exists: `gcloud compute instances describe isaac-sim-ubuntu --zone=us-east1-b`
-- Manual start: `gcloud compute instances start isaac-sim-ubuntu --zone=us-east1-b`
+- Check VM quota in `us-east1-c` (g2-standard-32 needs 32 vCPUs + 1 L4 GPU)
+- Check if VM exists: `gcloud compute instances describe isaac-sim-ubuntu --zone=us-east1-c`
+- Manual start: `gcloud compute instances start isaac-sim-ubuntu --zone=us-east1-c`
+- VM was migrated from `us-east1-b` → `us-east1-d` → `us-east1-c` due to GPU stockouts
 
 ### Cloud Build SSH fails (Stage 1)
 
 - Cloud Build SA needs `roles/compute.instanceAdmin.v1` and `roles/compute.osAdminLogin`
 - VM must have OS Login enabled
-- Check: `gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b -- "echo ok"`
+- Check: `gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c -- "echo ok"`
 
 ### Sub-workflow fails (Stages 2-4)
 
@@ -378,10 +390,67 @@ gs://bucket/scenes/my_scene/
 
 For the full pipeline to run end-to-end:
 
-1. **GPU VM** (`isaac-sim-ubuntu`) must exist in `us-east1-b` with Docker and `run_pipeline_gcs.sh`
+1. **GPU VM** (`isaac-sim-ubuntu`) must exist in `us-east1-c` with 3D-RE-GEN repo at `/home/nijelhunt1/3D-RE-GEN` and venv at `venv_py310`
 2. **Cloud Run jobs** for stages 2-4 must be deployed (simready-job, usd-assembly-job, replicator-job, variation-gen-job, genie-sim-export-job, etc.)
 3. **Sub-workflows** must be deployed to Cloud Workflows in `us-central1`
 4. **GKE cluster** needed for GenieSim GPU jobs (Stage 4)
 5. **Service accounts** with correct IAM permissions (handled by `setup-orchestrator-trigger.sh`)
 
 The VM is the only component that requires manual intervention (it auto-starts but may need container warmup). All other stages are fully serverless.
+
+## Local Pipeline Runner (Manual / Dev)
+
+For development and testing, you can run stages 1-3 from your local machine using `run_local_pipeline.py`:
+
+```bash
+# Set up environment
+export PYTHONPATH="/path/to/BlueprintPipeline"
+
+# Run reconstruction + downstream steps for a prepared scene directory
+python3 tools/run_local_pipeline.py \
+  --scene-dir /tmp/blueprint_scenes/ChIJHy53k-XlrIkRTdgT1Ev8ln4 \
+  --steps regen3d-reconstruct,regen3d,simready,usd
+
+# With GCS upload (requires ADC or service account)
+python3 tools/run_local_pipeline.py \
+  --scene-dir /tmp/blueprint_scenes/ChIJHy53k-XlrIkRTdgT1Ev8ln4 \
+  --steps regen3d-reconstruct \
+  --gcs-bucket blueprint-8c1ca.appspot.com \
+  --gcs-download-inputs \
+  --gcs-upload-outputs
+```
+
+### Key Config: `configs/regen3d_reconstruct.env`
+
+```
+REGEN3D_VM_HOST=isaac-sim-ubuntu
+REGEN3D_VM_ZONE=us-east1-c
+REGEN3D_REPO_PATH=/home/nijelhunt1/3D-RE-GEN
+REGEN3D_SEG_BACKEND=grounded_sam
+REGEN3D_STEPS=1,2,3,4,5,6,7
+REGEN3D_REPAIR_EMPTYROOM_PC=false
+GCS_BUCKET=blueprint-8c1ca.appspot.com
+```
+
+### VM Patches Required
+
+The 3D-RE-GEN code on the VM requires several patches that survive stop/start:
+
+1. **`scene_reconstruction/run.py`** — GLB pre-filter: Hunyuan3D-2.1 outputs `{name}_shape.glb`, not `{name}.glb`. The pre-filter must check both paths and create symlinks.
+2. **`pose_matching_planar.py`** — GLB loading fallback for `_shape.glb` suffix.
+3. **`global_utils.py`** — Guard against exporting empty scenes (zero geometry RuntimeError).
+4. **`pc_utils.py`** — Empty point cloud tensor guard.
+5. **`extract_pc_object.py`** — try-except around per-object extraction.
+
+These patches are NOT in git on the VM. If the VM is recreated from an image, re-apply them.
+
+### VM Scopes Issue
+
+The VM currently has `devstorage.read_only` scope. For autonomous GCS uploads, change to `cloud-platform`:
+
+```bash
+# VM must be stopped first
+gcloud compute instances set-service-account isaac-sim-ubuntu \
+  --zone=us-east1-c \
+  --scopes=cloud-platform
+```

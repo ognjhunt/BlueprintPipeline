@@ -78,7 +78,10 @@ def test_run_reconstruction_clears_native_output_before_download(
     native_dir.mkdir(parents=True, exist_ok=True)
     (native_dir / "stale.txt").write_text("stale")
 
-    runner = Regen3DRunner(config=Regen3DConfig(gemini_api_key=""), verbose=False)
+    runner = Regen3DRunner(
+        config=Regen3DConfig(gemini_api_key="", labels=["chair"]),
+        verbose=False,
+    )
 
     monkeypatch.setattr(runner, "_ensure_vm_ready", lambda: None)
     monkeypatch.setattr(runner, "_setup_remote", lambda: None)
@@ -116,6 +119,155 @@ def test_run_reconstruction_clears_native_output_before_download(
 
     assert result.success
     assert result.objects_count == 1
+
+
+def test_from_env_defaults_match_reconstruct_config(monkeypatch) -> None:
+    monkeypatch.delenv("REGEN3D_SEG_BACKEND", raising=False)
+    monkeypatch.delenv("REGEN3D_VM_ZONE", raising=False)
+    monkeypatch.delenv("REGEN3D_REPO_PATH", raising=False)
+    monkeypatch.delenv("REGEN3D_SETUP_TIMEOUT_S", raising=False)
+
+    cfg = Regen3DConfig.from_env()
+    assert cfg.seg_backend == "grounded_sam"
+    assert cfg.vm_zone == "us-east1-c"
+    assert cfg.repo_path == "/home/nijelhunt1/3D-RE-GEN"
+    assert cfg.setup_timeout_s == 3600
+
+
+def test_compare_backends_calls_setup_remote(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "room.png"
+    image_path.write_bytes(b"image")
+    out_dir = tmp_path / "compare"
+    runner = Regen3DRunner(config=Regen3DConfig(labels=["chair"]), verbose=False)
+
+    calls = {"setup_remote": 0}
+
+    monkeypatch.setattr(runner, "_ensure_vm_ready", lambda: None)
+
+    def _fake_setup_remote():
+        calls["setup_remote"] += 1
+
+    monkeypatch.setattr(runner, "_setup_remote", _fake_setup_remote)
+    monkeypatch.setattr(runner, "_resolve_auto_labels", lambda _img: None)
+    monkeypatch.setattr(runner._vm, "scp_upload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_generate_and_upload_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_execute_pipeline", lambda *_args, **_kwargs: (0, "", ""))
+    monkeypatch.setattr(runner, "_count_remote_masks", lambda *_args, **_kwargs: 2)
+    monkeypatch.setattr(runner, "_download_findings_if_present", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        runner,
+        "_run_sam3_segmentation",
+        lambda *_args, **_kwargs: {"mask_count": 2, "fallback_used": False, "error": None},
+    )
+    monkeypatch.setattr(runner._vm, "ssh_exec", lambda *_args, **_kwargs: (0, "", ""))
+
+    results = runner.compare_backends(image_path, out_dir)
+    assert calls["setup_remote"] == 1
+    assert results["grounded_sam"]["status"] == "success"
+    assert results["sam3"]["status"] == "success"
+    assert results["success"] is True
+
+
+def test_compare_backends_reports_sam3_failure(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "room.png"
+    image_path.write_bytes(b"image")
+    out_dir = tmp_path / "compare"
+    runner = Regen3DRunner(config=Regen3DConfig(labels=["chair"]), verbose=False)
+
+    monkeypatch.setattr(runner, "_ensure_vm_ready", lambda: None)
+    monkeypatch.setattr(runner, "_setup_remote", lambda: None)
+    monkeypatch.setattr(runner, "_resolve_auto_labels", lambda _img: None)
+    monkeypatch.setattr(runner._vm, "scp_upload", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_generate_and_upload_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_execute_pipeline", lambda *_args, **_kwargs: (0, "", ""))
+    monkeypatch.setattr(
+        runner,
+        "_count_remote_masks",
+        lambda remote_dir: 2 if "grounded_sam" in remote_dir else 0,
+    )
+    monkeypatch.setattr(runner, "_download_findings_if_present", lambda *_args, **_kwargs: True)
+
+    def _fail_sam3(*_args, **_kwargs):
+        raise RuntimeError("sam3 failed hard")
+
+    monkeypatch.setattr(runner, "_run_sam3_segmentation", _fail_sam3)
+    monkeypatch.setattr(runner._vm, "ssh_exec", lambda *_args, **_kwargs: (0, "", ""))
+
+    results = runner.compare_backends(image_path, out_dir)
+    assert results["grounded_sam"]["status"] == "success"
+    assert results["sam3"]["status"] == "failed"
+    assert results["sam3"]["fallback_used"] is False
+    assert "sam3 failed hard" in (results["sam3"]["error"] or "")
+    assert results["success"] is False
+
+
+def test_generate_and_upload_config_does_not_leak_gemini_key_in_ssh(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config = Regen3DConfig(
+        repo_path="/tmp/3D-RE-GEN",
+        labels=["chair"],
+        gemini_api_key="AIza_test_secret_1234567890",
+        huggingface_token="hf_test_secret_abcdefghijklmnopqrstuvwxyz",
+    )
+    runner = Regen3DRunner(config=config, verbose=False)
+
+    recorded_cmds: list[str] = []
+    uploaded_paths: list[str] = []
+    uploaded_env_content = {"text": ""}
+
+    def _fake_scp_upload(local_path: Path, remote_path: str) -> None:
+        uploaded_paths.append(remote_path)
+        if remote_path.endswith("/src/config.yaml"):
+            # Ensure config upload path still works.
+            assert Path(local_path).is_file()
+        if remote_path.endswith("/.env_keys"):
+            uploaded_env_content["text"] = Path(local_path).read_text()
+
+    def _fake_ssh_exec(command: str, *args, **kwargs):
+        recorded_cmds.append(command)
+        return (0, "", "")
+
+    monkeypatch.setattr(runner._vm, "scp_upload", _fake_scp_upload)
+    monkeypatch.setattr(runner._vm, "ssh_exec", _fake_ssh_exec)
+
+    runner._generate_and_upload_config(
+        remote_image_path="/tmp/3D-RE-GEN/input_images/scene.jpg",
+        remote_output_dir="/tmp/3D-RE-GEN/output_scene",
+        scene_id="scene",
+    )
+
+    assert any(path.endswith("/.env_keys") for path in uploaded_paths)
+    assert all("GEMINI_API_KEY=" not in cmd for cmd in recorded_cmds)
+    assert all("HF_TOKEN=" not in cmd for cmd in recorded_cmds)
+    assert all("HF_HUB_TOKEN=" not in cmd for cmd in recorded_cmds)
+    assert all("HUGGINGFACE_HUB_TOKEN=" not in cmd for cmd in recorded_cmds)
+    assert "GEMINI_API_KEY=" in uploaded_env_content["text"]
+    assert "HF_TOKEN=" in uploaded_env_content["text"]
+    assert "HF_HUB_TOKEN=" in uploaded_env_content["text"]
+    assert "HUGGINGFACE_HUB_TOKEN=" in uploaded_env_content["text"]
+
+
+def test_step7_background_pointcloud_fallback_creates_empty_room_file(
+    monkeypatch,
+) -> None:
+    runner = Regen3DRunner(config=Regen3DConfig(), verbose=False)
+    commands: list[str] = []
+
+    def _fake_ssh_exec(command: str, *args, **kwargs):
+        commands.append(command)
+        if "test -f" in command and "points_emptyRoom.ply" in command:
+            return (1, "", "")
+        if "test -f" in command and "points_merged.ply" in command:
+            return (0, "EXISTS\n", "")
+        if command.startswith("cp "):
+            return (0, "", "")
+        return (1, "", "")
+
+    monkeypatch.setattr(runner._vm, "ssh_exec", _fake_ssh_exec)
+    runner._ensure_step7_background_pointcloud("/remote/out")
+    assert any(cmd.startswith("cp ") and "points_emptyRoom.ply" in cmd for cmd in commands)
 
 
 def test_harvest_is_idempotent_and_removes_stale_objects(tmp_path: Path) -> None:
@@ -208,6 +360,20 @@ def test_vm_executor_retries_on_sshconnectionerror(monkeypatch) -> None:
     assert rc == 0
     assert stdout == "ok"
     assert stderr == ""
+
+
+def test_vm_executor_sanitizes_gemini_key_in_command_log() -> None:
+    raw = "echo GEMINI_API_KEY=AIzaRealSecretToken1234567890 && run"
+    masked = VMExecutor._sanitize_command_for_log(raw)
+    assert "GEMINI_API_KEY=<REDACTED>" in masked
+    assert "AIzaRealSecretToken1234567890" not in masked
+
+
+def test_vm_executor_sanitizes_hf_token_in_command_log() -> None:
+    raw = "export HF_TOKEN=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 && run"
+    masked = VMExecutor._sanitize_command_for_log(raw)
+    assert "HF_TOKEN=<REDACTED>" in masked
+    assert "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" not in masked
 
 
 def test_regen3d_reconstruct_loads_env_defaults(monkeypatch, tmp_path: Path) -> None:

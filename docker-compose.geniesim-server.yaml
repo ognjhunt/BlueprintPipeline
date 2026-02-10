@@ -36,6 +36,11 @@ services:
       GENIESIM_RUNTIME_READINESS_JSON: ${GENIESIM_RUNTIME_READINESS_JSON:-/workspace/BlueprintPipeline/.geniesim_runtime_readiness.json}
       GENIESIM_RUNTIME_PRESTART_JSON: ${GENIESIM_RUNTIME_PRESTART_JSON:-/workspace/BlueprintPipeline/.geniesim_runtime_prestart_probe.json}
       GENIESIM_KEEP_OBJECTS_KINEMATIC: ${GENIESIM_KEEP_OBJECTS_KINEMATIC:-0}
+      GENIESIM_SERVER_CUROBO_MODE: ${GENIESIM_SERVER_CUROBO_MODE:-off}
+      # Camera RGB rendering: set ENABLE_CAMERAS=1 + SKIP_RGB_CAPTURE=false
+      # to activate. Requires a GPU with working RT cores (T4, L40S, etc.)
+      ENABLE_CAMERAS: ${ENABLE_CAMERAS:-0}
+      SKIP_RGB_CAPTURE: ${SKIP_RGB_CAPTURE:-true}
       # DISPLAY must point to an Xorg server with NVIDIA GLX for camera RGB
       # rendering. The host starts Xorg :99 and shares /tmp/.X11-unix.
       DISPLAY: ${DISPLAY:-:99}

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 class VMConfig:
     """Configuration for a remote GCE VM."""
     host: str = "isaac-sim-ubuntu"
-    zone: str = "us-east1-d"
+    zone: str = "us-east1-c"
     user: str = ""  # empty = gcloud default
     ssh_timeout_s: int = 30
     max_ssh_retries: int = 3
@@ -54,6 +55,14 @@ class GPUNotAvailableError(VMExecutorError):
 class VMExecutor:
     """Execute commands on a remote GCE VM via gcloud SSH."""
 
+    _SECRET_PATTERNS = (
+        re.compile(r"(GEMINI_API_KEY\s*=\s*)([^ \n;&|]+)"),
+        re.compile(r"((?:HF_TOKEN|HF_HUB_TOKEN|HUGGINGFACE_HUB_TOKEN)\s*=\s*)([^ \n;&|]+)"),
+        re.compile(r"(Authorization:\s*Bearer\s+)([^ \n\"']+)"),
+        re.compile(r"AIza[0-9A-Za-z\-_]{20,}"),
+        re.compile(r"hf_[0-9A-Za-z]{20,}"),
+    )
+
     def __init__(self, config: VMConfig, verbose: bool = True):
         self.config = config
         self.verbose = verbose
@@ -62,6 +71,18 @@ class VMExecutor:
         if self.config.user:
             return f"{self.config.user}@{self.config.host}"
         return self.config.host
+
+    @classmethod
+    def _sanitize_command_for_log(cls, command: str) -> str:
+        redacted = command
+        for pattern in cls._SECRET_PATTERNS:
+            if pattern.pattern.startswith("AIza"):
+                redacted = pattern.sub("AIza<REDACTED>", redacted)
+            elif pattern.pattern.startswith("hf_"):
+                redacted = pattern.sub("hf_<REDACTED>", redacted)
+            else:
+                redacted = pattern.sub(r"\1<REDACTED>", redacted)
+        return redacted
 
     def _build_ssh_cmd(self, command: str, timeout: Optional[int] = None) -> List[str]:
         """Build gcloud compute ssh command."""
@@ -106,10 +127,11 @@ class VMExecutor:
 
         for attempt in range(1, self.config.max_ssh_retries + 1):
             try:
+                safe_command = self._sanitize_command_for_log(command)
                 if self.verbose:
                     logger.info(
                         f"[VM] SSH attempt {attempt}/{self.config.max_ssh_retries}: "
-                        f"{command[:120]}..."
+                        f"{safe_command[:120]}..."
                     )
 
                 if stream_logs:
@@ -137,7 +159,8 @@ class VMExecutor:
 
             except subprocess.TimeoutExpired:
                 raise CommandTimeoutError(
-                    f"Command timed out after {timeout}s: {command[:100]}"
+                    f"Command timed out after {timeout}s: "
+                    f"{self._sanitize_command_for_log(command)[:100]}"
                 )
             except SSHConnectionError as exc:
                 last_error = exc
