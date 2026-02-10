@@ -78,23 +78,41 @@ def segment_with_sam3(
     detections: List[Dict[str, Any]] = []
     w, h = image.size
 
-    # Pre-compute vision embeddings once
+    # Prepare image inputs once. Depending on the transformers/SAM3 version,
+    # the model forward may accept either `pixel_values` or precomputed
+    # `vision_embeds`. Prefer vision embeddings (faster), but fall back to
+    # pixel_values for compatibility.
     log.info("Computing vision embeddings (%dx%d)...", w, h)
     img_inputs = processor(images=image, return_tensors="pt").to(device)
-    with torch.no_grad():
-        vision_outputs = model.get_vision_features(
-            pixel_values=img_inputs["pixel_values"]
-        )
+    pixel_values = img_inputs.get("pixel_values")
+    vision_embeds = None
+    if pixel_values is not None and hasattr(model, "get_vision_features"):
+        try:
+            with torch.no_grad():
+                vision_features = model.get_vision_features(pixel_values=pixel_values)
+            # Common shapes across versions: dict with key, or object attribute.
+            if isinstance(vision_features, dict) and "vision_embeds" in vision_features:
+                vision_embeds = vision_features["vision_embeds"]
+            elif hasattr(vision_features, "vision_embeds"):
+                vision_embeds = vision_features.vision_embeds
+            else:
+                # Some versions may return the tensor directly.
+                vision_embeds = vision_features
+        except Exception as exc:
+            log.warning("Failed to precompute vision embeddings; falling back to pixel_values (%s)", exc)
+            vision_embeds = None
 
     for label in labels:
         log.info("Segmenting label: %s", label)
         text_inputs = processor(text=label, return_tensors="pt").to(device)
 
         with torch.no_grad():
-            outputs = model(
-                vision_outputs=vision_outputs,
-                **text_inputs,
-            )
+            if vision_embeds is not None:
+                outputs = model(vision_embeds=vision_embeds, **text_inputs)
+            elif pixel_values is not None:
+                outputs = model(pixel_values=pixel_values, **text_inputs)
+            else:
+                raise RuntimeError("SAM3 processor did not produce pixel_values for the input image")
 
         # Post-process to get instance masks
         results = processor.post_process_instance_segmentation(

@@ -63,3 +63,6 @@ test_scenes/scenes/*/replicator/
 # Pipeline completion markers
 **/.*_complete
 **/.*_submitted
+
+# Analysis outputs (per-run image/segmentation artifacts)
+analysis_outputs/

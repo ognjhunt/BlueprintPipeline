@@ -933,7 +933,12 @@ class Regen3DRunner:
         remote_output_dir: str,
         local_output_dir: Path,
     ) -> bool:
-        """Download findings/ directory if it exists."""
+        """Download findings/ artifacts for A/B compare if they exist.
+
+        For `--compare`, we only need `findings/fullSize` (masks) and any
+        top-level marker files (e.g. `.sam3_failed`). Downloading the full
+        findings tree is slow and doesn't change the visual decision.
+        """
         rc, stdout, _ = self._vm.ssh_exec(
             f"test -d {shlex.quote(remote_output_dir)}/findings && echo EXISTS",
             stream_logs=False,
@@ -942,11 +947,42 @@ class Regen3DRunner:
         if "EXISTS" not in stdout:
             return False
         local_output_dir.mkdir(parents=True, exist_ok=True)
-        self._vm.scp_download_dir(
-            f"{remote_output_dir}/findings",
-            local_output_dir / "findings",
+
+        any_downloaded = False
+
+        # 1) Download masks (what we visually compare)
+        remote_fullsize = f"{remote_output_dir}/findings/fullSize"
+        rc, stdout, _ = self._vm.ssh_exec(
+            f"test -d {shlex.quote(remote_fullsize)} && echo EXISTS",
+            stream_logs=False,
+            check=False,
         )
-        return True
+        if "EXISTS" in stdout:
+            self._vm.scp_download_dir(
+                remote_fullsize,
+                local_output_dir / "findings" / "fullSize",
+            )
+            any_downloaded = True
+
+        # 2) Download any small marker/metadata files at findings root.
+        rc, stdout, _ = self._vm.ssh_exec(
+            f"find {shlex.quote(remote_output_dir)}/findings "
+            f"-maxdepth 1 -type f 2>/dev/null",
+            stream_logs=False,
+            check=False,
+        )
+        if rc == 0 and stdout.strip():
+            for remote_file in [l.strip() for l in stdout.splitlines() if l.strip()]:
+                rel = remote_file.replace(
+                    f"{remote_output_dir.rstrip('/')}/findings/", "", 1
+                )
+                self._vm.scp_download(
+                    remote_file,
+                    local_output_dir / "findings" / rel,
+                )
+                any_downloaded = True
+
+        return any_downloaded
 
     def compare_backends(
         self,

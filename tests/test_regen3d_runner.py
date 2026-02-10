@@ -370,10 +370,11 @@ def test_vm_executor_sanitizes_gemini_key_in_command_log() -> None:
 
 
 def test_vm_executor_sanitizes_hf_token_in_command_log() -> None:
-    raw = "export HF_TOKEN=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 && run"
+    # Use a dummy token shape; never embed real HF tokens in the repo.
+    raw = "export HF_TOKEN=hf_test_secret_abcdefghijklmnopqrstuvwxyz && run"
     masked = VMExecutor._sanitize_command_for_log(raw)
     assert "HF_TOKEN=<REDACTED>" in masked
-    assert "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" not in masked
+    assert "hf_test_secret_abcdefghijklmnopqrstuvwxyz" not in masked
 
 
 def test_regen3d_reconstruct_loads_env_defaults(monkeypatch, tmp_path: Path) -> None:
