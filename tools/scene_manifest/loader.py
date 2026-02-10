@@ -31,6 +31,18 @@ def _canonical_to_legacy_object(obj: Dict) -> Dict:
 
     sim_role = obj.get("sim_role", "unknown")
     legacy_type = SIM_ROLE_TO_TYPE.get(sim_role, "static")
+    articulation = obj.get("articulation") or {}
+    articulation_hint = articulation.get("type")
+    if not articulation_hint:
+        hints = articulation.get("hints")
+        if isinstance(hints, list) and hints:
+            first_hint = hints[0] if isinstance(hints[0], dict) else {}
+            joint_types = first_hint.get("joint_types", [])
+            parts = first_hint.get("parts", [])
+            if joint_types:
+                articulation_hint = joint_types[0]
+            elif parts:
+                articulation_hint = parts[0]
 
     entry = {
         "id": obj.get("id"),
@@ -52,6 +64,11 @@ def _canonical_to_legacy_object(obj: Dict) -> Dict:
         or from_scene_assets.get("interactive_output"),
         "physx_endpoint": (obj.get("articulation") or {}).get("physx_endpoint")
         or from_scene_assets.get("physx_endpoint"),
+        "articulation_hint": articulation_hint or from_scene_assets.get("articulation_hint"),
+        "articulation_required": bool(
+            articulation.get("required")
+            or from_scene_assets.get("articulation_required")
+        ),
         "polygon": (obj.get("placement") or {}).get("polygon")
         or from_scene_assets.get("polygon"),
     }

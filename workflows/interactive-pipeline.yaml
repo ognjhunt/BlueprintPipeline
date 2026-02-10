@@ -52,11 +52,14 @@ main:
           - assetsPrefix: ${"scenes/" + sceneId + "/assets"}
           - interactiveOutputPrefix: ${"scenes/" + sceneId + "/assets/interactive"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
-          # NOTE: Set PARTICULATE_ENDPOINT environment variable for articulation detection.
-          # Falls back to heuristic detection if not available.
+          # Backend routing:
+          # - ARTICULATION_BACKEND=particulate|heuristic enforces explicit backend.
+          # - ARTICULATION_BACKEND=auto (default) uses particulate when endpoint is set,
+          #   otherwise heuristic.
           - particulateEndpoint: ${default(sys.get_env("PARTICULATE_ENDPOINT"), "")}
+          - requestedArticulationBackend: ${default(sys.get_env("ARTICULATION_BACKEND"), "auto")}
           - disallowPlaceholderUrdf: ${default(sys.get_env("DISALLOW_PLACEHOLDER_URDF"), "false")}
-          - articulationBackend: ${if(particulateEndpoint != "", "particulate", "heuristic")}
+          - articulationBackend: ${if(requestedArticulationBackend != "auto", requestedArticulationBackend, if(particulateEndpoint != "", "particulate", "heuristic"))}
           - jobName: "interactive-job"
           - simreadyJobName: "simready-job"
           # Explicit override: 30 minutes for interactive processing.

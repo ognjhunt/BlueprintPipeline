@@ -4,7 +4,10 @@ import importlib.util
 import json
 import os
 import sys
+from types import SimpleNamespace
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(REPO_ROOT))
@@ -83,13 +86,22 @@ def build_scene_assets(assets_prefix: str, object_ids: list[str], gcs_root: Path
     return assets_root
 
 
-def run_job(monkeypatch, assets_prefix: str, disallow_placeholder: bool, mock_placeholder: bool, gcs_root: Path | None = None) -> None:
+def run_job(
+    monkeypatch,
+    assets_prefix: str,
+    disallow_placeholder: bool,
+    mock_placeholder: bool,
+    gcs_root: Path | None = None,
+    particulate_mode: str = "mock",
+    articulation_backend: str = "auto",
+) -> None:
     monkeypatch.setenv("BUCKET", "test-bucket")
     monkeypatch.setenv("SCENE_ID", "interactive_scene")
     monkeypatch.setenv("ASSETS_PREFIX", assets_prefix)
     monkeypatch.setenv("REGEN3D_PREFIX", f"{assets_prefix}/regen3d")
     monkeypatch.setenv("INTERACTIVE_MODE", "glb")
-    monkeypatch.setenv("PARTICULATE_MODE", "mock")
+    monkeypatch.setenv("PARTICULATE_MODE", particulate_mode)
+    monkeypatch.setenv("ARTICULATION_BACKEND", articulation_backend)
     monkeypatch.setenv("DISALLOW_PLACEHOLDER_URDF", str(disallow_placeholder).lower())
     monkeypatch.setenv("PARTICULATE_MOCK_PLACEHOLDER", str(mock_placeholder).lower())
     monkeypatch.delenv("PARTICULATE_ENDPOINT", raising=False)
@@ -147,3 +159,126 @@ def test_disallow_placeholder_urdf_blocks_mock(tmp_path, monkeypatch) -> None:
     results = json.loads(results_path.read_text(encoding="utf-8"))
     assert results["error_count"] == 1
     assert "Placeholder URDF generation blocked" in results["objects"][0]["error"]
+
+
+def test_backend_dispatcher_resolves_particulate_heuristic_and_auto() -> None:
+    resolve = run_interactive_assets.resolve_articulation_backend
+
+    assert (
+        resolve(
+            run_interactive_assets.ARTICULATION_BACKEND_PARTICULATE,
+            run_interactive_assets.PARTICULATE_MODE_REMOTE,
+            "",
+        )
+        == run_interactive_assets.ARTICULATION_BACKEND_PARTICULATE
+    )
+    assert (
+        resolve(
+            run_interactive_assets.ARTICULATION_BACKEND_HEURISTIC,
+            run_interactive_assets.PARTICULATE_MODE_LOCAL,
+            "http://localhost:8080",
+        )
+        == run_interactive_assets.ARTICULATION_BACKEND_HEURISTIC
+    )
+    assert (
+        resolve(
+            run_interactive_assets.ARTICULATION_BACKEND_AUTO,
+            run_interactive_assets.PARTICULATE_MODE_REMOTE,
+            "https://particulate.example",
+        )
+        == run_interactive_assets.ARTICULATION_BACKEND_PARTICULATE
+    )
+    assert (
+        resolve(
+            run_interactive_assets.ARTICULATION_BACKEND_AUTO,
+            run_interactive_assets.PARTICULATE_MODE_REMOTE,
+            "",
+        )
+        == run_interactive_assets.ARTICULATION_BACKEND_HEURISTIC
+    )
+    assert (
+        resolve(
+            run_interactive_assets.ARTICULATION_BACKEND_AUTO,
+            run_interactive_assets.PARTICULATE_MODE_LOCAL,
+            "",
+        )
+        == run_interactive_assets.ARTICULATION_BACKEND_PARTICULATE
+    )
+
+
+def test_required_articulation_object_fails_closed_on_non_articulated_output(tmp_path, monkeypatch) -> None:
+    assets_prefix = f"interactive-required-{tmp_path.name}"
+    assets_root = build_scene_assets(assets_prefix, ["desk_0"], gcs_root=tmp_path)
+
+    manifest_path = assets_root / "scene_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["objects"][0]["category"] = "desk with drawers"
+    manifest["objects"][0]["articulation"] = {"required": True, "type": "prismatic"}
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        run_job(
+            monkeypatch,
+            assets_prefix,
+            disallow_placeholder=False,
+            mock_placeholder=False,
+            gcs_root=tmp_path,
+            particulate_mode="mock",
+            articulation_backend="particulate",
+        )
+
+    assert exit_info.value.code == 1
+    assert (assets_root / ".interactive_failed").is_file()
+
+    complete_payload = json.loads((assets_root / ".interactive_complete").read_text(encoding="utf-8"))
+    assert complete_payload["status"] == "failure"
+    assert complete_payload["summary"]["required_failures"]
+
+    failed_payload = json.loads((assets_root / ".interactive_failed").read_text(encoding="utf-8"))
+    assert failed_payload["reason"] == "required_articulation_unmet"
+
+
+def test_generate_multiview_scaffold_writes_synthetic_views(tmp_path, monkeypatch) -> None:
+    glb_path = tmp_path / "obj_drawer.glb"
+    glb_path.write_bytes(create_minimal_glb())
+    output_dir = tmp_path / "interactive" / "obj_drawer"
+
+    class _FakeImageClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def generate_image(self, prompt: str, size: str) -> SimpleNamespace:
+            self.calls.append((prompt, size))
+            return SimpleNamespace(images=[b"fake-image-bytes"])
+
+    fake_client = _FakeImageClient()
+    llm_client_module = __import__("tools.llm_client.client", fromlist=["create_llm_client"])
+    monkeypatch.setattr(
+        llm_client_module,
+        "create_llm_client",
+        lambda provider, model, fallback_enabled: fake_client,
+    )
+
+    metadata = run_interactive_assets.generate_multiview_scaffold(
+        obj_name="obj_drawer",
+        obj_class="desk with drawers",
+        glb_path=glb_path,
+        output_dir=output_dir,
+        view_count=3,
+        model="gemini-3-pro-image-preview",
+    )
+
+    assert metadata["status"] == "success"
+    assert metadata["generated_count"] == 3
+    assert len(fake_client.calls) == 3
+
+    scaffold_metadata_path = output_dir / "multiview_scaffold.json"
+    assert scaffold_metadata_path.is_file()
+    scaffold_metadata = json.loads(scaffold_metadata_path.read_text(encoding="utf-8"))
+    assert scaffold_metadata["model"] == "gemini-3-pro-image-preview"
+    assert scaffold_metadata["generated_count"] == 3
+    assert len(scaffold_metadata["generated_files"]) == 3
+
+    scaffold_dir = output_dir / "multiview_synth"
+    for file_name in scaffold_metadata["generated_files"]:
+        assert (scaffold_dir / file_name).is_file()

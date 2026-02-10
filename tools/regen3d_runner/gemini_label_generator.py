@@ -37,6 +37,9 @@ Use code execution to crop and inspect areas that might contain objects you miss
 Return a JSON array of short noun phrases, one per object type.
 Include structural elements like "floor", "wall", "ceiling" if visible.
 Be specific: prefer "office chair" over just "chair", "potted plant" over "plant".
+If an object has likely articulated parts, encode that cue naturally in the label.
+Examples: "desk with drawers", "cabinet with doors", "box with hinged lid".
+Look specifically for drawers, doors, hinges, knobs, handles, or lids.
 Do NOT include people.
 Return at most 25 labels.
 

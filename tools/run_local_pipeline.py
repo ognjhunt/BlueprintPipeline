@@ -234,6 +234,8 @@ class LocalPipelineRunner:
     # Default step order (free/default workflow)
     DEFAULT_STEPS = [
         PipelineStep.REGEN3D,
+        PipelineStep.SCALE,
+        PipelineStep.INTERACTIVE,
         PipelineStep.SIMREADY,
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
@@ -2311,6 +2313,9 @@ class LocalPipelineRunner:
             return True
 
         endpoint = os.getenv("PARTICULATE_ENDPOINT", "").strip()
+        particulate_mode = (os.getenv("PARTICULATE_MODE", "remote") or "remote").strip().lower()
+        local_endpoint = (os.getenv("PARTICULATE_LOCAL_ENDPOINT", "") or "").strip()
+        articulation_backend = (os.getenv("ARTICULATION_BACKEND", "particulate") or "particulate").strip().lower()
         interactive_requested = PipelineStep.INTERACTIVE in steps
 
         if self.skip_interactive or not interactive_requested:
@@ -2326,14 +2331,42 @@ class LocalPipelineRunner:
             self.log(f"Articulated object IDs: {required_ids}", "ERROR")
             return False
 
-        if not endpoint:
+        if articulation_backend not in {"particulate", "auto"}:
+            self.log(
+                "ERROR: Required articulated assets require Particulate backend. "
+                f"Current ARTICULATION_BACKEND={articulation_backend}.",
+                "ERROR",
+            )
+            self.log(f"Articulated object IDs: {required_ids}", "ERROR")
+            return False
+
+        if particulate_mode in {"mock", "skip"}:
+            self.log(
+                "ERROR: Required articulated assets cannot run with "
+                f"PARTICULATE_MODE={particulate_mode}.",
+                "ERROR",
+            )
+            self.log(f"Articulated object IDs: {required_ids}", "ERROR")
+            return False
+
+        if particulate_mode == "local":
+            resolved_local_endpoint = local_endpoint or "http://localhost:8080"
+            if not resolved_local_endpoint:
+                self.log(
+                    "ERROR: PARTICULATE_MODE=local set but no local endpoint available.",
+                    "ERROR",
+                )
+                self.log(f"Articulated object IDs: {required_ids}", "ERROR")
+                return False
+        elif not endpoint:
             self.log(
                 "ERROR: Articulated assets detected but PARTICULATE_ENDPOINT is not set.",
                 "ERROR",
             )
             self.log(
-                "Set PARTICULATE_ENDPOINT and re-run, or set DISABLE_ARTICULATED_ASSETS=true to proceed "
-                "without articulated assets.",
+                "Set PARTICULATE_ENDPOINT (remote mode) or use PARTICULATE_MODE=local "
+                "with PARTICULATE_LOCAL_ENDPOINT, or set DISABLE_ARTICULATED_ASSETS=true "
+                "to proceed without articulated assets.",
                 "ERROR",
             )
             self.log(f"Articulated object IDs: {required_ids}", "ERROR")
@@ -2643,7 +2676,7 @@ class LocalPipelineRunner:
         self.log(f"Copied {len(asset_paths)} assets")
 
         # Generate inventory
-        inventory = self._generate_inventory(regen3d_output)
+        inventory = self._generate_inventory(regen3d_output, manifest=manifest)
         inventory_path = self.seg_dir / "inventory.json"
         _safe_write_text(
             inventory_path,
@@ -2684,7 +2717,11 @@ class LocalPipelineRunner:
         manifest_path: Path,
     ) -> Dict[str, Any]:
         """Detect articulated objects and annotate the manifest."""
-        from tools.articulation import detect_scene_articulations
+        from tools.articulation import (
+            detect_scene_articulations,
+            infer_primary_joint_type,
+            parse_label_articulation_hint,
+        )
 
         results = detect_scene_articulations(
             manifest,
@@ -2692,43 +2729,97 @@ class LocalPipelineRunner:
             verbose=self.verbose,
         )
 
-        required_ids = []
+        required_ids: List[str] = []
+        required_from_hints: List[str] = []
+        required_from_detector: List[str] = []
         for obj in manifest.get("objects", []):
             obj_id = obj.get("id")
             if not obj_id or obj.get("sim_role") in {"background", "scene_shell"}:
                 continue
 
+            articulation = obj.get("articulation") or {}
+            category_text = (
+                obj.get("category")
+                or (obj.get("semantics") or {}).get("class")
+                or obj.get("name")
+                or obj_id
+            )
+            hint_payload = parse_label_articulation_hint(str(category_text))
+
+            if hint_payload.get("is_articulated"):
+                hints = articulation.get("hints")
+                if not isinstance(hints, list):
+                    hints = []
+                hint_entry = {
+                    "source": "label_hint",
+                    "text": str(category_text),
+                    "confidence": float(hint_payload.get("confidence", 0.0)),
+                    "joint_types": hint_payload.get("joint_types", []),
+                    "parts": hint_payload.get("parts", []),
+                    "matched_keywords": hint_payload.get("matched_keywords", []),
+                }
+                hints.append(hint_entry)
+                articulation["hints"] = hints
+
+                primary_joint_type = infer_primary_joint_type(hint_payload)
+                if primary_joint_type and not articulation.get("type"):
+                    articulation["type"] = primary_joint_type
+
+                if float(hint_payload.get("confidence", 0.0)) >= 0.55:
+                    required_ids.append(obj_id)
+                    required_from_hints.append(obj_id)
+                    articulation["required"] = True
+                    articulation["required_reason"] = (
+                        f"label_hint:{','.join(hint_payload.get('parts', []))}"
+                    )
+                    articulation["required_source"] = "label_hint"
+                    articulation["detection"] = {
+                        "type": primary_joint_type or articulation.get("type"),
+                        "confidence": float(hint_payload.get("confidence", 0.0)),
+                        "method": "label_hint",
+                    }
+                    obj["articulation"] = articulation
+                    if obj.get("sim_role") in {"unknown", "static", None, ""}:
+                        obj["sim_role"] = self._infer_articulation_role(obj)
+                    continue
+
             result = results.get(obj_id)
-            if not result or not result.has_articulation:
+            if result and result.has_articulation:
+                required_ids.append(obj_id)
+                required_from_detector.append(obj_id)
+                detection_payload = {
+                    "type": result.articulation_type.value,
+                    "confidence": result.confidence,
+                    "method": result.detection_method,
+                }
+                if result.joint_axis is not None:
+                    detection_payload["axis"] = [float(v) for v in result.joint_axis.tolist()]
+                if result.joint_range is not None:
+                    detection_payload["range"] = [float(result.joint_range[0]), float(result.joint_range[1])]
+
+                articulation.update({
+                    "required": True,
+                    "required_reason": "detector_match",
+                    "required_source": "detector",
+                    "detection": detection_payload,
+                })
+                articulation.setdefault("type", result.articulation_type.value)
+                obj["articulation"] = articulation
+                if obj.get("sim_role") in {"unknown", "static", None, ""}:
+                    obj["sim_role"] = self._infer_articulation_role(obj)
                 continue
 
-            required_ids.append(obj_id)
-            articulation = obj.get("articulation") or {}
-            detection_payload = {
-                "type": result.articulation_type.value,
-                "confidence": result.confidence,
-                "method": result.detection_method,
-            }
-            if result.joint_axis is not None:
-                detection_payload["axis"] = [float(v) for v in result.joint_axis.tolist()]
-            if result.joint_range is not None:
-                detection_payload["range"] = [float(result.joint_range[0]), float(result.joint_range[1])]
-
-            articulation.update({
-                "required": True,
-                "detection": detection_payload,
-            })
             obj["articulation"] = articulation
 
-            if obj.get("sim_role") in {"unknown", "static", None, ""}:
-                obj["sim_role"] = self._infer_articulation_role(obj)
-
         metadata = manifest.get("metadata") or {}
+        required_ids = sorted(set(required_ids))
         metadata["articulation_detection"] = {
             "required_count": len(required_ids),
             "required_objects": required_ids,
+            "required_from_label_hints": sorted(set(required_from_hints)),
+            "required_from_detector": sorted(set(required_from_detector)),
             "generated_at": datetime.utcnow().isoformat() + "Z",
-            "source": "heuristic",
+            "source": "label_hint+heuristic",
         }
         manifest["metadata"] = metadata
         _safe_write_text(
@@ -2780,15 +2871,48 @@ class LocalPipelineRunner:
                 required.append(obj_id)
         return required
 
-    def _generate_inventory(self, regen3d_output) -> Dict[str, Any]:
+    def _generate_inventory(
+        self,
+        regen3d_output,
+        manifest: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Generate semantic inventory from 3D-RE-GEN output."""
+        manifest_by_id: Dict[str, Dict[str, Any]] = {}
+        if manifest:
+            manifest_by_id = {
+                str(obj.get("id")): obj
+                for obj in manifest.get("objects", [])
+                if obj.get("id") is not None
+            }
+
         objects = []
         for obj in regen3d_output.objects:
+            manifest_obj = manifest_by_id.get(str(obj.id), {})
+            manifest_articulation = manifest_obj.get("articulation") or {}
+            articulation_hint = manifest_articulation.get("type")
+            articulation_hint_source = manifest_articulation.get("required_source")
+            if not articulation_hint:
+                hints = manifest_articulation.get("hints")
+                if isinstance(hints, list) and hints:
+                    first_hint = hints[0] if isinstance(hints[0], dict) else {}
+                    joint_types = first_hint.get("joint_types", [])
+                    parts = first_hint.get("parts", [])
+                    if joint_types:
+                        articulation_hint = joint_types[0]
+                    elif parts:
+                        articulation_hint = parts[0]
+                    articulation_hint_source = articulation_hint_source or first_hint.get("source")
+
             inv_obj = {
                 "id": obj.id,
                 "category": obj.category or "object",
                 "short_description": obj.description or f"Object {obj.id}",
-                "sim_role": obj.sim_role if obj.sim_role != "unknown" else "static",
+                "sim_role": (
+                    manifest_obj.get("sim_role")
+                    or (obj.sim_role if obj.sim_role != "unknown" else "static")
+                ),
+                "articulation_hint": articulation_hint,
+                "articulation_hint_source": articulation_hint_source,
                 "bounds": obj.bounds,
                 "is_floor_contact": obj.pose.is_floor_contact,
             }
@@ -3048,7 +3172,8 @@ class LocalPipelineRunner:
                     duration_seconds=0,
                     message=(
                         "Articulation required but interactive job is disabled. "
-                        "Run with --with-interactive and set PARTICULATE_ENDPOINT."
+                        "Run with --with-interactive and configure Particulate "
+                        "(PARTICULATE_ENDPOINT or PARTICULATE_MODE=local)."
                     ),
                     outputs={"required_articulations": required_ids},
                 )
@@ -3063,9 +3188,41 @@ class LocalPipelineRunner:
                 outputs={"completion_marker": str(marker_path)},
             )
 
-        # Would need PARTICULATE_ENDPOINT to run
-        endpoint = os.getenv("PARTICULATE_ENDPOINT")
-        if not endpoint:
+        particulate_mode = (os.getenv("PARTICULATE_MODE", "remote") or "remote").strip().lower()
+        endpoint = (os.getenv("PARTICULATE_ENDPOINT", "") or "").strip()
+        local_endpoint = (os.getenv("PARTICULATE_LOCAL_ENDPOINT", "") or "").strip()
+        articulation_backend = (
+            os.getenv("ARTICULATION_BACKEND", "particulate") or "particulate"
+        ).strip().lower()
+
+        if required_ids and articulation_backend not in {"particulate", "auto"}:
+            return StepResult(
+                step=PipelineStep.INTERACTIVE,
+                success=False,
+                duration_seconds=0,
+                message=(
+                    "Required articulated assets need Particulate backend. "
+                    f"ARTICULATION_BACKEND={articulation_backend} is not allowed."
+                ),
+                outputs={"required_articulations": required_ids},
+            )
+        if required_ids and particulate_mode in {"mock", "skip"}:
+            return StepResult(
+                step=PipelineStep.INTERACTIVE,
+                success=False,
+                duration_seconds=0,
+                message=(
+                    "Required articulated assets cannot run with "
+                    f"PARTICULATE_MODE={particulate_mode}."
+                ),
+                outputs={"required_articulations": required_ids},
+            )
+
+        resolved_endpoint = endpoint
+        if particulate_mode == "local":
+            resolved_endpoint = local_endpoint or "http://localhost:8080"
+
+        if particulate_mode != "local" and not endpoint:
             if production_mode:
                 return StepResult(
                     step=PipelineStep.INTERACTIVE,
@@ -3079,7 +3236,10 @@ class LocalPipelineRunner:
                     step=PipelineStep.INTERACTIVE,
                     success=False,
                     duration_seconds=0,
-                    message="Articulation required but PARTICULATE_ENDPOINT not set",
+                    message=(
+                        "Articulation required but PARTICULATE endpoint is not set "
+                        "for remote mode."
+                    ),
                     outputs={"required_articulations": required_ids},
                 )
             marker_path = self.assets_dir / ".interactive_complete"
@@ -3095,13 +3255,21 @@ class LocalPipelineRunner:
         interactive_script = REPO_ROOT / "interactive-job" / "run_interactive_assets.py"
         env = os.environ.copy()
         env.update({
+            "BUCKET": os.getenv("BUCKET", "local"),
             "ASSETS_PREFIX": str(self.assets_dir),
             "REGEN3D_PREFIX": str(self.regen3d_dir),
             "SCENE_ID": self.scene_id,
             "PARTICULATE_ENDPOINT": endpoint,
+            "PARTICULATE_MODE": particulate_mode,
+            "PARTICULATE_LOCAL_ENDPOINT": local_endpoint or "http://localhost:8080",
+            "PARTICULATE_LOCAL_MODEL": os.getenv("PARTICULATE_LOCAL_MODEL", ""),
+            "APPROVED_PARTICULATE_MODELS": os.getenv("APPROVED_PARTICULATE_MODELS", "pat_b"),
+            "ARTICULATION_BACKEND": articulation_backend,
             "PIPELINE_ENV": os.getenv("PIPELINE_ENV", "development"),
             "DISALLOW_PLACEHOLDER_URDF": os.getenv("DISALLOW_PLACEHOLDER_URDF", "false"),
         })
+        if particulate_mode == "local":
+            env["PARTICULATE_ENDPOINT"] = resolved_endpoint
 
         self.log("Running interactive-job entrypoint locally")
         proc = subprocess.run(
@@ -3786,6 +3954,11 @@ class LocalPipelineRunner:
                 },
             )
 
+        # Hybrid VM mode: Gemini images locally + Hunyuan3D on GPU VM
+        hybrid_mode = os.getenv("VARIATION_GEN_MODE", "").lower()
+        if hybrid_mode == "hybrid_vm":
+            return self._run_variation_gen_hybrid(variation_assets_dir)
+
         gcs_scene_dir = self._ensure_gcs_scene_link()
         if gcs_scene_dir is None:
             return StepResult(
@@ -3929,6 +4102,43 @@ class LocalPipelineRunner:
             output_dir / "variation_assets.json",
             json.dumps(payload, indent=2),
             context="variation assets manifest",
+        )
+
+    def _run_variation_gen_hybrid(self, variation_assets_dir: Path) -> StepResult:
+        """Run variation asset generation via hybrid local+VM orchestration."""
+        t0 = time.time()
+        try:
+            from tools.variation_asset_runner import VariationAssetRunner
+            runner = VariationAssetRunner(
+                scene_dir=self.scene_dir,
+                vm_zone=os.getenv("VM_ZONE", "us-east1-c"),
+                vm_host=os.getenv("VM_HOST", "isaac-sim-ubuntu"),
+            )
+            summary = runner.run()
+        except Exception as exc:
+            self._log_exception_traceback("Hybrid variation gen failed", exc)
+            return StepResult(
+                step=PipelineStep.VARIATION_GEN,
+                success=False,
+                duration_seconds=time.time() - t0,
+                message=f"Hybrid variation gen failed: {self._summarize_exception(exc)}",
+            )
+
+        succeeded = summary.get("succeeded", 0)
+        total = summary.get("total", 0)
+        marker_path = variation_assets_dir / ".variation_pipeline_complete"
+
+        return StepResult(
+            step=PipelineStep.VARIATION_GEN,
+            success=succeeded > 0,
+            duration_seconds=time.time() - t0,
+            message=f"Variation assets generated via hybrid VM ({succeeded}/{total} succeeded)",
+            outputs={
+                "variation_assets_manifest": str(variation_assets_dir / "variation_assets.json"),
+                "simready_assets_manifest": str(variation_assets_dir / "simready_assets.json"),
+                "pipeline_summary": str(variation_assets_dir / "pipeline_summary.json"),
+                "variation_marker": str(marker_path),
+            },
         )
 
     def _ensure_gcs_scene_link(self) -> Optional[Path]:
@@ -5995,7 +6205,11 @@ def main():
     parser.add_argument(
         "--with-interactive",
         action="store_true",
-        help="Run interactive job (requires PARTICULATE_ENDPOINT)",
+        help=(
+            "Run interactive job "
+            "(requires PARTICULATE_ENDPOINT for remote mode or "
+            "PARTICULATE_MODE=local)"
+        ),
     )
     parser.add_argument(
         "--enable-dwm",

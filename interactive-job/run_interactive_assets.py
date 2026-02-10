@@ -22,17 +22,22 @@ Environment Variables:
     PARTICULATE_LOCAL_ENDPOINT: Optional local Particulate URL for PARTICULATE_MODE=local
     PARTICULATE_LOCAL_MODEL: Identifier for the locally hosted Particulate model (required in labs/prod)
     APPROVED_PARTICULATE_MODELS: Comma-separated allowlist for local Particulate models (default: pat_b)
+    ARTICULATION_BACKEND: "particulate", "heuristic", or "auto" (default)
     REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
     PIPELINE_ENV: Pipeline environment (e.g., "production") for production guardrails
     DISALLOW_PLACEHOLDER_URDF: "true" to fail if placeholder URDFs are generated
     LABS_MODE: "true" to enforce labs guardrails (Particulate required, no heuristics)
+    ARTICULATION_MULTIVIEW_ENABLED: "true" to generate experimental synthetic multiview references
+    ARTICULATION_MULTIVIEW_COUNT: Number of synthetic scaffold views (default: 4)
+    ARTICULATION_MULTIVIEW_MODEL: Gemini image model for scaffold generation
 """
 import base64
 import importlib.util
 import json
 import math
 import os
+import shutil
 import sys
 import time
 import urllib.error
@@ -72,6 +77,10 @@ PARTICULATE_MODE_LOCAL = "local"
 PARTICULATE_MODE_MOCK = "mock"
 PARTICULATE_MODE_SKIP = "skip"
 
+ARTICULATION_BACKEND_PARTICULATE = "particulate"
+ARTICULATION_BACKEND_HEURISTIC = "heuristic"
+ARTICULATION_BACKEND_AUTO = "auto"
+
 
 # =============================================================================
 # Logging
@@ -103,6 +112,40 @@ def normalize_particulate_mode(value: str) -> str:
         )
         return PARTICULATE_MODE_REMOTE
     return mode
+
+
+def normalize_articulation_backend(value: str) -> str:
+    """Normalize articulation backend env var to a supported value."""
+    backend = value.strip().lower()
+    if backend not in {
+        ARTICULATION_BACKEND_PARTICULATE,
+        ARTICULATION_BACKEND_HEURISTIC,
+        ARTICULATION_BACKEND_AUTO,
+    }:
+        log(
+            f"Unknown ARTICULATION_BACKEND '{value}', defaulting to '{ARTICULATION_BACKEND_AUTO}'",
+            "WARNING",
+        )
+        return ARTICULATION_BACKEND_AUTO
+    return backend
+
+
+def resolve_articulation_backend(
+    requested_backend: str,
+    particulate_mode: str,
+    particulate_endpoint: str,
+) -> str:
+    """Resolve backend selection (explicit or auto)."""
+    if requested_backend == ARTICULATION_BACKEND_PARTICULATE:
+        return ARTICULATION_BACKEND_PARTICULATE
+    if requested_backend == ARTICULATION_BACKEND_HEURISTIC:
+        return ARTICULATION_BACKEND_HEURISTIC
+
+    if particulate_mode in {PARTICULATE_MODE_LOCAL, PARTICULATE_MODE_MOCK}:
+        return ARTICULATION_BACKEND_PARTICULATE
+    if particulate_mode == PARTICULATE_MODE_REMOTE and particulate_endpoint:
+        return ARTICULATION_BACKEND_PARTICULATE
+    return ARTICULATION_BACKEND_HEURISTIC
 
 
 def parse_csv_env(value: str) -> List[str]:
@@ -331,6 +374,16 @@ def find_crop_image(obj_dir: Path, multiview_root: Path, obj_id: str) -> Optiona
     return None
 
 
+def is_required_articulation_object(obj: Dict[str, Any]) -> bool:
+    """Return True when object is explicitly marked articulation-required."""
+    if obj.get("articulation_required") is True:
+        return True
+    articulation = obj.get("articulation")
+    if isinstance(articulation, dict) and articulation.get("required") is True:
+        return True
+    return False
+
+
 # =============================================================================
 # Mesh Rendering (GLB → Multi-View Images)
 # =============================================================================
@@ -457,6 +510,79 @@ def render_mesh_to_single_view(glb_path: Path, output_path: Path) -> Optional[Pa
         log(f"Single view render failed: {e}", "WARNING")
 
     return None
+
+
+def generate_multiview_scaffold(
+    obj_name: str,
+    obj_class: str,
+    glb_path: Path,
+    output_dir: Path,
+    view_count: int,
+    model: str,
+) -> Dict[str, Any]:
+    """Generate synthetic reference views for future articulation segmentation."""
+    scaffold_dir = output_dir / "multiview_synth"
+    ensure_dir(scaffold_dir)
+
+    metadata: Dict[str, Any] = {
+        "status": "pending",
+        "object_id": obj_name,
+        "class_name": obj_class,
+        "model": model,
+        "requested_count": int(view_count),
+        "generated_count": 0,
+        "generated_files": [],
+        "errors": [],
+    }
+
+    seed_view_path = render_mesh_to_single_view(glb_path, scaffold_dir / "seed_mesh_view.png")
+    if seed_view_path is not None:
+        metadata["seed_view"] = seed_view_path.name
+
+    try:
+        from tools.llm_client.client import create_llm_client, LLMProvider
+    except Exception as exc:
+        metadata["status"] = "failed"
+        metadata["errors"].append(f"llm_client_unavailable: {exc}")
+        save_json(metadata, output_dir / "multiview_scaffold.json")
+        return metadata
+
+    try:
+        client = create_llm_client(
+            provider=LLMProvider.GEMINI,
+            model=model,
+            fallback_enabled=False,
+        )
+    except Exception as exc:
+        metadata["status"] = "failed"
+        metadata["errors"].append(f"llm_client_init_failed: {exc}")
+        save_json(metadata, output_dir / "multiview_scaffold.json")
+        return metadata
+
+    count = max(1, int(view_count))
+    for view_idx in range(count):
+        prompt = (
+            f"Generate a clean product image of a {obj_class} on a plain light background. "
+            "Preserve realistic structure and proportions. "
+            "This image will be used for articulated-part segmentation research. "
+            f"Create view {view_idx + 1} of {count}. "
+            "Prefer slight viewpoint changes and include plausible open/closed articulation states "
+            "when drawers, doors, or lids are present."
+        )
+        try:
+            response = client.generate_image(prompt=prompt, size="1024x1024")
+            if not response.images:
+                raise RuntimeError("no images returned")
+            output_path = scaffold_dir / f"view_{view_idx}.png"
+            output_path.write_bytes(response.images[0])
+            metadata["generated_files"].append(output_path.name)
+        except Exception as exc:
+            metadata["errors"].append(f"view_{view_idx}: {exc}")
+
+    metadata["generated_count"] = len(metadata["generated_files"])
+    metadata["status"] = "success" if metadata["generated_files"] else "failed"
+    save_json(metadata, output_dir / "multiview_scaffold.json")
+    return metadata
 
 
 # =============================================================================
@@ -1283,6 +1409,85 @@ def generate_placeholder_urdf(
 """
 
 
+def _load_heuristic_articulation_module() -> Any:
+    """Load heuristic articulation module lazily."""
+    module_path = REPO_ROOT / "interactive-job" / "heuristic_articulation.py"
+    spec = importlib.util.spec_from_file_location("heuristic_articulation", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load heuristic articulation module: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _dimensions_from_object_metadata(obj: Dict[str, Any]) -> Optional[Any]:
+    """Extract [width, depth, height] from object metadata when available."""
+    dims = obj.get("dimensions_est")
+    if isinstance(dims, dict):
+        width = dims.get("width")
+        depth = dims.get("depth")
+        height = dims.get("height")
+        if all(v is not None for v in (width, depth, height)):
+            try:
+                import numpy as np
+
+                return np.array([float(width), float(depth), float(height)], dtype=float)
+            except (TypeError, ValueError):
+                return None
+            except ImportError:
+                return None
+    return None
+
+
+def materialize_heuristic_articulation(
+    obj: Dict[str, Any],
+    obj_name: str,
+    obj_class: str,
+    glb_path: Path,
+    output_dir: Path,
+) -> Tuple[Path, Path, Dict[str, Any]]:
+    """Generate heuristic articulation output (mesh + URDF)."""
+    ensure_dir(output_dir)
+    mesh_path = output_dir / "mesh.glb"
+    shutil.copy(glb_path, mesh_path)
+
+    urdf_path = output_dir / f"{obj_name}.urdf"
+    metadata: Dict[str, Any] = {
+        "placeholder": False,
+        "generator": "heuristic",
+    }
+
+    module = _load_heuristic_articulation_module()
+    detector = module.HeuristicArticulationDetector()
+    dims = _dimensions_from_object_metadata(obj)
+
+    spec = detector.detect(
+        object_id=obj_name,
+        object_category=obj_class,
+        object_dimensions=dims,
+    )
+    if spec is None:
+        urdf_path.write_text(generate_static_urdf(obj_name, mesh_path.name), encoding="utf-8")
+        metadata["fallback_static"] = True
+        metadata["reason"] = "no_heuristic_pattern_match"
+        return mesh_path, urdf_path, metadata
+
+    ok = module.generate_urdf_from_spec(
+        spec=spec,
+        mesh_path=Path(mesh_path.name),
+        output_path=urdf_path,
+    )
+    if not ok:
+        urdf_path.write_text(generate_static_urdf(obj_name, mesh_path.name), encoding="utf-8")
+        metadata["fallback_static"] = True
+        metadata["reason"] = "heuristic_urdf_generation_failed"
+        return mesh_path, urdf_path, metadata
+
+    metadata["joint_type"] = spec.joint_type.value
+    metadata["confidence"] = float(spec.confidence)
+    return mesh_path, urdf_path, metadata
+
+
 # =============================================================================
 # Asset Materialization
 # =============================================================================
@@ -1356,22 +1561,23 @@ def process_object(
     multiview_root: Path,
     particulate_endpoint: Optional[str],
     particulate_mode: str,
+    articulation_backend: str,
     mode: str,
     disallow_placeholder_urdf: bool,
+    multiview_enabled: bool,
+    multiview_count: int,
+    multiview_model: str,
     index: int,
     total: int,
 ) -> dict:
     """
-    Process a single interactive object using Particulate.
+    Process a single interactive object using configured articulation backend.
 
     Pipeline:
     1. Find GLB mesh from 3D-RE-GEN
-    2. Send GLB to Particulate for articulation
+    2. Run Particulate or heuristic articulation
     3. Materialize outputs (mesh + URDF)
     4. Generate manifest with joint summary
-
-    Args:
-        particulate_endpoint: Particulate service URL
     """
     obj_id = str(obj.get("id"))
     obj_name = f"obj_{obj_id}"
@@ -1384,13 +1590,15 @@ def process_object(
     ensure_dir(output_dir)
 
     # Result structure
+    required_articulation = is_required_articulation_object(obj)
+    articulation_hint = obj.get("articulation_hint")
     result = {
         "id": obj_id,
         "name": obj_name,
         "class_name": obj_class,
         "status": "pending",
         "mode": mode,
-        "backend": "particulate",
+        "backend": articulation_backend,
         "particulate_mode": particulate_mode,
         "output_dir": str(output_dir),
         "mesh_path": None,
@@ -1398,6 +1606,8 @@ def process_object(
         "joint_count": 0,
         "is_articulated": False,
         "placeholder": False,
+        "required_articulation": required_articulation,
+        "articulation_hint": articulation_hint,
     }
 
     # Find GLB mesh from 3D-RE-GEN
@@ -1448,54 +1658,94 @@ def process_object(
         result["placeholder_reason"] = "no_glb"
         return result
 
-    # Check if Particulate endpoint is configured (skip for mock mode)
-    if not particulate_endpoint and particulate_mode != PARTICULATE_MODE_MOCK:
-        log("No Particulate endpoint configured, using static URDF", "WARNING", obj_name)
-        result["status"] = "static"
+    if multiview_enabled and (required_articulation or articulation_hint):
+        scaffold_metadata = generate_multiview_scaffold(
+            obj_name=obj_name,
+            obj_class=obj_class,
+            glb_path=glb_path,
+            output_dir=output_dir,
+            view_count=multiview_count,
+            model=multiview_model,
+        )
+        result["multiview_scaffold"] = scaffold_metadata
 
-        # Copy GLB and generate static URDF
-        import shutil
-        mesh_out = output_dir / "mesh.glb"
-        shutil.copy(glb_path, mesh_out)
-        result["mesh_path"] = str(mesh_out)
-
-        urdf_path = output_dir / f"{obj_name}.urdf"
-        urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
-        result["urdf_path"] = str(urdf_path)
-        return result
-
-    # Call Particulate service or mock response
-    if particulate_mode == PARTICULATE_MODE_MOCK:
-        mock_placeholder = env_flag(os.getenv("PARTICULATE_MOCK_PLACEHOLDER"), default=False)
-        log(f"Building mock Particulate response (placeholder={mock_placeholder})", obj_id=obj_name)
-        response = build_mock_particulate_response(glb_path, obj_name, mock_placeholder)
-    else:
-        log(f"Calling Particulate for articulation", obj_id=obj_name)
-        response = call_particulate_service(particulate_endpoint, glb_path, obj_name)
-
-    if not response:
-        log("Particulate service call failed", "ERROR", obj_name)
-        result["status"] = "error"
-        result["error"] = "service_failed"
-
-        # Fallback to static URDF with original mesh
-        import shutil
-        mesh_out = output_dir / "mesh.glb"
-        shutil.copy(glb_path, mesh_out)
-        result["mesh_path"] = str(mesh_out)
-
-        urdf_path = output_dir / f"{obj_name}.urdf"
-        urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
-        result["urdf_path"] = str(urdf_path)
-        return result
-
-    # Materialize response
-    mesh_path, urdf_path, meta = materialize_articulation_response(
-        response,
-        output_dir,
-        obj_name,
-        disallow_placeholder=disallow_placeholder_urdf,
+    resolved_backend = resolve_articulation_backend(
+        requested_backend=articulation_backend,
+        particulate_mode=particulate_mode,
+        particulate_endpoint=particulate_endpoint or "",
     )
+    result["backend"] = resolved_backend
+
+    mesh_path: Optional[Path] = None
+    urdf_path: Optional[Path] = None
+    meta: Dict[str, Any] = {}
+
+    if resolved_backend == ARTICULATION_BACKEND_HEURISTIC:
+        log("Using heuristic articulation backend", obj_id=obj_name)
+        try:
+            mesh_path, urdf_path, meta = materialize_heuristic_articulation(
+                obj=obj,
+                obj_name=obj_name,
+                obj_class=obj_class,
+                glb_path=glb_path,
+                output_dir=output_dir,
+            )
+            if meta.get("fallback_static"):
+                result["status"] = "static"
+        except Exception as e:
+            log(f"Heuristic articulation failed: {e}", "ERROR", obj_name)
+            result["status"] = "error"
+            result["error"] = "heuristic_failed"
+
+            mesh_out = output_dir / "mesh.glb"
+            shutil.copy(glb_path, mesh_out)
+            result["mesh_path"] = str(mesh_out)
+
+            fallback_urdf_path = output_dir / f"{obj_name}.urdf"
+            fallback_urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
+            result["urdf_path"] = str(fallback_urdf_path)
+            return result
+    else:
+        if not particulate_endpoint and particulate_mode != PARTICULATE_MODE_MOCK:
+            log("No Particulate endpoint configured, using static URDF", "WARNING", obj_name)
+            result["status"] = "static"
+            mesh_out = output_dir / "mesh.glb"
+            shutil.copy(glb_path, mesh_out)
+            result["mesh_path"] = str(mesh_out)
+
+            urdf_path = output_dir / f"{obj_name}.urdf"
+            urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
+            result["urdf_path"] = str(urdf_path)
+            return result
+
+        if particulate_mode == PARTICULATE_MODE_MOCK:
+            mock_placeholder = env_flag(os.getenv("PARTICULATE_MOCK_PLACEHOLDER"), default=False)
+            log(f"Building mock Particulate response (placeholder={mock_placeholder})", obj_id=obj_name)
+            response = build_mock_particulate_response(glb_path, obj_name, mock_placeholder)
+        else:
+            log("Calling Particulate for articulation", obj_id=obj_name)
+            response = call_particulate_service(particulate_endpoint, glb_path, obj_name)
+
+        if not response:
+            log("Particulate service call failed", "ERROR", obj_name)
+            result["status"] = "error"
+            result["error"] = "service_failed"
+
+            mesh_out = output_dir / "mesh.glb"
+            shutil.copy(glb_path, mesh_out)
+            result["mesh_path"] = str(mesh_out)
+
+            urdf_path = output_dir / f"{obj_name}.urdf"
+            urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
+            result["urdf_path"] = str(urdf_path)
+            return result
+
+        mesh_path, urdf_path, meta = materialize_articulation_response(
+            response,
+            output_dir,
+            obj_name,
+            disallow_placeholder=disallow_placeholder_urdf,
+        )
 
     if not mesh_path or not urdf_path:
         log("Materialization failed, using fallback", "WARNING", obj_name)
@@ -1503,7 +1753,6 @@ def process_object(
 
         # Use original GLB if available
         if glb_path and glb_path.is_file():
-            import shutil
             mesh_out = output_dir / "mesh.glb"
             shutil.copy(glb_path, mesh_out)
             result["mesh_path"] = str(mesh_out)
@@ -1557,6 +1806,9 @@ def process_object(
         "object_id": obj_id,
         "object_name": obj_name,
         "class_name": obj_class,
+        "backend": resolved_backend,
+        "required_articulation": required_articulation,
+        "articulation_hint": articulation_hint,
         "generator": meta.get("generator", "particulate"),
         "endpoint": particulate_endpoint,
         "particulate_mode": particulate_mode,
@@ -1580,6 +1832,8 @@ def process_object(
         },
         "downgraded_to_static": downgraded_to_static,
     }
+    if result.get("multiview_scaffold"):
+        manifest["multiview_scaffold"] = result["multiview_scaffold"]
 
     if glb_path:
         manifest["input_glb"] = str(glb_path)
@@ -1642,7 +1896,15 @@ def main() -> None:
     labs_mode = env_flag(os.getenv("LABS_MODE"), default=False)
     disallow_placeholder_env = env_flag(os.getenv("DISALLOW_PLACEHOLDER_URDF"), default=False)
     disallow_placeholder_urdf = production_mode or disallow_placeholder_env
-    articulation_backend = os.getenv("ARTICULATION_BACKEND", "particulate").strip().lower() or "particulate"
+    articulation_backend = normalize_articulation_backend(
+        os.getenv("ARTICULATION_BACKEND", ARTICULATION_BACKEND_AUTO)
+    )
+    multiview_enabled = env_flag(os.getenv("ARTICULATION_MULTIVIEW_ENABLED"), default=False)
+    try:
+        multiview_count = max(1, int(os.getenv("ARTICULATION_MULTIVIEW_COUNT", "4")))
+    except ValueError:
+        multiview_count = 4
+    multiview_model = os.getenv("ARTICULATION_MULTIVIEW_MODEL", "gemini-3-pro-image-preview")
     local_model_id = os.getenv("PARTICULATE_LOCAL_MODEL", "").strip()
     approved_models = parse_csv_env(os.getenv("APPROVED_PARTICULATE_MODELS", "pat_b"))
     failure_writer = FailureMarkerWriter(
@@ -1676,6 +1938,7 @@ def main() -> None:
 
     # Filter interactive objects
     interactive_objects = [o for o in objects if o.get("type") == "interactive"]
+    required_interactive_objects = [o for o in interactive_objects if is_required_articulation_object(o)]
 
     # Print configuration
     log("=" * 60)
@@ -1697,6 +1960,9 @@ def main() -> None:
     log(f"Labs mode: {labs_mode}")
     log(f"Disallow placeholder URDFs: {disallow_placeholder_urdf}")
     log(f"Articulation backend: {articulation_backend}")
+    log(f"Multiview scaffold enabled: {multiview_enabled}")
+    if multiview_enabled:
+        log(f"Multiview scaffold config: count={multiview_count}, model={multiview_model}")
     log("=" * 60)
 
     config_context = {
@@ -1713,19 +1979,36 @@ def main() -> None:
         "particulate_endpoint": particulate_endpoint or None,
         "particulate_endpoint_source": endpoint_source,
         "articulation_backend": articulation_backend,
+        "resolved_articulation_backend": resolve_articulation_backend(
+            articulation_backend,
+            particulate_mode,
+            particulate_endpoint,
+        ),
+        "articulation_multiview_enabled": multiview_enabled,
+        "articulation_multiview_count": multiview_count,
+        "articulation_multiview_model": multiview_model,
         "particulate_local_model": local_model_id or None,
     }
 
     guardrails_enabled = production_mode or labs_mode
 
-    if guardrails_enabled and articulation_backend == "heuristic":
+    resolved_backend = resolve_articulation_backend(
+        articulation_backend,
+        particulate_mode,
+        particulate_endpoint,
+    )
+
+    if guardrails_enabled and resolved_backend == ARTICULATION_BACKEND_HEURISTIC:
         log("Heuristic articulation outputs are not allowed in labs/production mode", "ERROR")
         write_failure_marker(
             assets_root,
             failure_writer,
             scene_id,
             reason="heuristic_articulation_blocked",
-            details={"articulation_backend": articulation_backend},
+            details={
+                "articulation_backend": articulation_backend,
+                "resolved_articulation_backend": resolved_backend,
+            },
             config_context=config_context,
         )
         sys.exit(1)
@@ -1776,6 +2059,21 @@ def main() -> None:
         sys.exit(1)
 
     if particulate_mode == PARTICULATE_MODE_SKIP:
+        if required_interactive_objects:
+            details = {
+                "required_objects": [str(o.get("id")) for o in required_interactive_objects],
+                "particulate_mode": particulate_mode,
+            }
+            write_failure_marker(
+                assets_root,
+                failure_writer,
+                scene_id,
+                reason="required_articulation_unmet",
+                details=details,
+                config_context=config_context,
+            )
+            sys.exit(1)
+
         log("PARTICULATE_MODE=skip set; skipping articulation", "WARNING")
         warnings = [{
             "code": "particulate_skipped",
@@ -1790,7 +2088,7 @@ def main() -> None:
             "class_name": obj.get("class_name", "unknown"),
             "status": "skipped",
             "mode": mode,
-            "backend": "particulate",
+            "backend": resolved_backend,
             "particulate_mode": particulate_mode,
             "error": "particulate_skipped",
         } for obj in interactive_objects]
@@ -1806,7 +2104,7 @@ def main() -> None:
             "fallback_count": 0,
             "skipped_count": len(interactive_objects),
             "mode": mode,
-            "backend": "particulate",
+            "backend": resolved_backend,
             "particulate_mode": particulate_mode,
             "particulate_endpoint": particulate_endpoint or None,
             "objects": results,
@@ -1820,7 +2118,7 @@ def main() -> None:
             "fallback_count": 0,
             "skipped_count": len(interactive_objects),
             "mode": mode,
-            "backend": "particulate",
+            "backend": resolved_backend,
             "particulate_mode": particulate_mode,
             "particulate_endpoint": particulate_endpoint or None,
         }
@@ -1854,7 +2152,7 @@ def main() -> None:
             "fallback_count": 0,
             "skipped_count": 0,
             "mode": mode,
-            "backend": "particulate",
+            "backend": resolved_backend,
             "particulate_mode": particulate_mode,
             "particulate_endpoint": particulate_endpoint or None,
         }
@@ -1869,7 +2167,7 @@ def main() -> None:
         return
 
     # Wait for Particulate service to be ready
-    if particulate_endpoint:
+    if resolved_backend == ARTICULATION_BACKEND_PARTICULATE and particulate_endpoint:
         log("Checking Particulate service health...")
         if not wait_for_particulate_ready(particulate_endpoint):
             if production_mode:
@@ -1896,8 +2194,12 @@ def main() -> None:
                 multiview_root=multiview_root,
                 particulate_endpoint=particulate_endpoint,
                 particulate_mode=particulate_mode,
+                articulation_backend=articulation_backend,
                 mode=mode,
                 disallow_placeholder_urdf=disallow_placeholder_urdf,
+                multiview_enabled=multiview_enabled,
+                multiview_count=multiview_count,
+                multiview_model=multiview_model,
                 index=i,
                 total=len(interactive_objects),
             )
@@ -1908,6 +2210,7 @@ def main() -> None:
                 "id": obj.get("id"),
                 "status": "error",
                 "error": str(e),
+                "required_articulation": is_required_articulation_object(obj),
             })
 
     # Summary statistics
@@ -1928,6 +2231,24 @@ def main() -> None:
         if r.get("placeholder")
     ]
     error_payloads, warning_payloads = collect_result_payloads(results)
+    required_failures = [
+        {
+            "id": r.get("id"),
+            "status": r.get("status"),
+            "backend": r.get("backend"),
+            "error": r.get("error"),
+        }
+        for r in results
+        if r.get("required_articulation") and not r.get("is_articulated")
+    ]
+    if required_failures:
+        error_payloads.append(
+            {
+                "code": "required_articulation_unmet",
+                "message": "Required articulated objects were not articulated.",
+                "details": {"objects": required_failures},
+            }
+        )
 
     # Write results
     results_data = {
@@ -1939,7 +2260,7 @@ def main() -> None:
         "fallback_count": fallback_count,
         "skipped_count": skipped_count,
         "mode": mode,
-        "backend": "particulate",
+        "backend": resolved_backend,
         "particulate_mode": particulate_mode,
         "particulate_endpoint": particulate_endpoint or None,
         "objects": results,
@@ -1983,12 +2304,15 @@ def main() -> None:
         "fallback_count": fallback_count,
         "skipped_count": skipped_count,
         "mode": mode,
-        "backend": "particulate",
+        "backend": resolved_backend,
         "particulate_mode": particulate_mode,
         "particulate_endpoint": particulate_endpoint or None,
+        "required_failures": required_failures,
     }
 
-    if len(interactive_objects) == 0:
+    if required_failures:
+        status = "failure"
+    elif len(interactive_objects) == 0:
         status = "success"
     elif ok_count == 0:
         status = "failure"
@@ -2006,11 +2330,12 @@ def main() -> None:
         warnings=warning_payloads,
     )
     if status == "failure":
+        failure_reason = "required_articulation_unmet" if required_failures else "articulation_failed"
         write_failure_marker(
             assets_root,
             failure_writer,
             scene_id,
-            reason="articulation_failed",
+            reason=failure_reason,
             details=summary,
             errors=error_payloads,
             warnings=warning_payloads,
@@ -2031,6 +2356,9 @@ def main() -> None:
     # Exit with error if all failed
     if ok_count == 0 and len(interactive_objects) > 0:
         log("WARNING: All objects failed or fell back to static!", "WARNING")
+    if required_failures:
+        log("ERROR: Required articulated objects did not receive articulation outputs.", "ERROR")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

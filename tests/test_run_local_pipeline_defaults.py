@@ -27,6 +27,8 @@ def test_default_steps_without_selector_excludes_dream2flow(monkeypatch, tmp_pat
 
     assert steps == [
         PipelineStep.REGEN3D,
+        PipelineStep.SCALE,
+        PipelineStep.INTERACTIVE,
         PipelineStep.SIMREADY,
         PipelineStep.USD,
         PipelineStep.REPLICATOR,
