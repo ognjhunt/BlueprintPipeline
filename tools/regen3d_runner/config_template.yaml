@@ -1,7 +1,7 @@
 ############# General Configuration #############
 logging: INFO
 config_path: "../src/config.yaml"
-image_url: ../tmp/converted_from_webp.png
+image_url: "{input_image_path}"
 
 input_image: "{input_image_path}"
 GT_scene: None
@@ -14,7 +14,7 @@ device_global: "{device}"
 use_all_available_cuda: {use_all_available_cuda}
 
 jobs_per_gpu: {jobs_per_gpu}
-conda_env: null
+conda_env: "{conda_env}"
 
 seed: 1234567
 output: "{output_dir}"
@@ -115,7 +115,7 @@ remesh_target_num_faces: 50000
 use_hunyuan21: {use_hunyuan21}
 
 use_parallel_hy21: true
-enable_texture_hy21: true
+enable_texture_hy21: {enable_texture_hy21}
 low_vram_hy21: false
 clear_output_hy21: true
 

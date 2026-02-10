@@ -3,7 +3,12 @@
 Analyzes an input image using Gemini to determine what objects are present,
 producing a dynamic label list for SAM3 text-prompted segmentation.
 This makes the pipeline scene-agnostic — it works on kitchens, workshops,
-offices, bedrooms, etc. without hardcoded label lists.
+offices, bedrooms, etc. without any hardcoded label lists.
+
+Uses Agentic Vision (Gemini 3 Flash code_execution) to zoom and crop into
+regions of the image for better small-object detection. The model can write
+Python code to manipulate the image (zoom, crop, annotate) and re-examine
+regions before producing the final label list.
 
 Runs locally (Mac) before uploading to the remote VM.
 """
@@ -12,81 +17,115 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional
 
 log = logging.getLogger(__name__)
 
-# Prompt instructs Gemini to return a JSON array of short noun phrases
+# Prompt instructs Gemini to return a JSON array of short noun phrases.
+# Encourages agentic vision: the model can zoom/crop into image regions
+# using code execution to find small or partially occluded objects.
 _LABEL_PROMPT = """\
-List all distinct objects and furniture visible in this image.
+Carefully analyze this image to identify ALL distinct objects and furniture.
+
+First, examine the full image. Then zoom into different regions (corners, shelves,
+countertops, background areas) to find small or partially hidden objects.
+Use code execution to crop and inspect areas that might contain objects you missed.
+
 Return a JSON array of short noun phrases, one per object type.
 Include structural elements like "floor", "wall", "ceiling" if visible.
 Be specific: prefer "office chair" over just "chair", "potted plant" over "plant".
 Do NOT include people.
-Return at most 20 labels.
+Return at most 25 labels.
 
 Example output: ["office chair", "wooden desk", "monitor", "potted plant", "floor"]
 """
 
 
-def generate_labels_from_image(
-    image_path: str,
-    fallback_labels: Optional[List[str]] = None,
-) -> List[str]:
+def generate_labels_from_image(image_path: str) -> List[str]:
     """Call Gemini to analyze an image and return object labels.
 
     Args:
         image_path: Path to the input image.
-        fallback_labels: Labels to use if Gemini fails.
 
     Returns:
         List of object label strings for SAM3 segmentation.
+
+    Raises:
+        FileNotFoundError: If the image doesn't exist.
+        RuntimeError: If Gemini fails to produce labels.
     """
-    _default_fallback = [
-        "chair", "table", "sofa", "cabinet", "shelf", "counter",
-        "sink", "refrigerator", "oven", "microwave", "lamp",
-        "plant in pot", "bed", "desk", "stool", "floor",
-    ]
-    fallback = fallback_labels or _default_fallback
-
     if not Path(image_path).is_file():
-        log.warning("Image not found: %s — using fallback labels", image_path)
-        return fallback
+        raise FileNotFoundError(f"Image not found: {image_path}")
 
+    from tools.llm_client.client import (
+        GeminiClient,
+        FallbackLLMClient,
+    )
+
+    # Fallback chain: Gemini 3 Flash → Gemini 3 Pro → Gemini 2.5 Flash
+    # All support image input + JSON output.
+    primary = GeminiClient(model="gemini-3-flash-preview")
+    fallbacks = [
+        GeminiClient(model="gemini-3-pro-preview"),
+        GeminiClient(model="gemini-2.5-flash"),
+    ]
+    client = FallbackLLMClient(primary=primary, fallbacks=fallbacks)
+
+    response = client.generate(
+        prompt=_LABEL_PROMPT,
+        image=image_path,
+        json_output=True,
+        temperature=0.3,
+    )
+
+    # With code_execution (agentic vision), the model may run Python code
+    # to zoom/crop the image before producing labels. The final JSON output
+    # is extracted from response.text / parse_json() as usual.
     try:
-        from tools.llm_client.client import create_llm_client, LLMProvider
+        parsed = response.parse_json()
+    except (json.JSONDecodeError, ValueError) as e:
+        # Agentic vision code execution can sometimes produce mixed output.
+        # Try to extract JSON array from the raw text as a fallback.
+        log.warning("JSON parse failed (%s), attempting regex extraction from response", e)
+        parsed = _extract_json_from_text(response.text)
 
-        client = create_llm_client(provider=LLMProvider.GEMINI)
-        response = client.generate(
-            prompt=_LABEL_PROMPT,
-            image=image_path,
-            json_output=True,
-            temperature=0.3,
-            disable_tools=True,
+    labels = _parse_label_response(parsed)
+
+    if not labels:
+        raise RuntimeError(
+            f"Gemini returned no labels for image: {image_path}. "
+            f"Raw response: {response.text[:500]}"
         )
 
-        labels = _parse_label_response(response.parse_json())
+    log.info("Gemini detected %d labels: %s", len(labels), labels)
+    return labels
 
-        if not labels:
-            log.warning("Gemini returned no labels — using fallback")
-            return fallback
 
-        log.info("Gemini detected %d labels: %s", len(labels), labels)
-        return labels
-
-    except Exception as exc:
-        log.warning(
-            "Gemini label generation failed (%s) — using fallback labels",
-            exc,
-        )
-        return fallback
+def _extract_json_from_text(text: str):
+    """Try to extract a JSON array from mixed text (code execution output)."""
+    # Look for [...] pattern in the text
+    match = re.search(r'\[[\s\S]*?\]', text)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    # Look for {...} pattern
+    match = re.search(r'\{[\s\S]*?\}', text)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    return []
 
 
 def _parse_label_response(data) -> List[str]:
     """Extract a list of string labels from various JSON response shapes."""
-    # Direct array: ["chair", "table", ...]
+    # Direct array: ["office chair", "wooden desk", ...]
     if isinstance(data, list):
         return [str(l) for l in data if isinstance(l, str) and l.strip()]
 

@@ -73,23 +73,17 @@ class Regen3DConfig:
     # Model choices
     use_vggt: bool = True
     use_hunyuan21: bool = True
+    enable_texture_hy21: bool = False  # Disabled: Hunyuan3D UNet type mismatch hangs
 
     # Gemini for nanoBanana inpainting
     gemini_api_key: str = ""
     gemini_model_id: str = "gemini-2.5-flash-image"
 
-    # Segmentation labels (fallback when auto_labels fails)
-    labels: List[str] = field(
-        default_factory=lambda: [
-            "chair", "table", "sofa", "plant in pot", "lamp", "floor"
-        ]
-    )
+    # Segmentation labels (populated dynamically by Gemini auto-labeling)
+    labels: List[str] = field(default_factory=list)
 
     # Segmentation backend: "sam3" (new) or "grounded_sam" (original Step 1)
     seg_backend: str = "sam3"
-
-    # Use Gemini to auto-detect labels from the input image
-    auto_labels: bool = True
 
     # SAM3-specific settings
     sam3_threshold: float = 0.4
@@ -107,9 +101,7 @@ class Regen3DConfig:
         steps_str = os.getenv("REGEN3D_STEPS", "1,2,3,4,5,6,7")
         steps = [int(s.strip()) for s in steps_str.split(",") if s.strip()]
 
-        labels_str = os.getenv(
-            "REGEN3D_LABELS", "chair,table,sofa,plant in pot,lamp,floor"
-        )
+        labels_str = os.getenv("REGEN3D_LABELS", "")
         labels = [l.strip() for l in labels_str.split(",") if l.strip()]
 
         seg_backend = os.getenv("REGEN3D_SEG_BACKEND", "sam3").lower()
@@ -128,14 +120,14 @@ class Regen3DConfig:
             in ("true", "1", "yes"),
             use_hunyuan21=os.getenv("REGEN3D_USE_HUNYUAN21", "true").lower()
             in ("true", "1", "yes"),
+            enable_texture_hy21=os.getenv("REGEN3D_ENABLE_TEXTURE", "false").lower()
+            in ("true", "1", "yes"),
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
             gemini_model_id=os.getenv(
                 "REGEN3D_GEMINI_MODEL", "gemini-2.5-flash-image"
             ),
             labels=labels,
             seg_backend=seg_backend,
-            auto_labels=os.getenv("REGEN3D_AUTO_LABELS", "true").lower()
-            in ("true", "1", "yes"),
             sam3_threshold=float(os.getenv("REGEN3D_SAM3_THRESHOLD", "0.4")),
             sam3_model=os.getenv("REGEN3D_SAM3_MODEL", "facebook/sam3"),
             require_background=os.getenv("REGEN3D_REQUIRE_BACKGROUND", "true").lower()
@@ -229,9 +221,22 @@ class Regen3DRunner:
             # Step 4: Generate and upload config
             remote_output_dir = f"{self.config.repo_path}/output_{scene_id}"
 
-            # Step 4a: Auto-detect labels with Gemini (if enabled)
-            if self.config.seg_backend == "sam3" and self.config.auto_labels:
+            # Step 4a: Auto-detect labels with Gemini
+            if not self.config.labels:
                 self._resolve_auto_labels(input_image)
+
+            if not self.config.labels:
+                return ReconstructionResult(
+                    success=False,
+                    scene_id=scene_id,
+                    objects_count=0,
+                    duration_seconds=time.monotonic() - start_time,
+                    output_dir=output_dir,
+                    error=(
+                        "No segmentation labels available. "
+                        "Gemini auto-labeling failed and no REGEN3D_LABELS configured."
+                    ),
+                )
 
             self._generate_and_upload_config(
                 remote_image_path, remote_output_dir, scene_id
@@ -463,6 +468,8 @@ class Regen3DRunner:
             gemini_model_id=self.config.gemini_model_id,
             use_vggt=str(self.config.use_vggt).lower(),
             use_hunyuan21=str(self.config.use_hunyuan21).lower(),
+            enable_texture_hy21=str(self.config.enable_texture_hy21).lower(),
+            conda_env=f"{self.config.repo_path}/venv_py310",
         )
 
         # Validate rendered YAML before uploading to remote.
@@ -520,6 +527,8 @@ class Regen3DRunner:
             f"[ -f .env_keys ] && source .env_keys ; "
             f"export PATH=$HOME/miniforge3/bin:$PATH && "
             f"export PYTHONNOUSERSITE=1 && "
+            f"export CUDA_HOME=/usr/local/cuda && "
+            f"export PYTORCH_SKIP_CUDA_MISMATCH_CHECK=1 && "
             f"mkdir -p {shlex.quote(remote_output_dir)} && "
             f"./venv_py310/bin/python run.py -p {steps_arg}"
         )
@@ -534,21 +543,12 @@ class Regen3DRunner:
     def _resolve_auto_labels(self, input_image: Path) -> None:
         """Use Gemini to auto-detect object labels from the input image."""
         self.log("Running Gemini auto-labeling...")
-        try:
-            from tools.regen3d_runner.gemini_label_generator import (
-                generate_labels_from_image,
-            )
-            labels = generate_labels_from_image(
-                str(input_image),
-                fallback_labels=self.config.labels,
-            )
-            self.config.labels = labels
-            self.log(f"Auto-labels ({len(labels)}): {labels}")
-        except Exception as exc:
-            self.log(
-                f"Gemini auto-labeling failed ({exc}), using configured labels",
-                "WARNING",
-            )
+        from tools.regen3d_runner.gemini_label_generator import (
+            generate_labels_from_image,
+        )
+        labels = generate_labels_from_image(str(input_image))
+        self.config.labels = labels
+        self.log(f"Auto-labels ({len(labels)}): {labels}")
 
     def _setup_sam3_env(self) -> None:
         """Ensure the SAM3 Python 3.12 venv exists on the remote VM."""

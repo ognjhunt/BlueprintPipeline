@@ -719,20 +719,45 @@ class GeminiClient(LLMClient):
         if json_output:
             config_kwargs["response_mime_type"] = "application/json"
 
-        # Enable thinking, grounding, and URL context for Gemini 3.x models
-        # Callers can pass disable_tools=True to skip AFC/thinking (e.g. simple factual prompts)
-        if self.model.startswith("gemini-3") and not kwargs.get("disable_tools", False):
+        # Enable thinking for Gemini models that support it (always on unless explicitly disabled)
+        # Gemini 3.x and 2.5+ all support thinking; use highest level available.
+        _supports_thinking = (
+            self.model.startswith("gemini-3")
+            or self.model.startswith("gemini-2.5")
+        )
+        if _supports_thinking and not kwargs.get("disable_thinking", False):
             config_kwargs["thinking_config"] = self._types.ThinkingConfig(thinking_level="HIGH")
-            tools = [
-                self._types.Tool(url_context=self._types.UrlContext()),
-                self._types.Tool(googleSearch=self._types.GoogleSearch()),
-            ]
-            config_kwargs["tools"] = tools
-        elif use_web_search:
-            if hasattr(self._types, "Tool") and hasattr(self._types, "GoogleSearch"):
-                config_kwargs["tools"] = [
-                    self._types.Tool(googleSearch=self._types.GoogleSearch())
-                ]
+
+        # Enable tools for Gemini models.
+        # Callers can pass disable_tools=True to skip all tools (web search, URL context, code execution).
+        if not kwargs.get("disable_tools", False):
+            tools: list = []
+
+            # Gemini 3.x: full agentic toolset (web search, URL context, code execution/agentic vision)
+            if self.model.startswith("gemini-3"):
+                tools.extend([
+                    self._types.Tool(url_context=self._types.UrlContext()),
+                    self._types.Tool(googleSearch=self._types.GoogleSearch()),
+                    self._types.Tool(code_execution=self._types.ToolCodeExecution()),
+                ])
+            # Gemini 2.5+: code execution + optional web search
+            elif self.model.startswith("gemini-2.5"):
+                tools.append(
+                    self._types.Tool(code_execution=self._types.ToolCodeExecution())
+                )
+                if use_web_search and hasattr(self._types, "GoogleSearch"):
+                    tools.append(
+                        self._types.Tool(googleSearch=self._types.GoogleSearch())
+                    )
+            # Other models: web search only if requested
+            elif use_web_search:
+                if hasattr(self._types, "Tool") and hasattr(self._types, "GoogleSearch"):
+                    tools.append(
+                        self._types.Tool(googleSearch=self._types.GoogleSearch())
+                    )
+
+            if tools:
+                config_kwargs["tools"] = tools
 
         config = self._types.GenerateContentConfig(**config_kwargs)
 
