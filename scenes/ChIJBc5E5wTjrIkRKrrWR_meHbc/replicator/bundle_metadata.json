@@ -1,0 +1,30 @@
+{
+  "scene_id": "ChIJBc5E5wTjrIkRKrrWR_meHbc",
+  "environment_type": "generic",
+  "scene_type": "generic",
+  "policies": [
+    "dexterous_pick_place",
+    "general_manipulation"
+  ],
+  "placement_regions_count": 3,
+  "variation_assets_count": 3,
+  "analysis_summary": {
+    "scene_summary": "A compact residential or dormitory-style environment featuring basic wooden furniture including a bed frame, desk, and nightstand, suitable for small-scale object manipulation tasks.",
+    "key_surfaces": [
+      "wooden_desk_top",
+      "nightstand_top",
+      "bed_frame_slats",
+      "floor_area"
+    ],
+    "key_articulated": [],
+    "key_manipulable": [
+      "obj_1",
+      "obj_3"
+    ],
+    "recommended_policies": [
+      "dexterous_pick_place",
+      "general_manipulation"
+    ]
+  },
+  "generated_at": "2026-02-10T04:40:26.224294Z"
+}

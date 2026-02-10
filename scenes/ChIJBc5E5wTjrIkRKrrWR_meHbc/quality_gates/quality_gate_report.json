@@ -1,0 +1,143 @@
+{
+  "scene_id": "ChIJBc5E5wTjrIkRKrrWR_meHbc",
+  "timestamp": "2026-02-10T04:40:26.266318Z",
+  "summary": {
+    "total_gates": 6,
+    "passed": 5,
+    "failed": 1,
+    "blocking_failures": 0,
+    "can_proceed": true
+  },
+  "results": [
+    {
+      "gate_id": "qg-2-physics",
+      "checkpoint": "simready_complete",
+      "passed": false,
+      "severity": "warning",
+      "message": "Physics plausibility: 1 warnings",
+      "details": {
+        "warnings": [
+          "scene_background: Mass 1000.0kg outside expected range [0.01, 500.0]"
+        ],
+        "thresholds": {
+          "mass_range_kg": [
+            0.01,
+            500.0
+          ],
+          "friction_range": [
+            0.0,
+            2.0
+          ]
+        }
+      },
+      "recommendations": [
+        "Review mass estimates for realism",
+        "Verify friction coefficients match expected materials",
+        "Consider measuring real-world properties for critical objects",
+        "Thresholds can be adjusted in quality_config.json or via BP_QUALITY_* env vars"
+      ],
+      "requires_human_approval": false,
+      "timestamp": "2026-02-10T04:39:25.729362Z"
+    },
+    {
+      "gate_id": "qg-3-usd",
+      "checkpoint": "usd_assembled",
+      "passed": true,
+      "severity": "error",
+      "message": "USD validated successfully",
+      "details": {
+        "issues": [],
+        "reference_count": 6
+      },
+      "recommendations": [],
+      "requires_human_approval": true,
+      "timestamp": "2026-02-10T04:39:25.740407Z"
+    },
+    {
+      "gate_id": "qg-8-usd-size",
+      "checkpoint": "usd_assembled",
+      "passed": true,
+      "severity": "error",
+      "message": "USD size 4012 bytes within limit 500000000",
+      "details": {
+        "usd_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/usd/scene.usda",
+        "size_bytes": 4012,
+        "max_size_bytes": 500000000
+      },
+      "recommendations": [],
+      "requires_human_approval": false,
+      "timestamp": "2026-02-10T04:39:25.740489Z"
+    },
+    {
+      "gate_id": "qg-14-inventory-enrichment",
+      "checkpoint": "inventory_enrichment_complete",
+      "passed": true,
+      "severity": "error",
+      "message": "Inventory enrichment validated",
+      "details": {
+        "inventory_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/seg/inventory_enriched.json",
+        "object_count": 5,
+        "enrichment_status": "success",
+        "thresholds": {
+          "min_object_count": 1,
+          "require_enrichment_metadata": true,
+          "allowed_statuses": [
+            "success",
+            "stub"
+          ]
+        },
+        "issues": []
+      },
+      "recommendations": [],
+      "requires_human_approval": false,
+      "timestamp": "2026-02-10T04:40:00.361151Z"
+    },
+    {
+      "gate_id": "qg-9-replicator-sensors",
+      "checkpoint": "replicator_complete",
+      "passed": true,
+      "severity": "error",
+      "message": "Replicator bundle sensor metadata validated",
+      "details": {
+        "replicator_bundle_dir": "/Users/nijelhunt_1/workspace/BlueprintPipeline/scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/replicator",
+        "missing_files": [],
+        "config_issues": [],
+        "issues": [],
+        "required_sensor_fields": {
+          "camera_list": [
+            "cameras",
+            "camera_list"
+          ],
+          "resolution": [
+            "resolution"
+          ],
+          "modalities": [
+            "modalities",
+            "annotations"
+          ],
+          "stream_ids": [
+            "stream_ids",
+            "streams"
+          ]
+        }
+      },
+      "recommendations": [],
+      "requires_human_approval": false,
+      "timestamp": "2026-02-10T04:40:26.228376Z"
+    },
+    {
+      "gate_id": "qg-4-isaac-lab",
+      "checkpoint": "isaac_lab_generated",
+      "passed": true,
+      "severity": "warning",
+      "message": "Isaac Lab validation: 1 tasks, 0 issues",
+      "details": {
+        "task_count": 1,
+        "issues": []
+      },
+      "recommendations": [],
+      "requires_human_approval": false,
+      "timestamp": "2026-02-10T04:40:26.266300Z"
+    }
+  ]
+}

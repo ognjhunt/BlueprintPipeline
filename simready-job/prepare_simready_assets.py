@@ -1203,13 +1203,13 @@ def call_gemini_for_dimensions(
     prompt = make_dimension_estimation_prompt(obj, has_multiple_views=len(images) > 1)
 
     try:
-        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-flash-preview")
+        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-pro-preview")
         if model_name.startswith("gemini-1") or model_name.startswith("gemini-2"):
             logger.warning(
-                "[SIMREADY] Overriding legacy Gemini model '%s' with gemini-3-flash-preview.",
+                "[SIMREADY] Overriding legacy Gemini model '%s' with gemini-3-pro-preview.",
                 model_name,
             )
-            model_name = "gemini-3-flash-preview"
+            model_name = "gemini-3-pro-preview"
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
@@ -1308,7 +1308,7 @@ def call_gemini_for_object(
     prompt = make_gemini_prompt(oid, obj, bounds, base_cfg, has_image=reference_image is not None)
 
     try:
-        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-flash-preview")
+        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-pro-preview")
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
@@ -1600,11 +1600,12 @@ def call_gemini_for_object(
 
     except Exception as e:  # pragma: no cover
         logger.warning(
-            "[SIMREADY] Gemini failed for obj %s: %s; falling back to base physics config.",
+            "[SIMREADY] Gemini parsing failed for obj %s: %s; propagating to retry handler.",
             oid,
             e,
+            exc_info=True,
         )
-        return base_cfg
+        raise
 
 
 # ---------- Physics configuration builders ----------
@@ -1639,7 +1640,7 @@ def build_physics_config(
         Complete physics configuration dict
     """
     # GAP 4: Try Gemini-based estimation with retry before falling back
-    _max_physics_retries = 2
+    _max_physics_retries = 3
     if not deterministic_physics and gemini_client is not None and have_gemini():
         for _attempt in range(_max_physics_retries):
             try:
@@ -2328,6 +2329,7 @@ def prepare_simready_assets_job(
 
     simready_paths: Dict[Any, str] = {}
     computed_bounds_map: Dict[str, Dict[str, Any]] = {}  # oid -> bounds dict from compute_bounds()
+    simready_physics_summary: Dict[str, Dict[str, Any]] = {}
     fallback_stats = {"total": 0, "covered": 0}
     quality_stats = {"total": 0, "passed": 0}
     fallback_mode = use_deterministic_physics
@@ -2336,7 +2338,9 @@ def prepare_simready_assets_job(
     # GAP-PERF-002 FIX: Process objects in parallel for 10-50x speedup
     def process_single_object(
         obj: Dict[str, Any],
-    ) -> Optional[Tuple[str, str, str, bool, Optional[bool], str]]:
+    ) -> Optional[
+        Tuple[str, str, str, bool, Optional[bool], str, Dict[str, Any], Dict[str, Any]]
+    ]:
         """
         Process a single object. Returns (oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used)
         or None on failure.
@@ -2460,8 +2464,24 @@ def prepare_simready_assets_job(
             if "static/obj_" in str(visual_path):
                 sim_rel = f"{assets_prefix}/static/obj_{oid}/simready.usda"
 
+            physics_summary = {
+                "mass_kg": _coerce_float(physics_cfg.get("mass_kg")) or 0.0,
+                "static_friction": _coerce_float(physics_cfg.get("static_friction")) or 0.0,
+                "dynamic_friction": _coerce_float(physics_cfg.get("dynamic_friction")) or 0.0,
+                "estimation_source": str(physics_cfg.get("estimation_source", "")),
+            }
+
             print(f"[SIMREADY] ✓ Processed obj {oid}")
-            return (oid, sim_rel, str(sim_path), fallback_covered, quality_passed, profile_used, bounds)
+            return (
+                oid,
+                sim_rel,
+                str(sim_path),
+                fallback_covered,
+                quality_passed,
+                profile_used,
+                bounds,
+                physics_summary,
+            )
 
         except Exception as e:
             logger.warning(
@@ -2483,9 +2503,19 @@ def prepare_simready_assets_job(
         # Collect successful results
         for success_item in result.successful:
             if success_item:
-                oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used, bounds = success_item
+                (
+                    oid,
+                    sim_rel,
+                    sim_path,
+                    fallback_covered,
+                    quality_passed,
+                    profile_used,
+                    bounds,
+                    physics_summary,
+                ) = success_item
                 simready_paths[oid] = sim_rel
                 computed_bounds_map[str(oid)] = bounds
+                simready_physics_summary[str(oid)] = physics_summary
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
                 profiles_used.add(profile_used)
                 if fallback_mode:
@@ -2513,9 +2543,19 @@ def prepare_simready_assets_job(
         for obj in objects:
             result = process_single_object(obj)
             if result:
-                oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used, bounds = result
+                (
+                    oid,
+                    sim_rel,
+                    sim_path,
+                    fallback_covered,
+                    quality_passed,
+                    profile_used,
+                    bounds,
+                    physics_summary,
+                ) = result
                 simready_paths[oid] = sim_rel
                 computed_bounds_map[str(oid)] = bounds
+                simready_physics_summary[str(oid)] = physics_summary
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
                 profiles_used.add(profile_used)
                 if fallback_mode:
@@ -2610,6 +2650,25 @@ def prepare_simready_assets_job(
             "[SIMREADY] Failed to update progress marker: %s; continuing without progress update.",
             exc,
         )
+
+    # Persist machine-readable per-object physics for downstream quality gates.
+    physics_summary_path = assets_root / "simready_physics.json"
+    physics_summary_payload = {
+        "scene_id": scene_id,
+        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "objects": [
+            {
+                "id": oid,
+                **summary,
+            }
+            for oid, summary in sorted(simready_physics_summary.items())
+        ],
+    }
+    physics_summary_path.write_text(
+        json.dumps(physics_summary_payload, indent=2),
+        encoding="utf-8",
+    )
+    print(f"[SIMREADY] Wrote physics summary to {physics_summary_path}")
 
     # Write computed dimensions back to scene_manifest.json so downstream jobs
     # (geniesim adapter, episode generation) have real object sizes instead of

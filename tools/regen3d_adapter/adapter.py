@@ -368,6 +368,16 @@ class Regen3DAdapter:
         obj_id = "scene_background" if is_background else obj_dir.name
         sim_role = "background" if is_background else "unknown"
 
+        # Load semantic label if harvester wrote one
+        category = None
+        label_path = obj_dir / "label.json"
+        if label_path.is_file():
+            try:
+                label_data = json.loads(label_path.read_text())
+                category = label_data.get("label")
+            except Exception:
+                pass
+
         return Regen3DObject(
             id=obj_id,
             mesh_path=mesh_path,
@@ -376,6 +386,7 @@ class Regen3DAdapter:
             material=material,
             segmentation_mask_path=seg_mask_path,
             sim_role=sim_role,
+            category=category,
         )
 
     def create_manifest(

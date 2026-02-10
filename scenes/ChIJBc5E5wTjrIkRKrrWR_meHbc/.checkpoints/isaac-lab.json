@@ -1,0 +1,31 @@
+{
+  "step": "isaac-lab",
+  "status": "completed",
+  "started_at": "2026-02-10T04:40:26.229995Z",
+  "completed_at": "2026-02-10T04:40:26.245265Z",
+  "outputs": {
+    "files": [
+      "env_cfg.py",
+      "task_manipulation.py",
+      "reward_functions.py",
+      "train_cfg.yaml",
+      "randomizations.py",
+      "__init__.py"
+    ],
+    "completion_marker": "/Users/nijelhunt_1/workspace/BlueprintPipeline/scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/isaac_lab/.isaac_lab_complete",
+    "quality_gate_checkpoint": "isaac_lab_generated",
+    "quality_gate_report": "/Users/nijelhunt_1/workspace/BlueprintPipeline/scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/quality_gates/quality_gate_report.json",
+    "quality_gate_summary": {
+      "total_gates": 6,
+      "passed": 5,
+      "failed": 1,
+      "blocking_failures": 0,
+      "can_proceed": true
+    }
+  },
+  "output_paths": [
+    "/Users/nijelhunt_1/workspace/BlueprintPipeline/scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/isaac_lab/.isaac_lab_complete"
+  ],
+  "output_hashes": {},
+  "scene_id": "ChIJBc5E5wTjrIkRKrrWR_meHbc"
+}

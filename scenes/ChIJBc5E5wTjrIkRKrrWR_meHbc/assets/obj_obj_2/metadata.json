@@ -1,0 +1,43 @@
+{
+  "id": "obj_2",
+  "category": "nightstand",
+  "mesh_bounds": {
+    "export": {
+      "min": [
+        0.039645105600357056,
+        -0.5459954738616943,
+        -1.105767011642456
+      ],
+      "max": [
+        0.2912592589855194,
+        -0.40535208582878113,
+        -0.8446675539016724
+      ],
+      "center": [
+        0.16545218229293823,
+        -0.47567377984523773,
+        -0.9752172827720642
+      ],
+      "size": [
+        0.25161415338516235,
+        0.1406433880329132,
+        0.2610994577407837
+      ]
+    }
+  },
+  "source": "3d-re-gen",
+  "reconstruction_confidence": 1.0,
+  "is_floor_contact": true,
+  "material": {
+    "base_color": [
+      0.8,
+      0.8,
+      0.8
+    ],
+    "metallic": 0.0,
+    "roughness": 0.5,
+    "normal_map_path": null,
+    "albedo_map_path": null,
+    "material_type": "generic"
+  }
+}

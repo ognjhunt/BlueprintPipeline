@@ -93,7 +93,7 @@ def harvest_regen3d_native_output(
         d.mkdir(parents=True, exist_ok=True)
 
     # --- Harvest objects ---
-    objects_count = _harvest_objects(native_dir, objects_dir, warnings)
+    objects_count, object_labels = _harvest_objects(native_dir, objects_dir, warnings)
 
     # --- Harvest background ---
     has_background = _harvest_background(native_dir, background_dir, warnings)
@@ -119,6 +119,8 @@ def harvest_regen3d_native_output(
     }
     if source_image_path:
         scene_info["source_image_path"] = str(source_image_path)
+    if object_labels:
+        scene_info["object_labels"] = object_labels
 
     (target_dir / "scene_info.json").write_text(json.dumps(scene_info, indent=2))
 
@@ -135,10 +137,26 @@ def harvest_regen3d_native_output(
     )
 
 
+def _parse_label_from_filename(filename: str) -> Optional[str]:
+    """Extract semantic label from 3D-RE-GEN GLB filename.
+
+    3D-RE-GEN names GLBs as '{label}__{pixel_coords}.glb',
+    e.g. 'bed_frame__(619, 582).glb' → 'bed_frame'.
+    """
+    if "__" in filename:
+        return filename.split("__")[0].strip()
+    # No pixel-coord suffix — use the whole stem as label
+    return filename
+
+
 def _harvest_objects(
     native_dir: Path, objects_dir: Path, warnings: List[str]
-) -> int:
-    """Harvest per-object GLBs and create metadata files."""
+) -> Tuple[int, Dict[str, str]]:
+    """Harvest per-object GLBs and create metadata files.
+
+    Returns:
+        Tuple of (object_count, label_map) where label_map maps obj_id → label.
+    """
     # 3D-RE-GEN stores meshes in output_folder_hy (3D/) or glb/
     # The optimized GLBs with correct poses are in glb/
     glb_dir = native_dir / "glb"
@@ -170,7 +188,7 @@ def _harvest_objects(
 
     if not object_glbs:
         warnings.append("No object GLBs found in glb/ or 3D/ directories")
-        return 0
+        return 0, {}
 
     # Load transforms from the combined scene or individual optimization results
     transforms = _load_object_transforms(native_dir)
@@ -204,10 +222,19 @@ def _harvest_objects(
                 "or per-object transform.json files."
             )
 
+    label_map: Dict[str, str] = {}
+
     for idx, (obj_name, glb_path) in enumerate(sorted(object_glbs.items())):
         obj_id = f"obj_{idx}"
         obj_dir = objects_dir / obj_id
         obj_dir.mkdir(parents=True, exist_ok=True)
+
+        # Extract semantic label from GLB filename (e.g. "bed_frame__(619, 582)" → "bed_frame")
+        label = _parse_label_from_filename(obj_name)
+        if label:
+            label_map[obj_id] = label
+            label_data = {"label": label, "original_filename": glb_path.name}
+            (obj_dir / "label.json").write_text(json.dumps(label_data, indent=2))
 
         # Copy mesh
         shutil.copy2(glb_path, obj_dir / "mesh.glb")
@@ -234,11 +261,11 @@ def _harvest_objects(
                     break
 
         logger.info(
-            f"[HARVEST] Object {obj_id} ({obj_name}): "
+            f"[HARVEST] Object {obj_id} ({obj_name}): label={label}, "
             f"mesh={glb_path.name}, has_transform={transform is not None}"
         )
 
-    return len(object_glbs)
+    return len(object_glbs), label_map
 
 
 def _harvest_background(

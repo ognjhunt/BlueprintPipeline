@@ -1,0 +1,22 @@
+{
+  "policy_id": "default_policy",
+  "capture_config": {
+    "cameras": [
+      "wrist",
+      "overhead"
+    ],
+    "resolution": [
+      1280,
+      720
+    ],
+    "modalities": [
+      "rgb",
+      "depth"
+    ],
+    "stream_ids": [
+      "rgb",
+      "depth",
+      "segmentation"
+    ]
+  }
+}

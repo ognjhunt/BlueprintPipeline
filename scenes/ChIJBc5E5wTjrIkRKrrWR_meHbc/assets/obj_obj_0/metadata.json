@@ -1,0 +1,43 @@
+{
+  "id": "obj_0",
+  "category": "bed_frame",
+  "mesh_bounds": {
+    "export": {
+      "min": [
+        -0.3441866338253021,
+        -0.5263364315032959,
+        -2.114713191986084
+      ],
+      "max": [
+        0.5346715450286865,
+        -0.10240194201469421,
+        -1.1318693161010742
+      ],
+      "center": [
+        0.0952424556016922,
+        -0.31436918675899506,
+        -1.623291254043579
+      ],
+      "size": [
+        0.8788581788539886,
+        0.4239344894886017,
+        0.9828438758850098
+      ]
+    }
+  },
+  "source": "3d-re-gen",
+  "reconstruction_confidence": 1.0,
+  "is_floor_contact": true,
+  "material": {
+    "base_color": [
+      0.8,
+      0.8,
+      0.8
+    ],
+    "metallic": 0.0,
+    "roughness": 0.5,
+    "normal_map_path": null,
+    "albedo_map_path": null,
+    "material_type": "generic"
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "scene_id": "ChIJBc5E5wTjrIkRKrrWR_meHbc",
+  "scene_type": "generic",
+  "environment_type": "generic",
+  "generated_at": "2026-02-10T04:40:26.223328Z",
+  "total_assets": 3,
+  "policies": [
+    "dexterous_pick_place",
+    "general_manipulation"
+  ],
+  "by_priority": {
+    "required": [
+      "drinking_vessel"
+    ],
+    "recommended": [
+      "writing_utensils"
+    ],
+    "optional": [
+      "electronic_clutter"
+    ]
+  },
+  "by_category": {
+    "stationery": [
+      "writing_utensils"
+    ],
+    "tableware": [
+      "drinking_vessel"
+    ],
+    "electronics": [
+      "electronic_clutter"
+    ]
+  },
+  "assets": [
+    {
+      "name": "writing_utensils",
+      "category": "stationery",
+      "description": "Various pens and pencils for desk clutter.",
+      "semantic_class": "tool",
+      "priority": "recommended",
+      "source_hint": "simready",
+      "example_variants": [
+        "ballpoint_pen",
+        "wooden_pencil",
+        "highlighter"
+      ],
+      "physics_hints": {
+        "mass_range_kg": [
+          0.01,
+          0.03
+        ],
+        "friction": 0.4,
+        "collision_shape": "convex"
+      },
+      "asset_id": null,
+      "asset_path": null,
+      "thumbnail_uri": null,
+      "generation_prompt_hint": "A Various pens and pencils for desk clutter., made of appropriate materials. . Photorealistic product photography style."
+    },
+    {
+      "name": "drinking_vessel",
+      "category": "tableware",
+      "description": "Mugs or glasses commonly found on desks.",
+      "semantic_class": "container",
+      "priority": "required",
+      "source_hint": "library",
+      "example_variants": [
+        "ceramic_mug",
+        "glass_tumbler",
+        "plastic_cup"
+      ],
+      "physics_hints": {
+        "mass_range_kg": [
+          0.1,
+          0.4
+        ],
+        "friction": 0.6,
+        "collision_shape": "convex"
+      },
+      "asset_id": null,
+      "asset_path": null,
+      "thumbnail_uri": null,
+      "generation_prompt_hint": "A Mugs or glasses commonly found on desks., made of appropriate materials. . Photorealistic product photography style."
+    },
+    {
+      "name": "electronic_clutter",
+      "category": "electronics",
+      "description": "Small personal electronics.",
+      "semantic_class": "tool",
+      "priority": "optional",
+      "source_hint": "simready",
+      "example_variants": [
+        "smartphone",
+        "tablet",
+        "calculator"
+      ],
+      "physics_hints": {
+        "mass_range_kg": [
+          0.15,
+          0.6
+        ],
+        "friction": 0.3,
+        "collision_shape": "box"
+      },
+      "asset_id": null,
+      "asset_path": null,
+      "thumbnail_uri": null,
+      "material_hint": "plastic housing with metal accents",
+      "style_hint": "consumer electronics or devices",
+      "generation_prompt_hint": "A Small personal electronics., made of plastic housing with metal accents. consumer electronics or devices. Photorealistic product photography style."
+    }
+  ],
+  "generation_config": {
+    "image_model": "gemini-3-pro-image-preview",
+    "default_style": "photorealistic product photography",
+    "background": "white studio background",
+    "lighting": "soft 3-point studio lighting"
+  }
+}

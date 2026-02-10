@@ -179,6 +179,9 @@
               "height": {"type": "number"}
             }
           },
+          "dimensions_source": {
+            "type": "string"
+          },
           "asset": {
             "type": "object",
             "additionalProperties": false,

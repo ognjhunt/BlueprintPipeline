@@ -6,11 +6,12 @@ import copy
 import json
 import logging
 import os
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 import jsonschema
@@ -190,6 +191,136 @@ class ExternalInventoryEnricher(InventoryEnricher):
         return enriched
 
 
+class GeminiInventoryEnricher(InventoryEnricher):
+    """Enriches inventory objects using Gemini for semantic metadata."""
+
+    def __init__(self, api_key: str, model: str = "gemini-3-pro-preview"):
+        if not api_key:
+            raise InventoryEnrichmentError("GEMINI_API_KEY is required for Gemini enrichment")
+        self.api_key = api_key
+        self.model = model
+
+    def _build_prompt(self, objects: List[Dict[str, Any]], environment_type: str) -> str:
+        obj_descriptions = []
+        for obj in objects:
+            dims = obj.get("bounds", {}).get("size", [0, 0, 0])
+            obj_descriptions.append(
+                f'- id: "{obj["id"]}", category: "{obj.get("category", "unknown")}", '
+                f"dimensions: {dims[0]:.3f} x {dims[1]:.3f} x {dims[2]:.3f} m"
+            )
+        obj_block = "\n".join(obj_descriptions)
+
+        return f"""You are a robotics simulation expert. Given these objects from a {environment_type} scene, provide detailed semantic enrichment for each object.
+
+Objects:
+{obj_block}
+
+For EACH object, return a JSON array where each element has:
+- "id": the object id (string)
+- "description": 1-2 sentence description of the real-world object (string)
+- "primary_material": main material (e.g. "wood", "metal", "fabric", "plastic", "ceramic", "glass") (string)
+- "secondary_materials": list of other materials present (list of strings)
+- "typical_mass_kg": realistic mass in kg for this object at these dimensions (float)
+- "surface_finish": e.g. "smooth", "rough", "polished", "textured", "soft" (string)
+- "is_graspable": whether a robot gripper could pick this up (boolean)
+- "is_articulated": whether it has moving parts like doors/drawers (boolean)
+- "affordances": list of interactions possible (e.g. ["open", "place_on", "sit_on"]) (list of strings)
+- "semantic_tags": list of descriptive tags for scene understanding (list of strings)
+- "sim_notes": any notes relevant for physics simulation (string)
+
+Return ONLY a valid JSON array. No markdown, no explanation."""
+
+    def _call_gemini(self, prompt: str) -> List[Dict[str, Any]]:
+        """Call Gemini API and parse the response."""
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=self.api_key)
+        response = client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=4096),
+                temperature=0.2,
+                response_mime_type="application/json",
+            ),
+        )
+
+        text = response.text.strip()
+        # Strip markdown fences if present
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1]
+            if text.endswith("```"):
+                text = text.rsplit("```", 1)[0]
+            text = text.strip()
+
+        result = json.loads(text)
+        if isinstance(result, dict) and "objects" in result:
+            result = result["objects"]
+        if not isinstance(result, list):
+            raise InventoryEnrichmentValidationError(
+                f"Expected JSON array from Gemini, got {type(result).__name__}"
+            )
+        return result
+
+    def enrich(self, inventory: Dict[str, Any]) -> Dict[str, Any]:
+        objects = inventory.get("objects", [])
+        environment_type = inventory.get("environment_type", "unknown")
+
+        if not objects:
+            logger.warning("No objects in inventory to enrich")
+            enriched = copy.deepcopy(inventory)
+            metadata = enriched.get("metadata") or {}
+            metadata["inventory_enrichment"] = {
+                "provider": "gemini",
+                "status": "skipped",
+                "enriched_at": datetime.utcnow().isoformat() + "Z",
+                "note": "No objects to enrich.",
+            }
+            enriched["metadata"] = metadata
+            return enriched
+
+        prompt = self._build_prompt(objects, environment_type)
+        gemini_results = self._call_gemini(prompt)
+
+        # Index Gemini results by object id
+        results_by_id = {r["id"]: r for r in gemini_results if "id" in r}
+
+        enriched = copy.deepcopy(inventory)
+        enriched_count = 0
+        for obj in enriched.get("objects", []):
+            oid = obj["id"]
+            if oid in results_by_id:
+                gemini_data = results_by_id[oid]
+                # Merge Gemini fields into object (don't overwrite existing keys like bounds)
+                for key in (
+                    "description", "primary_material", "secondary_materials",
+                    "typical_mass_kg", "surface_finish", "is_graspable",
+                    "is_articulated", "affordances", "semantic_tags", "sim_notes",
+                ):
+                    if key in gemini_data:
+                        obj[key] = gemini_data[key]
+                # Replace generic short_description with Gemini description
+                if "description" in gemini_data and obj.get("short_description", "").startswith("Object "):
+                    obj["short_description"] = gemini_data["description"]
+                enriched_count += 1
+            else:
+                logger.warning("No Gemini enrichment for object %s", oid)
+
+        metadata = enriched.get("metadata") or {}
+        metadata["inventory_enrichment"] = {
+            "provider": "gemini",
+            "model": self.model,
+            "request_id": str(uuid.uuid4()),
+            "status": "success",
+            "enriched_at": datetime.utcnow().isoformat() + "Z",
+            "enriched_count": enriched_count,
+            "total_objects": len(objects),
+        }
+        enriched["metadata"] = metadata
+        return enriched
+
+
 def _resolve_config(mode: Optional[str] = None) -> InventoryEnrichmentConfig:
     env_mode = os.getenv("INVENTORY_ENRICHMENT_MODE")
     resolved_mode = (mode or env_mode or "mock").strip().lower()
@@ -248,6 +379,13 @@ def get_inventory_enricher(mode: Optional[str] = None) -> InventoryEnricher:
 
     if config.mode in {"mock", "stub", "offline"}:
         return MockInventoryEnricher()
+    if config.mode == "gemini":
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        if not gemini_key:
+            logger.warning("GEMINI_API_KEY not set; falling back to mock enricher")
+            return MockInventoryEnricher()
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+        return GeminiInventoryEnricher(api_key=gemini_key, model=gemini_model)
     if config.mode == "external":
         if not api_key:
             raise InventoryEnrichmentError(

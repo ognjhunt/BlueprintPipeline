@@ -133,13 +133,33 @@ def test_harvest_is_idempotent_and_removes_stale_objects(tmp_path: Path) -> None
     assert object_dirs == ["obj_0"]
 
 
-def test_harvest_fails_when_object_transforms_are_missing(tmp_path: Path) -> None:
+def test_harvest_uses_identity_when_object_transforms_are_missing(tmp_path: Path) -> None:
     native_dir = tmp_path / "native"
     target_dir = tmp_path / "regen3d"
     _write_native_output(native_dir, ["chair"], include_transforms=False)
 
-    with pytest.raises(ValueError, match="chair"):
-        harvest_regen3d_native_output(native_dir, target_dir, scene_id="scene")
+    result = harvest_regen3d_native_output(native_dir, target_dir, scene_id="scene")
+    assert result.objects_count == 1
+
+    pose_path = target_dir / "objects" / "obj_0" / "pose.json"
+    pose = json.loads(pose_path.read_text())
+    assert pose["transform_matrix"] == [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
+def test_harvest_handles_missing_object_glbs(tmp_path: Path) -> None:
+    native_dir = tmp_path / "native"
+    target_dir = tmp_path / "regen3d"
+    native_dir.mkdir(parents=True, exist_ok=True)
+
+    result = harvest_regen3d_native_output(native_dir, target_dir, scene_id="scene")
+
+    assert result.objects_count == 0
+    assert "No object GLBs found in glb/ or 3D/ directories" in result.warnings
 
 
 def test_vm_executor_retries_on_ssh_exit_255_when_check_false(monkeypatch) -> None:

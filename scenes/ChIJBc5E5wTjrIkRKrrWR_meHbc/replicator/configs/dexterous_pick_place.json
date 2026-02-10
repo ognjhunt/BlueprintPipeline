@@ -1,0 +1,84 @@
+{
+  "policy_id": "dexterous_pick_place",
+  "policy_name": "Precision Desk Manipulation",
+  "policy_target": "dexterous_pick_place",
+  "description": "Training for fine motor control picking small items from the desk and nightstand.",
+  "placement_regions": [
+    "desk_surface",
+    "nightstand_surface"
+  ],
+  "variation_assets": [
+    "writing_utensils",
+    "drinking_vessel"
+  ],
+  "randomizers": [
+    {
+      "name": "object_scatter",
+      "enabled": true,
+      "frequency": "per_frame",
+      "parameters": {
+        "min_objects": 3,
+        "max_objects": 8,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "name": "material_variation",
+      "enabled": true,
+      "frequency": "per_episode",
+      "parameters": {
+        "vary_color": true,
+        "vary_roughness": true,
+        "roughness_range": [
+          0.1,
+          0.9
+        ]
+      }
+    },
+    {
+      "name": "lighting_variation",
+      "enabled": true,
+      "frequency": "per_episode",
+      "parameters": {
+        "intensity_range": [
+          0.8,
+          1.2
+        ],
+        "color_temperature_range": [
+          3000,
+          5500
+        ]
+      }
+    }
+  ],
+  "capture_config": {
+    "resolution": [
+      1024,
+      1024
+    ],
+    "annotations": [
+      "rgb",
+      "depth",
+      "semantic_segmentation",
+      "instance_segmentation",
+      "bounding_box_2d"
+    ],
+    "frames_per_episode": 50,
+    "camera_list": [
+      "front_camera",
+      "wrist_camera"
+    ],
+    "stream_ids": [
+      "rgb",
+      "depth",
+      "semantic_segmentation",
+      "instance_segmentation",
+      "bounding_box_2d"
+    ]
+  },
+  "scene_modifications": {
+    "hide_objects": [],
+    "spawn_additional": true,
+    "modify_existing": true
+  }
+}

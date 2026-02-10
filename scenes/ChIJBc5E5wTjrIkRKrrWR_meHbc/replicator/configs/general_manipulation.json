@@ -1,0 +1,71 @@
+{
+  "policy_id": "general_manipulation",
+  "policy_name": "Room Tidying and Sorting",
+  "policy_target": "general_manipulation",
+  "description": "General purpose manipulation involving moving objects between the bed, desk, and nightstand.",
+  "placement_regions": [
+    "desk_surface",
+    "nightstand_surface",
+    "bed_base_region"
+  ],
+  "variation_assets": [
+    "writing_utensils",
+    "drinking_vessel",
+    "electronic_clutter"
+  ],
+  "randomizers": [
+    {
+      "name": "object_scatter",
+      "enabled": true,
+      "frequency": "per_frame",
+      "parameters": {
+        "min_objects": 6,
+        "max_objects": 12,
+        "distribution": "clustered"
+      }
+    },
+    {
+      "name": "lighting_variation",
+      "enabled": true,
+      "frequency": "per_episode",
+      "parameters": {
+        "intensity_range": [
+          0.5,
+          2.0
+        ],
+        "color_temperature_range": [
+          2500,
+          7000
+        ]
+      }
+    }
+  ],
+  "capture_config": {
+    "resolution": [
+      1280,
+      720
+    ],
+    "annotations": [
+      "rgb",
+      "depth",
+      "semantic_segmentation",
+      "bounding_box_3d"
+    ],
+    "frames_per_episode": 100,
+    "camera_list": [
+      "front_camera",
+      "wrist_camera"
+    ],
+    "stream_ids": [
+      "rgb",
+      "depth",
+      "semantic_segmentation",
+      "bounding_box_3d"
+    ]
+  },
+  "scene_modifications": {
+    "hide_objects": [],
+    "spawn_additional": true,
+    "modify_existing": false
+  }
+}
