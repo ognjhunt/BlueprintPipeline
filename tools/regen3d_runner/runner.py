@@ -530,6 +530,7 @@ class Regen3DRunner:
             f"export CUDA_HOME=/usr/local/cuda && "
             f"export PYTORCH_SKIP_CUDA_MISMATCH_CHECK=1 && "
             f"mkdir -p {shlex.quote(remote_output_dir)} && "
+            f"mkdir -p {repo}/tmp_{shlex.quote(scene_id)} && "
             f"./venv_py310/bin/python run.py -p {steps_arg}"
         )
 

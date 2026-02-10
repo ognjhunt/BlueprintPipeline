@@ -69,7 +69,7 @@ use_AQ: true
 model_id: "{gemini_model_id}"
 
 keep_existing_banans: false
-keep_existing_empty_rooms: true
+keep_existing_empty_rooms: false
 
 banana_inpainting_prompt: |
    Extract this red marked {{object}}.
@@ -212,9 +212,9 @@ rotation_speed_mult: 8.0
 depth_warmup_iters: 100
 
 learning_rate: 0.005
-max_iterations: 300
+max_iterations: 150
 early_stop_grad_threshold: 0.005
-early_stop_min_iterations: 200
+early_stop_min_iterations: 80
 
 camera_znear: 0.1
 camera_zfar: 50.0
@@ -234,6 +234,7 @@ icp_max_iterations: 200
 icp_estimate_scale: false
 
 output_ply: "{output_dir}/pointclouds/"
+point_cloud_folder: "{output_dir}/pointclouds/"
 
 glb_scene_path: "{output_dir}/glb/scene/combined_scene.glb"
 ply_scene_bp_path: "{output_dir}/pointclouds/scene/combined_scene_bp.ply"
