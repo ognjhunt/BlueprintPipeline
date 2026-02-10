@@ -2,11 +2,14 @@ from dataclasses import dataclass
 import sys
 import types
 
+import pytest
+
 stub_gcs_upload = types.ModuleType("tools.gcs_upload")
 stub_gcs_upload.calculate_md5_base64 = lambda *args, **kwargs: ""
 stub_gcs_upload.verify_blob_upload = lambda *args, **kwargs: True
 sys.modules.setdefault("tools.gcs_upload", stub_gcs_upload)
 
+from tools.error_handling.retry import NonRetryableError
 from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep, StepResult
 
 
@@ -54,3 +57,19 @@ def test_geniesim_submit_blocks_when_episode_metadata_missing(tmp_path):
     assert not updated.success
     assert updated.outputs.get("quality_gate_blocked") is True
     assert "Quality gates blocked" in updated.message
+
+
+def test_skip_quality_gates_rejected_in_production(tmp_path, monkeypatch):
+    runner = LocalPipelineRunner(
+        scene_dir=tmp_path,
+        verbose=False,
+        skip_interactive=True,
+        environment_type="kitchen",
+        enable_dwm=False,
+        enable_dream2flow=False,
+    )
+    monkeypatch.setenv("SKIP_QUALITY_GATES", "true")
+    monkeypatch.setattr(runner, "_is_production_mode", lambda: True)
+
+    with pytest.raises(NonRetryableError, match="not allowed in production"):
+        runner._should_skip_quality_gates()

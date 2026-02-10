@@ -1001,6 +1001,10 @@ class QualityGateRegistry:
         self.results: List[QualityGateResult] = []
         self.verbose = verbose
         self.approval_manager: Optional[HumanApprovalManager] = None
+        self.report_version = "2.0"
+        self._required_checkpoints: set[str] = set()
+        self._executed_checkpoints: set[str] = set()
+        self._skipped_checkpoint_reasons: Dict[str, str] = {}
 
         # Load configuration with overrides
         if config:
@@ -1031,6 +1035,29 @@ class QualityGateRegistry:
         """Get all gates for a checkpoint."""
         return [g for g in self.gates.values() if g.checkpoint == checkpoint]
 
+    def register_required_checkpoint(self, checkpoint: QualityGateCheckpoint) -> None:
+        """Track that a checkpoint is required in this run/report."""
+        self._required_checkpoints.add(checkpoint.value)
+
+    def register_executed_checkpoint(self, checkpoint: QualityGateCheckpoint) -> None:
+        """Track that a checkpoint's quality gates were executed."""
+        checkpoint_value = checkpoint.value
+        self._required_checkpoints.add(checkpoint_value)
+        self._executed_checkpoints.add(checkpoint_value)
+        self._skipped_checkpoint_reasons.pop(checkpoint_value, None)
+
+    def register_skipped_checkpoint(
+        self,
+        checkpoint: QualityGateCheckpoint,
+        reason: str,
+    ) -> None:
+        """Track a checkpoint skipped from gate execution with explicit reason."""
+        checkpoint_value = checkpoint.value
+        self._required_checkpoints.add(checkpoint_value)
+        if checkpoint_value in self._executed_checkpoints:
+            return
+        self._skipped_checkpoint_reasons[checkpoint_value] = reason
+
     def run_checkpoint(
         self,
         checkpoint: QualityGateCheckpoint,
@@ -1047,6 +1074,7 @@ class QualityGateRegistry:
         Returns:
             List of QualityGateResult
         """
+        self.register_required_checkpoint(checkpoint)
         gates = self.get_gates_for_checkpoint(checkpoint)
         results = []
 
@@ -1084,6 +1112,7 @@ class QualityGateRegistry:
                         gate, result, context, notification_service
                     )
 
+        self.register_executed_checkpoint(checkpoint)
         return results
 
     def run_checkpoint_with_approval(
@@ -1177,16 +1206,27 @@ class QualityGateRegistry:
         passed = sum(1 for r in self.results if r.passed)
         failed = len(self.results) - passed
         blocking = len(self.get_blocking_failures())
+        required_checkpoints = sorted(self._required_checkpoints)
+        executed_checkpoints = sorted(self._executed_checkpoints)
+        skipped_checkpoints = sorted(self._skipped_checkpoint_reasons.keys())
 
         return {
+            "report_version": self.report_version,
             "scene_id": scene_id,
             "timestamp": datetime.utcnow().isoformat() + "Z",
+            "required_checkpoints": required_checkpoints,
+            "executed_checkpoints": executed_checkpoints,
+            "skipped_checkpoints": skipped_checkpoints,
+            "skip_reasons": dict(self._skipped_checkpoint_reasons),
             "summary": {
                 "total_gates": len(self.results),
                 "passed": passed,
                 "failed": failed,
                 "blocking_failures": blocking,
                 "can_proceed": self.can_proceed(),
+                "required_checkpoints": len(required_checkpoints),
+                "executed_checkpoints": len(executed_checkpoints),
+                "skipped_checkpoints": len(skipped_checkpoints),
             },
             "results": [
                 {
@@ -1827,13 +1867,15 @@ class QualityGateRegistry:
             success_rate = (
                 success_count / len(generation_entries)
                 if generation_entries
-                else 1.0
+                else 0.0
             )
 
             issues = []
             if total_objects < min_objects:
                 issues.append(f"Variation asset count {total_objects} below minimum {min_objects}")
-            if generation_entries and success_rate < min_success_rate:
+            if total_objects > 0 and not generation_entries:
+                issues.append("No generated_3d entries found in variation assets")
+            elif success_rate < min_success_rate:
                 issues.append(
                     f"3D success rate {success_rate:.1%} below {min_success_rate:.1%}"
                 )

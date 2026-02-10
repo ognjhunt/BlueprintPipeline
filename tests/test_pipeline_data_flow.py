@@ -131,7 +131,7 @@ def test_pipeline_data_flow_entrypoints(
     # Install stub modules so blueprint_sim.assembly / usd-assembly-job can import
     if "pxr" not in sys.modules:
         pxr_stub = ModuleType("pxr")
-        for attr in ("Sdf", "Usd", "UsdGeom", "UsdPhysics", "UsdShade", "UsdUtils", "Gf", "Vt"):
+        for attr in ("Sdf", "Usd", "UsdGeom", "UsdLux", "UsdPhysics", "UsdShade", "UsdUtils", "Gf", "Vt"):
             setattr(pxr_stub, attr, SimpleNamespace())
         monkeypatch.setitem(sys.modules, "pxr", pxr_stub)
     if "pygltflib" not in sys.modules:

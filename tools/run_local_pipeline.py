@@ -1160,6 +1160,7 @@ class LocalPipelineRunner:
             "status": status,
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "scene_id": self.scene_id,
+            "run_id": self.run_id,
         }
         if payload:
             marker_payload.update(payload)
@@ -1169,21 +1170,98 @@ class LocalPipelineRunner:
             context="marker file",
         )
 
+    def _load_marker_payload(
+        self,
+        marker_path: Path,
+        marker_label: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not marker_path.is_file():
+            return None
+        try:
+            payload = _load_json(marker_path, marker_label)
+        except NonRetryableError as exc:
+            self.log(f"Ignoring unreadable {marker_label}: {exc}", "WARNING")
+            return None
+        if not isinstance(payload, dict):
+            self.log(
+                f"Ignoring malformed {marker_label}: expected JSON object at {marker_path}",
+                "WARNING",
+            )
+            return None
+        return payload
+
+    def _clear_stale_marker_if_mismatched(
+        self,
+        marker_path: Path,
+        marker_label: str,
+        *,
+        expected_job_id: Optional[str],
+        expected_run_id: Optional[str],
+    ) -> bool:
+        """Return True when marker matches expected job/run, else remove stale marker."""
+        if not marker_path.is_file():
+            return False
+        marker_payload = self._load_marker_payload(marker_path, marker_label)
+        if not marker_payload:
+            try:
+                marker_path.unlink(missing_ok=True)
+            except Exception as exc:
+                self.log(f"Failed to remove malformed marker {marker_path}: {exc}", "WARNING")
+            return False
+        marker_job_id = str(marker_payload.get("job_id") or "").strip()
+        marker_run_id = str(marker_payload.get("run_id") or "").strip()
+        if (
+            expected_job_id
+            and expected_run_id
+            and marker_job_id == expected_job_id
+            and marker_run_id == expected_run_id
+        ):
+            return True
+        self.log(
+            f"Ignoring stale {marker_label} at {marker_path} "
+            f"(expected job_id={expected_job_id!r}, run_id={expected_run_id!r}; "
+            f"found job_id={marker_job_id!r}, run_id={marker_run_id!r}).",
+            "WARNING",
+        )
+        try:
+            marker_path.unlink(missing_ok=True)
+        except Exception as exc:
+            self.log(f"Failed to remove stale marker {marker_path}: {exc}", "WARNING")
+        return False
+
+    def _resolve_geniesim_job_identity(self) -> Tuple[Optional[str], Optional[str]]:
+        """Return current Genie Sim (job_id, run_id) when job metadata is available."""
+        job_path = self.geniesim_dir / "job.json"
+        if not job_path.is_file():
+            return None, None
+        try:
+            payload = _load_json(job_path, "Genie Sim job payload")
+        except NonRetryableError as exc:
+            self.log(f"Failed to load Genie Sim job metadata: {exc}", "WARNING")
+            return None, None
+        if not isinstance(payload, dict):
+            self.log(
+                f"Failed to parse Genie Sim job metadata at {job_path}: expected JSON object.",
+                "WARNING",
+            )
+            return None, None
+        job_id = str(payload.get("job_id") or "").strip() or None
+        run_id = str(payload.get("run_id") or "").strip() or self.run_id
+        return job_id, run_id
+
     def _resolve_quality_gate_report_path(self) -> Path:
         report_dir = self.scene_dir / "quality_gates"
         report_dir.mkdir(parents=True, exist_ok=True)
         return report_dir / "quality_gate_report.json"
 
     def _should_skip_quality_gates(self) -> bool:
-        if not parse_bool_env(os.getenv("SKIP_QUALITY_GATES"), default=False):
+        skip_requested = parse_bool_env(os.getenv("SKIP_QUALITY_GATES"), default=False)
+        if not skip_requested:
             return False
-        if resolve_production_mode():
-            self.log(
-                "SKIP_QUALITY_GATES requested but production mode detected; "
-                "quality gates will still run.",
-                "WARNING",
+        if self._is_production_mode():
+            raise NonRetryableError(
+                "SKIP_QUALITY_GATES is not allowed in production mode."
             )
-            return False
         return True
 
     @staticmethod
@@ -1416,7 +1494,13 @@ class LocalPipelineRunner:
             }
         return None
 
-    def _apply_quality_gates(self, step: PipelineStep, result: StepResult) -> StepResult:
+    def _apply_quality_gates(
+        self,
+        step: PipelineStep,
+        result: StepResult,
+        *,
+        checkpointed: bool = False,
+    ) -> StepResult:
         try:
             gate_payload = self._quality_gate_context_for_step(step)
         except NonRetryableError as exc:
@@ -1428,19 +1512,42 @@ class LocalPipelineRunner:
 
         checkpoint = gate_payload["checkpoint"]
         context = gate_payload["context"]
+        self._quality_gates.register_required_checkpoint(checkpoint)
         outputs = result.outputs
         outputs["quality_gate_checkpoint"] = checkpoint.value
         outputs["quality_gate_report"] = str(self._quality_gate_report_path)
+        if checkpointed:
+            outputs["quality_gate_step_source"] = "checkpoint_resume"
 
-        if self._should_skip_quality_gates():
-            self.log(
-                f"SKIP_QUALITY_GATES enabled - skipping quality gates for {checkpoint.value}",
-                "WARNING",
-            )
+        try:
+            should_skip = self._should_skip_quality_gates()
+        except NonRetryableError as exc:
+            reason = str(exc)
+            self._quality_gates.register_skipped_checkpoint(checkpoint, reason)
             self._quality_gates.save_report(self.scene_id, self._quality_gate_report_path)
             report = self._quality_gates.to_report(self.scene_id)
             outputs["quality_gate_summary"] = report.get("summary", {})
             outputs["quality_gate_skipped"] = True
+            outputs["quality_gate_skip_reason"] = reason
+            result.success = False
+            result.message = reason
+            outputs["quality_gate_blocked"] = True
+            return result
+
+        if should_skip:
+            skip_reason = "SKIP_QUALITY_GATES environment override"
+            if checkpointed:
+                skip_reason += " on checkpoint-resumed step"
+            self.log(
+                f"SKIP_QUALITY_GATES enabled - skipping quality gates for {checkpoint.value}",
+                "WARNING",
+            )
+            self._quality_gates.register_skipped_checkpoint(checkpoint, skip_reason)
+            self._quality_gates.save_report(self.scene_id, self._quality_gate_report_path)
+            report = self._quality_gates.to_report(self.scene_id)
+            outputs["quality_gate_summary"] = report.get("summary", {})
+            outputs["quality_gate_skipped"] = True
+            outputs["quality_gate_skip_reason"] = skip_reason
             return result
 
         if isinstance(context, list):
@@ -1462,6 +1569,7 @@ class LocalPipelineRunner:
         self._quality_gates.save_report(self.scene_id, self._quality_gate_report_path)
         report = self._quality_gates.to_report(self.scene_id)
         outputs["quality_gate_summary"] = report.get("summary", {})
+        outputs["quality_gate_skipped"] = False
 
         blocked = any((not entry.passed and entry.severity == "error") for entry in gate_results)
         if blocked:
@@ -1493,6 +1601,18 @@ class LocalPipelineRunner:
         }
 
         if production_mode:
+            skip_quality_gates_requested = parse_bool_env(
+                os.getenv("SKIP_QUALITY_GATES"),
+                default=False,
+            )
+            report["checks"]["quality_gate_policy"] = {
+                "skip_requested": skip_quality_gates_requested,
+            }
+            if skip_quality_gates_requested:
+                report["errors"].append(
+                    "SKIP_QUALITY_GATES cannot be enabled in production mode."
+                )
+
             report["checks"]["checkpoint_hashes"] = {
                 "enabled": self.enable_checkpoint_hashes,
                 "env": os.getenv("BP_CHECKPOINT_HASHES"),
@@ -1781,13 +1901,23 @@ class LocalPipelineRunner:
             prior_steps = steps[:resume_index]
             for step in prior_steps:
                 expected_outputs = self._expected_output_paths(step)
-                if checkpoint_store.should_skip_step(
+                step_has_checkpoint = checkpoint_store.should_skip_step(
                     step.value,
                     expected_outputs=expected_outputs,
                     require_nonempty=True,
                     require_fresh_outputs=True,
                     validate_sidecar_metadata=True,
-                ):
+                )
+                if step == PipelineStep.GENIESIM_IMPORT and step_has_checkpoint:
+                    expected_job_id, expected_run_id = self._resolve_geniesim_job_identity()
+                    marker_ok = self._clear_stale_marker_if_mismatched(
+                        self.geniesim_dir / ".geniesim_import_complete",
+                        "Genie Sim import completion marker",
+                        expected_job_id=expected_job_id,
+                        expected_run_id=expected_run_id,
+                    )
+                    step_has_checkpoint = marker_ok
+                if step_has_checkpoint:
                     continue
                 self.log(
                     (
@@ -1901,27 +2031,60 @@ class LocalPipelineRunner:
                 expected_outputs = self._expected_output_paths(step)
                 if step in forced_steps:
                     self.log(f"Force rerun requested for step {step.value}; skipping checkpoint.", "INFO")
-                elif checkpoint_store.should_skip_step(
-                    step.value,
-                    expected_outputs=expected_outputs,
-                    require_nonempty=True,
-                    require_fresh_outputs=True,
-                    validate_sidecar_metadata=True,
-                ):
-                    checkpoint = checkpoint_store.load_checkpoint(step.value)
-                    self.log(f"Skipping step {step.value} (checkpoint found)", "INFO")
-                    self.results.append(
-                        StepResult(
+                else:
+                    should_skip_step = checkpoint_store.should_skip_step(
+                        step.value,
+                        expected_outputs=expected_outputs,
+                        require_nonempty=True,
+                        require_fresh_outputs=True,
+                        validate_sidecar_metadata=True,
+                    )
+                    if step == PipelineStep.GENIESIM_IMPORT and should_skip_step:
+                        expected_job_id, expected_run_id = self._resolve_geniesim_job_identity()
+                        marker_path = self.geniesim_dir / ".geniesim_import_complete"
+                        marker_ok = self._clear_stale_marker_if_mismatched(
+                            marker_path,
+                            "Genie Sim import completion marker",
+                            expected_job_id=expected_job_id,
+                            expected_run_id=expected_run_id,
+                        )
+                        if not marker_ok:
+                            should_skip_step = False
+                            self.log(
+                                "Ignoring checkpoint resume for genie-sim-import because "
+                                "completion marker did not match current job/run.",
+                                "WARNING",
+                            )
+                    if should_skip_step:
+                        checkpoint = checkpoint_store.load_checkpoint(step.value)
+                        self.log(f"Skipping step {step.value} (checkpoint found)", "INFO")
+                        checkpoint_outputs = dict(checkpoint.outputs) if checkpoint else {}
+                        checkpoint_result = StepResult(
                             step=step,
                             success=True,
                             duration_seconds=0,
                             message="Skipped (checkpointed)",
-                            outputs=checkpoint.outputs if checkpoint else {},
+                            outputs=checkpoint_outputs,
                         )
-                    )
-                    # Checkpointed step counts as success for circuit breaker
-                    self._step_circuit_breaker.record_success()
-                    return True
+                        checkpoint_result = self._apply_quality_gates(
+                            step,
+                            checkpoint_result,
+                            checkpointed=True,
+                        )
+                        self.results.append(checkpoint_result)
+                        if not checkpoint_result.success:
+                            all_success = False
+                            self.log(f"Step {step.value} failed: {checkpoint_result.message}", "ERROR")
+                            self._step_circuit_breaker.record_failure(
+                                Exception(checkpoint_result.message or "Quality gate failed")
+                            )
+                            if self.fail_fast:
+                                self.log("Fail-fast enabled; stopping pipeline.", "ERROR")
+                                return False
+                        else:
+                            # Checkpointed step counts as success for circuit breaker
+                            self._step_circuit_breaker.record_success()
+                        return True
 
             started_at = datetime.utcnow().isoformat() + "Z"
             result = self._run_step(step)
@@ -4586,6 +4749,7 @@ class LocalPipelineRunner:
                     status="submitted",
                     payload={
                         "job_id": prior_job_payload.get("job_id"),
+                        "run_id": str(prior_job_payload.get("run_id") or self.run_id),
                         "job_status": prior_status,
                     },
                 )
@@ -5273,6 +5437,7 @@ class LocalPipelineRunner:
                 status="submitted",
                 payload={
                     "job_id": job_id,
+                    "run_id": self.run_id,
                     "job_status": job_status,
                 },
             )
@@ -5432,6 +5597,7 @@ class LocalPipelineRunner:
                 message=str(exc),
                 outputs={
                     "job_id": job_id,
+                    "run_id": str(job_payload.get("run_id") or self.run_id),
                     "job_status": job_status,
                     "local_execution_success": bool(local_success),
                     "output_dir": str(output_dir),
@@ -5480,7 +5646,20 @@ class LocalPipelineRunner:
         marker_path = None
         if result.success:
             marker_path = self.geniesim_dir / ".geniesim_import_complete"
-            self._write_marker(marker_path, status="completed")
+            import_manifest_path = (
+                str(result.import_manifest_path)
+                if result.import_manifest_path
+                else None
+            )
+            self._write_marker(
+                marker_path,
+                status="completed",
+                payload={
+                    "job_id": job_id,
+                    "run_id": str(job_payload.get("run_id") or self.run_id),
+                    "import_manifest": import_manifest_path,
+                },
+            )
         duration_seconds = time.time() - start_time
         local_execution = job_payload.get("local_execution", {})
         local_execution["import_duration_seconds"] = duration_seconds
@@ -5498,6 +5677,7 @@ class LocalPipelineRunner:
             message="Genie Sim import completed" if result.success else "Genie Sim import failed",
             outputs={
                 "job_id": job_id,
+                "run_id": str(job_payload.get("run_id") or self.run_id),
                 "import_manifest": str(result.import_manifest_path) if result.import_manifest_path else None,
                 "output_dir": str(output_dir),
                 "recordings_path": str(recordings_dir),
@@ -5668,18 +5848,6 @@ class LocalPipelineRunner:
         marker_path = self.geniesim_dir / ".geniesim_import_triggered"
         completion_marker = self.geniesim_dir / ".geniesim_import_complete"
         submission_marker = self.geniesim_dir / ".geniesim_submitted"
-        if completion_marker.is_file():
-            self.log(
-                f"Genie Sim import already completed (marker: {completion_marker}).",
-                "INFO",
-            )
-            return True
-        if marker_path.is_file():
-            self.log(
-                f"Genie Sim import already triggered (marker: {marker_path}).",
-                "INFO",
-            )
-            return True
         if submission_marker.is_file():
             try:
                 submission_payload = _load_json(
@@ -5726,6 +5894,29 @@ class LocalPipelineRunner:
                 "ERROR",
             )
             return False
+        run_id = str(job_payload.get("run_id") or self.run_id)
+        if self._clear_stale_marker_if_mismatched(
+            completion_marker,
+            "Genie Sim import completion marker",
+            expected_job_id=job_id,
+            expected_run_id=run_id,
+        ):
+            self.log(
+                f"Genie Sim import already completed (marker: {completion_marker}).",
+                "INFO",
+            )
+            return True
+        if self._clear_stale_marker_if_mismatched(
+            marker_path,
+            "Genie Sim import trigger marker",
+            expected_job_id=job_id,
+            expected_run_id=run_id,
+        ):
+            self.log(
+                f"Genie Sim import already triggered (marker: {marker_path}).",
+                "INFO",
+            )
+            return True
         try:
             _, job_status = self._poll_geniesim_job_status(
                 job_path,
@@ -5741,13 +5932,22 @@ class LocalPipelineRunner:
                 "ERROR",
             )
             return False
-        if completion_marker.is_file():
+        if self._clear_stale_marker_if_mismatched(
+            completion_marker,
+            "Genie Sim import completion marker",
+            expected_job_id=job_id,
+            expected_run_id=run_id,
+        ):
             self.log(
                 f"Genie Sim import already completed (marker: {completion_marker}).",
                 "INFO",
             )
             return True
-        self._write_marker(marker_path, status="triggered")
+        self._write_marker(
+            marker_path,
+            status="triggered",
+            payload={"job_id": job_id, "run_id": run_id},
+        )
         result = self._run_geniesim_import()
         return bool(result.success)
 

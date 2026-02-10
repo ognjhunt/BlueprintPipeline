@@ -51,7 +51,9 @@ Environment Variables:
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -186,11 +188,10 @@ from tools.firebase_upload.uploader import (
 )
 from tools.error_handling.job_wrapper import run_job_with_dead_letter_queue
 from tools.tracing import init_tracing
-from tools.gcs_upload import (
-    calculate_file_md5_base64,
-    upload_blob_from_filename,
-    verify_blob_upload,
-)
+try:
+    import tools.gcs_upload as _gcs_upload  # type: ignore
+except Exception:
+    _gcs_upload = None
 from tools.dataset_catalog import DatasetCatalogClient, build_dataset_document
 from tools.cost_tracking import get_cost_tracker
 from tools.validation.entrypoint_checks import validate_required_env_vars
@@ -203,6 +204,56 @@ from tools.quality.quality_config import (
     resolve_quality_settings,
 )
 from tools.training import DataStreamConfig, DataStreamProtocol, RealtimeFeedbackLoop
+
+
+def _fallback_calculate_file_md5_base64(filename: Path | str) -> str:
+    digest = hashlib.md5()
+    with Path(filename).open("rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return base64.b64encode(digest.digest()).decode("utf-8")
+
+
+def calculate_file_md5_base64(filename: Path | str) -> str:
+    if _gcs_upload is not None:
+        fn = getattr(_gcs_upload, "calculate_file_md5_base64", None)
+        if callable(fn):
+            return fn(filename)
+        fn = getattr(_gcs_upload, "calculate_md5_base64", None)
+        if callable(fn):
+            return fn(Path(filename).read_bytes())
+    return _fallback_calculate_file_md5_base64(filename)
+
+
+def verify_blob_upload(*args, **kwargs) -> tuple[bool, Optional[str]]:
+    if _gcs_upload is not None:
+        fn = getattr(_gcs_upload, "verify_blob_upload", None)
+        if callable(fn):
+            result = fn(*args, **kwargs)
+            if isinstance(result, tuple):
+                if len(result) >= 2:
+                    return bool(result[0]), None if result[1] is None else str(result[1])
+                if len(result) == 1:
+                    return bool(result[0]), None
+            return bool(result), None
+    return False, "verify_blob_upload unavailable"
+
+
+def upload_blob_from_filename(*args, **kwargs):
+    if _gcs_upload is not None:
+        fn = getattr(_gcs_upload, "upload_blob_from_filename", None)
+        if callable(fn):
+            return fn(*args, **kwargs)
+    return type(
+        "UploadResult",
+        (),
+        {
+            "success": False,
+            "gcs_uri": str(kwargs.get("gcs_uri", "")),
+            "error": "upload_blob_from_filename unavailable",
+            "attempts": 0,
+        },
+    )()
 
 # Import quality validation
 try:
@@ -226,6 +277,7 @@ JOB_NAME = "genie-sim-import-job"
 logger = logging.getLogger(__name__)
 DEFAULT_VIDEO_CAMERA_ID = "camera"
 VIDEO_CHUNK_SIZE = 1000
+ARTIFACT_CONTRACT_VERSION = "1.0"
 
 
 class DeliveryMarkerExistsError(RuntimeError):
@@ -2835,14 +2887,89 @@ def _upload_output_dir(
     }
 
 
+def _resolve_recording_format(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return "json"
+    if suffix == ".parquet":
+        return "parquet"
+    return "unknown"
+
+
+def _serialize_frame_rows(payload: Dict[str, Any]) -> Dict[str, List[Any]]:
+    frames = payload.get("frames", [])
+    rows: Dict[str, List[Any]] = {
+        "timestamp": [],
+        "observation": [],
+        "action": [],
+        "reward": [],
+        "robot_state": [],
+    }
+    for idx, frame in enumerate(frames):
+        if not isinstance(frame, dict):
+            continue
+        observation = frame.get("observation")
+        if not isinstance(observation, dict):
+            observation = {}
+        action = frame.get("action")
+        if action is None:
+            action = frame.get("joint_positions")
+        if action is None:
+            action = observation.get("joint_positions", [])
+        robot_state = frame.get("robot_state")
+        if not isinstance(robot_state, dict):
+            robot_state = observation.get("robot_state", {}) if isinstance(
+                observation.get("robot_state"), dict
+            ) else {}
+        timestamp = frame.get("timestamp", idx / 30.0)
+        if not isinstance(timestamp, (int, float)):
+            timestamp = idx / 30.0
+        rows["timestamp"].append(float(timestamp))
+        rows["observation"].append(observation)
+        rows["action"].append(action if action is not None else [])
+        rows["reward"].append(frame.get("reward", 0.0))
+        rows["robot_state"].append(robot_state)
+    return rows
+
+
+def _write_parquet_recording_from_json(
+    *,
+    json_path: Path,
+    parquet_path: Path,
+) -> bool:
+    if parquet_path.exists():
+        return True
+    if importlib.util.find_spec("pyarrow") is None:
+        return False
+    try:
+        with open(json_path, "r") as handle:
+            payload = json.load(handle)
+        rows = _serialize_frame_rows(payload)
+        if not rows["timestamp"]:
+            return False
+        pa = importlib.import_module("pyarrow")
+        pq = importlib.import_module("pyarrow.parquet")
+        table = pa.Table.from_pydict(rows)
+        pq.write_table(table, parquet_path)
+        return True
+    except Exception:
+        return False
+
+
 def _collect_local_episode_metadata(
     recordings_dir: Path,
 ) -> Dict[str, Any]:
     episode_metadata_list: List[GeneratedEpisodeMetadata] = []
     parse_failures: List[Dict[str, str]] = []
     total_files = 0
-    for episode_file in sorted(recordings_dir.rglob("*.json")):
-        total_files += 1
+    seen_episode_ids: set[str] = set()
+    recording_format_counts: Dict[str, int] = {"json": 0, "parquet": 0, "unknown": 0}
+
+    json_files = sorted(recordings_dir.rglob("*.json"))
+    parquet_files = sorted(recordings_dir.rglob("*.parquet"))
+    total_files = len(json_files) + len(parquet_files)
+
+    for episode_file in json_files:
         try:
             with open(episode_file, "r") as handle:
                 payload = json.load(handle)
@@ -2850,14 +2977,28 @@ def _collect_local_episode_metadata(
             frame_count = payload.get("frame_count", len(frames))
             duration_seconds = 0.0
             if frames:
-                last_timestamp = frames[-1].get("timestamp")
+                last_frame = frames[-1] if isinstance(frames[-1], dict) else {}
+                last_timestamp = last_frame.get("timestamp")
                 if isinstance(last_timestamp, (int, float)):
                     duration_seconds = float(last_timestamp)
                 else:
-                    duration_seconds = max(0.0, frame_count / 30.0)
+                    duration_seconds = max(0.0, float(frame_count) / 30.0)
+            episode_id = str(payload.get("episode_id", episode_file.stem))
+            if not episode_id:
+                episode_id = episode_file.stem
+
+            parquet_path = recordings_dir / f"{episode_id}.parquet"
+            converted = _write_parquet_recording_from_json(
+                json_path=episode_file,
+                parquet_path=parquet_path,
+            )
+            resolved_path = parquet_path if converted else episode_file
+            resolved_format = "parquet" if converted else "json"
+            recording_format_counts["json"] = recording_format_counts.get("json", 0) + 1
+
             episode_metadata_list.append(
                 GeneratedEpisodeMetadata(
-                    episode_id=payload.get("episode_id", episode_file.stem),
+                    episode_id=episode_id,
                     task_name=payload.get("task_name", "unknown"),
                     quality_score=float(payload.get("quality_score", 0.0)),
                     quality_components=_extract_quality_components(payload),
@@ -2865,8 +3006,13 @@ def _collect_local_episode_metadata(
                     duration_seconds=duration_seconds,
                     validation_passed=bool(payload.get("validation_passed", True)),
                     file_size_bytes=episode_file.stat().st_size,
+                    recording_path=resolved_path.as_posix(),
+                    recording_format=resolved_format,
+                    source_recording_path=episode_file.as_posix(),
+                    source_recording_format="json",
                 )
             )
+            seen_episode_ids.add(episode_id)
         except Exception as exc:
             error_message = f"{type(exc).__name__}: {exc}"
             parse_failures.append(
@@ -2876,11 +3022,65 @@ def _collect_local_episode_metadata(
                 }
             )
             print(f"[IMPORT] ⚠️  Failed to parse local episode {episode_file}: {exc}")
+
+    for episode_file in parquet_files:
+        episode_id = episode_file.stem
+        if episode_id in seen_episode_ids:
+            recording_format_counts["parquet"] = recording_format_counts.get("parquet", 0) + 1
+            continue
+        frame_count = 0
+        duration_seconds = 0.0
+        quality_score = 0.0
+        validation_passed = True
+        task_name = "unknown"
+        sidecar_json = recordings_dir / f"{episode_id}.json"
+        if sidecar_json.exists():
+            try:
+                with open(sidecar_json, "r") as handle:
+                    sidecar_payload = json.load(handle)
+                quality_score = float(sidecar_payload.get("quality_score", 0.0))
+                validation_passed = bool(sidecar_payload.get("validation_passed", True))
+                task_name = str(sidecar_payload.get("task_name", "unknown"))
+            except Exception:
+                pass
+        if importlib.util.find_spec("pyarrow.parquet") is not None:
+            try:
+                pq = importlib.import_module("pyarrow.parquet")
+                pf = pq.ParquetFile(episode_file)
+                frame_count = int(pf.metadata.num_rows)
+                duration_seconds = max(0.0, frame_count / 30.0)
+            except Exception:
+                frame_count = 0
+                duration_seconds = 0.0
+
+        recording_format_counts["parquet"] = recording_format_counts.get("parquet", 0) + 1
+        episode_metadata_list.append(
+            GeneratedEpisodeMetadata(
+                episode_id=episode_id,
+                task_name=task_name,
+                quality_score=quality_score,
+                quality_components={},
+                frame_count=frame_count,
+                duration_seconds=duration_seconds,
+                validation_passed=validation_passed,
+                file_size_bytes=episode_file.stat().st_size,
+                recording_path=episode_file.as_posix(),
+                recording_format="parquet",
+                source_recording_path=episode_file.as_posix(),
+                source_recording_format="parquet",
+            )
+        )
+        seen_episode_ids.add(episode_id)
+
+    if recording_format_counts.get("json", 0) == 0 and recording_format_counts.get("parquet", 0) == 0:
+        recording_format_counts["unknown"] = len(parse_failures)
+
     return {
         "episodes": episode_metadata_list,
         "parse_failures": parse_failures,
         "parse_failure_count": len(parse_failures),
         "total_files": total_files,
+        "recording_format_counts": recording_format_counts,
     }
 
 
@@ -3014,6 +3214,7 @@ class ImportResult:
     total_episodes_downloaded: int = 0
     episodes_passed_validation: int = 0
     episodes_filtered: int = 0
+    recording_format_counts: Dict[str, int] = field(default_factory=dict)
     episodes_parse_failed: int = 0
     episode_parse_failures: List[Dict[str, str]] = field(default_factory=list)
     episode_content_hashes: Dict[str, str] = field(default_factory=dict)
@@ -3119,26 +3320,63 @@ class ImportedEpisodeValidator:
         elif actual_size < 1024:  # Less than 1KB
             warnings.append(f"Episode file is suspiciously small: {actual_size} bytes")
 
-        # Load and validate episode data structure
-        try:
-            parquet_results = _stream_parquet_validation(
-                episode_file,
-                require_parquet_validation=self.require_parquet_validation,
-                episode_index=episode_index,
-            )
-            parquet_errors = parquet_results["errors"]
-            errors.extend(parquet_errors)
-            warnings.extend(parquet_results["warnings"])
-        except RuntimeError as exc:
-            error_message = str(exc)
-            errors.append(error_message)
-            if (
-                self.require_parquet_validation
-                and "pyarrow" in error_message.lower()
-            ):
-                parquet_validation_error = error_message
-        except Exception as e:
-            warnings.append(f"Failed to load episode data for validation: {e}")
+        recording_format = str(
+            getattr(episode_metadata, "recording_format", "")
+            or _resolve_recording_format(episode_file)
+        ).lower()
+        if recording_format == "json" or episode_file.suffix.lower() == ".json":
+            try:
+                payload = _load_json_file(episode_file)
+                frames = payload.get("frames", []) if isinstance(payload, dict) else []
+                if not isinstance(frames, list) or not frames:
+                    errors.append("JSON episode recording has no frames")
+                else:
+                    timestamps: List[float] = []
+                    for idx, frame in enumerate(frames):
+                        if not isinstance(frame, dict):
+                            warnings.append(f"Frame {idx} is not a JSON object")
+                            continue
+                        ts = frame.get("timestamp")
+                        if isinstance(ts, (int, float)):
+                            timestamps.append(float(ts))
+                    if timestamps and any(
+                        timestamps[i] < timestamps[i - 1]
+                        for i in range(1, len(timestamps))
+                    ):
+                        errors.append("Timestamps in JSON episode are not monotonic")
+                    if not any(
+                        isinstance(frame, dict) and isinstance(frame.get("observation"), dict)
+                        for frame in frames
+                    ):
+                        warnings.append("JSON episode missing observation payloads")
+                    if not any(
+                        isinstance(frame, dict) and frame.get("action") is not None
+                        for frame in frames
+                    ):
+                        warnings.append("JSON episode missing action payloads")
+            except Exception as e:
+                errors.append(f"Failed to load JSON episode data: {e}")
+        else:
+            # Load and validate episode Parquet structure
+            try:
+                parquet_results = _stream_parquet_validation(
+                    episode_file,
+                    require_parquet_validation=self.require_parquet_validation,
+                    episode_index=episode_index,
+                )
+                parquet_errors = parquet_results["errors"]
+                errors.extend(parquet_errors)
+                warnings.extend(parquet_results["warnings"])
+            except RuntimeError as exc:
+                error_message = str(exc)
+                errors.append(error_message)
+                if (
+                    self.require_parquet_validation
+                    and "pyarrow" in error_message.lower()
+                ):
+                    parquet_validation_error = error_message
+            except Exception as e:
+                warnings.append(f"Failed to load episode data for validation: {e}")
 
         # Check quality score
         quality_score = episode_metadata.quality_score
@@ -3214,7 +3452,11 @@ class ImportedEpisodeValidator:
         component_failed_count = 0
 
         for episode_index, episode in enumerate(episodes):
-            episode_file = episode_dir / f"{episode.episode_id}.parquet"
+            episode_file = (
+                Path(episode.recording_path)
+                if getattr(episode, "recording_path", None)
+                else episode_dir / f"{episode.episode_id}.parquet"
+            )
             result = self.validate_episode(
                 episode,
                 episode_file,
@@ -3629,7 +3871,11 @@ def convert_to_lerobot(
                 skipped_count += 1
                 continue
 
-            episode_file = episodes_dir / f"{ep_metadata.episode_id}.parquet"
+            episode_file = (
+                Path(ep_metadata.recording_path)
+                if getattr(ep_metadata, "recording_path", None)
+                else episodes_dir / f"{ep_metadata.episode_id}.parquet"
+            )
             if not episode_file.exists():
                 skipped_count += 1
                 conversion_failures.append(
@@ -3641,7 +3887,21 @@ def convert_to_lerobot(
                 continue
 
             episode_output = output_dir / f"episode_{converted_count:06d}.parquet"
-            shutil.copyfile(episode_file, episode_output)
+            if episode_file.suffix.lower() == ".json":
+                if not _write_parquet_recording_from_json(
+                    json_path=episode_file,
+                    parquet_path=episode_output,
+                ):
+                    skipped_count += 1
+                    conversion_failures.append(
+                        {
+                            "episode_id": ep_metadata.episode_id,
+                            "error": "Failed to convert JSON recording to Parquet",
+                        }
+                    )
+                    continue
+            else:
+                shutil.copyfile(episode_file, episode_output)
 
             dataset_info["episodes"].append({
                 "episode_id": ep_metadata.episode_id,
@@ -3703,6 +3963,10 @@ def convert_to_lerobot(
     except ImportError:
         raise ImportError("PyArrow is required for LeRobot conversion: pip install pyarrow")
 
+    if importlib.util.find_spec("pandas") is None:
+        raise ImportError("Pandas is required for LeRobot conversion: pip install pandas")
+    pd = importlib.import_module("pandas")
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Track conversion statistics
@@ -3750,7 +4014,11 @@ def convert_to_lerobot(
             skipped_count += 1
             continue
 
-        episode_file = episodes_dir / f"{ep_metadata.episode_id}.parquet"
+        episode_file = (
+            Path(ep_metadata.recording_path)
+            if getattr(ep_metadata, "recording_path", None)
+            else episodes_dir / f"{ep_metadata.episode_id}.parquet"
+        )
         if not episode_file.exists():
             skipped_count += 1
             conversion_failures.append(
@@ -3768,8 +4036,39 @@ def convert_to_lerobot(
         while retry_ctx.should_continue():
             try:
                 # Read Genie Sim episode
-                table = pq.read_table(episode_file)
-                df = table.to_pandas()
+                if episode_file.suffix.lower() == ".json":
+                    payload = _load_json_file(episode_file)
+                    frames = payload.get("frames", []) if isinstance(payload, dict) else []
+                    rows = []
+                    for idx, frame in enumerate(frames):
+                        if not isinstance(frame, dict):
+                            continue
+                        observation = frame.get("observation")
+                        if not isinstance(observation, dict):
+                            observation = {}
+                        action = frame.get("action")
+                        if action is None:
+                            action = frame.get("joint_positions")
+                        if action is None:
+                            action = observation.get("joint_positions", [])
+                        row = {
+                            "timestamp": frame.get("timestamp", idx / 30.0),
+                            "rgb_image": observation.get("rgb_image", observation.get("image")),
+                            "image": observation.get("image"),
+                            "depth_image": observation.get("depth_image"),
+                            "robot_state": frame.get("robot_state", observation.get("robot_state", {})),
+                            "action": action,
+                            "reward": frame.get("reward", 0.0),
+                        }
+                        rows.append(row)
+                    if not rows:
+                        raise IOError(
+                            f"JSON episode contains no frame rows: {episode_file}"
+                        )
+                    df = pd.DataFrame(rows)
+                else:
+                    table = pq.read_table(episode_file)
+                    df = table.to_pandas()
                 rgb_column = None
                 if "rgb_image" in df.columns:
                     rgb_column = "rgb_image"
@@ -4127,6 +4426,9 @@ def run_local_import_job(
     episode_metadata_list = episode_metadata_payload["episodes"]
     parse_failure_count = episode_metadata_payload["parse_failure_count"]
     parse_failures = episode_metadata_payload["parse_failures"]
+    result.recording_format_counts = dict(
+        episode_metadata_payload.get("recording_format_counts", {}) or {}
+    )
     if not episode_metadata_list:
         result.errors.append(f"No local episode files found under {recordings_dir}")
         return result
@@ -4285,12 +4587,20 @@ def run_local_import_job(
             # Build episode dicts from validated metadata + parquet files
             cosmos_episodes = []
             for ep_metadata in validated_episode_metadata_list:
-                episode_file = recordings_dir / f"{ep_metadata.episode_id}.parquet"
+                episode_file = (
+                    Path(ep_metadata.recording_path)
+                    if getattr(ep_metadata, "recording_path", None)
+                    else recordings_dir / f"{ep_metadata.episode_id}.parquet"
+                )
                 if not episode_file.exists():
                     continue
 
-                # Load frame data from parquet
-                frames = _load_episode_frames_for_cosmos(episode_file)
+                # Load frame data from source recording (JSON or Parquet)
+                if episode_file.suffix.lower() == ".json":
+                    payload = _load_json_file(episode_file)
+                    frames = payload.get("frames", []) if isinstance(payload, dict) else []
+                else:
+                    frames = _load_episode_frames_for_cosmos(episode_file)
                 if not frames:
                     continue
 
@@ -4751,10 +5061,42 @@ def run_local_import_job(
                 input_bundle_root,
             )
 
+    run_id = _resolve_run_id(config.job_id)
+    robot_types: List[str] = []
+    generation_params = (job_metadata or {}).get("generation_params")
+    if isinstance(generation_params, dict):
+        configured_robot_types = generation_params.get("robot_types")
+        if isinstance(configured_robot_types, list):
+            robot_types.extend(
+                rt.strip()
+                for rt in configured_robot_types
+                if isinstance(rt, str) and rt.strip()
+            )
+        configured_robot = generation_params.get("robot_type")
+        if isinstance(configured_robot, str) and configured_robot.strip():
+            robot_types.append(configured_robot.strip())
+    metadata_robot_type = (job_metadata or {}).get("robot_type")
+    if isinstance(metadata_robot_type, str) and metadata_robot_type.strip():
+        robot_types.append(metadata_robot_type.strip())
+    robot_types = list(dict.fromkeys(robot_types))
+    recording_counts = dict(result.recording_format_counts or {})
+    recordings_format = "unknown"
+    if recording_counts.get("json", 0) > 0 and recording_counts.get("parquet", 0) > 0:
+        recordings_format = "mixed"
+    elif recording_counts.get("json", 0) > 0:
+        recordings_format = "json"
+    elif recording_counts.get("parquet", 0) > 0:
+        recordings_format = "parquet"
+
     import_manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "schema_definition": MANIFEST_SCHEMA_DEFINITION,
         "generated_at": datetime.utcnow().isoformat() + "Z",
+        "scene_id": scene_id,
+        "run_id": run_id,
+        "robot_types": robot_types,
+        "recordings_format": recordings_format,
+        "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
         "job_id": config.job_id,
         "output_dir": output_dir_str,
         "gcs_output_path": gcs_output_path,
@@ -4776,6 +5118,7 @@ def run_local_import_job(
             "download_errors": 0,
             "parse_failed": result.episodes_parse_failed,
             "parse_failures": result.episode_parse_failures,
+            "recording_format_counts": recording_counts,
             "min_required": config.min_episodes_required,
         },
         "quality": {
@@ -5474,6 +5817,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                             "download_errors": 0,
                             "parse_failed": 0,
                             "parse_failures": [],
+                            "recording_format_counts": {"json": 0, "parquet": 0, "unknown": 0},
                             "min_required": min_episodes_required,
                         },
                         "quality": {
@@ -5597,6 +5941,9 @@ def main(input_params: Optional[Dict[str, Any]] = None):
                         "download_errors": 0,
                         "parse_failed": result.episodes_parse_failed,
                         "parse_failures": result.episode_parse_failures,
+                        "recording_format_counts": dict(
+                            result.recording_format_counts or {}
+                        ),
                         "min_required": min_episodes_required,
                     },
                     "quality": {

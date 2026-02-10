@@ -5,7 +5,19 @@ import sys
 from pathlib import Path
 
 
+def _reset_google_cloud_modules() -> None:
+    for module_name in list(sys.modules):
+        if (
+            module_name == "google"
+            or module_name.startswith("google.")
+            or module_name == "firebase_admin"
+            or module_name.startswith("firebase_admin.")
+        ):
+            sys.modules.pop(module_name, None)
+
+
 def test_download_recordings_fallback(monkeypatch, tmp_path, load_job_module):
+    _reset_google_cloud_modules()
     module = load_job_module("geniesim_import", "import_from_geniesim.py")
 
     class FakeBlob:

@@ -128,6 +128,18 @@ jobs:
             -n auto \
             || true
 
+      - name: Generate readiness evidence reports
+        if: matrix.python-version == '3.10'
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python tools/quality_gates/release_matrix_summary.py \
+            --output analysis_outputs/release_matrix_summary.json
+          python tools/quality_gates/canary_stability_gate.py \
+            --output analysis_outputs/canary_stability_gate.json
+          python tools/quality_gates/readiness_scorecard.py \
+            --output analysis_outputs/readiness_scorecard.json
+
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.10'
         uses: codecov/codecov-action@v4
@@ -147,6 +159,9 @@ jobs:
             junit*.xml
             coverage.xml
             htmlcov/
+            analysis_outputs/readiness_scorecard.json
+            analysis_outputs/release_matrix_summary.json
+            analysis_outputs/canary_stability_gate.json
           if-no-files-found: warn
 
       - name: Publish test results

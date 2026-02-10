@@ -99,6 +99,17 @@ def apply():
                                 _ang_attr = _rb_api.GetAngularVelocityAttr()
                                 if _ang_attr:
                                     _ang_attr.Set(Gf.Vec3f(0, 0, 0))
+                            # Physics settle: run 3 sim steps to let collision mesh stabilize
+                            # before grasp force is applied. Prevents initial-frame interpenetration.
+                            try:
+                                import omni.kit.app
+                                _app = omni.kit.app.get_app()
+                                if _app:
+                                    for _settle_i in range(3):
+                                        _app.update()
+                                    print(f"[TOGGLE] {{_prim_path}} settled (3 physics steps)")
+                            except Exception as _settle_err:
+                                print(f"[TOGGLE] WARNING: physics settle failed: {{_settle_err}}")
                             print(f"[TOGGLE] {{_prim_path}} -> {{'dynamic' if _is_dynamic else 'kinematic'}}")
                     except Exception as _e:
                         print(f"[TOGGLE] ERROR for {{_prim_path}}: {{_e}}")

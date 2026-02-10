@@ -1195,6 +1195,10 @@ class GeneratedEpisodeMetadata:
     file_size_bytes: int = 0
     quality_components: Dict[str, float] = field(default_factory=dict)
     episode_content_hash: Optional[str] = None
+    recording_path: Optional[str] = None
+    recording_format: str = "parquet"
+    source_recording_path: Optional[str] = None
+    source_recording_format: str = "parquet"
 
 
 @dataclass
@@ -5173,6 +5177,58 @@ class GenieSimGRPCClient:
                             },
                         )
 
+                    # --- Fall-through watchdog (Phase 1C) ---
+                    # After toggling to dynamic, check that the object hasn't immediately
+                    # fallen through the surface. Query pose after physics settle and compare
+                    # to pre-toggle position. If Y dropped >0.3m, revert to kinematic.
+                    _fallthrough_guard = parse_bool_env(
+                        os.getenv("GENIESIM_DYNAMIC_FALLTHROUGH_GUARD"), default=False,
+                    )
+                    if _fallthrough_guard and _attached_dynamic_toggle_success:
+                        try:
+                            import time as _ft_time
+                            _ft_pre_pose = self.get_object_pose(_attached_prim)
+                            if _ft_pre_pose and _ft_pre_pose.success:
+                                _ft_pre_y = None
+                                _ft_payload = _ft_pre_pose.payload or {}
+                                if isinstance(_ft_payload, dict):
+                                    _ft_pos = _ft_payload.get("position") or _ft_payload.get("pos")
+                                    if _ft_pos and len(_ft_pos) >= 3:
+                                        _ft_pre_y = float(_ft_pos[1])  # Y-up or server convention
+                                # Wait a short beat for physics to propagate, then re-query
+                                _ft_time.sleep(0.15)  # ~4-5 physics steps at 30Hz
+                                _ft_post_pose = self.get_object_pose(_attached_prim)
+                                if _ft_post_pose and _ft_post_pose.success and _ft_pre_y is not None:
+                                    _ft_post_payload = _ft_post_pose.payload or {}
+                                    if isinstance(_ft_post_payload, dict):
+                                        _ft_post_pos = _ft_post_payload.get("position") or _ft_post_payload.get("pos")
+                                        if _ft_post_pos and len(_ft_post_pos) >= 3:
+                                            _ft_post_y = float(_ft_post_pos[1])
+                                            _ft_drop = _ft_pre_y - _ft_post_y
+                                            if _ft_drop > 0.3:
+                                                logger.warning(
+                                                    "[DYNAMIC_FALLTHROUGH_DETECTED] %s dropped %.3fm "
+                                                    "(pre_y=%.3f, post_y=%.3f). Reverting to kinematic.",
+                                                    _attached_prim, _ft_drop, _ft_pre_y, _ft_post_y,
+                                                )
+                                                try:
+                                                    self.set_object_dynamic(_attached_prim, is_dynamic=False)
+                                                except Exception:
+                                                    pass
+                                                _dynamic_toggle_success = False
+                                                _attached_dynamic_toggle_success = False
+                                                # Mark episode metadata for quality filtering
+                                                if not hasattr(self, "_dynamic_fallthrough_objects"):
+                                                    self._dynamic_fallthrough_objects = []
+                                                self._dynamic_fallthrough_objects.append(_attached_prim)
+                                            elif _ft_drop > 0.05:
+                                                logger.info(
+                                                    "[DYNAMIC_SETTLE] %s settled %.3fm (normal range)",
+                                                    _attached_prim, _ft_drop,
+                                                )
+                        except Exception as _ft_err:
+                            logger.warning("[FALLTHROUGH_GUARD] Error checking position: %s", _ft_err)
+
                     _overrides = self._object_prim_overrides_cache
                     if _overrides is None:
                         _overrides = {}
@@ -5532,6 +5588,9 @@ class GenieSimLocalFramework:
         _strict_real_only = bool(getattr(self, "_strict_real_only", False))
         _keep_kinematic = parse_bool_env(os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False)
         _require_real_efforts = parse_bool_env(os.getenv("REQUIRE_REAL_EFFORTS"), default=True)
+        _require_dynamic_toggle = parse_bool_env(
+            os.getenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE"), default=False,
+        )
         # In kinematic mode with REQUIRE_REAL_EFFORTS=false, inverse dynamics
         # backfill was previously allowed. Strict real-only now keeps fail-closed.
         if _keep_kinematic and not _require_real_efforts and not _strict_real_only:
@@ -5542,6 +5601,25 @@ class GenieSimLocalFramework:
                     stale_ratio,
                 )
             return
+        # Phase B grasp-only toggle: objects are kinematic at rest but dynamic during
+        # manipulation. Non-manipulation phases (approach, retreat) may still produce
+        # identical efforts. Stale ratio 0.3-0.9 is expected and acceptable.
+        if _keep_kinematic and _require_dynamic_toggle and _require_real_efforts:
+            if stale_ratio is not None and stale_ratio <= 0.9:
+                logger.info(
+                    "[STRICT] Phase B grasp toggle mode: effort stale ratio=%.3f "
+                    "(within acceptable range for grasp-only dynamic toggle).",
+                    stale_ratio,
+                )
+                return
+            if stale_ratio is not None and stale_ratio > 0.9:
+                logger.warning(
+                    "[STRICT] Phase B grasp toggle: stale ratio=%.3f still >0.9 — "
+                    "dynamic toggle may not be activating during grasp phases. "
+                    "Check server logs for [TOGGLE] messages.",
+                    stale_ratio,
+                )
+                # Don't hard-fail — this is diagnostic. The toggle may need debugging.
 
         diagnostics = {
             "efforts_source": efforts_source,

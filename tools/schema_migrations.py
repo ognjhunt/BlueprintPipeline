@@ -3,10 +3,10 @@ from __future__ import annotations
 import copy
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 DATASET_INFO_SCHEMA_VERSION = "1.0.0"
-MANIFEST_SCHEMA_VERSION = "1.2"
+MANIFEST_SCHEMA_VERSION = "1.3"
 
 SUPPORTED_DATASET_INFO_VERSIONS = {DATASET_INFO_SCHEMA_VERSION}
 SUPPORTED_MANIFEST_VERSIONS = {MANIFEST_SCHEMA_VERSION}
@@ -120,7 +120,12 @@ def migrate_import_manifest_payload(payload: Mapping[str, Any]) -> MigrationResu
                 "notes": ["Migrated from 0.1.0; fields may be incomplete."],
             },
         )
-        applied_steps.append("migrate-import-manifest-0.1.0-to-1.2")
+        payload_copy.setdefault("run_id", payload_copy.get("job_id"))
+        payload_copy.setdefault("scene_id", "unknown")
+        payload_copy.setdefault("robot_types", [])
+        payload_copy.setdefault("recordings_format", "unknown")
+        payload_copy.setdefault("artifact_contract_version", "1.0")
+        applied_steps.append("migrate-import-manifest-0.1.0-to-1.3")
         return MigrationResult(
             payload=payload_copy,
             applied_steps=applied_steps,
@@ -128,4 +133,141 @@ def migrate_import_manifest_payload(payload: Mapping[str, Any]) -> MigrationResu
             target_version=MANIFEST_SCHEMA_VERSION,
         )
 
+    if version == "1.2":
+        payload_copy["schema_version"] = MANIFEST_SCHEMA_VERSION
+        payload_copy.setdefault(
+            "schema_definition",
+            {
+                "version": MANIFEST_SCHEMA_VERSION,
+                "description": "Migrated import manifest schema.",
+                "fields": {"schema_version": "Schema version string."},
+                "notes": ["Migrated from 1.2 to 1.3 with backfilled metadata fields."],
+            },
+        )
+        payload_copy["scene_id"] = _infer_manifest_scene_id(payload_copy)
+        payload_copy["run_id"] = str(
+            payload_copy.get("run_id")
+            or (payload_copy.get("job_metadata", {}) or {}).get("run_id")
+            or payload_copy.get("job_id")
+            or "unknown"
+        )
+        payload_copy["robot_types"] = _infer_manifest_robot_types(payload_copy)
+        payload_copy["recordings_format"] = _infer_recordings_format(payload_copy)
+        payload_copy["artifact_contract_version"] = str(
+            payload_copy.get("artifact_contract_version") or "1.0"
+        )
+        applied_steps.append("migrate-import-manifest-1.2-to-1.3")
+        return MigrationResult(
+            payload=payload_copy,
+            applied_steps=applied_steps,
+            original_version="1.2",
+            target_version=MANIFEST_SCHEMA_VERSION,
+        )
+
     raise SchemaMigrationError(f"unsupported import_manifest schema_version: {version}")
+
+
+def _infer_manifest_scene_id(payload: Mapping[str, Any]) -> str:
+    scene_id = payload.get("scene_id")
+    if isinstance(scene_id, str) and scene_id.strip():
+        return scene_id.strip()
+
+    provenance = payload.get("provenance")
+    if isinstance(provenance, Mapping):
+        prov_scene = provenance.get("scene_id")
+        if isinstance(prov_scene, str) and prov_scene.strip():
+            return prov_scene.strip()
+
+    job_metadata = payload.get("job_metadata")
+    if isinstance(job_metadata, Mapping):
+        meta_scene = job_metadata.get("scene_id")
+        if isinstance(meta_scene, str) and meta_scene.strip():
+            return meta_scene.strip()
+
+    env = (payload.get("provenance") or {}).get("config_snapshot", {}).get("env")
+    if isinstance(env, Mapping):
+        env_scene = env.get("SCENE_ID")
+        if isinstance(env_scene, str) and env_scene.strip():
+            return env_scene.strip()
+
+    output_dir = payload.get("output_dir")
+    if isinstance(output_dir, str):
+        segments = [seg for seg in output_dir.split("/") if seg]
+        for idx, segment in enumerate(segments):
+            if segment == "scenes" and idx + 1 < len(segments):
+                candidate = segments[idx + 1]
+                if candidate:
+                    return candidate
+
+    return "unknown"
+
+
+def _infer_manifest_robot_types(payload: Mapping[str, Any]) -> List[str]:
+    robots: List[str] = []
+    robot_entries = payload.get("robots")
+    if isinstance(robot_entries, list):
+        for entry in robot_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            robot_type = entry.get("robot_type")
+            if isinstance(robot_type, str) and robot_type.strip():
+                robots.append(robot_type.strip())
+
+    if not robots:
+        generation_params = (payload.get("job_metadata") or {}).get("generation_params")
+        if isinstance(generation_params, Mapping):
+            robot_types = generation_params.get("robot_types")
+            if isinstance(robot_types, list):
+                robots.extend(
+                    rt.strip()
+                    for rt in robot_types
+                    if isinstance(rt, str) and rt.strip()
+                )
+            robot_type = generation_params.get("robot_type")
+            if isinstance(robot_type, str) and robot_type.strip():
+                robots.append(robot_type.strip())
+
+    deduped: List[str] = []
+    for robot in robots:
+        if robot not in deduped:
+            deduped.append(robot)
+    return deduped
+
+
+def _infer_recordings_format(payload: Mapping[str, Any]) -> str:
+    recordings_format = payload.get("recordings_format")
+    if isinstance(recordings_format, str) and recordings_format.strip():
+        return recordings_format.strip()
+
+    episodes = payload.get("episodes")
+    if isinstance(episodes, Mapping):
+        if "recording_format_counts" in episodes:
+            counts = episodes.get("recording_format_counts")
+            if isinstance(counts, Mapping):
+                if "json" in counts and counts.get("json", 0):
+                    return "json"
+                if "parquet" in counts and counts.get("parquet", 0):
+                    return "parquet"
+
+    file_inventory = payload.get("file_inventory")
+    if isinstance(file_inventory, list):
+        saw_json = False
+        saw_parquet = False
+        for entry in file_inventory:
+            if not isinstance(entry, Mapping):
+                continue
+            path = entry.get("path")
+            if not isinstance(path, str):
+                continue
+            if path.endswith(".json"):
+                saw_json = True
+            if path.endswith(".parquet"):
+                saw_parquet = True
+        if saw_json and saw_parquet:
+            return "mixed"
+        if saw_json:
+            return "json"
+        if saw_parquet:
+            return "parquet"
+
+    return "unknown"

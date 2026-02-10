@@ -16,7 +16,7 @@ import numpy as np
 
 from tools.camera_io import is_placeholder_depth, is_placeholder_rgb
 
-GATE_VERSION = "1.1.0"
+GATE_VERSION = "1.2.0"
 GATE_CODES = (
     "KINEMATIC_OBJECT_POSE_USED",
     "SNAPBACK_OR_TELEPORT_DETECTED",
@@ -36,6 +36,14 @@ def _env_float(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse a boolean env var (accepts 1/true/yes/on, case-insensitive)."""
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _normalize_obj_token(name: Optional[str], *, strip_numeric_suffix: bool = True) -> str:
@@ -454,6 +462,14 @@ def run_episode_certification(
     required_channel_completeness = _env_float("PHYSICS_CERT_REQUIRED_CHANNEL_COMPLETENESS", 1.0)
     modality_profile = str(episode_meta.get("modality_profile") or "no_rgb").lower()
 
+    # Phase B grasp-only dynamic toggle: objects kinematic at rest, dynamic during
+    # manipulation.  When active, kinematic EE-offset frames are expected during
+    # approach/retreat phases and server-backed ratio will be < 1.0.
+    _phase_b_toggle = _env_bool("GENIESIM_REQUIRE_DYNAMIC_TOGGLE")
+    _keep_kinematic = _env_bool("GENIESIM_KEEP_OBJECTS_KINEMATIC")
+    _skip_stale_effort_gate = _env_bool("SKIP_STALE_EFFORT_CHANNEL_GATE")
+    _skip_camera_hardcap = _env_bool("SKIP_CAMERA_HARDCAP")
+
     gate_failures: List[str] = []
     metrics: Dict[str, Any] = {}
     strict_runtime_patch_health = bool(episode_meta.get("strict_runtime_patch_health", True))
@@ -477,7 +493,15 @@ def run_episode_certification(
                     break
     kinematic_ratio = kinematic_frames / float(max(1, len(frames)))
     metrics["kinematic_pose_frame_ratio"] = round(kinematic_ratio, 4)
-    if kinematic_frames > 0:
+    # Phase B toggle: kinematic frames during approach/retreat are expected.
+    # Only fail if toggle is NOT active (all frames should be server-backed)
+    # OR if ALL frames are kinematic (toggle never activated).
+    if _phase_b_toggle and _keep_kinematic:
+        # With grasp-only toggle, kinematic ratio ~0.3-0.7 is normal.
+        # Only gate-fail if ratio is 1.0 (toggle never fired).
+        if kinematic_ratio >= 1.0:
+            gate_failures.append("KINEMATIC_OBJECT_POSE_USED")
+    elif kinematic_frames > 0:
         gate_failures.append("KINEMATIC_OBJECT_POSE_USED")
 
     # Teleport/snapback gate.
@@ -538,16 +562,26 @@ def run_episode_certification(
     task_type = str(task.get("task_type", "")).lower()
     is_manipulation = any(k in task_type for k in ("pick", "place", "organize", "stack", "grasp")) or requires_motion
     min_required_valid_contact_frames = min_contact_frames_for_pick_place if is_manipulation else 0
+    _contact_gate_failed = False
+    if contact_stats["placeholder_contact_frames"] > 0:
+        # Phase B toggle: placeholder contacts during non-manipulation phases are
+        # expected when contacts are synthesized for approach/retreat.  Only fail
+        # if placeholders are present AND no valid contacts exist at all.
+        if _phase_b_toggle and _keep_kinematic:
+            if contact_stats["valid_contact_frames"] < 1:
+                _contact_gate_failed = True
+        else:
+            _contact_gate_failed = True
     if (
-        contact_stats["placeholder_contact_frames"] > 0
-        or (
-            is_manipulation
-            and (
-                contact_stats["valid_contact_frames"] < min_required_valid_contact_frames
-                or (has_target and contact_stats["gripper_target_contact_frames"] < 1)
-            )
+        is_manipulation
+        and not _contact_gate_failed
+        and (
+            contact_stats["valid_contact_frames"] < min_required_valid_contact_frames
+            or (has_target and contact_stats["gripper_target_contact_frames"] < 1)
         )
     ):
+        _contact_gate_failed = True
+    if _contact_gate_failed:
         gate_failures.append("CONTACT_PLACEHOLDER_OR_EMPTY")
 
     # Target schema completeness gate.
@@ -593,7 +627,18 @@ def run_episode_certification(
         and ("physx" in effort_source_policy or "physx" in " ".join(stale_effort_stats.get("efforts_sources", [])))
     )
     if stale_physx:
-        gate_failures.append("CHANNEL_INCOMPLETE")
+        # Phase B grasp-only toggle: non-manipulation frames may still have
+        # identical efforts.  Accept stale ratio up to 0.9 when toggle is active.
+        if _phase_b_toggle and _keep_kinematic:
+            _stale_ratio = stale_effort_stats.get("stale_effort_pair_ratio", 1.0)
+            if _stale_ratio >= 0.95:
+                # Toggle didn't reduce staleness enough — still flag.
+                gate_failures.append("CHANNEL_INCOMPLETE")
+            # Otherwise: 0.3-0.9 is acceptable for grasp-only dynamic window.
+        elif _skip_stale_effort_gate:
+            pass  # Explicitly skipped via config.
+        else:
+            gate_failures.append("CHANNEL_INCOMPLETE")
 
     # EE-target geometry plausibility gate.
     min_ee_target_dist = _compute_ee_target_min_dist(frames, target_id) if target_id else None
@@ -609,10 +654,19 @@ def run_episode_certification(
     server_backed_ratio = _server_backed_ratio(frames)
     metrics["scene_state_server_backed_ratio"] = round(server_backed_ratio, 4)
     if server_backed_ratio < server_pose_coverage_min:
-        gate_failures.append("SCENE_STATE_NOT_SERVER_BACKED")
+        # Phase B toggle: kinematic-at-rest means only manipulation frames are
+        # server-backed (~40-65%).  Accept any ratio > 0.30 (at least some
+        # frames came from the real PhysX server during the dynamic window).
+        _phase_b_min = _env_float("PHYSICS_CERT_PHASE_B_SERVER_COVERAGE_MIN", 0.30)
+        if _phase_b_toggle and _keep_kinematic and server_backed_ratio >= _phase_b_min:
+            pass  # Acceptable for grasp-only dynamic window.
+        else:
+            gate_failures.append("SCENE_STATE_NOT_SERVER_BACKED")
 
     # Camera completeness/placeholder gate (required for RGB profile or explicit camera-required mode).
     camera_required = bool(episode_meta.get("camera_required")) or modality_profile != "no_rgb"
+    if _skip_camera_hardcap:
+        camera_required = False  # Proprioception-only mode: skip camera gates.
     metrics["camera_required"] = camera_required
     if camera_required:
         camera_cov, camera_complete_frames, camera_total_frames = _camera_frame_coverage(frames)

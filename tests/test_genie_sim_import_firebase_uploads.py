@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+def _reset_google_cloud_modules() -> None:
+    for module_name in list(sys.modules):
+        if (
+            module_name == "google"
+            or module_name.startswith("google.")
+            or module_name == "firebase_admin"
+            or module_name.startswith("firebase_admin.")
+        ):
+            sys.modules.pop(module_name, None)
 
 
 def _build_payload(tmp_path: Path, robot_type: str) -> dict:
@@ -28,6 +40,7 @@ def _build_payload(tmp_path: Path, robot_type: str) -> dict:
 
 
 def test_firebase_upload_allows_partial_failures(monkeypatch, load_job_module, tmp_path):
+    _reset_google_cloud_modules()
     module = load_job_module("geniesim_import", "import_from_geniesim.py")
     monkeypatch.setattr(module, "_persist_episode_hash_index", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -75,6 +88,7 @@ def test_firebase_upload_allows_partial_failures(monkeypatch, load_job_module, t
 
 
 def test_firebase_upload_blocks_partial_failures(monkeypatch, load_job_module, tmp_path):
+    _reset_google_cloud_modules()
     module = load_job_module("geniesim_import", "import_from_geniesim.py")
     monkeypatch.setattr(module, "_persist_episode_hash_index", lambda *args, **kwargs: None)
     monkeypatch.setattr(

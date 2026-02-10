@@ -220,6 +220,87 @@ def test_physics_certification_requires_camera_when_flagged():
     assert "CAMERA_PLACEHOLDER_PRESENT" in report["critical_failures"]
 
 
+def test_physics_certification_flags_contact_placeholder_for_manipulation() -> None:
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], closed=True),
+        _frame(position=[0.11, 0.0, 0.2], closed=True),
+    ]
+    for frame in frames:
+        frame["collision_contacts"] = [
+            {
+                "body_a": "",
+                "body_b": "",
+                "force_N": 0.0,
+                "penetration_depth": 0.0,
+            }
+        ]
+    task = {"task_type": "pick_place", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is False
+    assert "CONTACT_PLACEHOLDER_OR_EMPTY" in report["critical_failures"]
+
+
+def test_physics_certification_flags_target_schema_incomplete_when_mass_missing() -> None:
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], effort_value=0.1),
+        _frame(position=[0.11, 0.0, 0.2], effort_value=0.2),
+    ]
+    for frame in frames:
+        pose = frame["object_poses"]["lightwheel_kitchen_obj_Toaster003"]
+        pose.pop("linear_velocity", None)
+
+    meta = _episode_meta()
+    meta["object_metadata"] = {"lightwheel_kitchen_obj_Toaster003": {}}
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, meta, task, mode="strict")
+
+    assert report["passed"] is False
+    assert "TARGET_SCHEMA_INCOMPLETE" in report["critical_failures"]
+
+
+def test_physics_certification_flags_channel_incomplete_on_missing_ee_velocity() -> None:
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], effort_value=0.1),
+        _frame(position=[0.11, 0.0, 0.2], effort_value=0.1),
+        _frame(position=[0.12, 0.0, 0.2], effort_value=0.1),
+    ]
+    for frame in frames:
+        frame.pop("ee_vel", None)
+        frame.pop("ee_acc", None)
+
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is False
+    assert "CHANNEL_INCOMPLETE" in report["critical_failures"]
+
+
+def test_physics_certification_flags_scene_state_not_server_backed() -> None:
+    frames = [
+        _frame(scene_provenance="synthetic_fallback", source="synthetic_fallback"),
+        _frame(scene_provenance="synthetic_fallback", source="synthetic_fallback"),
+    ]
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is False
+    assert "SCENE_STATE_NOT_SERVER_BACKED" in report["critical_failures"]
+
+
+def test_physics_certification_flags_snapback_or_teleport() -> None:
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2]),
+        _frame(position=[0.35, 0.0, 0.2]),
+        _frame(position=[0.1, 0.0, 0.2]),
+    ]
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is False
+    assert "SNAPBACK_OR_TELEPORT_DETECTED" in report["critical_failures"]
+
+
 def test_write_run_certification_report_outputs_json_and_jsonl(tmp_path: Path):
     reports = [
         {

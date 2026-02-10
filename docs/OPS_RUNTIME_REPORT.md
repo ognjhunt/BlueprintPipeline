@@ -2,47 +2,41 @@
 
 ## Objective
 
-Validate end-to-end pipeline runtime behavior for large, multi-robot scenes, capture per-stage runtime distributions/timeout usage from `bp_metric` logs, and tune workflow timeouts if stages regularly exceed 80–95% of configured limits.
+Validate end-to-end pipeline runtime behavior for production-like scenes, capture
+per-stage runtime distributions/timeout usage from `bp_metric` logs, and tune
+timeouts when stages consistently approach limits.
 
-## Environment Constraints
+## Inputs
 
-- This repo does not include production `bp_metric` log exports or scene catalogs with object counts/robot configuration metadata.
-- The current environment does not provide access to the production execution platform to run full pipeline workloads or to query Cloud Logging for `bp_metric` distributions.
+- Exported `bp_metric` JSONL logs containing at minimum:
+  - `job_invocation` events with stage/job + duration + configured timeout.
+  - `job_retry_exhausted` (or equivalent timeout exhaustion) events.
 
-## Scene Selection Criteria (Pending)
+## Generation Command
 
-Target scenes should satisfy **both** conditions:
+```bash
+python tools/quality_gates/runtime_slo_summary.py \
+  --inputs /path/to/bp_metric_export.jsonl \
+  --output analysis_outputs/runtime_slo_summary.json \
+  --update-ops-doc
+```
 
-- High object count (e.g., 150+ objects in `scene_manifest.json`).
-- Multi-robot configuration (two or more robots in simulation/episode configs).
+## Runtime Metrics Summary
 
-## Candidate Scene Inventory (Pending)
-
-A production scene inventory is required to select representative scenes. Capture these inputs before re-running the audit:
-
-- `scene_manifest.json` metadata with object counts.
-- Robot configuration per scene (episode/agent configs).
-
-## Pipeline Execution (Not Run)
-
-No production-like runs were executed in this environment. Once scene inventory is available, run each selected scene through the full pipeline and capture:
-
-- Per-stage runtime distributions from `bp_metric: job_invocation` logs (duration, timeout usage ratio).
-- Timeout usage ratios and retry exhaustion events from `bp_metric: job_retry_exhausted`.
-
-## Runtime Metrics Summary (Not Available)
-
-| Stage | Timeout (s) | P50 Duration (s) | P90 Duration (s) | P95 Duration (s) | P99 Duration (s) | P95 Timeout Usage | Notes |
+<!-- RUNTIME_TABLE_START -->
+| Stage | Timeout (s) | P50 Duration (s) | P90 Duration (s) | P95 Duration (s) | P99 Duration (s) | P95 Timeout Usage | Timeout Exhausted |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| N/A | N/A | N/A | N/A | N/A | N/A | N/A | Awaiting production log export |
+| N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+<!-- RUNTIME_TABLE_END -->
 
-## Timeout Adjustments (Not Applicable)
+## Interpretation Rules
 
-No timeout changes were made because runtime distributions and timeout usage ratios were unavailable.
+- `P95 timeout usage >= 0.80`: candidate for timeout tuning or optimization.
+- `P95 timeout usage >= 0.95`: high risk of timeout failures.
+- Any non-zero timeout exhaustion count requires root cause review.
 
 ## Next Actions
 
-1. Export `bp_metric` logs for the chosen scenes covering `job_invocation` and `job_retry_exhausted` events.
-2. Populate the runtime distribution table above and identify any stages exceeding 80–95% of configured timeouts.
-3. Update the affected workflow YAML timeouts and `workflows/TIMEOUT_AND_RETRY_POLICY.md` accordingly.
-4. Re-run this report with before/after metrics.
+1. Export `bp_metric` logs for representative release scenes.
+2. Re-run `runtime_slo_summary.py` and update this document table.
+3. Tune workflow timeout settings and rerun to capture before/after evidence.

@@ -1,0 +1,461 @@
+{
+  "generated_at": "2026-02-10T14:31:03Z",
+  "repo_root": "/Users/nijelhunt_1/workspace/BlueprintPipeline",
+  "release_thresholds": {
+    "certification_pass_rate_min": 0.98,
+    "preprod_certification_pass_rate_min": 0.95,
+    "import_quality_average_min": 0.85,
+    "min_canonical_scenes": 12,
+    "min_scene_families": 4,
+    "min_robot_types": 3,
+    "max_scene_contribution_ratio": 0.25,
+    "min_per_robot_import_success": 0.9
+  },
+  "scores": {
+    "commercial_readiness_score": 0,
+    "pipeline_maturity_score": 14,
+    "release_gates_passed": 0,
+    "release_gates_total": 6,
+    "phases_completed": 1,
+    "phases_total": 7
+  },
+  "release_gates": [
+    {
+      "name": "certification",
+      "passed": false,
+      "details": {
+        "pass_rate": 0.0,
+        "episodes": 6,
+        "dominant_failure_code": "CHANNEL_INCOMPLETE",
+        "dominant_failure_ratio": 0.1277
+      },
+      "blockers": [
+        "certification_pass_rate 0.0000 below 0.9800"
+      ]
+    },
+    {
+      "name": "import_viability",
+      "passed": false,
+      "details": {
+        "manifest_count": 18,
+        "null_scene_count": 0,
+        "total_passed_validation": 0,
+        "mean_quality_score": 0.0,
+        "successful_manifest_count": 0
+      },
+      "blockers": [
+        "episodes.passed_validation is 0",
+        "mean quality 0.0000 below 0.85",
+        "JSON-backed runs still contain missing-parquet validation errors"
+      ]
+    },
+    {
+      "name": "quality_gate_enforcement",
+      "passed": false,
+      "details": {
+        "report_count": 2,
+        "total_gates": 1,
+        "reports_with_checkpoint_coverage": 0,
+        "production_skip_count": 0
+      },
+      "blockers": [
+        "reports missing required/executed/skipped checkpoint coverage fields"
+      ]
+    },
+    {
+      "name": "diversity",
+      "passed": false,
+      "details": {
+        "canonical_scene_count": 2,
+        "scene_families": [
+          "bedroom",
+          "kitchen"
+        ],
+        "robot_types": [
+          "franka"
+        ],
+        "max_scene_contribution_ratio": 0.0
+      },
+      "blockers": [
+        "canonical scene count 2 < 12",
+        "scene family count 2 < 4",
+        "robot type count 1 < 3",
+        "missing required robots: ur10, ur5e"
+      ]
+    },
+    {
+      "name": "production_evidence",
+      "passed": false,
+      "details": {
+        "production_report_count": 2,
+        "production_mode_true_count": 0,
+        "ok_count": 2,
+        "runtime_summary_available": true,
+        "runtime_summary_complete": false
+      },
+      "blockers": [
+        "no production_mode=true validation artifact found",
+        "runtime SLO summary incomplete (missing distribution/timeout coverage)"
+      ]
+    },
+    {
+      "name": "ci_reliability",
+      "passed": false,
+      "details": {
+        "entrypoint_test_state": "unknown",
+        "canary_stable_7_day": false
+      },
+      "blockers": [
+        "test_pipeline_data_flow_entrypoints is not confirmed green",
+        "7-day nightly canary stability gate not satisfied"
+      ]
+    }
+  ],
+  "phases": {
+    "phase_0_controls": {
+      "passed": true,
+      "blockers": []
+    },
+    "phase_1_contract": {
+      "passed": false,
+      "blockers": [
+        "no run evidence with episodes.passed_validation > 0",
+        "JSON runs still failing parquet existence checks"
+      ]
+    },
+    "phase_2_quality_enforcement": {
+      "passed": false,
+      "blockers": [
+        "checkpoint coverage fields missing from gate reports"
+      ]
+    },
+    "phase_3_certification": {
+      "passed": false,
+      "blockers": [
+        "certification pass rate 0.0000 below preprod target 0.9500"
+      ]
+    },
+    "phase_4_diversity": {
+      "passed": false,
+      "blockers": [
+        "canonical scene count 2 < 12",
+        "scene family count 2 < 4",
+        "robot type count 1 < 3",
+        "missing required robots: ur10, ur5e"
+      ]
+    },
+    "phase_5_production_e2e": {
+      "passed": false,
+      "blockers": [
+        "no production_mode=true validation artifact found",
+        "runtime SLO summary incomplete (missing distribution/timeout coverage)"
+      ]
+    },
+    "phase_6_reliability": {
+      "passed": false,
+      "blockers": [
+        "pipeline data-flow entrypoint test not green",
+        "7-day canary stability signal missing or failing"
+      ]
+    }
+  },
+  "evidence": {
+    "import": {
+      "manifest_count": 18,
+      "non_null_scene_count": 18,
+      "null_scene_count": 0,
+      "null_scene_paths": [],
+      "total_passed_validation": 0,
+      "mean_quality_score": 0.0,
+      "successful_manifest_count": 0,
+      "json_with_parquet_missing_errors": [
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-06692dd9-a9dd-4192-951d-90c7976a6673/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-11f1b14a-da20-4d2c-b808-fd2b2864f874/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-276de2b7-1605-41de-85b9-a54f3cd7ac04/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-342372c3-2a38-43ca-9eff-13b687a23892/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-59025ffd-3667-4fa8-8437-3aa30913a255/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-5a953502-baa9-4bad-aabe-04be924c5f24/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-65e35ca4-eab9-4154-93b9-7d1ab80e83a7/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-758654c5-42a4-400d-8df5-ae553d9a5d73/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-799b1c45-ebb8-47c0-9e85-3a43687d0625/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-9554a94e-989e-4626-bc0c-518121632121/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-9e984b25-0f7b-492b-b337-0fd8fb256c33/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-9eedcc92-9b37-423d-a065-c3b8aa4376d2/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-b82550b8-dfbe-45ff-a015-7bde6c057ba2/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-ba3a5673-0ab0-48b0-b733-a11d3fc9723b/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-c8b535aa-b7a9-4c23-bdbc-7ebd7a30a254/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-ca1c0447-2094-4718-9225-3e4ddbd7965e/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-e0db9fdf-8acb-40d7-96ab-643b0b3f787b/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-e82a0406-928d-468a-89bf-25ad93341620/import_manifest.json"
+      ],
+      "accepted_episodes_by_scene": {
+        "lightwheel_kitchen": 0
+      },
+      "robot_types_from_manifests": [
+        "franka"
+      ],
+      "manifest_paths": [
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-06692dd9-a9dd-4192-951d-90c7976a6673/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-11f1b14a-da20-4d2c-b808-fd2b2864f874/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-276de2b7-1605-41de-85b9-a54f3cd7ac04/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-342372c3-2a38-43ca-9eff-13b687a23892/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-59025ffd-3667-4fa8-8437-3aa30913a255/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-5a953502-baa9-4bad-aabe-04be924c5f24/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-65e35ca4-eab9-4154-93b9-7d1ab80e83a7/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-758654c5-42a4-400d-8df5-ae553d9a5d73/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-799b1c45-ebb8-47c0-9e85-3a43687d0625/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-9554a94e-989e-4626-bc0c-518121632121/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-9e984b25-0f7b-492b-b337-0fd8fb256c33/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-9eedcc92-9b37-423d-a065-c3b8aa4376d2/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-b82550b8-dfbe-45ff-a015-7bde6c057ba2/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-ba3a5673-0ab0-48b0-b733-a11d3fc9723b/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-c8b535aa-b7a9-4c23-bdbc-7ebd7a30a254/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-ca1c0447-2094-4718-9225-3e4ddbd7965e/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-e0db9fdf-8acb-40d7-96ab-643b0b3f787b/import_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/geniesim_local-e82a0406-928d-468a-89bf-25ad93341620/import_manifest.json"
+      ]
+    },
+    "quality_gates": {
+      "report_count": 2,
+      "total_gates": 1,
+      "empty_reports": 1,
+      "reports_with_checkpoint_coverage": 0,
+      "report_versions": {
+        "unknown": 2
+      },
+      "checkpoint_skip_entries": [
+        {
+          "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/.checkpoints/genie-sim-import.json",
+          "production_mode": false,
+          "skip_reason": null
+        },
+        {
+          "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/.checkpoints/genie-sim-submit.json",
+          "production_mode": false,
+          "skip_reason": null
+        },
+        {
+          "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/.checkpoints/interactive.json",
+          "production_mode": false,
+          "skip_reason": null
+        },
+        {
+          "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/.checkpoints/inventory-enrichment.json",
+          "production_mode": false,
+          "skip_reason": null
+        },
+        {
+          "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/.checkpoints/replicator.json",
+          "production_mode": false,
+          "skip_reason": null
+        },
+        {
+          "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/.checkpoints/scale.json",
+          "production_mode": false,
+          "skip_reason": null
+        },
+        {
+          "path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/.checkpoints/variation-gen.json",
+          "production_mode": false,
+          "skip_reason": null
+        }
+      ],
+      "production_skip_count": 0,
+      "report_paths": [
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/quality_gates/quality_gate_report.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/quality_gates/quality_gate_report.json"
+      ]
+    },
+    "certification": {
+      "latest_run_report": "/Users/nijelhunt_1/workspace/BlueprintPipeline/analysis_outputs/lightwheel_kitchen_run_92e1e2a647e8/run_certification_report.json",
+      "latest_slo_gate": "/Users/nijelhunt_1/workspace/BlueprintPipeline/analysis_outputs/lightwheel_kitchen_run_92e1e2a647e8/certification_slo_gate.json",
+      "episodes": 6,
+      "certified": 0,
+      "certification_pass_rate": 0.0,
+      "gate_histogram": {
+        "CHANNEL_INCOMPLETE": 6,
+        "CONTACT_PLACEHOLDER_OR_EMPTY": 6,
+        "EE_TARGET_GEOMETRY_IMPLAUSIBLE": 6,
+        "KINEMATIC_OBJECT_POSE_USED": 6,
+        "SCENE_STATE_NOT_SERVER_BACKED": 6,
+        "SNAPBACK_OR_TELEPORT_DETECTED": 5,
+        "TARGET_SCHEMA_INCOMPLETE": 6,
+        "TASK_SUCCESS_CONTRADICTION": 6
+      },
+      "dominant_failure_code": "CHANNEL_INCOMPLETE",
+      "dominant_failure_ratio": 0.1277,
+      "slo_gate": {
+        "evaluated_at": "2026-02-06T22:27:04.111934Z",
+        "profile": "production",
+        "threshold": 0.98,
+        "min_episodes": 6,
+        "episodes": 6,
+        "certified": 0,
+        "raw_only": 6,
+        "certification_pass_rate": 0.0,
+        "passed": false,
+        "reasons": [
+          "certification_pass_rate=0.0000 below threshold 0.9800"
+        ],
+        "gate_histogram": {
+          "CHANNEL_INCOMPLETE": 6,
+          "CONTACT_PLACEHOLDER_OR_EMPTY": 6,
+          "EE_TARGET_GEOMETRY_IMPLAUSIBLE": 6,
+          "KINEMATIC_OBJECT_POSE_USED": 6,
+          "SCENE_STATE_NOT_SERVER_BACKED": 6,
+          "SNAPBACK_OR_TELEPORT_DETECTED": 5,
+          "TARGET_SCHEMA_INCOMPLETE": 6,
+          "TASK_SUCCESS_CONTRADICTION": 6
+        },
+        "selected_report": "/Users/nijelhunt_1/workspace/BlueprintPipeline/analysis_outputs/lightwheel_kitchen_run_92e1e2a647e8/run_certification_report.json",
+        "reports_discovered": [
+          "/Users/nijelhunt_1/workspace/BlueprintPipeline/analysis_outputs/lightwheel_kitchen_run_92e1e2a647e8/run_certification_report.json"
+        ]
+      }
+    },
+    "diversity": {
+      "scene_manifest_count": 2,
+      "canonical_scene_count": 2,
+      "canonical_scene_ids": [
+        "ChIJBc5E5wTjrIkRKrrWR_meHbc",
+        "lightwheel_kitchen"
+      ],
+      "scene_families": [
+        "bedroom",
+        "kitchen"
+      ],
+      "environment_types": [
+        "bedroom",
+        "kitchen"
+      ],
+      "missing_scene_family_metadata_paths": [],
+      "robot_types": [
+        "franka"
+      ],
+      "accepted_episode_total": 0,
+      "max_scene_contribution": {
+        "scene_id": null,
+        "ratio": 0.0
+      },
+      "scene_manifest_paths": [
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/assets/scene_manifest.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/assets/scene_manifest.json"
+      ],
+      "job_metadata_paths": [
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/geniesim/job.json"
+      ]
+    },
+    "production_validation": {
+      "report_count": 2,
+      "production_mode_true_count": 0,
+      "ok_count": 2,
+      "reports_with_errors": [],
+      "report_paths": [
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/production_validation.json",
+        "/Users/nijelhunt_1/workspace/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/production_validation.json"
+      ]
+    },
+    "runtime": {
+      "summary_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/analysis_outputs/runtime_slo_summary.json",
+      "available": true,
+      "stages_with_distributions": 0,
+      "complete": false,
+      "details": {
+        "generated_at": "2026-02-10T14:26:43Z",
+        "stages": {},
+        "stage_count": 0,
+        "complete": false
+      }
+    },
+    "ci": {
+      "entrypoint_test_state": "unknown",
+      "entrypoint_test_seen": false,
+      "entrypoint_test_failures": 0,
+      "junit_paths_scanned": [],
+      "canary_stability_path": "/Users/nijelhunt_1/workspace/BlueprintPipeline/analysis_outputs/canary_stability_gate.json",
+      "canary_stable_7_day": false,
+      "canary_summary": {
+        "generated_at": "2026-02-10T14:31:03Z",
+        "reference_date": "2026-02-10",
+        "window_days": 7,
+        "required_robots": [
+          "franka",
+          "ur5e",
+          "ur10"
+        ],
+        "stable_7_day": false,
+        "per_robot": {
+          "franka": {
+            "passing_days": 0,
+            "required_days": 7,
+            "missing_dates": [
+              "2026-02-10",
+              "2026-02-09",
+              "2026-02-08",
+              "2026-02-07",
+              "2026-02-06",
+              "2026-02-05",
+              "2026-02-04"
+            ],
+            "failing_dates": [],
+            "stable": false
+          },
+          "ur5e": {
+            "passing_days": 0,
+            "required_days": 7,
+            "missing_dates": [
+              "2026-02-10",
+              "2026-02-09",
+              "2026-02-08",
+              "2026-02-07",
+              "2026-02-06",
+              "2026-02-05",
+              "2026-02-04"
+            ],
+            "failing_dates": [],
+            "stable": false
+          },
+          "ur10": {
+            "passing_days": 0,
+            "required_days": 7,
+            "missing_dates": [
+              "2026-02-10",
+              "2026-02-09",
+              "2026-02-08",
+              "2026-02-07",
+              "2026-02-06",
+              "2026-02-05",
+              "2026-02-04"
+            ],
+            "failing_dates": [],
+            "stable": false
+          }
+        },
+        "window_dates": [
+          "2026-02-10",
+          "2026-02-09",
+          "2026-02-08",
+          "2026-02-07",
+          "2026-02-06",
+          "2026-02-05",
+          "2026-02-04"
+        ]
+      }
+    }
+  },
+  "outstanding_work": [
+    "certification: certification_pass_rate 0.0000 below 0.9800",
+    "import_viability: episodes.passed_validation is 0",
+    "import_viability: mean quality 0.0000 below 0.85",
+    "import_viability: JSON-backed runs still contain missing-parquet validation errors",
+    "quality_gate_enforcement: reports missing required/executed/skipped checkpoint coverage fields",
+    "diversity: canonical scene count 2 < 12",
+    "diversity: scene family count 2 < 4",
+    "diversity: robot type count 1 < 3",
+    "diversity: missing required robots: ur10, ur5e",
+    "production_evidence: no production_mode=true validation artifact found",
+    "production_evidence: runtime SLO summary incomplete (missing distribution/timeout coverage)",
+    "ci_reliability: test_pipeline_data_flow_entrypoints is not confirmed green",
+    "ci_reliability: 7-day nightly canary stability gate not satisfied"
+  ]
+}

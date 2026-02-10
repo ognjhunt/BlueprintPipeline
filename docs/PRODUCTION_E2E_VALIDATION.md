@@ -183,5 +183,16 @@ A run is **PASS** when all of the following are true:
 - `quality_gate_report.json` shows no blocking failures.
 - `validation_report.json` meets pass-rate and average-score thresholds.
 - No mock capture fallbacks detected (non-PhysX backend, dev-only fallback, or mock indicators).
+- `production_validation.json` reports `production_mode=true` and `ok=true`.
+- Runtime SLO summary is generated at `analysis_outputs/runtime_slo_summary.json`.
 
 A run is **FAIL** if any marker is missing, a threshold is violated, or mock fallback indicators are found.
+
+## Required Companion Reports
+
+After each production E2E campaign, generate and publish:
+
+1. `analysis_outputs/readiness_scorecard.json`
+2. `analysis_outputs/release_matrix_summary.json`
+3. `analysis_outputs/runtime_slo_summary.json`
+4. `analysis_outputs/canary_stability_gate.json`

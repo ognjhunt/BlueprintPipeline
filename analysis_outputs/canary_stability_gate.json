@@ -1,0 +1,67 @@
+{
+  "generated_at": "2026-02-10T14:31:03Z",
+  "reference_date": "2026-02-10",
+  "window_days": 7,
+  "required_robots": [
+    "franka",
+    "ur5e",
+    "ur10"
+  ],
+  "stable_7_day": false,
+  "per_robot": {
+    "franka": {
+      "passing_days": 0,
+      "required_days": 7,
+      "missing_dates": [
+        "2026-02-10",
+        "2026-02-09",
+        "2026-02-08",
+        "2026-02-07",
+        "2026-02-06",
+        "2026-02-05",
+        "2026-02-04"
+      ],
+      "failing_dates": [],
+      "stable": false
+    },
+    "ur5e": {
+      "passing_days": 0,
+      "required_days": 7,
+      "missing_dates": [
+        "2026-02-10",
+        "2026-02-09",
+        "2026-02-08",
+        "2026-02-07",
+        "2026-02-06",
+        "2026-02-05",
+        "2026-02-04"
+      ],
+      "failing_dates": [],
+      "stable": false
+    },
+    "ur10": {
+      "passing_days": 0,
+      "required_days": 7,
+      "missing_dates": [
+        "2026-02-10",
+        "2026-02-09",
+        "2026-02-08",
+        "2026-02-07",
+        "2026-02-06",
+        "2026-02-05",
+        "2026-02-04"
+      ],
+      "failing_dates": [],
+      "stable": false
+    }
+  },
+  "window_dates": [
+    "2026-02-10",
+    "2026-02-09",
+    "2026-02-08",
+    "2026-02-07",
+    "2026-02-06",
+    "2026-02-05",
+    "2026-02-04"
+  ]
+}

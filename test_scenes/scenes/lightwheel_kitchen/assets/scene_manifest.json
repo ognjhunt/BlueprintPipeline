@@ -514,6 +514,8 @@
     "meters_per_unit": 1.0,
     "room": {}
   },
+  "environment_type": "kitchen",
+  "scene_family": "kitchen",
   "scene_id": "lightwheel_kitchen",
   "version": "1.0.0"
 }

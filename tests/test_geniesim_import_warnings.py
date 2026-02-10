@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 import pytest
+
+
+def _reset_google_cloud_modules() -> None:
+    for module_name in list(sys.modules):
+        if (
+            module_name == "google"
+            or module_name.startswith("google.")
+            or module_name == "firebase_admin"
+            or module_name.startswith("firebase_admin.")
+        ):
+            sys.modules.pop(module_name, None)
 
 
 def test_resolve_upload_file_list_warns_on_bad_json(
@@ -11,6 +23,7 @@ def test_resolve_upload_file_list_warns_on_bad_json(
     caplog: pytest.LogCaptureFixture,
     load_job_module,
 ) -> None:
+    _reset_google_cloud_modules()
     module = load_job_module("geniesim_import", "import_from_geniesim.py")
 
     output_dir = tmp_path / "output"
@@ -33,6 +46,7 @@ def test_parquet_validation_logs_shape_warnings_once(
     pq = pytest.importorskip("pyarrow.parquet")
     pd = pytest.importorskip("pandas")
 
+    _reset_google_cloud_modules()
     module = load_job_module("geniesim_import", "import_from_geniesim.py")
 
     parquet_path = tmp_path / "episode_000000.parquet"

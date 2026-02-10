@@ -1,0 +1,183 @@
+name: Genie Sim Nightly Canary
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 6 * * *"
+
+concurrency:
+  group: geniesim-nightly-canary-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  canary-per-robot:
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        robot: [franka, ur5e, ur10]
+    env:
+      GENIESIM_HOST: 0.0.0.0
+      GENIESIM_PORT: 50051
+      GENIESIM_HEADLESS: "1"
+      RUN_GENIESIM_STAGING_E2E: "1"
+      STAGING_DATA_ROOT: ${{ secrets.STAGING_DATA_ROOT }}
+      STAGING_SCENE_ID: ${{ secrets.STAGING_SCENE_ID }}
+      STAGING_ENVIRONMENT_TYPE: ${{ secrets.STAGING_ENVIRONMENT_TYPE || 'kitchen' }}
+      NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare artifact directories
+        run: |
+          mkdir -p logs/ci/canary
+
+      - name: Authenticate to NVIDIA NGC
+        if: env.NGC_API_KEY != ''
+        run: |
+          echo "$NGC_API_KEY" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
+      - name: Start Genie Sim gRPC server
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml up -d
+
+      - name: Wait for Genie Sim server readiness
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml exec -T geniesim-server \
+            /bin/bash -lc "python3 -m tools.geniesim_adapter.geniesim_healthcheck"
+
+      - name: Run canary staging E2E for robot
+        env:
+          ROBOT_TYPES: ${{ matrix.robot }}
+          GENIESIM_ROBOT_TYPE: ${{ matrix.robot }}
+        run: |
+          set +e
+          docker compose -f docker-compose.geniesim-server.yaml exec -T \
+            -e RUN_GENIESIM_STAGING_E2E=1 \
+            -e STAGING_DATA_ROOT="$STAGING_DATA_ROOT" \
+            -e STAGING_SCENE_ID="$STAGING_SCENE_ID" \
+            -e STAGING_ENVIRONMENT_TYPE="$STAGING_ENVIRONMENT_TYPE" \
+            -e GENIESIM_HOST=localhost \
+            -e GENIESIM_PORT=50051 \
+            -e ROBOT_TYPES="${ROBOT_TYPES}" \
+            -e GENIESIM_ROBOT_TYPE="${GENIESIM_ROBOT_TYPE}" \
+            geniesim-server \
+            /bin/bash -lc \
+            "/isaac-sim/python.sh -m pytest tests/test_geniesim_staging_e2e.py -v --junitxml=logs/ci/canary/pytest-${ROBOT_TYPES}.xml"
+          RC=$?
+          STATUS="pass"
+          if [ "$RC" -ne 0 ]; then STATUS="fail"; fi
+          export STATUS
+          python - <<'PY'
+          import datetime
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "date": datetime.datetime.utcnow().date().isoformat(),
+              "robot": os.environ["ROBOT_TYPES"],
+              "status": os.environ["STATUS"],
+          }
+          path = Path("logs/ci/canary") / f"canary-{os.environ['ROBOT_TYPES']}.json"
+          path.write_text(json.dumps(payload, indent=2))
+          print(f"[canary] wrote {path}")
+          PY
+          echo "STATUS=${STATUS}" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Upload robot canary artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ matrix.robot }}-artifacts
+          path: logs/ci/canary
+          if-no-files-found: warn
+
+      - name: Shutdown Genie Sim server
+        if: always()
+        run: |
+          docker compose -f docker-compose.geniesim-server.yaml down -v
+
+  canary-summary:
+    runs-on: ubuntu-latest
+    needs: canary-per-robot
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download canary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: logs/ci/canary
+          pattern: canary-*-artifacts
+          merge-multiple: true
+
+      - name: Build daily canary summary + update history
+        run: |
+          python - <<'PY'
+          import datetime
+          import json
+          from pathlib import Path
+
+          canary_dir = Path("logs/ci/canary")
+          payloads = []
+          for path in sorted(canary_dir.glob("canary-*.json")):
+              try:
+                  payloads.append(json.loads(path.read_text()))
+              except Exception:
+                  continue
+
+          today = datetime.datetime.utcnow().date().isoformat()
+          robots = {}
+          for item in payloads:
+              robot = str(item.get("robot") or "").strip().lower()
+              if not robot:
+                  continue
+              status = str(item.get("status") or "").strip().lower()
+              robots[robot] = status in {"pass", "passed", "success", "ok", "true", "1"}
+
+          analysis_dir = Path("analysis_outputs")
+          analysis_dir.mkdir(parents=True, exist_ok=True)
+          daily = {"date": today, "robots": robots}
+          (analysis_dir / "canary_daily_status.json").write_text(json.dumps(daily, indent=2))
+
+          history_path = analysis_dir / "canary_history.json"
+          history = []
+          if history_path.is_file():
+              try:
+                  existing = json.loads(history_path.read_text())
+              except Exception:
+                  existing = []
+              if isinstance(existing, list):
+                  history = [entry for entry in existing if isinstance(entry, dict)]
+              elif isinstance(existing, dict):
+                  values = existing.get("history")
+                  if isinstance(values, list):
+                      history = [entry for entry in values if isinstance(entry, dict)]
+          history = [entry for entry in history if str(entry.get("date")) != today]
+          history.append(daily)
+          history = sorted(history, key=lambda entry: str(entry.get("date")))
+          history_path.write_text(json.dumps(history, indent=2))
+          print(f"[canary] wrote {history_path}")
+          PY
+
+      - name: Evaluate 7-day canary stability gate
+        run: |
+          python tools/quality_gates/canary_stability_gate.py \
+            --history analysis_outputs/canary_history.json \
+            --output analysis_outputs/canary_stability_gate.json
+
+      - name: Upload canary summary artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-summary-artifacts
+          path: |
+            analysis_outputs/canary_daily_status.json
+            analysis_outputs/canary_history.json
+            analysis_outputs/canary_stability_gate.json
+          if-no-files-found: warn

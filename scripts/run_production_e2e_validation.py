@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 
@@ -154,6 +155,35 @@ def evaluate_quality_gate(report: Dict[str, Any]) -> List[str]:
     return errors
 
 
+def evaluate_import_manifest(report: Dict[str, Any], min_average_score: float) -> List[str]:
+    errors: List[str] = []
+    episodes = report.get("episodes", {})
+    quality = report.get("quality", {})
+    passed_validation = int(episodes.get("passed_validation", 0) or 0)
+    average_score = float(quality.get("average_score", 0.0) or 0.0)
+    scene_id = str(report.get("scene_id") or "").strip().lower()
+
+    if passed_validation <= 0:
+        errors.append("import_manifest episodes.passed_validation <= 0")
+    if average_score < min_average_score:
+        errors.append(
+            f"import_manifest quality.average_score {average_score:.2f} < {min_average_score:.2f}"
+        )
+    if scene_id in {"", "unknown", "none", "null", "n/a"}:
+        errors.append("import_manifest scene_id is null/unknown")
+
+    return errors
+
+
+def evaluate_production_validation(report: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    if not bool(report.get("production_mode", False)):
+        errors.append("production_validation.production_mode is false")
+    if not bool(report.get("ok", False)):
+        errors.append("production_validation.ok is false")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run production E2E validation workflows.")
     parser.add_argument("--project-id", required=True)
@@ -168,6 +198,11 @@ def main() -> int:
         help="Comma-separated list of allowed physics backends.",
     )
     parser.add_argument("--timeout-seconds", type=int, default=21600)
+    parser.add_argument(
+        "--output-json",
+        default="analysis_outputs/production_e2e_validation.json",
+        help="Local output path for the harness summary JSON.",
+    )
     args = parser.parse_args()
 
     allowed_backends = [b.strip() for b in args.allowed_physics_backends.split(",") if b.strip()]
@@ -257,6 +292,14 @@ def main() -> int:
     geniesim_import_complete = f"scenes/{args.scene_id}/geniesim/.geniesim_import_complete"
     if not gcs_object_exists(args.bucket, geniesim_import_complete):
         raise RuntimeError("Missing Genie Sim import completion marker.")
+    import_manifest_path = f"scenes/{args.scene_id}/episodes/import_manifest.json"
+    if not gcs_object_exists(args.bucket, import_manifest_path):
+        raise RuntimeError("Missing import_manifest.json after Genie Sim import.")
+    import_manifest = read_gcs_json(args.bucket, import_manifest_path)
+    import_manifest_errors = evaluate_import_manifest(
+        import_manifest,
+        args.min_average_score,
+    )
 
     print("[E2E] Triggering DWM preparation workflow...")
     run_workflow(
@@ -270,13 +313,24 @@ def main() -> int:
     if not gcs_object_exists(args.bucket, dwm_complete):
         raise RuntimeError("Missing DWM completion marker.")
 
+    production_validation_path = f"scenes/{args.scene_id}/production_validation.json"
+    production_validation = {}
+    production_validation_errors: List[str] = []
+    if gcs_object_exists(args.bucket, production_validation_path):
+        production_validation = read_gcs_json(args.bucket, production_validation_path)
+        production_validation_errors = evaluate_production_validation(production_validation)
+    else:
+        production_validation_errors = ["Missing production_validation.json"]
+
     summary = {
         "scene_id": args.scene_id,
         "outputs": {
             "geniesim_prefix": f"scenes/{args.scene_id}/geniesim",
             "episodes_prefix": f"scenes/{args.scene_id}/episodes",
+            "import_manifest": import_manifest_path,
             "validation_report": validation_report_path,
             "quality_gate_report": quality_gate_report_path,
+            "production_validation": production_validation_path,
             "dwm_prefix": f"scenes/{args.scene_id}/dwm",
         },
         "quality": {
@@ -284,17 +338,41 @@ def main() -> int:
             "average_score": validation_report.get("summary", {}).get("average_score"),
             "physics_validation": validation_report.get("physics_validation", {}),
             "quality_gate_summary": quality_gate_report.get("summary", {}),
+            "import_manifest": {
+                "episodes_passed_validation": import_manifest.get("episodes", {}).get("passed_validation"),
+                "average_score": import_manifest.get("quality", {}).get("average_score"),
+                "scene_id": import_manifest.get("scene_id"),
+            },
         },
+        "production_validation": production_validation,
         "mock_fallbacks": mock_indicators,
     }
 
-    failures = validation_errors + quality_gate_errors
+    failures = (
+        validation_errors
+        + quality_gate_errors
+        + import_manifest_errors
+        + production_validation_errors
+    )
     status = "PASS" if not failures else "FAIL"
 
     print("\n[E2E] ===============================")
     print(f"[E2E] Final Status: {status}")
     print("[E2E] Summary:")
     print(json.dumps(summary, indent=2))
+    output_path = Path(args.output_json).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w") as handle:
+        json.dump(
+            {
+                "status": status,
+                "summary": summary,
+                "failures": failures,
+            },
+            handle,
+            indent=2,
+        )
+    print(f"[E2E] Wrote summary JSON to {output_path}")
 
     if failures:
         print("\n[E2E] Failures:")

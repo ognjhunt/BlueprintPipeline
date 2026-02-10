@@ -18,6 +18,11 @@ MANIFEST_SCHEMA_DEFINITION = {
     "fields": {
         "schema_version": "Schema version string.",
         "generated_at": "UTC timestamp for manifest generation.",
+        "scene_id": "Scene identifier associated with the imported dataset bundle.",
+        "run_id": "Pipeline run identifier associated with this import.",
+        "robot_types": "Robot types included in the imported dataset bundle.",
+        "recordings_format": "Primary source format for imported recordings (json/parquet/mixed).",
+        "artifact_contract_version": "Version identifier for dataset artifact contract fields.",
         "output_dir": "Output directory relative to the bundle root (or '.' for the root).",
         "gcs_output_path": "Optional GCS URI pointing at the bundle root containing output_dir.",
         "upload_status": "Status of any post-import upload to a GCS target.",

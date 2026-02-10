@@ -21,6 +21,7 @@ from genie_sim_import.integrity import _sha256_file, _write_checksums_file
 from genie_sim_import.manifest import _load_import_manifest_with_migration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+ARTIFACT_CONTRACT_VERSION = "1.0"
 
 
 def _relative_to_bundle(bundle_root: Path, path: Path) -> str:
@@ -115,6 +116,51 @@ def _write_combined_import_manifest(
     total_filtered = sum(entry["episodes"]["filtered"] for entry in robot_entries)
     total_parse_failed = sum(entry["episodes"]["parse_failed"] for entry in robot_entries)
     idempotency = _resolve_job_idempotency(job_metadata)
+    scene_id = None
+    run_id = job_id
+    robot_types: List[str] = []
+    if isinstance(job_metadata, dict):
+        scene_candidate = job_metadata.get("scene_id")
+        if isinstance(scene_candidate, str) and scene_candidate.strip():
+            scene_id = scene_candidate.strip()
+        run_candidate = job_metadata.get("run_id")
+        if isinstance(run_candidate, str) and run_candidate.strip():
+            run_id = run_candidate.strip()
+        generation_params = job_metadata.get("generation_params")
+        if isinstance(generation_params, dict):
+            robot_list = generation_params.get("robot_types")
+            if isinstance(robot_list, list):
+                robot_types.extend(
+                    item.strip()
+                    for item in robot_list
+                    if isinstance(item, str) and item.strip()
+                )
+            single_robot = generation_params.get("robot_type")
+            if isinstance(single_robot, str) and single_robot.strip():
+                robot_types.append(single_robot.strip())
+    robot_types.extend(
+        entry.get("robot_type", "").strip()
+        for entry in robot_entries
+        if isinstance(entry.get("robot_type"), str) and entry.get("robot_type", "").strip()
+    )
+    robot_types = list(dict.fromkeys(robot_types))
+    recording_format_counts: Dict[str, int] = {"json": 0, "parquet": 0, "unknown": 0}
+    for entry in robot_entries:
+        episodes_payload = entry.get("episodes", {})
+        per_robot_counts = episodes_payload.get("recording_format_counts", {})
+        if not isinstance(per_robot_counts, dict):
+            continue
+        for key in ("json", "parquet", "unknown"):
+            value = per_robot_counts.get(key, 0)
+            if isinstance(value, (int, float)):
+                recording_format_counts[key] += int(value)
+    recordings_format = "unknown"
+    if recording_format_counts.get("json", 0) > 0 and recording_format_counts.get("parquet", 0) > 0:
+        recordings_format = "mixed"
+    elif recording_format_counts.get("json", 0) > 0:
+        recordings_format = "json"
+    elif recording_format_counts.get("parquet", 0) > 0:
+        recordings_format = "parquet"
 
     weighted_quality_sum = 0.0
     quality_weight_total = 0
@@ -263,6 +309,11 @@ def _write_combined_import_manifest(
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "schema_definition": MANIFEST_SCHEMA_DEFINITION,
         "generated_at": datetime.utcnow().isoformat() + "Z",
+        "scene_id": scene_id,
+        "run_id": run_id,
+        "robot_types": robot_types,
+        "recordings_format": recordings_format,
+        "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
         "job_id": job_id,
         "output_dir": str(output_dir),
         "gcs_output_path": normalized_gcs_output_path,
@@ -278,6 +329,7 @@ def _write_combined_import_manifest(
             "download_errors": 0,
             "parse_failed": total_parse_failed,
             "parse_failures": [],
+            "recording_format_counts": recording_format_counts,
             "min_required": min(
                 (entry["episodes"].get("min_required", MIN_EPISODES_REQUIRED) for entry in robot_entries),
                 default=MIN_EPISODES_REQUIRED,
