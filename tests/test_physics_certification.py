@@ -205,6 +205,43 @@ def test_physics_certification_fails_static_target_motion_task():
     assert report["dataset_tier"] == "raw_preserved"
 
 
+def test_phase_b_env_does_not_skip_motion_gate(monkeypatch):
+    # Phase B grasp-toggle env vars must not disable strict motion gating.
+    monkeypatch.setenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE", "1")
+    monkeypatch.setenv("GENIESIM_KEEP_OBJECTS_KINEMATIC", "1")
+
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], closed=True),
+        _frame(position=[0.1, 0.0, 0.2], closed=True),
+        _frame(position=[0.1, 0.0, 0.2], closed=False),
+    ]
+    task = {"task_type": "pick_place", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is False
+    assert "EE_TARGET_GEOMETRY_IMPLAUSIBLE" in report["critical_failures"]
+
+
+def test_phase_b_env_does_not_skip_contact_gate(monkeypatch):
+    # Phase B grasp-toggle env vars must not accept zero contacts in strict mode.
+    monkeypatch.setenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE", "1")
+    monkeypatch.setenv("GENIESIM_KEEP_OBJECTS_KINEMATIC", "1")
+
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], closed=True),
+        _frame(position=[0.11, 0.0, 0.2], closed=True),
+        _frame(position=[0.12, 0.0, 0.2], closed=False),
+    ]
+    for frame in frames:
+        frame.pop("collision_contacts", None)
+
+    task = {"task_type": "pick_place", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is False
+    assert "CONTACT_PLACEHOLDER_OR_EMPTY" in report["critical_failures"]
+
+
 def test_physics_certification_requires_camera_when_flagged():
     frames = [
         _frame(position=[0.1, 0.0, 0.2]),

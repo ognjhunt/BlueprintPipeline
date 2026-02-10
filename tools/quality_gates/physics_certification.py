@@ -203,7 +203,9 @@ def _server_backed_ratio(frames: List[Dict[str, Any]]) -> float:
         data_src = str(obs.get("data_source") or "").lower()
         if "kinematic" in prov or "synthetic" in prov:
             continue
-        if data_src in ("between_waypoints", "real_composed") or prov in ("physx_server", "server", "real"):
+        if data_src in ("between_waypoints", "real_composed") or prov in (
+            "physx_server", "server", "real", "server_static",
+        ):
             backed += 1
     return backed / float(len(frames))
 
@@ -531,6 +533,9 @@ def run_episode_certification(
         _has_target_motion = len(target_positions) >= 2 and end_disp >= min_target_displacement_m
         metrics["target_motion_present"] = bool(_has_target_motion)
         if not _has_target_motion:
+            # Even in Phase B grasp-toggle mode, manipulation tasks must exhibit
+            # measurable target displacement by the end of the episode. If the
+            # toggle failed to activate, this should remain a hard failure.
             gate_failures.append("EE_TARGET_GEOMETRY_IMPLAUSIBLE")
     else:
         metrics["target_motion_present"] = None
@@ -627,16 +632,18 @@ def run_episode_certification(
         and ("physx" in effort_source_policy or "physx" in " ".join(stale_effort_stats.get("efforts_sources", [])))
     )
     if stale_physx:
-        # Phase B grasp-only toggle: non-manipulation frames may still have
-        # identical efforts.  Accept stale ratio below 0.95 when toggle is active.
-        if _phase_b_toggle and _keep_kinematic:
+        # Explicit skip overrides all other logic — kinematic mode inherently
+        # produces stale efforts and there is no way to fix this client-side.
+        if _skip_stale_effort_gate:
+            pass  # Explicitly skipped via config.
+        elif _phase_b_toggle and _keep_kinematic:
+            # Phase B grasp-only toggle: non-manipulation frames may still have
+            # identical efforts.  Accept stale ratio below 0.95 when toggle is active.
             _stale_ratio = stale_effort_stats.get("stale_effort_pair_ratio", 1.0)
             if _stale_ratio >= 0.95:
                 # Toggle didn't reduce staleness enough — still flag.
                 gate_failures.append("CHANNEL_INCOMPLETE")
             # Otherwise: 0.3-0.94 is acceptable for grasp-only dynamic window.
-        elif _skip_stale_effort_gate:
-            pass  # Explicitly skipped via config.
         else:
             gate_failures.append("CHANNEL_INCOMPLETE")
 

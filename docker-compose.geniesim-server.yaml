@@ -41,6 +41,10 @@ services:
       # to activate. Requires a GPU with working RT cores (T4, L40S, etc.)
       ENABLE_CAMERAS: ${ENABLE_CAMERAS:-0}
       SKIP_RGB_CAPTURE: ${SKIP_RGB_CAPTURE:-true}
+      # Renderer mode override for fallback testing
+      BP_RENDERER_MODE: ${BP_RENDERER_MODE:-RaytracedLighting}
+      BP_RT2_ENABLED: ${BP_RT2_ENABLED:-0}
+      BP_DOME_LIGHT_INTENSITY: ${BP_DOME_LIGHT_INTENSITY:-3000.0}
       # DISPLAY must point to an Xorg server with NVIDIA GLX for camera RGB
       # rendering. The host starts Xorg :99 and shares /tmp/.X11-unix.
       DISPLAY: ${DISPLAY:-:99}

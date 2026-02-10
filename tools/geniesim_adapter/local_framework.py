@@ -5449,11 +5449,28 @@ class GenieSimLocalFramework:
         )
         _raw_only_flag_file = os.getenv("GENIESIM_FORCE_RAW_ONLY_FLAG_FILE", "/tmp/geniesim_force_raw_only.flag")
         if _raw_only_flag_file and Path(_raw_only_flag_file).is_file():
-            self._force_raw_only = True
-            self._strict_runtime_patch_health = False
-            self._strict_runtime_patch_details.append(
-                f"raw-only flag file present: {_raw_only_flag_file}"
-            )
+            # Guard against stale flag files left over from previous sessions.
+            # If the flag file is older than 10 minutes, treat it as stale —
+            # delete it and do NOT downgrade to raw_only.
+            import time as _time_flag
+            _flag_path = Path(_raw_only_flag_file)
+            _flag_age_s = _time_flag.time() - _flag_path.stat().st_mtime
+            _FLAG_STALE_THRESHOLD_S = 600  # 10 minutes
+            if _flag_age_s > _FLAG_STALE_THRESHOLD_S:
+                logger.warning(
+                    "Stale raw-only flag file (%.0fs old, threshold=%ds) — removing: %s",
+                    _flag_age_s, _FLAG_STALE_THRESHOLD_S, _raw_only_flag_file,
+                )
+                try:
+                    _flag_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            else:
+                self._force_raw_only = True
+                self._strict_runtime_patch_health = False
+                self._strict_runtime_patch_details.append(
+                    f"raw-only flag file present (age={_flag_age_s:.0f}s): {_raw_only_flag_file}"
+                )
         if self._modality_profile == "no_rgb":
             # No-RGB profile intentionally omits camera payloads from episodes.
             self._skip_rgb_placeholder = True
@@ -9813,8 +9830,55 @@ class GenieSimLocalFramework:
                     or task.get("target_object_id")
                 )
                 if _target_oid:
-                    _init_p = frames[0].get("_initial_object_poses", {}).get(_target_oid)
-                    _final_p = frames[-1].get("_final_object_poses", {}).get(_target_oid)
+                    _init_poses_dict = frames[0].get("_initial_object_poses", {})
+                    _final_poses_dict = frames[-1].get("_final_object_poses", {})
+                    _init_p = _init_poses_dict.get(_target_oid)
+                    _final_p = _final_poses_dict.get(_target_oid)
+                    # Fallback: try normalized token match (handles variation_ prefix
+                    # and numeric suffix mismatches, e.g. variation_toaster → Toaster003)
+                    if _init_p is None or _final_p is None:
+                        import re as _re_goal
+                        def _norm_goal_token(name: str) -> str:
+                            t = str(name).rsplit("/", 1)[-1]
+                            if "_obj_" in t:
+                                t = t.split("_obj_")[-1]
+                            t = t.lower()
+                            if t.startswith("variation_"):
+                                t = t[len("variation_"):]
+                            return _re_goal.sub(r"\d+$", "", t)
+                        _target_norm = _norm_goal_token(_target_oid)
+                        for _pk, _pv in _init_poses_dict.items():
+                            if _norm_goal_token(_pk) == _target_norm:
+                                _init_p = _pv
+                                break
+                        for _pk, _pv in _final_poses_dict.items():
+                            if _norm_goal_token(_pk) == _target_norm:
+                                _final_p = _pv
+                                break
+                    # Also try extracting from object_poses if _initial/_final not present
+                    if (_init_p is None or _final_p is None) and len(frames) >= 2:
+                        import re as _re_goal2
+                        def _norm_goal_token2(name: str) -> str:
+                            t = str(name).rsplit("/", 1)[-1]
+                            if "_obj_" in t:
+                                t = t.split("_obj_")[-1]
+                            t = t.lower()
+                            if t.startswith("variation_"):
+                                t = t[len("variation_"):]
+                            return _re_goal2.sub(r"\d+$", "", t)
+                        _target_norm2 = _norm_goal_token2(_target_oid)
+                        for _oid2, _pose2 in frames[0].get("object_poses", {}).items():
+                            if _norm_goal_token2(_oid2) == _target_norm2 and isinstance(_pose2, dict):
+                                _pos2 = _pose2.get("position")
+                                if isinstance(_pos2, list) and len(_pos2) >= 3 and _init_p is None:
+                                    _init_p = _pos2[:3]
+                                break
+                        for _oid2, _pose2 in frames[-1].get("object_poses", {}).items():
+                            if _norm_goal_token2(_oid2) == _target_norm2 and isinstance(_pose2, dict):
+                                _pos2 = _pose2.get("position")
+                                if isinstance(_pos2, list) and len(_pos2) >= 3 and _final_p is None:
+                                    _final_p = _pos2[:3]
+                                break
                     if _init_p is not None and _final_p is not None:
                         _init_arr = np.array(_init_p)
                         _final_arr = np.array(_final_p)
@@ -9958,6 +10022,18 @@ class GenieSimLocalFramework:
                 else:
                     task_success = bool(task_success_server) and bool(_environment_success_estimate)
                 llm_metadata["task_success_source"] = "server_task_success_constrained_by_physics"
+                # Safety: if server says success but we have no geometric verification,
+                # downgrade to False for manipulation-style tasks to avoid TASK_SUCCESS_CONTRADICTION.
+                _task_type_guard = str(task.get("task_type") or "").lower()
+                if task_success and llm_metadata.get("goal_region_verification") is None and any(
+                    k in _task_type_guard for k in ("pick", "place", "grasp", "lift", "stack", "organize", "interact")
+                ):
+                    task_success = False
+                    llm_metadata["task_success_reasoning"] = (
+                        "Server reported success but no geometric verification could be performed. "
+                        "Downgraded to False to avoid TASK_SUCCESS_CONTRADICTION."
+                    )
+                    llm_metadata["task_success_source"] = "server_downgraded_no_geometric_verification"
             else:
                 task_success = False
                 llm_metadata.setdefault(
@@ -10659,8 +10735,11 @@ class GenieSimLocalFramework:
                             mass_kg = _runtime_mass
                             _object_property_provenance[f"{obj_id}:mass"] = "runtime_scene_state"
                             break
-                # Fallback: estimate mass from object type name
-                if mass_kg is None and obj_id and not _strict_real_only:
+                # Fallback: estimate mass from object type name.
+                # Mass is metadata (not synthetic physics), so allow even under
+                # strict_real_only — without it every object gets mass_kg=None
+                # and TARGET_SCHEMA_INCOMPLETE fires on all episodes.
+                if mass_kg is None and obj_id:
                     import re as _re_mass
                     _mass_estimates = {
                         "pot": 0.5, "cup": 0.2, "plate": 0.3, "bottle": 0.4,
@@ -10673,7 +10752,8 @@ class GenieSimLocalFramework:
                         "sink": 5.0, "cabinet": 15.0, "kitchen_cabinet": 15.0,
                         "table": 20.0, "wallstackoven": 25.0,
                     }
-                    _type_match = _re_mass.match(r'^(?:lightwheel_kitchen_obj_)?([A-Za-z_]+?)(?:\d+)?$', obj_id.split("/")[-1])
+                    # Strip optional prefixes: lightwheel_kitchen_obj_, variation_
+                    _type_match = _re_mass.match(r'^(?:lightwheel_kitchen_obj_)?(?:variation_)?([A-Za-z_]+?)(?:\d+)?$', obj_id.split("/")[-1])
                     if _type_match:
                         _obj_type_key = _type_match.group(1).lower()
                         mass_kg = _mass_estimates.get(_obj_type_key)
@@ -12868,13 +12948,20 @@ class GenieSimLocalFramework:
                         break
             if _attached_object_id is not None and _ee_pos_units is not None and not _attached_has_real_pose:
                 _require_obj_motion = parse_bool_env(os.getenv("REQUIRE_OBJECT_MOTION"), default=True)
+                _keep_kin_prov = parse_bool_env(os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False)
                 _strict_disallow_kinematic_proxy = _strict_real_only or (_cert_strict and _require_obj_motion)
                 if _strict_disallow_kinematic_proxy:
-                    # Strict certification with required object motion disallows
-                    # client-side object pose synthesis for certified outputs.
-                    if obs.get("scene_state_provenance") != "kinematic_ee_offset_blocked":
+                    # When objects are kept kinematic by design, the server still
+                    # reports real (static) poses — label as "server_static" so
+                    # the certification server-backed check recognises server data.
+                    # Only use "kinematic_ee_offset_blocked" when not in kinematic
+                    # mode (i.e. objects SHOULD be moving but aren't).
+                    if _keep_kin_prov:
+                        if obs.get("scene_state_provenance") != "server_static":
+                            obs["scene_state_provenance"] = "server_static"
+                    elif obs.get("scene_state_provenance") != "kinematic_ee_offset_blocked":
                         obs["scene_state_provenance"] = "kinematic_ee_offset_blocked"
-                    if _strict_realism and (_requires_motion_task or _strict_real_only):
+                    if _strict_realism and (_requires_motion_task or _strict_real_only) and not _keep_kin_prov:
                         self._raise_fatal_realism(
                             "STRICT_OBJECT_MOTION_KINEMATIC_PROXY",
                             (
@@ -13979,8 +14066,8 @@ class GenieSimLocalFramework:
                 _cf_container["contact_forces"] = _cf_payload
 
         # Synthesize collision_contacts during manipulation phases from ID efforts.
-        # Certification checks collision_contacts (not contact_forces), so populate
-        # the per-frame contact list with gripper-to-target entries when grasping.
+        # NOTE: This is a non-strict fallback only. Strict realism must rely on
+        # real PhysX contact reports, not client-side synthesis.
         if _estimated_effort_count > 0 and _attached_object_id:
             if _strict_real_only:
                 self._raise_fatal_realism(

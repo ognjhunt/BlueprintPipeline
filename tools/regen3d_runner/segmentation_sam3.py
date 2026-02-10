@@ -53,8 +53,23 @@ def load_sam3(
 
     log.info("Loading SAM3 model: %s", model_id)
     t0 = time.monotonic()
-    processor = Sam3Processor.from_pretrained(model_id)
-    model = Sam3Model.from_pretrained(model_id).to(device)
+    # `facebook/sam3` is a gated repo. If we don't have a HF token, avoid
+    # network calls and rely on the local HF cache.
+    has_token = any(
+        os.getenv(k) for k in ("HF_TOKEN", "HF_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN")
+    )
+    local_only = not has_token
+    try:
+        processor = Sam3Processor.from_pretrained(model_id, local_files_only=local_only)
+        model = Sam3Model.from_pretrained(model_id, local_files_only=local_only).to(device)
+    except Exception as exc:
+        if local_only:
+            raise RuntimeError(
+                "SAM3 model is gated and no HF token is configured. "
+                "Either set HF_TOKEN (or HF_HUB_TOKEN/HUGGINGFACE_HUB_TOKEN) "
+                "or ensure the model is already cached on disk."
+            ) from exc
+        raise
     model.eval()
     log.info("SAM3 loaded in %.1fs", time.monotonic() - t0)
     return model, processor
@@ -95,9 +110,12 @@ def segment_with_sam3(
                 vision_embeds = vision_features["vision_embeds"]
             elif hasattr(vision_features, "vision_embeds"):
                 vision_embeds = vision_features.vision_embeds
-            else:
+            elif isinstance(vision_features, torch.Tensor):
                 # Some versions may return the tensor directly.
                 vision_embeds = vision_features
+            else:
+                # Unknown return shape; fall back to pixel_values path.
+                vision_embeds = None
         except Exception as exc:
             log.warning("Failed to precompute vision embeddings; falling back to pixel_values (%s)", exc)
             vision_embeds = None

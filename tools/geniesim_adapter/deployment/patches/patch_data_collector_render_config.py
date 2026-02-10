@@ -30,7 +30,9 @@ SERVER_SCRIPT = os.path.join(
 
 PATCH_MARKER = "BlueprintPipeline render config patch"
 HEADLESS_LINE = '"headless": False if (os.environ.get("DISPLAY") and os.environ.get("ENABLE_CAMERAS") == "1") else args.headless,'
-RENDERER_LINE = '"renderer": "RaytracedLighting",'
+# Respect BP_RENDERER_MODE env var for fallback testing; default RaytracedLighting.
+_RENDERER = os.environ.get("BP_RENDERER_MODE", "RaytracedLighting")
+RENDERER_LINE = f'"renderer": "{_RENDERER}",'
 
 
 def _replace_once(content: str, pattern: str, repl, desc: str, flags: int = 0) -> str:
@@ -154,7 +156,7 @@ def patch_file() -> None:
 
     # Remove any stale/duplicate rendermode and rt2 lines before re-inserting canonical block.
     content = re.sub(
-        r'^.*simulation_app\._carb_settings\.set\("/persistent/rtx/modes/rt2/enabled",\s*False\)\s*$\n?',
+        r'^.*simulation_app\._carb_settings\.set\("/persistent/rtx/modes/rt2/enabled",\s*(?:True|False)\)\s*$\n?',
         "",
         content,
         flags=re.MULTILINE,
@@ -167,13 +169,17 @@ def patch_file() -> None:
     )
 
     # Re-assert renderer settings immediately after SimulationApp init.
+    # Respect BP_RENDERER_MODE and BP_RT2_ENABLED env vars for fallback testing.
+    _rt2_enabled = os.environ.get("BP_RT2_ENABLED", "0") == "1"
+
     def _post_init_repl(match: re.Match) -> str:
         indent = match.group("indent")
+        _rt2_str = "True" if _rt2_enabled else "False"
         return (
             f'{indent}simulation_app._carb_settings.set("/omni/replicator/asyncRendering", False)\n'
-            f"{indent}# {PATCH_MARKER}: disable legacy rt2 and pin renderer mode.\n"
-            f'{indent}simulation_app._carb_settings.set("/persistent/rtx/modes/rt2/enabled", False)\n'
-            f'{indent}simulation_app._carb_settings.set("/rtx/rendermode", "RaytracedLighting")'
+            f"{indent}# {PATCH_MARKER}: pin renderer mode (BP_RENDERER_MODE={_RENDERER}, RT2={_rt2_str}).\n"
+            f'{indent}simulation_app._carb_settings.set("/persistent/rtx/modes/rt2/enabled", {_rt2_str})\n'
+            f'{indent}simulation_app._carb_settings.set("/rtx/rendermode", "{_RENDERER}")'
         )
 
     replicator_pattern = r'^(?P<indent>\s*)simulation_app\._carb_settings\.set\("/omni/replicator/asyncRendering",\s*False\)\s*$'

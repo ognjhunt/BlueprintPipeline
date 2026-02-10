@@ -48,6 +48,8 @@ CAMERA_HANDLER = textwrap.dedent("""\
         try:
             import carb.settings
             settings = carb.settings.get_settings()
+            import os as _render_os
+            _rt2_on = _render_os.environ.get("BP_RT2_ENABLED", "0") == "1"
             _settings_updates = {
                 "/app/asyncRendering": False,
                 "/app/asyncRenderingLowLatency": False,
@@ -63,7 +65,7 @@ CAMERA_HANDLER = textwrap.dedent("""\
                 "/rtx/pathtracing/optixDenoiser/enabled": True,
                 "/rtx/directLighting/sampledLighting/enabled": True,
                 "/app/usd/useFabricSceneDelegate": True,
-                "/persistent/rtx/modes/rt2/enabled": False,
+                "/persistent/rtx/modes/rt2/enabled": _rt2_on,
                 # NOTE: Do NOT set /rtx/rendermode here — it's a namespace, not a leaf key.
                 # Setting it overwrites sub-keys like /rtx/rendermode/subframes.
             }

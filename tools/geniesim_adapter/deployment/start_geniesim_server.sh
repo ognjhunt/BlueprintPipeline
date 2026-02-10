@@ -43,6 +43,10 @@ if [ ! -d "${GENIESIM_ROOT}/.git" ]; then
   exit 1
 fi
 
+# Remove stale raw-only flag from previous sessions so that new runs
+# start with a clean slate (STRICT_RUNTIME_PRECHECK_FAILED fix).
+rm -f /tmp/geniesim_force_raw_only.flag
+
 export GENIESIM_ROOT
 export ISAAC_SIM_PATH
 export GENIESIM_RUNTIME_READINESS_JSON
