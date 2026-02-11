@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from json import JSONDecodeError, loads as json_loads
@@ -68,6 +69,55 @@ def _namespaced_asset_id(scene_id: Optional[str], obj_id: str) -> str:
         return obj_id
     return f"{scene_id}_obj_{obj_id}"
 
+
+CANONICAL_REQUIRED_CAMERA_IDS: List[str] = ["left", "right", "wrist"]
+_CAMERA_ALIAS_TO_CANONICAL: Dict[str, str] = {
+    "left": "left",
+    "left_wrist": "left",
+    "side": "left",
+    "right": "right",
+    "head": "right",
+    "overhead": "right",
+    "wrist": "wrist",
+    "hand": "wrist",
+    "eye_in_hand": "wrist",
+}
+_COMPOSITE_TASK_TYPES = {"organize", "fill", "stack"}
+
+
+def _sanitize_token(value: Optional[str], *, fallback: str) -> str:
+    token = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
+    return token or fallback
+
+
+def _normalize_required_camera_ids(camera_ids: Optional[List[str]]) -> List[str]:
+    normalized: List[str] = []
+    for camera_id in (camera_ids or []):
+        alias = str(camera_id).strip().lower()
+        if not alias:
+            continue
+        canonical = _CAMERA_ALIAS_TO_CANONICAL.get(alias, alias)
+        if canonical in CANONICAL_REQUIRED_CAMERA_IDS and canonical not in normalized:
+            normalized.append(canonical)
+    for required in CANONICAL_REQUIRED_CAMERA_IDS:
+        if required not in normalized:
+            normalized.append(required)
+    return normalized
+
+
+def _derive_task_complexity(task_type: str, description_hint: Optional[str] = None) -> str:
+    task_name = (task_type or "").strip().lower()
+    hint = (description_hint or "").strip().lower()
+    if task_name in _COMPOSITE_TASK_TYPES:
+        return "composite"
+    if " then " in hint or " and then " in hint:
+        return "composite"
+    return "atomic"
+
+
+def _derive_curriculum_split(task_complexity: str) -> str:
+    return "target" if str(task_complexity).strip().lower() == "composite" else "pretrain"
+
 # =============================================================================
 # Data Models
 # =============================================================================
@@ -101,6 +151,11 @@ class SuggestedTask:
 
     task_type: str  # pick_place, open_close, pour, stack, etc.
     target_object: str  # Object ID
+    task_id: Optional[str] = None
+    task_name: Optional[str] = None
+    task_complexity: Optional[str] = None  # atomic|composite
+    curriculum_split: Optional[str] = None  # pretrain|target
+    required_camera_ids: List[str] = field(default_factory=lambda: list(CANONICAL_REQUIRED_CAMERA_IDS))
     goal_region: Optional[str] = None  # Placement region or goal object
     difficulty: str = "medium"  # easy, medium, hard
     priority: int = 1  # Higher = more important
@@ -117,9 +172,32 @@ class SuggestedTask:
             if self.requires_object_motion is not None
             else _infer_requires_object_motion(self.task_type, self.description_hint)
         )
+        complexity = (
+            str(self.task_complexity).strip().lower()
+            if self.task_complexity
+            else _derive_task_complexity(self.task_type, self.description_hint)
+        )
+        if complexity not in {"atomic", "composite"}:
+            complexity = _derive_task_complexity(self.task_type, self.description_hint)
+        curriculum_split = (
+            str(self.curriculum_split).strip().lower()
+            if self.curriculum_split
+            else _derive_curriculum_split(complexity)
+        )
+        if curriculum_split not in {"pretrain", "target"}:
+            curriculum_split = _derive_curriculum_split(complexity)
+        normalized_camera_ids = _normalize_required_camera_ids(self.required_camera_ids)
+        task_name = self.task_name or self.description_hint or f"{self.task_type}_{self.target_object}"
+        resolved_task_name = str(task_name).strip() or f"{self.task_type}_{self.target_object}"
+        resolved_task_id = self.task_id or f"{_sanitize_token(scene_id, fallback='scene')}::{_sanitize_token(self.task_type, fallback='task')}::{_sanitize_token(self.target_object, fallback='object')}"
         result = {
+            "task_id": resolved_task_id,
+            "task_name": resolved_task_name,
             "task_type": self.task_type,
             "target_object": target_object,
+            "task_complexity": complexity,
+            "curriculum_split": curriculum_split,
+            "required_camera_ids": normalized_camera_ids,
             "difficulty": self.difficulty,
             "priority": self.priority,
             "requires_object_motion": requires_motion,
@@ -759,6 +837,11 @@ class TaskConfigGenerator:
             tasks.append(SuggestedTask(
                 task_type=task_type,
                 target_object=target_obj,
+                task_id=t.get("task_id"),
+                task_name=t.get("task_name"),
+                task_complexity=t.get("task_complexity"),
+                curriculum_split=t.get("curriculum_split"),
+                required_camera_ids=t.get("required_camera_ids") or list(CANONICAL_REQUIRED_CAMERA_IDS),
                 goal_region=t.get("goal_region"),
                 difficulty=t.get("difficulty", "medium"),
                 priority=min(int(t.get("priority", 1)), 5),
@@ -866,8 +949,13 @@ Return JSON with this exact structure:
   }},
   "suggested_tasks": [
     {{
+      "task_id": "stable_task_id",
+      "task_name": "human_readable_task_name",
       "task_type": "pick_place",
       "target_object": "ObjectId",
+      "task_complexity": "atomic|composite",
+      "curriculum_split": "pretrain|target",
+      "required_camera_ids": ["left", "right", "wrist"],
       "goal_region": "SurfaceId",
       "difficulty": "easy|medium|hard",
       "priority": 1,

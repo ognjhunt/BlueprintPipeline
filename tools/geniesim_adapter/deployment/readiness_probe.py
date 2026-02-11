@@ -51,6 +51,11 @@ FORBIDDEN_PATCH_MARKER_SETS: Dict[str, Tuple[Tuple[str, str], ...]] = {
     "strict": STRICT_FORBIDDEN_PATCH_MARKERS,
 }
 
+FRANKA_REQUIRED_PATHS: Tuple[str, ...] = (
+    "source/data_collection/config/robot_cfg/franka_panda.json",
+    "source/data_collection/config/robot/franka/franka.usd",
+)
+
 
 def _parse_bool(value: str | None, default: bool) -> bool:
     if value is None:
@@ -153,6 +158,23 @@ def check_patch_markers(
             details.append(f"ok forbidden marker absent '{marker}' in {target}")
 
     return passed, missing, forbidden_hits, details
+
+
+def check_franka_assets(geniesim_root: Path) -> Tuple[bool, Dict[str, object], List[str]]:
+    errors: List[str] = []
+    found_paths: List[str] = []
+    for rel_path in FRANKA_REQUIRED_PATHS:
+        target = geniesim_root / rel_path
+        if target.is_file():
+            found_paths.append(rel_path)
+        else:
+            errors.append(f"missing Franka asset/config: {target}")
+    summary: Dict[str, object] = {
+        "required_paths": list(FRANKA_REQUIRED_PATHS),
+        "found_paths": found_paths,
+        "missing_count": len(errors),
+    }
+    return len(errors) == 0, summary, errors
 
 
 def check_physics_coverage_report(
@@ -269,6 +291,18 @@ def run_probe(args: argparse.Namespace) -> Tuple[bool, Dict[str, object]]:
         )
         passed = passed and ok
 
+    if getattr(args, "check_franka_assets", False):
+        ok, summary, errors = check_franka_assets(Path(args.geniesim_root))
+        checks.append(
+            {
+                "name": "franka_assets",
+                "passed": ok,
+                "summary": summary,
+                "errors": errors,
+            }
+        )
+        passed = passed and ok
+
     physics_report_path = (args.physics_report or "").strip()
     if args.strict_runtime:
         if not physics_report_path:
@@ -362,6 +396,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=_parse_bool(os.environ.get("GENIESIM_STRICT_RUNTIME_READINESS"), False),
         help="Enable strict runtime checks (patch markers + physics coverage report).",
+    )
+    parser.add_argument(
+        "--check-franka-assets",
+        action="store_true",
+        default=_parse_bool(os.environ.get("GENIESIM_CHECK_FRANKA_ASSETS"), False),
+        help="Verify Franka robot config/assets exist under GENIESIM_ROOT.",
     )
     parser.add_argument(
         "--physics-report",

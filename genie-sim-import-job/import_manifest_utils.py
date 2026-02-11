@@ -244,6 +244,10 @@ def get_lerobot_metadata_paths(output_dir: Path) -> List[Path]:
         output_dir / "lerobot" / "meta" / "info.json",
         output_dir / "lerobot" / "meta" / "stats.json",
         output_dir / "lerobot" / "meta" / "episodes.jsonl",
+        output_dir / "lerobot" / "meta" / "modality.json",
+        output_dir / "lerobot" / "meta" / "embodiment.json",
+        output_dir / "lerobot" / "meta" / "episodes_stats.jsonl",
+        output_dir / "lerobot" / "meta" / "curriculum_index.json",
         # v3 official: meta/episodes/chunk-000/file-0000.parquet
         output_dir / "lerobot" / "meta" / "episodes" / "chunk-000" / "file-0000.parquet",
         # Legacy v3: meta/episode_index.json
@@ -256,6 +260,10 @@ def get_lerobot_metadata_paths(output_dir: Path) -> List[Path]:
         output_dir / "lerobot" / "data" / "chunk-000" / "episodes.parquet",
         output_dir / "episodes" / "lerobot" / "meta" / "info.json",
         output_dir / "episodes" / "lerobot" / "meta" / "episodes.jsonl",
+        output_dir / "episodes" / "lerobot" / "meta" / "modality.json",
+        output_dir / "episodes" / "lerobot" / "meta" / "embodiment.json",
+        output_dir / "episodes" / "lerobot" / "meta" / "episodes_stats.jsonl",
+        output_dir / "episodes" / "lerobot" / "meta" / "curriculum_index.json",
         output_dir / "episodes" / "lerobot" / "meta" / "episodes" / "chunk-000" / "file-0000.parquet",
         output_dir / "episodes" / "lerobot" / "meta" / "episode_index.json",
         output_dir / "episodes" / "lerobot" / "data" / "chunk-000" / "file-0000.parquet",

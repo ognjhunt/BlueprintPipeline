@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SceneRequestV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scene_id"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["v1"]
+    },
+    "scene_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_mode": {
+      "type": "string",
+      "enum": ["text", "image", "auto"],
+      "default": "text"
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "quality_tier": {
+      "type": "string",
+      "enum": ["standard", "premium"],
+      "default": "standard"
+    },
+    "seed_count": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gcs_uri"],
+      "properties": {
+        "gcs_uri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "string"
+        }
+      }
+    },
+    "constraints": {
+      "type": "object"
+    },
+    "provider_policy": {
+      "type": "string",
+      "enum": ["openai_primary"],
+      "default": "openai_primary"
+    },
+    "fallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_image_fallback": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    }
+  }
+}

@@ -26,6 +26,7 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 | `scale-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/layout/scene_layout.json` |
 | `scene-batch.yaml` | Manual only | Provide a manifest object with a scene list |
 | `scene-generation-pipeline.yaml` | Cloud Scheduler / manual | Scheduler (disabled by default) or manual run |
+| `source-orchestrator.yaml` | Eventarc (GCS finalized) | `scenes/*/prompts/scene_request.json` |
 | `training-pipeline.yaml` | Eventarc custom event | Event type `blueprintpipeline.episodes.imported` |
 | `upsell-features-pipeline.yaml` | Manual only | Manual run with `.episodes_complete` payload |
 | `usd-assembly-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` |
@@ -33,6 +34,27 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 
 ## Primary entrypoints
 - YAML workflow definitions and the `setup-*.sh` scripts.
+
+## Source Request Contract (Text-First)
+`source-orchestrator.yaml` expects prompt requests at:
+
+`gs://<bucket>/scenes/<scene_id>/prompts/scene_request.json`
+
+Contract schema:
+
+- `fixtures/contracts/scene_request_v1.schema.json`
+
+Core fields:
+
+- `schema_version` (`v1`)
+- `scene_id`
+- `source_mode` (`text` | `image` | `auto`)
+- `prompt` (required for `text`/`auto`)
+- `quality_tier` (`standard` | `premium`)
+- `seed_count` (>= 1)
+- `image.gcs_uri` (required for `image` mode)
+- `provider_policy` (`openai_primary`)
+- `fallback.allow_image_fallback` (default `true`)
 
 **Note:** Dream2Flow and DWM workflows are experimental and remain disabled by
 default unless explicitly enabled (e.g., `ENABLE_DREAM2FLOW=true`,
@@ -83,6 +105,13 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `SECONDARY_WORKFLOW_REGION`: secondary region used when primary health checks fail. Defaults to `us-east1`.
 - `WORKFLOW_REGION`: legacy override for workflows that do not yet use primary/secondary routing.
 - `PRIMARY_BUCKET`: default bucket for manual or scheduler-driven workflows (replaces hardcoded bucket names).
+- `DEFAULT_SOURCE_MODE`: source-orchestrator default request mode (`text`, `image`, `auto`). Defaults to `text`.
+- `TEXT_GEN_RUNTIME`: source-orchestrator runtime profile hint for text Stage 1 (`vm`, `cloudrun`, etc.). Defaults to `vm`.
+- `TEXT_GEN_STANDARD_PROFILE`: profile label injected into text-scene-gen-job for `quality_tier=standard`.
+- `TEXT_GEN_PREMIUM_PROFILE`: profile label injected into text-scene-gen-job for `quality_tier=premium`.
+- `TEXT_GEN_MAX_SEEDS`: max allowed `seed_count` for `scene_request.json`. Defaults to `16`.
+- `TEXT_GEN_ENABLE_IMAGE_FALLBACK`: allow `auto`/`text` fallback to image path when text source fails. Defaults to `true`.
+- `ENABLE_VLM_QUALITY_AUDIT`: enables VLM episode audit in Genie Sim export/import path. Defaults to `1` in `genie-sim-export-pipeline.yaml`.
 - `FIREBASE_STORAGE_BUCKET`: required in production workflow environments that enable Firebase uploads for Genie Sim export/import.
 - `GENIESIM_CIRCUIT_BREAKER_THRESHOLD`: maximum consecutive failures before Genie Sim export/import workflows short-circuit. Defaults to `3`.
 

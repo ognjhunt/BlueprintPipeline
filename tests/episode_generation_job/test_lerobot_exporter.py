@@ -146,11 +146,16 @@ def test_lerobot_exporter_writes_metadata_and_data(load_job_module, tmp_path: Pa
     assert (meta_dir / "info.json").exists()
     assert (meta_dir / "tasks.jsonl").exists()
     assert (meta_dir / "episodes.jsonl").exists()
+    assert (meta_dir / "modality.json").exists()
+    assert (meta_dir / "embodiment.json").exists()
+    assert (meta_dir / "episodes_stats.jsonl").exists()
+    assert (meta_dir / "curriculum_index.json").exists()
 
     info = json.loads((meta_dir / "info.json").read_text())
     assert info["total_episodes"] == 1
     assert info["total_tasks"] == 1
     assert info["data_pack"]["tier"] == "core"
+    assert (output_dir / "curriculum").exists()
 
     chunk_dir = data_dir / "chunk-000"
     assert chunk_dir.exists()

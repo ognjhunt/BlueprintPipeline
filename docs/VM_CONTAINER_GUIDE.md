@@ -123,7 +123,11 @@ All pipeline env vars are in `configs/realism_strict.env` (sourced by `run_pipel
 | `GENIESIM_STRICT_RUNTIME_READINESS` | `0` | Strict probe fails with kinematic objects |
 | `GENIESIM_ENABLE_SCENE_PHYSICS_PROBE` | `0` | Kinematic objects ignore gravity |
 | `GENIESIM_INIT_ROBOT_FAILOVER_TIMEOUT_S` | `180` | cuRobo failover can take 2+ min |
-| `SKIP_RGB_CAPTURE` | `true` | L4 GPU cannot render color (Known Issue #7) |
+| `SKIP_RGB_CAPTURE` | `false` | RGB capture required for production dataset profile |
+| `REQUIRE_CAMERA_DATA` | `true` | Enforce complete camera capture |
+| `BP_CAMERA_RIG_PROFILE` | `nvidia_3cam` | Canonical camera IDs: `left,right,wrist` |
+| `BP_ENABLE_NVIDIA_METADATA` | `true` | Emit modality/embodiment/episodes_stats/curriculum metadata |
+| `BP_ENABLE_CURRICULUM_LAYOUT` | `true` | Emit `curriculum/{split}/{complexity}/{task_name}` views |
 
 ### What data is real vs fallback
 
@@ -135,13 +139,16 @@ All pipeline env vars are in `configs/realism_strict.env` (sourced by `run_pipel
 | Object positions | Manifest transform fallback | Static (kinematic) |
 | Object motion | N/A | Disabled (kinematic) |
 | Contact data | N/A | Disabled (kinematic) |
-| Camera RGB | N/A | Disabled (L4 rendering bug) |
+| Camera RGB | Isaac Sim camera capture | Enabled (`left/right/wrist`) |
 
 ## Robot Configuration
 
-The server ONLY supports the **G1 humanoid** (via `G1_omnipicker_fixed.json`). All defaults use `robot_type="g1"`.
+Runtime is **Franka-first** (`franka_panda.json`) with automatic fallback to G1 (`G1_omnipicker_fixed.json`) if initialization fails.
 
-Franka Panda crashes the server during init (the Franka USD is not bundled in the Docker image). Do NOT set `robot_type="franka"`.
+Fallback provenance is recorded in dataset metadata:
+- `requested_robot=franka`
+- `runtime_robot=g1`
+- `fallback_reason=<error>`
 
 ## Syncing Code Changes
 
@@ -283,9 +290,9 @@ Each episode JSON (~800KB, 60 frames): joint positions/velocities/efforts, EE po
 
 2. **cuRobo API version mismatch**: `'TensorDeviceType' has no attribute 'mesh'`. IK fallback chain works: server cuRobo -> local numerical IK -> joint-space interpolation.
 
-3. **Franka robot crashes server**: Server only ships G1/G2 configs. Franka USD not bundled. Use `robot_type="g1"` only.
+3. **Franka asset mismatch**: Startup now validates Franka config/USD assets before collection. If missing, startup fails fast.
 
-4. **L4 GPU cannot render color**: RTX ray tracing produces RGB=0 on all cameras. Depth works. Options: switch to T4/A10G GPU, or use Isaac Sim 4.x instead of 5.1.0-rc.19.
+4. **RGB quality drift**: Use `REQUIRE_CAMERA_DATA=true` and production camera rig profile (`BP_CAMERA_RIG_PROFILE=nvidia_3cam`) to block incomplete episodes.
 
 5. **`variation_toaster` crashes server**: Object cannot be resolved; server crashes repeatedly during this task. 6/7 tasks complete with it skipped.
 
@@ -306,7 +313,11 @@ Each episode JSON (~800KB, 60 frames): joint positions/velocities/efforts, EE po
 | `GENIESIM_INTER_TASK_DELAY_S` | Delay between tasks with health probe | `5` |
 | `GENIESIM_RESTART_EVERY_N_TASKS` | Proactive restart every N tasks | `0` (disabled) |
 | `CAMERA_REWARMUP_ON_RESET` | Re-run camera warmup on each capture | `1` |
-| `SKIP_RGB_CAPTURE` | Skip camera RGB | `true` |
+| `SKIP_RGB_CAPTURE` | Skip camera RGB | `false` |
+| `REQUIRE_CAMERA_DATA` | Require camera data on every frame | `true` |
+| `BP_CAMERA_RIG_PROFILE` | Camera rig profile (`legacy`/`nvidia_3cam`) | `nvidia_3cam` |
+| `BP_ENABLE_NVIDIA_METADATA` | Emit NVIDIA-style metadata artifacts | `true` |
+| `BP_ENABLE_CURRICULUM_LAYOUT` | Emit curriculum hierarchy view | `true` |
 | `DATA_FIDELITY_MODE` | Fidelity mode (`production`/`development`) | `production` |
 | `STRICT_REALISM` | Fail on realism violations | `true` |
 

@@ -328,6 +328,75 @@ def _make_framework(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> lf.Genie
 
 
 @pytest.mark.unit
+def test_resolve_required_cameras_normalizes_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    framework = _make_framework(tmp_path, monkeypatch)
+    required = framework._resolve_required_cameras_for_task(
+        {"required_camera_ids": ["head", "left_wrist", "wrist"]}
+    )
+    assert required == ["right", "left", "wrist"] or required == ["left", "right", "wrist"]
+    assert set(required) == {"left", "right", "wrist"}
+
+
+@pytest.mark.unit
+def test_normalize_and_validate_tasks_applies_defaults_in_non_enforced_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    framework = _make_framework(tmp_path, monkeypatch)
+    framework._enforce_task_taxonomy = False
+    tasks = framework._normalize_and_validate_tasks(
+        [{"task_type": "pick_place", "target_object": "mug_0"}]
+    )
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task["task_id"]
+    assert task["task_name"]
+    assert task["task_complexity"] in {"atomic", "composite"}
+    assert task["curriculum_split"] in {"pretrain", "target"}
+    assert set(task["required_camera_ids"]) == {"left", "right", "wrist"}
+
+
+@pytest.mark.unit
+def test_initialize_runtime_robot_with_fallback_to_g1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    framework = _make_framework(tmp_path, monkeypatch)
+    init_calls: list[str] = []
+
+    def _fake_init(robot_cfg_file: str, base_pose, scene_usd):  # noqa: ANN001
+        init_calls.append(robot_cfg_file)
+        if robot_cfg_file == "franka_panda.json":
+            raise RuntimeError("franka init failure")
+
+    monkeypatch.setattr(framework, "_init_robot_on_server", _fake_init)
+    monkeypatch.setattr(
+        framework._client,
+        "get_joint_position",
+        lambda *args, **kwargs: lf.GrpcCallResult(
+            success=True,
+            available=True,
+            payload=[0.0] * 34,
+        ),
+    )
+
+    runtime_robot, robot_cfg_file, fallback_reason = framework._initialize_runtime_robot_with_fallback(
+        requested_robot="franka",
+        base_pose={"position": {"x": 0, "y": 0, "z": 0}, "orientation": {"rw": 1, "rx": 0, "ry": 0, "rz": 0}},
+        scene_usd="scenes/empty_scene.usda",
+    )
+
+    assert init_calls[0] == "franka_panda.json"
+    assert runtime_robot == "g1"
+    assert robot_cfg_file == "G1_omnipicker_fixed.json"
+    assert fallback_reason is not None
+    assert "franka_panda.json" in fallback_reason
+
+
+@pytest.mark.unit
 def test_runtime_patch_health_check_fails_when_containerized_and_no_readiness_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -456,6 +525,15 @@ def test_run_data_collection_aborts_immediately_on_fatal_realism(
     monkeypatch.setattr(framework._client, "is_connected", lambda: True)
     monkeypatch.setattr(framework._client, "ping", lambda timeout=10.0: True)
     monkeypatch.setattr(framework, "_init_robot_on_server", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        framework._client,
+        "get_joint_position",
+        lambda *args, **kwargs: lf.GrpcCallResult(
+            success=True,
+            available=True,
+            payload=[0.0] * 34,
+        ),
+    )
     monkeypatch.setattr(framework, "_strict_realism_preflight", lambda: None)
     monkeypatch.setattr(
         framework,

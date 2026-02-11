@@ -990,12 +990,54 @@ def _validate_json_schema(payload: Any, schema: Dict[str, Any]) -> None:
         jsonschema.validate(instance=payload, schema=schema)
 
 
+def _backfill_task_taxonomy_fields(task_config_payload: Dict[str, Any]) -> None:
+    """Backfill curriculum/camera fields for legacy task configs before schema validation."""
+    tasks = task_config_payload.get("suggested_tasks")
+    if not isinstance(tasks, list):
+        return
+    for idx, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            continue
+        task_type = str(task.get("task_type") or "task").strip().lower()
+        target_object = str(task.get("target_object") or f"object_{idx}").strip()
+        if not task.get("task_id"):
+            task["task_id"] = f"{task_type}::{target_object}"
+        if not task.get("task_name"):
+            task["task_name"] = str(task.get("description_hint") or f"{task_type}_{target_object}")
+        if not task.get("task_complexity"):
+            task["task_complexity"] = "composite" if task_type in {"organize", "fill", "stack"} else "atomic"
+        if not task.get("curriculum_split"):
+            task["curriculum_split"] = "target" if task.get("task_complexity") == "composite" else "pretrain"
+        required = task.get("required_camera_ids")
+        if not isinstance(required, list):
+            required = []
+        normalized: list[str] = []
+        for camera_id in required:
+            alias = str(camera_id).strip().lower()
+            if alias in {"left", "left_wrist", "side"}:
+                canonical = "left"
+            elif alias in {"right", "head", "overhead"}:
+                canonical = "right"
+            elif alias in {"wrist", "hand", "eye_in_hand"}:
+                canonical = "wrist"
+            else:
+                canonical = alias
+            if canonical in {"left", "right", "wrist"} and canonical not in normalized:
+                normalized.append(canonical)
+        for required_camera in ("left", "right", "wrist"):
+            if required_camera not in normalized:
+                normalized.append(required_camera)
+        task["required_camera_ids"] = normalized
+
+
 def _validate_bundle_schemas(payloads: Dict[str, Any]) -> None:
     errors = []
     for label, payload in payloads.items():
         schema_name = CONTRACT_SCHEMAS.get(label)
         if not schema_name:
             continue
+        if label == "task_config" and isinstance(payload, dict):
+            _backfill_task_taxonomy_fields(payload)
         schema = _load_contract_schema(schema_name)
         try:
             _validate_json_schema(payload, schema)

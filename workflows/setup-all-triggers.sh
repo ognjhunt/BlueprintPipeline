@@ -8,13 +8,14 @@
 #
 # It will create triggers for:
 #   1. episode-generation-pipeline (manual - uses GKE directly)
-#   2. usd-assembly-pipeline
-#   3. genie-sim-export-pipeline
-#   4. arena-export-pipeline (3 triggers for different sources)
-#   5. objects-pipeline
-#   6. genie-sim-import-poller (fallback)
-#   7. dream2flow-preparation-pipeline (manual, disabled unless enabled)
-#   8. dwm-preparation-pipeline (manual, disabled unless enabled)
+#   2. source-orchestrator (text-first scene requests)
+#   3. usd-assembly-pipeline
+#   4. genie-sim-export-pipeline
+#   5. arena-export-pipeline (3 triggers for different sources)
+#   6. objects-pipeline
+#   7. genie-sim-import-poller (fallback)
+#   8. dream2flow-preparation-pipeline (manual, disabled unless enabled)
+#   9. dwm-preparation-pipeline (manual, disabled unless enabled)
 #
 # Usage:
 #   ./setup-all-triggers.sh <project_id> [bucket_name] [region]
@@ -90,6 +91,7 @@ run_setup_script() {
 
 # Run all setup scripts in order
 run_setup_script "setup-image-trigger.sh" "Image-to-Scene Pipeline"
+run_setup_script "setup-source-orchestrator-trigger.sh" "Source Orchestrator (Text-First)"
 run_setup_script "setup-usd-assembly-trigger.sh" "USD Assembly Pipeline"
 run_setup_script "setup-genie-sim-export-trigger.sh" "Genie Sim Export Pipeline"
 run_setup_script "setup-arena-export-trigger.sh" "Arena Export Pipeline"
@@ -133,11 +135,12 @@ if [ ${fail_count} -eq 0 ]; then
     echo ""
     echo "Pipeline Triggers Created:"
     echo "  0. image-upload-pipeline-trigger → Trigger on scenes/{scene_id}/images/* uploads"
-    echo "  1. usd-assembly-trigger      → Trigger on .regen3d_complete"
-    echo "  2. genie-sim-export-trigger  → Trigger on .variation_pipeline_complete"
-    echo "  3. arena-export-* (3 triggers) → Trigger on .usd_complete, .geniesim_complete, .isaac_lab_complete (ignores .geniesim_submitted)"
-    echo "  4. objects-trigger           → Trigger on scene_layout.json uploads"
-    echo "  5. genie-sim-import-poller → Scheduled fallback poller"
+    echo "  1. scene-request-source-orchestrator-trigger → Trigger on scene_request.json uploads"
+    echo "  2. usd-assembly-trigger      → Trigger on .regen3d_complete"
+    echo "  3. genie-sim-export-trigger  → Trigger on .variation_pipeline_complete"
+    echo "  4. arena-export-* (3 triggers) → Trigger on .usd_complete, .geniesim_complete, .isaac_lab_complete (ignores .geniesim_submitted)"
+    echo "  5. objects-trigger           → Trigger on scene_layout.json uploads"
+    echo "  6. genie-sim-import-poller → Scheduled fallback poller"
     echo ""
     echo "Manual Setup Still Required:"
     echo "  • Episode Generation: Uses GKE directly (see episode-generation-job/scripts/setup_eventarc_trigger.sh)"

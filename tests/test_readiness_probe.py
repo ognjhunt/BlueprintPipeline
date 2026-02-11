@@ -234,3 +234,22 @@ def test_run_probe_strict_runtime_requires_physics_report() -> None:
     physics_checks = [c for c in checks if c.get("name") == "physics_coverage_report"]
     assert len(physics_checks) == 1
     assert physics_checks[0]["passed"] is False
+
+
+def test_check_franka_assets(tmp_path: Path) -> None:
+    root = tmp_path / "geniesim"
+    cfg = root / "source/data_collection/config/robot_cfg/franka_panda.json"
+    usd = root / "source/data_collection/config/robot/franka/franka.usd"
+    _write(cfg, "{}\n")
+    _write(usd, "#usda 1.0\n")
+
+    ok, summary, errors = readiness_probe.check_franka_assets(root)
+    assert ok is True
+    assert errors == []
+    assert summary["missing_count"] == 0
+
+    usd.unlink()
+    ok2, summary2, errors2 = readiness_probe.check_franka_assets(root)
+    assert ok2 is False
+    assert summary2["missing_count"] == 1
+    assert any("franka.usd" in error for error in errors2)

@@ -10,10 +10,34 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["task_type", "target_object", "difficulty", "priority"],
+        "required": [
+          "task_id",
+          "task_name",
+          "task_type",
+          "target_object",
+          "task_complexity",
+          "curriculum_split",
+          "required_camera_ids",
+          "difficulty",
+          "priority"
+        ],
         "properties": {
+          "task_id": {"type": "string", "minLength": 1},
+          "task_name": {"type": "string", "minLength": 1},
           "task_type": {"type": "string"},
           "target_object": {"type": "string"},
+          "task_complexity": {"type": "string", "enum": ["atomic", "composite"]},
+          "curriculum_split": {"type": "string", "enum": ["pretrain", "target"]},
+          "required_camera_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 3,
+            "allOf": [
+              {"contains": {"const": "left"}},
+              {"contains": {"const": "right"}},
+              {"contains": {"const": "wrist"}}
+            ]
+          },
           "goal_region": {"type": "string"},
           "difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]},
           "priority": {"type": "integer"},

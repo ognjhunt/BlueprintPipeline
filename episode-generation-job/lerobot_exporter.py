@@ -83,7 +83,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -262,6 +262,254 @@ def _validate_parquet_compression(codec: str) -> None:
             f"Parquet compression '{codec}' is not available in this pyarrow build. "
             f"Supported codecs: {supported_msg}."
         )
+
+
+def _load_json_file(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _load_jsonl_file(path: Path) -> List[Dict[str, Any]]:
+    if not path.is_file():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def _write_json_file(
+    path: Path,
+    payload: Dict[str, Any],
+    *,
+    record_checksum: Optional[Callable[[Path], None]] = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2))
+    if callable(record_checksum):
+        record_checksum(path)
+
+
+def _write_jsonl_file(
+    path: Path,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    record_checksum: Optional[Callable[[Path], None]] = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as handle:
+        for row in rows:
+            handle.write(json.dumps(dict(row)) + "\n")
+    if callable(record_checksum):
+        record_checksum(path)
+
+
+def _slugify_path_token(value: Any, *, fallback: str) -> str:
+    token = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
+    return token or fallback
+
+
+def write_nvidia_alignment_metadata_files(
+    *,
+    lerobot_root: Path,
+    info: Optional[Mapping[str, Any]] = None,
+    dataset_info: Optional[Mapping[str, Any]] = None,
+    episodes_meta: Optional[Sequence[Mapping[str, Any]]] = None,
+    tasks: Optional[Sequence[Mapping[str, Any]]] = None,
+    episode_stats_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+    global_stats: Optional[Mapping[str, Any]] = None,
+    enable_curriculum_layout: bool = True,
+    record_checksum: Optional[Callable[[Path], None]] = None,
+) -> Dict[str, Any]:
+    """Emit NVIDIA-style metadata artifacts on top of a LeRobot dataset root."""
+    lerobot_root = Path(lerobot_root)
+    meta_dir = lerobot_root / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+
+    info_payload = dict(info or _load_json_file(meta_dir / "info.json") or {})
+    dataset_info_payload = dict(dataset_info or _load_json_file(lerobot_root / "dataset_info.json") or {})
+
+    episodes_rows = [dict(row) for row in (episodes_meta or _load_jsonl_file(meta_dir / "episodes.jsonl"))]
+    if not episodes_rows:
+        fallback_rows = _load_jsonl_file(lerobot_root / "episodes.jsonl")
+        for row in fallback_rows:
+            episode_id = str(row.get("episode_id") or "")
+            episodes_rows.append(
+                {
+                    "episode_id": episode_id,
+                    "task_id": row.get("task_id") or episode_id,
+                    "task_name": row.get("task_name") or row.get("task") or "task",
+                    "task_complexity": row.get("task_complexity") or "atomic",
+                    "curriculum_split": row.get("curriculum_split") or "pretrain",
+                    "length": int(row.get("length") or 0),
+                    "camera_ids": ["left", "right", "wrist"],
+                    "parquet_path": f"data/chunk-000/episode_{episode_id}.parquet" if episode_id else None,
+                }
+            )
+
+    task_rows = [dict(row) for row in (tasks or _load_jsonl_file(meta_dir / "tasks.jsonl"))]
+    if not task_rows and episodes_rows:
+        by_task: Dict[str, Dict[str, Any]] = {}
+        for row in episodes_rows:
+            task_id = str(row.get("task_id") or row.get("task_name") or "task")
+            if task_id in by_task:
+                continue
+            by_task[task_id] = {
+                "task_id": task_id,
+                "task_name": row.get("task_name") or task_id,
+                "task_complexity": row.get("task_complexity") or "atomic",
+                "curriculum_split": row.get("curriculum_split") or "pretrain",
+                "required_camera_ids": row.get("camera_ids") or ["left", "right", "wrist"],
+            }
+        task_rows = list(by_task.values())
+
+    stats_rows = [dict(row) for row in (episode_stats_rows or _load_jsonl_file(meta_dir / "episodes_stats.jsonl"))]
+    if not stats_rows and episodes_rows:
+        for row in episodes_rows:
+            stats_rows.append(
+                {
+                    "episode_id": row.get("episode_id"),
+                    "task_id": row.get("task_id"),
+                    "task_name": row.get("task_name") or row.get("task"),
+                    "task_complexity": row.get("task_complexity") or "atomic",
+                    "curriculum_split": row.get("curriculum_split") or "pretrain",
+                    "length": int(row.get("length") or 0),
+                    "channels": {},
+                }
+            )
+
+    camera_ids: List[str] = []
+    raw_cameras = (
+        list(info_payload.get("cameras") or [])
+        or list((info_payload.get("data_pack") or {}).get("cameras") or [])
+    )
+    if not raw_cameras:
+        for row in episodes_rows:
+            for camera_id in list(row.get("camera_ids") or []):
+                if camera_id not in camera_ids:
+                    camera_ids.append(str(camera_id))
+    else:
+        camera_ids = [str(camera_id) for camera_id in raw_cameras if camera_id]
+    for required_id in ("left", "right", "wrist"):
+        if required_id not in camera_ids:
+            camera_ids.append(required_id)
+
+    modality_payload = {
+        "version": "1.0",
+        "camera_ids": camera_ids,
+        "required_camera_ids": ["left", "right", "wrist"],
+        "modalities": {
+            "observation.state": {"present": True},
+            "action": {"present": True},
+            "reward": {"present": True},
+            "observation.images": {
+                "present": bool(camera_ids),
+                "storage": "videos/",
+                "cameras": camera_ids,
+            },
+        },
+    }
+    embodiment_payload = {
+        "version": "1.0",
+        "requested_robot": (
+            dataset_info_payload.get("requested_robot")
+            or info_payload.get("requested_robot")
+            or info_payload.get("robot_type")
+        ),
+        "runtime_robot": (
+            dataset_info_payload.get("runtime_robot")
+            or info_payload.get("runtime_robot")
+            or info_payload.get("robot_type")
+        ),
+        "robot_type": info_payload.get("robot_type"),
+        "camera_rig_profile": (
+            dataset_info_payload.get("camera_rig_profile")
+            or info_payload.get("camera_rig_profile")
+            or "nvidia_3cam"
+        ),
+    }
+
+    _write_json_file(meta_dir / "modality.json", modality_payload, record_checksum=record_checksum)
+    _write_json_file(meta_dir / "embodiment.json", embodiment_payload, record_checksum=record_checksum)
+    _write_jsonl_file(meta_dir / "episodes_stats.jsonl", stats_rows, record_checksum=record_checksum)
+
+    stats_path = meta_dir / "stats.json"
+    stats_payload = _load_json_file(stats_path) or {}
+    if global_stats:
+        stats_payload.update(dict(global_stats))
+    stats_payload.setdefault(
+        "modality_coverage",
+        {
+            "episodes": len(episodes_rows),
+            "camera_ids": camera_ids,
+        },
+    )
+    _write_json_file(stats_path, stats_payload, record_checksum=record_checksum)
+
+    curriculum_index: Dict[str, Any] = {
+        "version": "1.0",
+        "entries": [],
+    }
+    if enable_curriculum_layout and episodes_rows:
+        curriculum_root = lerobot_root / "curriculum"
+        grouped: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+        for row in episodes_rows:
+            split = str(row.get("curriculum_split") or "pretrain").strip().lower()
+            complexity = str(row.get("task_complexity") or "atomic").strip().lower()
+            task_name = str(row.get("task_name") or row.get("task") or "task").strip()
+            key = (split, complexity, task_name)
+            grouped.setdefault(key, []).append(dict(row))
+
+        for (split, complexity, task_name), subset_rows in sorted(grouped.items(), key=lambda item: item[0]):
+            task_slug = _slugify_path_token(task_name, fallback="task")
+            subset_dir = curriculum_root / split / complexity / task_slug
+            subset_rows = sorted(subset_rows, key=lambda row: str(row.get("episode_id") or ""))
+            _write_jsonl_file(subset_dir / "episodes.jsonl", subset_rows, record_checksum=record_checksum)
+            _write_json_file(
+                subset_dir / "episode_indices.json",
+                {
+                    "episode_ids": [str(row.get("episode_id") or "") for row in subset_rows],
+                    "count": len(subset_rows),
+                    "stats_ref": "meta/episodes_stats.jsonl",
+                },
+                record_checksum=record_checksum,
+            )
+            _write_json_file(
+                subset_dir / "stats_ref.json",
+                {"stats_path": "meta/stats.json", "episodes_stats_path": "meta/episodes_stats.jsonl"},
+                record_checksum=record_checksum,
+            )
+            curriculum_rel = subset_dir.relative_to(lerobot_root).as_posix()
+            curriculum_index["entries"].append(
+                {
+                    "task_name": task_name,
+                    "task_id": subset_rows[0].get("task_id"),
+                    "curriculum_split": split,
+                    "task_complexity": complexity,
+                    "path": curriculum_rel,
+                    "episodes": len(subset_rows),
+                }
+            )
+
+    _write_json_file(meta_dir / "curriculum_index.json", curriculum_index, record_checksum=record_checksum)
+    return {
+        "episodes": len(episodes_rows),
+        "tasks": len(task_rows),
+        "curriculum_entries": len(curriculum_index.get("entries", [])),
+    }
 
 
 @dataclass
@@ -2371,6 +2619,19 @@ class LeRobotExporter:
                 self._write_camera_calibration(meta_dir)
                 self._write_episodes_meta(meta_dir)
                 self._write_episode_index(meta_dir)
+                write_nvidia_alignment_metadata_files(
+                    lerobot_root=temp_dir,
+                    info=_load_json_file(meta_dir / "info.json"),
+                    episodes_meta=_load_jsonl_file(meta_dir / "episodes.jsonl"),
+                    tasks=self.tasks,
+                    episode_stats_rows=_load_jsonl_file(meta_dir / "episodes_stats.jsonl"),
+                    global_stats=self.stats,
+                    enable_curriculum_layout=parse_bool_env(
+                        os.getenv("BP_ENABLE_CURRICULUM_LAYOUT"),
+                        default=True,
+                    ),
+                    record_checksum=self._record_checksum,
+                )
             except Exception as exc:
                 self._cleanup_failed_export("Failed to write metadata", exc)
                 raise

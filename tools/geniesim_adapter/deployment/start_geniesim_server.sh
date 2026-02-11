@@ -22,6 +22,8 @@ GENIESIM_STRICT_RUNTIME_READINESS=${GENIESIM_STRICT_RUNTIME_READINESS:-0}
 GENIESIM_STRICT_FAIL_ACTION=${GENIESIM_STRICT_FAIL_ACTION:-error}
 GENIESIM_KEEP_OBJECTS_KINEMATIC=${GENIESIM_KEEP_OBJECTS_KINEMATIC:-0}
 GENIESIM_SERVER_CUROBO_MODE=${GENIESIM_SERVER_CUROBO_MODE:-off}
+GENIESIM_CHECK_FRANKA_ASSETS=${GENIESIM_CHECK_FRANKA_ASSETS:-1}
+GENIESIM_PRIMARY_ROBOT=${GENIESIM_PRIMARY_ROBOT:-franka}
 GENIESIM_CUROBO_FAILOVER_FLAG=${GENIESIM_CUROBO_FAILOVER_FLAG:-${REPO_ROOT}/.geniesim_curobo_failover.flag}
 
 _RUNTIME_READINESS_DEFAULT="/tmp/geniesim_runtime_readiness.json"
@@ -42,6 +44,22 @@ if [ ! -d "${GENIESIM_ROOT}/.git" ]; then
   echo "[geniesim] ERROR: Genie Sim not found at ${GENIESIM_ROOT}." >&2
   echo "          Use the pre-baked image (Dockerfile.geniesim-server) or run bootstrap_geniesim_runtime.sh instead." >&2
   exit 1
+fi
+
+if [ "${GENIESIM_PRIMARY_ROBOT}" = "franka" ] && [ "${GENIESIM_CHECK_FRANKA_ASSETS}" = "1" ]; then
+  _franka_cfg="${GENIESIM_ROOT}/source/data_collection/config/robot_cfg/franka_panda.json"
+  _franka_usd="${GENIESIM_ROOT}/source/data_collection/config/robot/franka/franka.usd"
+  if [ ! -f "${_franka_cfg}" ] || [ ! -f "${_franka_usd}" ]; then
+    echo "[geniesim] WARNING: Franka-first mode enabled but Franka assets are missing." >&2
+    echo "[geniesim] WARNING: Expected files:" >&2
+    echo "[geniesim] WARNING:   - ${_franka_cfg}" >&2
+    echo "[geniesim] WARNING:   - ${_franka_usd}" >&2
+    if [ "${GENIESIM_STRICT_RUNTIME_READINESS}" = "1" ]; then
+      echo "[geniesim] ERROR: strict runtime readiness enabled; aborting startup." >&2
+      exit 1
+    fi
+    echo "[geniesim] WARNING: continuing startup; collector may fall back to G1 at runtime." >&2
+  fi
 fi
 
 # Remove stale raw-only flag files from previous sessions so that new runs
@@ -74,6 +92,8 @@ export GENIESIM_ALLOW_DEGRADED_XVFB
 export GENIESIM_STRICT_RUNTIME_READINESS
 export GENIESIM_STRICT_FAIL_ACTION
 export GENIESIM_SERVER_CUROBO_MODE
+export GENIESIM_CHECK_FRANKA_ASSETS
+export GENIESIM_PRIMARY_ROBOT
 export GENIESIM_CUROBO_FAILOVER_FLAG
 
 # Source pre-baked ROS 2 env if available, otherwise detect at runtime.
@@ -299,6 +319,9 @@ if [ -d "${PATCHES_DIR}" ]; then
       --forbid-patch-set strict
       --output "${GENIESIM_RUNTIME_PRESTART_JSON}"
     )
+    if [ "${GENIESIM_PRIMARY_ROBOT}" = "franka" ] && [ "${GENIESIM_CHECK_FRANKA_ASSETS}" = "1" ]; then
+      _prestart_probe_args+=(--check-franka-assets)
+    fi
     echo "[geniesim] Running pre-start patch readiness probe"
     if ! "${ISAAC_SIM_PATH}/python.sh" "${SCRIPT_DIR}/readiness_probe.py" "${_prestart_probe_args[@]}"; then
       echo "[geniesim] ERROR: Pre-start patch readiness probe failed." >&2

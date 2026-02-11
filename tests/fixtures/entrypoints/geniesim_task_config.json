@@ -3,10 +3,16 @@
   "environment_type": "kitchen",
   "suggested_tasks": [
     {
+      "task_id": "scene_1::pick::mug",
+      "task_name": "Pick up the mug",
       "task_type": "pick",
       "target_object": "mug",
+      "task_complexity": "atomic",
+      "curriculum_split": "pretrain",
+      "required_camera_ids": ["left", "right", "wrist"],
       "difficulty": "easy",
       "priority": 1,
+      "requires_object_motion": true,
       "description_hint": "Pick up the mug"
     }
   ],

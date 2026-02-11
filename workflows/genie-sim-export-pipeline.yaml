@@ -614,6 +614,8 @@ main:
                         value: "true"
                       - name: REQUIRE_QUALITY_GATES
                         value: "true"
+                      - name: ENABLE_VLM_QUALITY_AUDIT
+                        value: '${default(sys.get_env("ENABLE_VLM_QUALITY_AUDIT"), "1")}'
                       # Enable all enhanced features for commercial data generation
                       - name: ENABLE_MULTI_ROBOT
                         value: "true"

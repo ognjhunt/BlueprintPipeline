@@ -95,6 +95,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -106,7 +107,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 from pydantic import (
@@ -171,6 +172,136 @@ from tools.quality_gates.physics_certification import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+EPISODE_JOB_DIR = REPO_ROOT / "episode-generation-job"
+EPISODE_JOB_LEROBOT_EXPORTER = EPISODE_JOB_DIR / "lerobot_exporter.py"
+_LEROBOT_EXPORTER_MODULE_CACHE: Optional[Any] = None
+
+CANONICAL_CAMERA_IDS: Tuple[str, str, str] = ("left", "right", "wrist")
+CAMERA_ALIAS_TO_CANONICAL: Dict[str, str] = {
+    "left": "left",
+    "left_wrist": "left",
+    "side": "left",
+    "right": "right",
+    "head": "right",
+    "overhead": "right",
+    "wrist": "wrist",
+    "hand": "wrist",
+    "eye_in_hand": "wrist",
+    "front": "wrist",
+}
+CAMERA_PROVISIONING_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "left": {
+        "prim": "/World/BlueprintPipeline/Cameras/left",
+        "pose": {
+            "position": {"x": -1.2, "y": 0.9, "z": 1.5},
+            "orientation": {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+        },
+    },
+    "right": {
+        "prim": "/World/BlueprintPipeline/Cameras/right",
+        "pose": {
+            "position": {"x": -1.2, "y": -0.9, "z": 1.5},
+            "orientation": {"rw": 1.0, "rx": 0.0, "ry": 0.0, "rz": 0.0},
+        },
+    },
+}
+COMPOSITE_TASK_TYPES: Set[str] = {"organize", "fill", "stack"}
+
+
+def _canonicalize_camera_id(camera_id: Any) -> str:
+    raw = str(camera_id or "").strip().lower()
+    if not raw:
+        return ""
+    return CAMERA_ALIAS_TO_CANONICAL.get(raw, raw)
+
+
+def _normalize_required_camera_ids(
+    camera_ids: Optional[Sequence[Any]],
+    *,
+    ensure_all_canonical: bool = True,
+) -> List[str]:
+    normalized: List[str] = []
+    for camera_id in list(camera_ids or []):
+        canonical = _canonicalize_camera_id(camera_id)
+        if canonical in CANONICAL_CAMERA_IDS and canonical not in normalized:
+            normalized.append(canonical)
+    if ensure_all_canonical:
+        for camera_id in CANONICAL_CAMERA_IDS:
+            if camera_id not in normalized:
+                normalized.append(camera_id)
+    return normalized
+
+
+def _derive_task_complexity(task: Mapping[str, Any]) -> str:
+    declared = str(task.get("task_complexity") or "").strip().lower()
+    if declared in {"atomic", "composite"}:
+        return declared
+    task_type = str(task.get("task_type") or "").strip().lower()
+    hint = str(task.get("description_hint") or "").strip().lower()
+    if task_type in COMPOSITE_TASK_TYPES or " then " in hint or " and then " in hint:
+        return "composite"
+    return "atomic"
+
+
+def _derive_curriculum_split(task: Mapping[str, Any], *, task_complexity: str) -> str:
+    declared = str(task.get("curriculum_split") or "").strip().lower()
+    if declared in {"pretrain", "target"}:
+        return declared
+    return "target" if task_complexity == "composite" else "pretrain"
+
+
+def _sanitize_task_token(value: Any, *, fallback: str) -> str:
+    token = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
+    return token or fallback
+
+
+def _derive_task_id(task: Mapping[str, Any], *, task_index: int) -> str:
+    provided = str(task.get("task_id") or "").strip()
+    if provided:
+        return provided
+    task_type = _sanitize_task_token(task.get("task_type"), fallback="task")
+    target_object = _sanitize_task_token(task.get("target_object"), fallback=f"obj_{task_index:03d}")
+    return f"{task_type}::{target_object}"
+
+
+def _derive_task_name(task: Mapping[str, Any], *, task_index: int) -> str:
+    for key in ("task_name", "name", "description_hint", "task"):
+        value = str(task.get(key) or "").strip()
+        if value:
+            return value
+    task_type = str(task.get("task_type") or "task").strip()
+    target_object = str(task.get("target_object") or f"object_{task_index:03d}").strip()
+    return f"{task_type}_{target_object}"
+
+
+def _load_lerobot_exporter_module() -> Optional[Any]:
+    global _LEROBOT_EXPORTER_MODULE_CACHE
+    if _LEROBOT_EXPORTER_MODULE_CACHE is not None:
+        return _LEROBOT_EXPORTER_MODULE_CACHE
+    if not EPISODE_JOB_LEROBOT_EXPORTER.is_file():
+        logger.warning(
+            "LeRobot exporter module not found for canonical metadata writer: %s",
+            EPISODE_JOB_LEROBOT_EXPORTER,
+        )
+        return None
+    try:
+        if str(EPISODE_JOB_DIR) not in sys.path:
+            sys.path.insert(0, str(EPISODE_JOB_DIR))
+        spec = importlib.util.spec_from_file_location(
+            "blueprint_episode_generation_lerobot_exporter",
+            EPISODE_JOB_LEROBOT_EXPORTER,
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("spec_from_file_location returned no loader")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _LEROBOT_EXPORTER_MODULE_CACHE = module
+        return module
+    except Exception as exc:
+        logger.warning("Unable to load canonical LeRobot metadata writer: %s", exc)
+        return None
 
 
 def _strict_realism_enabled() -> bool:
@@ -953,7 +1084,7 @@ class GenieSimConfig(BaseModel):
     cleanup_tmp: StrictBool = True
 
     # Robot configuration
-    robot_type: str = "g1"
+    robot_type: str = "franka"
     robot_urdf: Optional[str] = None
 
     @classmethod
@@ -1410,7 +1541,7 @@ class GenieSimGRPCClient:
         # shared state and cannot handle concurrent commands.
         import threading as _threading
         self._grpc_lock = _threading.Lock()
-        self._default_camera_ids = ["wrist", "overhead", "side"]
+        self._default_camera_ids = list(CANONICAL_CAMERA_IDS)
         # Map logical camera names to robot-specific USD prim paths.
         # Populated after init_robot from the robot config's camera dict.
         self._camera_prim_map: Dict[str, str] = {}
@@ -5433,6 +5564,29 @@ class GenieSimLocalFramework:
         self._modality_profile = os.environ.get("GENIESIM_MODALITY_PROFILE", "no_rgb").strip().lower()
         if self._modality_profile not in {"no_rgb", "rgb"}:
             self._modality_profile = "no_rgb"
+        _is_production_runtime = str(getattr(self.config, "environment", "")).strip().lower() == "production"
+        _default_camera_rig = "nvidia_3cam" if _is_production_runtime else "legacy"
+        self._camera_rig_profile = os.environ.get("BP_CAMERA_RIG_PROFILE", _default_camera_rig).strip().lower()
+        if self._camera_rig_profile not in {"legacy", "nvidia_3cam", "production_3cam"}:
+            self._camera_rig_profile = _default_camera_rig
+        self._enable_nvidia_metadata = parse_bool_env(
+            os.getenv("BP_ENABLE_NVIDIA_METADATA"),
+            default=True,
+        )
+        self._enable_curriculum_layout = parse_bool_env(
+            os.getenv("BP_ENABLE_CURRICULUM_LAYOUT"),
+            default=True,
+        )
+        self._enforce_task_taxonomy = parse_bool_env(
+            os.getenv("BP_ENFORCE_TASK_TAXONOMY"),
+            default=_is_production_runtime,
+        )
+        self._runtime_robot_metadata: Dict[str, Any] = {
+            "requested_robot": None,
+            "runtime_robot": None,
+            "fallback_reason": None,
+            "robot_cfg_file": None,
+        }
         _cert_mode_default = "strict" if self._strict_realism else "compat"
         self._physics_cert_mode = os.environ.get("PHYSICS_CERT_MODE", _cert_mode_default).strip().lower()
         if self._physics_cert_mode not in {"strict", "compat"}:
@@ -7206,6 +7360,22 @@ class GenieSimLocalFramework:
                 errors.append(
                     f"Dataset profile '{_dataset_profile}' requires REQUIRE_CAMERA_DATA=true"
                 )
+        if self._camera_rig_profile in {"nvidia_3cam", "production_3cam"}:
+            if self._modality_profile == "no_rgb":
+                errors.append(
+                    f"Camera rig profile '{self._camera_rig_profile}' requires GENIESIM_MODALITY_PROFILE=rgb"
+                )
+            if not _require_camera_data:
+                errors.append(
+                    f"Camera rig profile '{self._camera_rig_profile}' requires REQUIRE_CAMERA_DATA=true"
+                )
+            _camera_map = getattr(self._client, "_camera_prim_map", {}) or {}
+            _missing_required = [cid for cid in CANONICAL_CAMERA_IDS if cid not in _camera_map]
+            if _missing_required:
+                errors.append(
+                    f"Camera rig profile '{self._camera_rig_profile}' missing canonical cameras: "
+                    f"{_missing_required}"
+                )
 
         # 0) Runtime patch marker health
         _patch_ok, _patch_details = self._runtime_patch_health_check()
@@ -7690,25 +7860,7 @@ class GenieSimLocalFramework:
             # end_effector_prim_path and other robot state; without it, reset()
             # crashes with AttributeError.
             robot_cfg = task_config.get("robot_config", {})
-            robot_type = robot_cfg.get("type", self.config.robot_type or "franka")
-            if robot_type and robot_type != self.config.robot_type:
-                self.log(f"Using robot type from task config: {robot_type}", "INFO")
-                self.config.robot_type = robot_type
-            # Map robot type to the server's robot config JSON filename.
-            # The Genie Sim server stores configs in robot_cfg/ directory;
-            # the robot_cfg_file field is looked up as:
-            #   {GENIESIM_ROOT}/source/data_collection/config/robot_cfg/{robot_cfg_file}
-            # Override via GENIESIM_ROBOT_CFG_FILE env var if needed.
-            _ROBOT_CFG_MAP = {
-                "franka": "G1_omnipicker_fixed.json",
-                "g1": "G1_omnipicker_fixed.json",
-                "g1_dual": "G1_omnipicker_fixed_dual.json",
-                "g2": "G2_omnipicker_fixed_dual.json",
-            }
-            robot_cfg_file = os.environ.get(
-                "GENIESIM_ROBOT_CFG_FILE",
-                _ROBOT_CFG_MAP.get(robot_type, f"{robot_type}.json"),
-            )
+            requested_robot = str(robot_cfg.get("type", self.config.robot_type or "franka")).strip().lower()
             base_pos = robot_cfg.get("base_position", [0, 0, 0])
             base_pose = {
                 "position": {"x": base_pos[0], "y": base_pos[1], "z": base_pos[2]},
@@ -7732,31 +7884,50 @@ class GenieSimLocalFramework:
                     )
                     scene_usd = container_path
 
-            # Store robot init params so we can re-init after server restarts.
+            runtime_robot, robot_cfg_file, fallback_reason = (
+                self._initialize_runtime_robot_with_fallback(
+                    requested_robot=requested_robot,
+                    base_pose=base_pose,
+                    scene_usd=scene_usd,
+                )
+            )
             self._robot_init_params = {
                 "robot_cfg_file": robot_cfg_file,
                 "base_pose": base_pose,
                 "scene_usd": scene_usd,
             }
-            self._init_robot_on_server(robot_cfg_file, base_pose, scene_usd)
+            if fallback_reason:
+                self.log(
+                    "Robot fallback engaged: "
+                    f"requested_robot={requested_robot} "
+                    f"runtime_robot={runtime_robot} "
+                    f"reason={fallback_reason}",
+                    "WARNING",
+                    extra={
+                        "requested_robot": requested_robot,
+                        "runtime_robot": runtime_robot,
+                        "fallback_reason": fallback_reason,
+                    },
+                )
 
             # Map logical camera names to USD prim paths.
-            # Priority: env var > robot config JSON > G1 defaults (legacy).
+            # Priority: env var > robot config JSON > canonical defaults.
             camera_map_env = os.environ.get("GENIESIM_CAMERA_PRIM_MAP", "")
             if camera_map_env:
                 import json as _json
-                self._client._camera_prim_map = _json.loads(camera_map_env)
-                self.log(f"Camera prim map (from env): {self._client._camera_prim_map}")
+                _raw_camera_map = _json.loads(camera_map_env)
+                _cam_map = self._normalize_camera_prim_map(_raw_camera_map)
+                self.log(f"Camera prim map (from env): {_cam_map}")
             else:
-                _cam_map: Dict[str, str] = {}
+                _raw_camera_map: Dict[str, str] = {}
                 _robot_cfg_dir = Path(__file__).resolve().parent / "robot_configs"
                 # Look for robot config files - prioritize the actual server config name
                 # (G1_omnipicker_fixed) over legacy names (franka_panda)
                 _robot_cfg_names = [
                     robot_cfg_file.replace(".json", ""),  # Server config name first (e.g., G1_omnipicker_fixed)
-                    robot_type,
-                    robot_type.replace("-", "_"),
-                    f"{robot_type}_panda" if robot_type == "franka" else robot_type,
+                    requested_robot,
+                    requested_robot.replace("-", "_"),
+                    f"{requested_robot}_panda" if requested_robot == "franka" else requested_robot,
                 ]
                 _loaded_robot_cfg = None
                 for _cfg_name in _robot_cfg_names:
@@ -7770,23 +7941,34 @@ class GenieSimLocalFramework:
                 if _loaded_robot_cfg:
                     # Support both "camera_prim_map" (new format) and "camera" (legacy format)
                     if _loaded_robot_cfg.get("camera_prim_map"):
-                        _cam_map = dict(_loaded_robot_cfg["camera_prim_map"])
-                        self.log(f"Camera prim map (from robot config camera_prim_map): {_cam_map}")
+                        _raw_camera_map = dict(_loaded_robot_cfg["camera_prim_map"])
+                        self.log(
+                            "Camera prim map (from robot config camera_prim_map): "
+                            f"{_raw_camera_map}"
+                        )
                     elif _loaded_robot_cfg.get("camera"):
                         _cam_prims = list(_loaded_robot_cfg["camera"].keys())
-                        _logical_names = ["wrist", "overhead", "side"]
+                        _logical_names = ["wrist", "right", "left"]
                         for _i, _prim in enumerate(_cam_prims):
                             if _i < len(_logical_names):
-                                _cam_map[_logical_names[_i]] = _prim
-                        self.log(f"Camera prim map (from robot config camera): {_cam_map}")
+                                _raw_camera_map[_logical_names[_i]] = _prim
+                        self.log(
+                            "Camera prim map (from robot config camera): "
+                            f"{_raw_camera_map}"
+                        )
+                _cam_map = self._normalize_camera_prim_map(_raw_camera_map)
                 if not _cam_map:
-                    _cam_map = {
+                    _cam_map = self._normalize_camera_prim_map(
+                        {
                         "wrist": "/G1/gripper_r_base_link/Right_Camera",
-                        "overhead": "/G1/head_link2/Head_Camera",
-                        "side": "/G1/gripper_l_base_link/Left_Camera",
-                    }
-                    self.log(f"Camera prim map (G1 defaults — no robot config found): {_cam_map}")
-                self._client._camera_prim_map = _cam_map
+                        "right": "/G1/head_link2/Head_Camera",
+                        "left": "/G1/gripper_l_base_link/Left_Camera",
+                        }
+                    )
+                    self.log(f"Camera prim map (fallback defaults): {_cam_map}")
+            _cam_map = self._provision_missing_cameras(_cam_map)
+            self._client._camera_prim_map = _cam_map
+            self._client._default_camera_ids = list(CANONICAL_CAMERA_IDS)
 
             # Populate scene object IDs for real object pose queries.
             _scene_meta = self._build_object_metadata_from_scene_config(
@@ -7945,6 +8127,8 @@ class GenieSimLocalFramework:
                     _t["metadata"] = _top_meta
                 if _top_robot_cfg and "robot_config" not in _t:
                     _t["robot_config"] = _top_robot_cfg
+            tasks = self._normalize_and_validate_tasks(tasks)
+            task_config["suggested_tasks"] = tasks
 
             self.log(f"Tasks: {len(tasks)}")
             self.log(f"Episodes per task: {episodes_target}")
@@ -10253,6 +10437,8 @@ class GenieSimLocalFramework:
             _dataset_profile = os.getenv("GENIESIM_DATASET_PROFILE", "").strip().lower()
             if _dataset_profile in {"buyable", "lab_grade", "production_camera"}:
                 _require_cameras = True
+            if self._camera_rig_profile in {"nvidia_3cam", "production_3cam"}:
+                _require_cameras = True
             if _require_cameras and _skip_rgb_capture:
                 _validity_errors.append(
                     "REQUIRE_CAMERA_DATA=true is incompatible with SKIP_RGB_CAPTURE=true."
@@ -10260,6 +10446,10 @@ class GenieSimLocalFramework:
             if _dataset_profile in {"buyable", "lab_grade", "production_camera"} and self._modality_profile == "no_rgb":
                 _validity_errors.append(
                     f"Dataset profile '{_dataset_profile}' requires GENIESIM_MODALITY_PROFILE=rgb."
+                )
+            if self._camera_rig_profile in {"nvidia_3cam", "production_3cam"} and self._modality_profile == "no_rgb":
+                _validity_errors.append(
+                    f"Camera rig profile '{self._camera_rig_profile}' requires GENIESIM_MODALITY_PROFILE=rgb."
                 )
             if _require_cameras and _camera_frame_count == 0:
                 _validity_errors.append(
@@ -10282,7 +10472,10 @@ class GenieSimLocalFramework:
                             break
                 if isinstance(required_cameras, str):
                     required_cameras = [required_cameras]
-                required_cameras = [str(camera_id) for camera_id in required_cameras]
+                required_cameras = _normalize_required_camera_ids(
+                    required_cameras,
+                    ensure_all_canonical=True,
+                )
                 for _frame_idx, _frame in enumerate(frames):
                     camera_frames = _frame.get("observation", {}).get("camera_frames") or {}
                     if required_cameras and not camera_frames:
@@ -14604,7 +14797,7 @@ class GenieSimLocalFramework:
                     break
         if isinstance(required_cameras, str):
             required_cameras = [required_cameras]
-        required_cameras = [str(camera_id) for camera_id in required_cameras]
+        required_cameras = _normalize_required_camera_ids(required_cameras, ensure_all_canonical=True)
 
         camera_placeholder_detected = False
         camera_placeholder_details: List[str] = []
@@ -15014,6 +15207,220 @@ class GenieSimLocalFramework:
             "camera_placeholder_details": details,
         }
 
+    def _normalize_camera_prim_map(self, camera_map: Mapping[str, Any]) -> Dict[str, str]:
+        normalized: Dict[str, str] = {}
+        for raw_id, raw_prim in dict(camera_map or {}).items():
+            prim = str(raw_prim or "").strip()
+            if not prim or not prim.startswith("/"):
+                continue
+            canonical = _canonicalize_camera_id(raw_id)
+            if canonical in CANONICAL_CAMERA_IDS and canonical not in normalized:
+                normalized[canonical] = prim
+        for raw_prim in dict(camera_map or {}).values():
+            prim = str(raw_prim or "").strip()
+            if not prim or not prim.startswith("/"):
+                continue
+            lowered = prim.lower()
+            inferred = None
+            if "left" in lowered:
+                inferred = "left"
+            elif "right" in lowered or "head" in lowered or "overhead" in lowered:
+                inferred = "right"
+            elif "wrist" in lowered or "hand" in lowered:
+                inferred = "wrist"
+            if inferred in CANONICAL_CAMERA_IDS and inferred not in normalized:
+                normalized[inferred] = prim
+        return normalized
+
+    def _provision_missing_cameras(self, camera_map: Dict[str, str]) -> Dict[str, str]:
+        if self._camera_rig_profile == "legacy":
+            return camera_map
+        provisioned = dict(camera_map)
+        for camera_id in ("left", "right"):
+            if provisioned.get(camera_id):
+                continue
+            defaults = CAMERA_PROVISIONING_DEFAULTS.get(camera_id) or {}
+            camera_prim = str(defaults.get("prim") or "").strip()
+            if not camera_prim:
+                continue
+            pose = defaults.get("pose")
+            try:
+                response = self._client.add_camera(
+                    camera_id=camera_prim,
+                    pose=pose if isinstance(pose, dict) else None,
+                    width=640,
+                    height=480,
+                    fov=60.0,
+                )
+                if response.success:
+                    provisioned[camera_id] = camera_prim
+                    self.log(f"Provisioned missing '{camera_id}' camera at {camera_prim}")
+                else:
+                    self.log(
+                        f"Unable to provision '{camera_id}' camera ({response.error}); capture may be incomplete.",
+                        "WARNING",
+                    )
+            except Exception as exc:
+                self.log(
+                    f"Exception provisioning '{camera_id}' camera: {exc}",
+                    "WARNING",
+                )
+        return provisioned
+
+    def _resolve_required_cameras_for_task(self, task: Mapping[str, Any]) -> List[str]:
+        required_cameras: Optional[Sequence[Any]] = None
+        for key in ("required_camera_ids", "required_cameras", "camera_ids"):
+            value = task.get(key)
+            if value:
+                required_cameras = value if isinstance(value, (list, tuple, set)) else [value]
+                break
+        if not required_cameras:
+            camera_config = task.get("camera_config") or {}
+            if isinstance(camera_config, dict):
+                for key in ("required_camera_ids", "required_cameras", "camera_ids"):
+                    value = camera_config.get(key)
+                    if value:
+                        required_cameras = value if isinstance(value, (list, tuple, set)) else [value]
+                        break
+        return _normalize_required_camera_ids(required_cameras, ensure_all_canonical=True)
+
+    def _normalize_and_validate_tasks(self, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        normalized_tasks: List[Dict[str, Any]] = []
+        missing_warnings: List[str] = []
+        for idx, task in enumerate(tasks):
+            if not isinstance(task, dict):
+                raise RuntimeError(f"Task entry at index {idx} is not an object: {task!r}")
+            normalized_task = dict(task)
+            task_complexity = _derive_task_complexity(normalized_task)
+            curriculum_split = _derive_curriculum_split(
+                normalized_task,
+                task_complexity=task_complexity,
+            )
+            required_camera_ids = self._resolve_required_cameras_for_task(normalized_task)
+            task_name = _derive_task_name(normalized_task, task_index=idx)
+            task_id = _derive_task_id(normalized_task, task_index=idx)
+
+            missing_fields = [
+                field_name
+                for field_name in (
+                    "task_id",
+                    "task_name",
+                    "task_complexity",
+                    "curriculum_split",
+                    "required_camera_ids",
+                )
+                if field_name not in normalized_task
+            ]
+            if missing_fields:
+                missing_warnings.append(
+                    f"task[{idx}] missing {missing_fields}; defaults applied "
+                    f"(task_id={task_id}, split={curriculum_split}, complexity={task_complexity})"
+                )
+
+            normalized_task["task_id"] = task_id
+            normalized_task["task_name"] = task_name
+            normalized_task["task_complexity"] = task_complexity
+            normalized_task["curriculum_split"] = curriculum_split
+            normalized_task["required_camera_ids"] = required_camera_ids
+            normalized_task["required_cameras"] = list(required_camera_ids)
+            normalized_task["camera_ids"] = list(required_camera_ids)
+            camera_config = normalized_task.get("camera_config")
+            if not isinstance(camera_config, dict):
+                camera_config = {}
+            camera_config["required_camera_ids"] = list(required_camera_ids)
+            normalized_task["camera_config"] = camera_config
+            normalized_tasks.append(normalized_task)
+
+        if missing_warnings:
+            message = "Task taxonomy/camera contract issues: " + "; ".join(missing_warnings[:5])
+            if self._enforce_task_taxonomy:
+                raise RuntimeError(
+                    message
+                    + ". Update task configs with task_id/task_name/task_complexity/"
+                    "curriculum_split/required_camera_ids."
+                )
+            self.log(message, "WARNING")
+
+        return normalized_tasks
+
+    def _select_robot_cfg_candidates(self, requested_robot: str) -> List[str]:
+        normalized = str(requested_robot or "").strip().lower()
+        if not normalized:
+            normalized = "franka"
+        override = os.environ.get("GENIESIM_ROBOT_CFG_FILE")
+        if override:
+            return [override]
+        candidate_map: Dict[str, List[str]] = {
+            "franka": ["franka_panda.json", "G1_omnipicker_fixed.json"],
+            "franka_panda": ["franka_panda.json", "G1_omnipicker_fixed.json"],
+            "panda": ["franka_panda.json", "G1_omnipicker_fixed.json"],
+            "g1": ["G1_omnipicker_fixed.json"],
+            "g1_dual": ["G1_omnipicker_fixed_dual.json"],
+            "g2": ["G2_omnipicker_fixed_dual.json"],
+        }
+        return list(candidate_map.get(normalized, [f"{normalized}.json"]))
+
+    def _resolve_runtime_robot_name(self, robot_cfg_file: str, requested_robot: str) -> str:
+        lowered = str(robot_cfg_file or "").strip().lower()
+        if "franka" in lowered or "panda" in lowered:
+            return "franka"
+        if "g1" in lowered:
+            return "g1"
+        if "g2" in lowered:
+            return "g2"
+        normalized_requested = str(requested_robot or "").strip().lower()
+        return normalized_requested or "franka"
+
+    def _initialize_runtime_robot_with_fallback(
+        self,
+        *,
+        requested_robot: str,
+        base_pose: Dict[str, Any],
+        scene_usd: str,
+    ) -> Tuple[str, str, Optional[str]]:
+        errors: List[str] = []
+        candidates = self._select_robot_cfg_candidates(requested_robot)
+        for idx, robot_cfg_file in enumerate(candidates):
+            try:
+                self._init_robot_on_server(robot_cfg_file, base_pose, scene_usd)
+                joint_result = self._client.get_joint_position(lock_timeout=5.0)
+                expected_joint_count = self._expected_joint_count_for_robot(robot_cfg_file)
+                ok, error_text, count = self._validate_joint_payload(
+                    joint_result,
+                    expected_joint_count,
+                )
+                if ok and count > 0:
+                    runtime_robot = self._resolve_runtime_robot_name(robot_cfg_file, requested_robot)
+                    fallback_reason = None
+                    if idx > 0:
+                        fallback_reason = "; ".join(errors[-3:]) or "primary_robot_init_failed"
+                    self._runtime_robot_metadata = {
+                        "requested_robot": requested_robot,
+                        "runtime_robot": runtime_robot,
+                        "fallback_reason": fallback_reason,
+                        "robot_cfg_file": robot_cfg_file,
+                    }
+                    self.config.robot_type = runtime_robot
+                    self._client._robot_type = runtime_robot
+                    return runtime_robot, robot_cfg_file, fallback_reason
+                error_message = (
+                    f"{robot_cfg_file}: invalid joint payload "
+                    f"(count={count}, error={error_text or 'unknown'})"
+                )
+                errors.append(error_message)
+                self.log(f"Robot init candidate failed: {error_message}", "WARNING")
+            except Exception as exc:
+                error_message = f"{robot_cfg_file}: {exc}"
+                errors.append(error_message)
+                self.log(f"Robot init candidate failed: {error_message}", "WARNING")
+
+        raise RuntimeError(
+            "Failed to initialize robot. Attempted configs: "
+            + ", ".join(candidates)
+            + ". Errors: "
+            + " | ".join(errors[-5:])
+        )
+
     def _attach_camera_frames(
         self,
         obs: Dict[str, Any],
@@ -15025,9 +15432,9 @@ class GenieSimLocalFramework:
         # from the server instead of reusing a stale observation with empty images.
         setattr(self._client, "_latest_observation", {})
         _any_camera = False
-        # Only request cameras that have valid prim mappings
-        _camera_ids_to_try = ["wrist", "overhead", "side"]
-        _cam_map = getattr(self._client, "_camera_prim_map", {})
+        _required_cameras = self._resolve_required_cameras_for_task(task)
+        _camera_ids_to_try = list(_required_cameras or CANONICAL_CAMERA_IDS)
+        _cam_map = getattr(self._client, "_camera_prim_map", {}) or {}
         if _cam_map:
             _camera_ids_to_try = [cid for cid in _camera_ids_to_try if cid in _cam_map]
         _allow_base64 = os.getenv("GENIESIM_CAMERA_ALLOW_BASE64", "0") == "1"
@@ -19021,6 +19428,14 @@ Scene objects: {scene_summary}
         skipped_count = 0
         total_frames = 0
         frame_counts: Dict[str, int] = {}
+        episode_meta_rows: List[Dict[str, Any]] = []
+        episode_stats_rows: List[Dict[str, Any]] = []
+        task_registry: Dict[str, Dict[str, Any]] = {}
+        global_channel_values: Dict[str, List[float]] = {
+            "timestamp": [],
+            "reward": [],
+            "frame_index": [],
+        }
         eligible_certified = 0
         exported_raw_only = 0
         rejected_by_gate_code: Dict[str, int] = {}
@@ -19028,6 +19443,18 @@ Scene objects: {scene_summary}
 
         # Find all episode files
         episode_files = list(recording_dir.glob("*.json"))
+
+        def _series_stats(values: Sequence[float]) -> Optional[Dict[str, float]]:
+            clean = [float(v) for v in values if v is not None]
+            if not clean:
+                return None
+            arr = np.asarray(clean, dtype=np.float64)
+            return {
+                "min": float(arr.min()),
+                "max": float(arr.max()),
+                "mean": float(arr.mean()),
+                "std": float(arr.std()),
+            }
 
         def _to_json_serializable(value: Any) -> Any:
             if isinstance(value, dict):
@@ -19098,8 +19525,34 @@ Scene objects: {scene_summary}
                     continue
 
                 episode_id = str(episode.get("episode_id", ep_file.stem))
-                task_name = episode.get("task_name")
-                task_id = episode.get("task_id")
+                task_name = str(
+                    episode.get("task_name")
+                    or episode.get("name")
+                    or episode.get("task")
+                    or _derive_task_name(episode, task_index=exported_count)
+                )
+                task_id = str(episode.get("task_id") or _derive_task_id(episode, task_index=exported_count))
+                task_complexity = _derive_task_complexity(episode)
+                curriculum_split = _derive_curriculum_split(
+                    episode,
+                    task_complexity=task_complexity,
+                )
+                required_camera_ids = _normalize_required_camera_ids(
+                    episode.get("required_camera_ids")
+                    or episode.get("required_cameras")
+                    or episode.get("camera_ids"),
+                    ensure_all_canonical=True,
+                )
+                task_registry.setdefault(
+                    task_id,
+                    {
+                        "task_id": task_id,
+                        "task_name": task_name,
+                        "task_complexity": task_complexity,
+                        "curriculum_split": curriculum_split,
+                        "required_camera_ids": list(required_camera_ids),
+                    },
+                )
                 frames = episode.get("frames", [])
                 frame_count = len(frames)
                 ep_dir = ep_file.parent
@@ -19133,6 +19586,20 @@ Scene objects: {scene_summary}
                         f"Camera data required but none found for episode {episode_id}. "
                         "Set REQUIRE_CAMERA_DATA=false to bypass."
                     )
+                if (
+                    require_camera_data
+                    and self._camera_rig_profile in {"nvidia_3cam", "production_3cam"}
+                ):
+                    missing_required_cameras = [
+                        camera_id
+                        for camera_id in required_camera_ids
+                        if len(camera_rgb_frames.get(camera_id, [])) == 0
+                    ]
+                    if missing_required_cameras:
+                        raise _CameraDataRequiredError(
+                            f"Episode {episode_id} missing RGB frames for required cameras "
+                            f"{missing_required_cameras}."
+                        )
 
                 # Write video files per camera
                 _have_imageio = False
@@ -19170,6 +19637,74 @@ Scene objects: {scene_summary}
                         for fi, rgb_frame in enumerate(rgb_list):
                             np.save(frames_out_dir / f"frame_{fi:06d}.npy", rgb_frame)
 
+                replay_root = lerobot_root / "replay"
+                replay_episode_dir = replay_root / f"episode_{episode_id}"
+                replay_episode_dir.mkdir(parents=True, exist_ok=True)
+                runtime_robot = str(
+                    self._runtime_robot_metadata.get("runtime_robot")
+                    or self.config.robot_type
+                    or "unknown"
+                )
+                scene_snapshot = {
+                    "episode_id": episode_id,
+                    "scene_id": episode.get("scene_id"),
+                    "task_id": task_id,
+                    "task_name": task_name,
+                    "task_complexity": task_complexity,
+                    "curriculum_split": curriculum_split,
+                    "requested_robot": self._runtime_robot_metadata.get("requested_robot"),
+                    "runtime_robot": runtime_robot,
+                    "fallback_reason": self._runtime_robot_metadata.get("fallback_reason"),
+                    "metadata": episode.get("metadata"),
+                }
+                scene_snapshot_path = replay_episode_dir / "scene_snapshot.json"
+                scene_snapshot_path.write_text(json.dumps(_to_json_serializable(scene_snapshot), indent=2))
+
+                sim_state_rows: List[Dict[str, Any]] = []
+                sim_state_jsonl_path = replay_episode_dir / "sim_state.jsonl"
+                with open(sim_state_jsonl_path, "w") as replay_file:
+                    for idx, frame in enumerate(frames):
+                        obs_payload = frame.get("observation") or {}
+                        robot_state = obs_payload.get("robot_state") or {}
+                        ee_pose = obs_payload.get("ee_pose") or obs_payload.get("end_effector_pose") or {}
+                        sim_row = {
+                            "frame_index": idx,
+                            "timestamp": float(frame.get("timestamp", idx)),
+                            "robot_joints": robot_state.get("joint_positions") or [],
+                            "robot_velocities": robot_state.get("joint_velocities") or [],
+                            "robot_efforts": robot_state.get("joint_efforts") or [],
+                            "ee_pose": ee_pose,
+                            "scene_state": obs_payload.get("scene_state") or {},
+                            "contacts": obs_payload.get("contacts") or {},
+                            "provenance": obs_payload.get("synthesis_provenance")
+                            or obs_payload.get("provenance")
+                            or {},
+                        }
+                        sim_state_rows.append(sim_row)
+                        replay_file.write(json.dumps(_to_json_serializable(sim_row)) + "\n")
+
+                sim_state_artifact_path = sim_state_jsonl_path
+                if sim_state_rows:
+                    try:
+                        sim_state_parquet = replay_episode_dir / "sim_state.parquet"
+                        sim_state_columns = {
+                            "frame_index": [int(row["frame_index"]) for row in sim_state_rows],
+                            "timestamp": [float(row["timestamp"]) for row in sim_state_rows],
+                            "robot_joints": [json.dumps(_to_json_serializable(row["robot_joints"])) for row in sim_state_rows],
+                            "ee_pose": [json.dumps(_to_json_serializable(row["ee_pose"])) for row in sim_state_rows],
+                            "scene_state": [json.dumps(_to_json_serializable(row["scene_state"])) for row in sim_state_rows],
+                            "contacts": [json.dumps(_to_json_serializable(row["contacts"])) for row in sim_state_rows],
+                            "provenance": [json.dumps(_to_json_serializable(row["provenance"])) for row in sim_state_rows],
+                        }
+                        sim_state_table = pa.Table.from_pydict(sim_state_columns)
+                        pq.write_table(sim_state_table, sim_state_parquet, compression="zstd")
+                        sim_state_artifact_path = sim_state_parquet
+                    except Exception as replay_exc:
+                        self.log(
+                            f"Replay state parquet write failed for episode {episode_id}: {replay_exc}",
+                            "WARNING",
+                        )
+
                 columns: Dict[str, List[Any]] = {
                     "episode_id": [],
                     "frame_index": [],
@@ -19203,6 +19738,7 @@ Scene objects: {scene_summary}
                     columns["task_id"].append(task_id)
 
                 table = pa.Table.from_pydict(columns, schema=schema)
+                episode_parquet_rel = ""
                 if resolved_format == LeRobotExportFormat.LEROBOT_V3 and parquet_writer:
                     parquet_writer.write_table(table)
                     episode_index[episode_id] = {
@@ -19210,11 +19746,62 @@ Scene objects: {scene_summary}
                         "row_group": row_group_index,
                         "task_id": task_id,
                         "task_name": task_name,
+                        "task_complexity": task_complexity,
+                        "curriculum_split": curriculum_split,
                     }
+                    episode_parquet_rel = "data/chunk-000/file-0000.parquet"
                     row_group_index += 1
                 else:
                     output_file = data_dir / f"episode_{episode_id}.parquet"
                     pq.write_table(table, output_file, compression="zstd")
+                    episode_parquet_rel = output_file.relative_to(lerobot_root).as_posix()
+
+                timestamps = [float(v) for v in columns["timestamp"]]
+                rewards = [float(v) for v in columns["reward"]]
+                frame_indices = [float(v) for v in columns["frame_index"]]
+                global_channel_values["timestamp"].extend(timestamps)
+                global_channel_values["reward"].extend(rewards)
+                global_channel_values["frame_index"].extend(frame_indices)
+                camera_ids_present = sorted(camera_rgb_frames.keys())
+                episode_channel_stats = {
+                    "timestamp": _series_stats(timestamps),
+                    "reward": _series_stats(rewards),
+                    "frame_index": _series_stats(frame_indices),
+                }
+                episode_stats_rows.append(
+                    {
+                        "episode_id": episode_id,
+                        "task_id": task_id,
+                        "task_name": task_name,
+                        "task_complexity": task_complexity,
+                        "curriculum_split": curriculum_split,
+                        "length": frame_count,
+                        "camera_ids": list(required_camera_ids),
+                        "camera_ids_present": camera_ids_present,
+                        "channels": episode_channel_stats,
+                    }
+                )
+                scene_snapshot_rel = scene_snapshot_path.relative_to(lerobot_root).as_posix()
+                sim_state_rel = sim_state_artifact_path.relative_to(lerobot_root).as_posix()
+                episode_meta_rows.append(
+                    {
+                        "episode_id": episode_id,
+                        "task_id": task_id,
+                        "task_name": task_name,
+                        "task_complexity": task_complexity,
+                        "curriculum_split": curriculum_split,
+                        "length": frame_count,
+                        "camera_ids": list(required_camera_ids),
+                        "camera_ids_present": camera_ids_present,
+                        "robot_runtime": runtime_robot,
+                        "requested_robot": self._runtime_robot_metadata.get("requested_robot"),
+                        "fallback_reason": self._runtime_robot_metadata.get("fallback_reason"),
+                        "sim_state_path": sim_state_rel,
+                        "scene_snapshot_path": scene_snapshot_rel,
+                        "episode_stats_ref": f"meta/episodes_stats.jsonl#episode_id={episode_id}",
+                        "parquet_path": episode_parquet_rel,
+                    }
+                )
 
                 exported_count += 1
                 total_frames += frame_count
@@ -19261,6 +19848,12 @@ Scene objects: {scene_summary}
                 "frame_counts": frame_counts,
                 "episode_index": "meta/episode_index.json",
                 "episodes_meta": "meta/episodes/chunk-000/file-0000.parquet",
+                "requested_robot": self._runtime_robot_metadata.get("requested_robot"),
+                "runtime_robot": self._runtime_robot_metadata.get("runtime_robot"),
+                "robot_fallback_reason": self._runtime_robot_metadata.get("fallback_reason"),
+                "camera_rig_profile": self._camera_rig_profile,
+                "nvidia_metadata_enabled": self._enable_nvidia_metadata,
+                "curriculum_layout_enabled": self._enable_curriculum_layout,
             }
         else:
             if resolved_format == LeRobotExportFormat.LEROBOT_V0_3_3:
@@ -19286,6 +19879,12 @@ Scene objects: {scene_summary}
                 "chunking": {"strategy": "single", "chunk_dir": "chunk-000"},
                 "schema": schema_description,
                 "frame_counts": frame_counts,
+                "requested_robot": self._runtime_robot_metadata.get("requested_robot"),
+                "runtime_robot": self._runtime_robot_metadata.get("runtime_robot"),
+                "robot_fallback_reason": self._runtime_robot_metadata.get("fallback_reason"),
+                "camera_rig_profile": self._camera_rig_profile,
+                "nvidia_metadata_enabled": self._enable_nvidia_metadata,
+                "curriculum_layout_enabled": self._enable_curriculum_layout,
             }
 
         # Add video paths to info if videos were written
@@ -19335,6 +19934,21 @@ Scene objects: {scene_summary}
             meta_table = pa.Table.from_pydict(meta_payload, schema=meta_schema)
             pq.write_table(meta_table, meta_episodes_file)
 
+        tasks_jsonl_path = meta_dir / "tasks.jsonl"
+        with open(tasks_jsonl_path, "w") as tasks_file:
+            for task_payload in sorted(task_registry.values(), key=lambda item: item.get("task_id", "")):
+                tasks_file.write(json.dumps(_to_json_serializable(task_payload)) + "\n")
+
+        episodes_meta_path = meta_dir / "episodes.jsonl"
+        with open(episodes_meta_path, "w") as episodes_meta_file:
+            for row in episode_meta_rows:
+                episodes_meta_file.write(json.dumps(_to_json_serializable(row)) + "\n")
+
+        episodes_stats_path = meta_dir / "episodes_stats.jsonl"
+        with open(episodes_stats_path, "w") as episodes_stats_file:
+            for row in episode_stats_rows:
+                episodes_stats_file.write(json.dumps(_to_json_serializable(row)) + "\n")
+
         # Write episodes.jsonl (required by v2 validation)
         if resolved_format != LeRobotExportFormat.LEROBOT_V3:
             episodes_jsonl_path = lerobot_root / "episodes.jsonl"
@@ -19357,18 +19971,70 @@ Scene objects: {scene_summary}
             "exported_at": datetime.utcnow().isoformat() + "Z",
             "lerobot_info": "meta/info.json",
             "debug_json_output": False,
+            "requested_robot": self._runtime_robot_metadata.get("requested_robot"),
+            "runtime_robot": self._runtime_robot_metadata.get("runtime_robot"),
+            "robot_fallback_reason": self._runtime_robot_metadata.get("fallback_reason"),
+            "camera_rig_profile": self._camera_rig_profile,
         }
 
         with open(output_dir / "dataset_info.json", "w") as f:
             json.dump(dataset_info, f, indent=2)
 
+        global_stats_payload: Dict[str, Any] = {
+            channel: stats
+            for channel, stats in (
+                (channel_name, _series_stats(values))
+                for channel_name, values in global_channel_values.items()
+            )
+            if stats is not None
+        }
+        camera_ids_seen: Dict[str, int] = {}
+        full_camera_rig_episodes = 0
+        for row in episode_meta_rows:
+            present = set(str(cid) for cid in row.get("camera_ids_present") or [])
+            for camera_id in present:
+                camera_ids_seen[camera_id] = camera_ids_seen.get(camera_id, 0) + 1
+            if all(camera_id in present for camera_id in CANONICAL_CAMERA_IDS):
+                full_camera_rig_episodes += 1
+        global_stats_payload["modality_coverage"] = {
+            "episodes": exported_count,
+            "episodes_with_full_camera_rig": full_camera_rig_episodes,
+            "camera_episode_counts": dict(sorted(camera_ids_seen.items())),
+        }
         if resolved_format == LeRobotExportFormat.LEROBOT_V3 and v3_output_file:
             try:
-                stats_payload = _compute_v3_stats(v3_output_file) or {}
-                with open(meta_dir / "stats.json", "w") as f:
-                    json.dump(stats_payload, f, indent=2)
+                global_stats_payload["parquet_numeric"] = _compute_v3_stats(v3_output_file) or {}
             except Exception as exc:
                 self.log(f"Failed to compute LeRobot v3 stats: {exc}", "WARNING")
+        with open(meta_dir / "stats.json", "w") as f:
+            json.dump(global_stats_payload, f, indent=2)
+
+        if self._enable_nvidia_metadata:
+            shared_exporter = _load_lerobot_exporter_module()
+            metadata_writer = (
+                getattr(shared_exporter, "write_nvidia_alignment_metadata_files", None)
+                if shared_exporter is not None
+                else None
+            )
+            if callable(metadata_writer):
+                try:
+                    metadata_writer(
+                        lerobot_root=lerobot_root,
+                        info=info,
+                        dataset_info=dataset_info,
+                        episodes_meta=episode_meta_rows,
+                        tasks=list(task_registry.values()),
+                        episode_stats_rows=episode_stats_rows,
+                        global_stats=global_stats_payload,
+                        enable_curriculum_layout=self._enable_curriculum_layout,
+                    )
+                except Exception as exc:
+                    self.log(f"Failed to write canonical NVIDIA metadata artifacts: {exc}", "WARNING")
+            else:
+                self.log(
+                    "Canonical NVIDIA metadata writer unavailable in episode-generation-job/lerobot_exporter.py",
+                    "WARNING",
+                )
 
         if os.getenv("LEROBOT_INCLUDE_RAW_EPISODES", "0") == "1":
             raw_dir = lerobot_root / "raw_episodes"

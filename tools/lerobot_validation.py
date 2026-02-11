@@ -111,6 +111,38 @@ def _select_parquet_for_schema(files: Sequence[Path]) -> Optional[Path]:
     return None
 
 
+def _validate_nvidia_alignment_artifacts(lerobot_dir: Path, errors: List[str]) -> None:
+    meta_dir = lerobot_dir / "meta"
+    modality_path = meta_dir / "modality.json"
+    embodiment_path = meta_dir / "embodiment.json"
+    episodes_stats_path = meta_dir / "episodes_stats.jsonl"
+    curriculum_index_path = meta_dir / "curriculum_index.json"
+    curriculum_dir = lerobot_dir / "curriculum"
+
+    required_triplet = [modality_path, embodiment_path, episodes_stats_path]
+    present_triplet = [path for path in required_triplet if path.is_file()]
+    if present_triplet and len(present_triplet) != len(required_triplet):
+        missing = [path.name for path in required_triplet if not path.is_file()]
+        errors.append(
+            "Incomplete NVIDIA-style metadata artifacts in meta/: missing "
+            + ", ".join(missing)
+        )
+
+    if modality_path.is_file():
+        _load_json(modality_path, "lerobot/meta/modality.json", errors)
+    if embodiment_path.is_file():
+        _load_json(embodiment_path, "lerobot/meta/embodiment.json", errors)
+    if episodes_stats_path.is_file():
+        _load_json(episodes_stats_path, "lerobot/meta/episodes_stats.jsonl", errors)
+
+    if curriculum_dir.is_dir() and not curriculum_index_path.is_file():
+        errors.append(
+            "curriculum directory present but lerobot/meta/curriculum_index.json is missing"
+        )
+    if curriculum_index_path.is_file():
+        _load_json(curriculum_index_path, "lerobot/meta/curriculum_index.json", errors)
+
+
 def validate_lerobot_dataset(lerobot_dir: Path) -> List[str]:
     """Validate LeRobot dataset layout and metadata."""
     errors: List[str] = []
@@ -206,5 +238,7 @@ def validate_lerobot_dataset(lerobot_dir: Path) -> List[str]:
     parquet_to_check = _select_parquet_for_schema(parquet_files)
     if parquet_to_check:
         _validate_schema_columns(parquet_to_check, errors)
+
+    _validate_nvidia_alignment_artifacts(lerobot_dir, errors)
 
     return errors

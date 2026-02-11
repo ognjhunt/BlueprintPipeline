@@ -93,3 +93,34 @@ def test_orchestrator_stage1_explicitly_runs_reconstruction_steps_only():
         "run_pipeline_gcs.sh ${SCENE_ID_Q} ${BUCKET_Q} ${OBJECT_NAME_Q} "
         "${OBJECT_GENERATION_Q} regen3d-reconstruct,regen3d"
     ) in workflow
+
+
+def test_source_orchestrator_text_path_wires_text_jobs_before_downstream_stages():
+    workflow = Path("workflows/source-orchestrator.yaml").read_text(encoding="utf-8")
+
+    _assert_ordered_markers(
+        workflow,
+        [
+            "- run_text_gen_job:",
+            "- run_text_adapter_job:",
+            "- run_downstream_for_child:",
+            "- run_stage2:",
+            "- run_stage3:",
+            "- run_stage4:",
+        ],
+    )
+
+
+def test_source_orchestrator_preserves_strict_stage2_stage3_contracts():
+    workflow = Path("workflows/source-orchestrator.yaml").read_text(encoding="utf-8")
+
+    assert 'interactive_failure_policy: "hybrid_strict"' in workflow
+    assert "require_replicator: true" in workflow
+    assert "require_isaac: true" in workflow
+    assert "enable_stage3_isaac_refresh: true" in workflow
+
+
+def test_source_orchestrator_trigger_filter_targets_scene_request_json():
+    workflow = Path("workflows/source-orchestrator.yaml").read_text(encoding="utf-8")
+
+    assert 'text.match_regex(object, "^scenes/[^/]+/prompts/scene_request\\\\.json$")' in workflow

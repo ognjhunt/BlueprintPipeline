@@ -103,3 +103,21 @@ def test_validate_import_manifest_contract_rejects_unknown_scene_for_release(tmp
         strict_release=True,
     )
     assert any("scene_id cannot be null/unknown for release" in err for err in errors)
+
+
+def test_get_lerobot_metadata_paths_includes_nvidia_alignment_files(tmp_path):
+    utils_module = _load_utils_module()
+    meta_dir = tmp_path / "lerobot" / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "info.json").write_text("{}")
+    (meta_dir / "modality.json").write_text("{}")
+    (meta_dir / "embodiment.json").write_text("{}")
+    (meta_dir / "episodes_stats.jsonl").write_text("{}\n")
+    (meta_dir / "curriculum_index.json").write_text("{}")
+
+    paths = utils_module.get_lerobot_metadata_paths(tmp_path)
+    names = {path.name for path in paths}
+    assert "modality.json" in names
+    assert "embodiment.json" in names
+    assert "episodes_stats.jsonl" in names
+    assert "curriculum_index.json" in names
