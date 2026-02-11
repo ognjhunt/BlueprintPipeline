@@ -239,6 +239,38 @@ gcloud workflows deploy blueprint-pipeline \
 gcloud eventarc triggers list --location=<region>
 ```
 
+For the text-first source orchestrator, deploy triggers with an explicit image compatibility mode:
+
+```bash
+cd workflows
+
+# Recommended: orchestrator topology (avoids duplicate marker-chain triggers)
+IMAGE_PATH_MODE=orchestrator \
+TEXT_GEN_RUNTIME=vm \
+bash setup-all-triggers.sh <project_id> <bucket> <region> orchestrator
+
+# Legacy compatibility mode (keeps marker-chain trigger topology)
+IMAGE_PATH_MODE=legacy_chain \
+TEXT_GEN_RUNTIME=cloudrun \
+bash setup-all-triggers.sh <project_id> <bucket> <region> legacy_chain
+```
+
+Key source-orchestrator env vars to set at deploy time:
+- `DEFAULT_SOURCE_MODE`
+- `TEXT_GEN_RUNTIME`
+- `TEXT_GEN_STANDARD_PROFILE`
+- `TEXT_GEN_PREMIUM_PROFILE`
+- `TEXT_GEN_MAX_SEEDS`
+- `TEXT_GEN_ENABLE_IMAGE_FALLBACK`
+- `IMAGE_PATH_MODE`
+- `IMAGE_ORCHESTRATOR_WORKFLOW_NAME`
+- `IMAGE_LEGACY_WORKFLOW_NAME`
+- `IMAGE_LEGACY_CHAIN_WAIT_SECONDS`
+- `TEXT_GEN_VM_NAME`
+- `TEXT_GEN_VM_ZONE`
+- `TEXT_GEN_VM_REPO_DIR`
+- `TEXT_GEN_VM_TIMEOUT_SECONDS`
+
 Optionally run a canary workflow with a known scene ID:
 
 ```bash

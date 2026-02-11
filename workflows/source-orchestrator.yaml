@@ -7,7 +7,7 @@
 #
 # Behavior:
 #   - source_mode=text: run text Stage 1 jobs, then Stage 2-5
-#   - source_mode=image: delegate to existing image-to-scene-orchestrator
+#   - source_mode=image: delegate to image compatibility path
 #   - source_mode=auto: prefer text, fallback to image when configured and available
 #
 # Stage 2-5 remains canonical and unchanged:
@@ -34,15 +34,31 @@ main:
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - defaultSourceMode: '${text.lower(default(sys.get_env("DEFAULT_SOURCE_MODE"), "text"))}'
-          - textGenRuntime: '${default(sys.get_env("TEXT_GEN_RUNTIME"), "vm")}'
+          - textGenRuntime: '${text.lower(default(sys.get_env("TEXT_GEN_RUNTIME"), "vm"))}'
           - textGenStandardProfile: '${default(sys.get_env("TEXT_GEN_STANDARD_PROFILE"), "standard_v1")}'
           - textGenPremiumProfile: '${default(sys.get_env("TEXT_GEN_PREMIUM_PROFILE"), "premium_v1")}'
           - textGenMaxSeeds: '${int(default(sys.get_env("TEXT_GEN_MAX_SEEDS"), "16"))}'
-          - textGenEnableImageFallback: '${default(sys.get_env("TEXT_GEN_ENABLE_IMAGE_FALLBACK"), "true") == "true"}'
+          - textGenEnableImageFallback: '${text.lower(default(sys.get_env("TEXT_GEN_ENABLE_IMAGE_FALLBACK"), "true")) == "true"}'
+          - imagePathMode: '${text.lower(default(sys.get_env("IMAGE_PATH_MODE"), "orchestrator"))}'
+          - imageOrchestratorWorkflow: '${default(sys.get_env("IMAGE_ORCHESTRATOR_WORKFLOW_NAME"), "image-to-scene-orchestrator")}'
+          - imageLegacyWorkflow: '${default(sys.get_env("IMAGE_LEGACY_WORKFLOW_NAME"), "image-to-scene-pipeline")}'
+          - imageLegacyWaitSeconds: '${int(default(sys.get_env("IMAGE_LEGACY_CHAIN_WAIT_SECONDS"), "7200"))}'
+          - textVmName: '${default(sys.get_env("TEXT_GEN_VM_NAME"), "isaac-sim-ubuntu")}'
+          - textVmZone: '${default(sys.get_env("TEXT_GEN_VM_ZONE"), "us-east1-c")}'
+          - textVmRepoDir: '${default(sys.get_env("TEXT_GEN_VM_REPO_DIR"), "~/BlueprintPipeline")}'
+          - textVmTimeoutSeconds: '${int(default(sys.get_env("TEXT_GEN_VM_TIMEOUT_SECONDS"), "2400"))}'
           - workflowName: "source-orchestrator"
           - startTime: '${time.format(sys.now())}'
           - fallbackUsed: false
           - completedVariants: 0
+          - cloudrunFallbackCount: 0
+          - lockAcquired: false
+          - requestSourceMode: "unknown"
+          - qualityTier: "standard"
+          - providerPolicy: "openai_primary"
+          - errorCode: ""
+          - errorMsg: ""
+          - failedStage: ""
         next: filter_prompt_requests
 
     - filter_prompt_requests:
@@ -59,6 +75,51 @@ main:
           - completionMarker: '${scenePrefix + "/.source_orchestrator_complete"}'
           - failureMarker: '${scenePrefix + "/.source_orchestrator_failed"}'
           - variantsIndexObject: '${scenePrefix + "/variants/index.json"}'
+          - geniesimCompleteObject: '${scenePrefix + "/geniesim/.geniesim_complete"}'
+          - lockObject: '${scenePrefix + "/locks/source-orchestrator-" + objectGeneration + ".lock"}'
+        next: acquire_lock
+
+    - acquire_lock:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${lockObject}
+            uploadType: "media"
+            ifGenerationMatch: 0
+            body: '${json.encode({
+              "scene_id": sceneId,
+              "workflow": workflowName,
+              "input_object": object,
+              "input_generation": objectGeneration,
+              "timestamp": time.format(sys.now())
+            })}'
+          result: lockInsertResult
+        except:
+          as: lockErr
+          steps:
+            - lock_conflict_switch:
+                switch:
+                  - condition: '${lockErr.code == 412 or lockErr.code == 409}'
+                    next: skip_duplicate_generation
+                next: set_lock_acquire_error
+            - set_lock_acquire_error:
+                assign:
+                  - errorCode: "lock_acquire_failed"
+                  - errorMsg: '${"Failed to acquire source orchestrator lock for scene " + sceneId + ": " + lockErr.message}'
+                  - failedStage: "lock_acquisition"
+                next: write_failure_and_raise
+        next: set_lock_acquired
+
+    - skip_duplicate_generation:
+        return:
+          status: "SKIPPED"
+          scene_id: ${sceneId}
+          message: '${"Duplicate event for generation " + objectGeneration + " (lock exists at " + lockObject + ")"}'
+
+    - set_lock_acquired:
+        assign:
+          - lockAcquired: true
         next: clear_previous_failure_marker
 
     - clear_previous_failure_marker:
@@ -88,30 +149,66 @@ main:
           object: ${object}
           alt: "media"
         result: requestRaw
-        next: parse_request
+        next: parse_request_payload
 
-    - parse_request:
-        assign:
-          - sceneRequest: '${json.decode(requestRaw)}'
-          - requestSourceMode: '${text.lower(default(map.get(sceneRequest, "source_mode"), defaultSourceMode))}'
-          - primarySourceMode: '${if(requestSourceMode == "auto", "text", requestSourceMode)}'
-          - qualityTier: '${text.lower(default(map.get(sceneRequest, "quality_tier"), "standard"))}'
-          - providerPolicy: '${default(map.get(sceneRequest, "provider_policy"), "openai_primary")}'
-          - seedCount: '${int(default(map.get(sceneRequest, "seed_count"), 1))}'
-          - prompt: '${default(map.get(sceneRequest, "prompt"), "")}'
-          - constraints: '${default(map.get(sceneRequest, "constraints"), {})}'
-          - fallbackConfig: '${default(map.get(sceneRequest, "fallback"), {})}'
-          - allowImageFallbackRequest: '${default(map.get(fallbackConfig, "allow_image_fallback"), true)}'
-          - allowImageFallback: '${allowImageFallbackRequest and textGenEnableImageFallback}'
-          - imagePayload: '${default(map.get(sceneRequest, "image"), {})}'
-          - imageGcsUri: '${default(map.get(imagePayload, "gcs_uri"), "")}'
-          - imageGeneration: '${if(map.get(imagePayload, "generation") != null, string(map.get(imagePayload, "generation")), objectGeneration)}'
-          - imageObjectCandidate: '${if(imageGcsUri == "", "", if(text.match_regex(imageGcsUri, "^gs://"), text.replace_all(imageGcsUri, "gs://" + bucket + "/", ""), imageGcsUri))}'
+    - parse_request_payload:
+        try:
+          assign:
+            - sceneRequest: '${json.decode(requestRaw)}'
+        except:
+          as: requestDecodeErr
+          steps:
+            - set_request_decode_error:
+                assign:
+                  - errorCode: "invalid_scene_request"
+                  - errorMsg: '${"scene_request.json is not valid JSON for scene " + sceneId + ": " + requestDecodeErr.message}'
+                  - failedStage: "source_request_validation"
+                next: write_failure_and_raise
+        next: parse_request_typed
+
+    - parse_request_typed:
+        try:
+          assign:
+            - requestSchemaVersion: '${string(default(map.get(sceneRequest, "schema_version"), ""))}'
+            - requestSceneId: '${string(default(map.get(sceneRequest, "scene_id"), ""))}'
+            - requestSourceMode: '${text.lower(string(default(map.get(sceneRequest, "source_mode"), defaultSourceMode)))}'
+            - primarySourceMode: '${if(requestSourceMode == "auto", "text", requestSourceMode)}'
+            - qualityTier: '${text.lower(string(default(map.get(sceneRequest, "quality_tier"), "standard")))}'
+            - providerPolicy: '${string(default(map.get(sceneRequest, "provider_policy"), "openai_primary"))}'
+            - seedCount: '${int(default(map.get(sceneRequest, "seed_count"), 1))}'
+            - prompt: '${string(default(map.get(sceneRequest, "prompt"), ""))}'
+            - constraints: '${default(map.get(sceneRequest, "constraints"), {})}'
+            - fallbackConfig: '${default(map.get(sceneRequest, "fallback"), {})}'
+            - allowImageFallbackRaw: '${default(map.get(fallbackConfig, "allow_image_fallback"), true)}'
+            - allowImageFallbackString: '${text.lower(string(allowImageFallbackRaw))}'
+            - allowImageFallbackRequest: '${allowImageFallbackString != "false" and allowImageFallbackString != "0" and allowImageFallbackString != "no" and allowImageFallbackString != "off"}'
+            - allowImageFallback: '${allowImageFallbackRequest and textGenEnableImageFallback}'
+            - imagePayload: '${default(map.get(sceneRequest, "image"), {})}'
+            - imageGcsUri: '${string(default(map.get(imagePayload, "gcs_uri"), ""))}'
+            - imageGeneration: '${if(map.get(imagePayload, "generation") != null, string(map.get(imagePayload, "generation")), objectGeneration)}'
+            - imageObjectCandidate: '${if(imageGcsUri == "", "", if(text.match_regex(imageGcsUri, "^gs://"), if(text.match_regex(imageGcsUri, "^gs://" + bucket + "/"), text.replace_all(imageGcsUri, "gs://" + bucket + "/", ""), ""), imageGcsUri))}'
+        except:
+          as: requestParseErr
+          steps:
+            - set_request_parse_error:
+                assign:
+                  - errorCode: "invalid_scene_request"
+                  - errorMsg: '${"scene_request.json parse failure for scene " + sceneId + ": " + requestParseErr.message}'
+                  - failedStage: "source_request_validation"
+                next: write_failure_and_raise
         next: validate_request
 
     - validate_request:
         switch:
+          - condition: '${requestSchemaVersion != "v1"}'
+            next: invalid_request
+          - condition: '${requestSceneId == "" or requestSceneId != sceneId}'
+            next: invalid_request
           - condition: '${requestSourceMode != "text" and requestSourceMode != "image" and requestSourceMode != "auto"}'
+            next: invalid_request
+          - condition: '${qualityTier != "standard" and qualityTier != "premium"}'
+            next: invalid_request
+          - condition: '${providerPolicy != "openai_primary"}'
             next: invalid_request
           - condition: '${(requestSourceMode == "text" or requestSourceMode == "auto") and prompt == ""}'
             next: invalid_request
@@ -139,7 +236,7 @@ main:
     - run_image_mode:
         switch:
           - condition: '${imageObjectCandidate != "" and text.match_regex(imageObjectCandidate, "^scenes/[^/]+/images/[^/]+\\.([Pp][Nn][Gg]|[Jj][Pp][Ee]?[Gg])$")}'
-            next: delegate_image_orchestrator
+            next: delegate_image_mode
         next: invalid_image_path
 
     - invalid_image_path:
@@ -149,14 +246,19 @@ main:
           - failedStage: "source_request_validation"
         next: write_failure_and_raise
 
-    - delegate_image_orchestrator:
-        call: run_image_orchestrator
+    - delegate_image_mode:
+        call: run_image_path_compat
         args:
           projectId: ${projectId}
           region: ${region}
           bucket: ${bucket}
           imageObject: ${imageObjectCandidate}
           generation: ${imageGeneration}
+          imagePathMode: ${imagePathMode}
+          imageOrchestratorWorkflow: ${imageOrchestratorWorkflow}
+          imageLegacyWorkflow: ${imageLegacyWorkflow}
+          geniesimCompleteObject: ${geniesimCompleteObject}
+          legacyWaitTimeoutSeconds: ${imageLegacyWaitSeconds}
         result: imageResult
         next: write_completion_marker_image
 
@@ -174,8 +276,18 @@ main:
             "seed_count": seedCount,
             "fallback_used": false,
             "text_gen_runtime": textGenRuntime,
+            "image_path_mode": imageResult.mode,
+            "image_workflow": imageResult.workflow_name,
             "timestamp": time.format(sys.now())
           })}'
+        next: release_lock_before_done_image
+
+    - release_lock_before_done_image:
+        call: release_source_lock_if_needed
+        args:
+          bucket: ${bucket}
+          lockObject: ${lockObject}
+          lockAcquired: ${lockAcquired}
         next: done_image
 
     - done_image:
@@ -185,6 +297,8 @@ main:
           scene_id: ${sceneId}
           seed_count: ${seedCount}
           fallback_used: false
+          image_path_mode: ${imageResult.mode}
+          image_workflow: ${imageResult.workflow_name}
 
     - init_text_mode:
         assign:
@@ -203,16 +317,26 @@ main:
           - seedSuffix: '${if(seedIndex < 10, "00" + string(seedIndex), if(seedIndex < 100, "0" + string(seedIndex), string(seedIndex)))}'
           - childSceneId: '${if(seedCount > 1, sceneId + "-s" + seedSuffix, sceneId)}'
           - childScenePrefix: '${"scenes/" + childSceneId}'
-          - childRequestObject: '${childScenePrefix + "/prompts/scene_request.json"}'
+          - childRequestObject: '${if(seedCount > 1, childScenePrefix + "/internal/scene_request.generated.json", object)}'
+          - shouldWriteChildRequest: '${seedCount > 1}'
           - childTextgenPrefix: '${childScenePrefix + "/textgen"}'
           - childAssetsPrefix: '${childScenePrefix + "/assets"}'
           - childLayoutPrefix: '${childScenePrefix + "/layout"}'
           - childSegPrefix: '${childScenePrefix + "/seg"}'
         next: process_text_seed
 
+    # NOTE: Fail-fast fallback behavior — if ANY seed fails in this loop,
+    # the except block jumps to fallback_to_image_mode (when enabled).
+    # Remaining seeds are NOT retried individually. The image path replaces
+    # the entire text generation for the parent scene_id.
     - process_text_seed:
         try:
           steps:
+            - maybe_write_child_request:
+                switch:
+                  - condition: ${shouldWriteChildRequest}
+                    next: write_child_request
+                next: run_text_stage1_for_child
             - write_child_request:
                 call: googleapis.storage.v1.objects.insert
                 args:
@@ -230,56 +354,39 @@ main:
                     "provider_policy": providerPolicy,
                     "fallback": {"allow_image_fallback": allowImageFallback}
                   })}'
-            - run_text_gen_job:
-                call: run_cloud_run_job_and_wait
+                next: run_text_stage1_for_child
+            - run_text_stage1_for_child:
+                call: run_text_stage1_for_child
                 args:
                   projectId: ${projectId}
                   region: ${region}
-                  jobName: "text-scene-gen-job"
-                  timeoutSeconds: 1800
-                  envVars:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${childSceneId}
-                    - name: REQUEST_OBJECT
-                      value: ${childRequestObject}
-                    - name: TEXTGEN_PREFIX
-                      value: ${childTextgenPrefix}
-                    - name: TEXT_SEED
-                      value: '${string(seedIndex)}'
-                    - name: DEFAULT_SOURCE_MODE
-                      value: "text"
-                    - name: TEXT_GEN_MAX_SEEDS
-                      value: '${string(textGenMaxSeeds)}'
-                    - name: TEXT_GEN_STANDARD_PROFILE
-                      value: ${textGenStandardProfile}
-                    - name: TEXT_GEN_PREMIUM_PROFILE
-                      value: ${textGenPremiumProfile}
-                    - name: TEXT_GEN_RUNTIME
-                      value: ${textGenRuntime}
-            - run_text_adapter_job:
-                call: run_cloud_run_job_and_wait
-                args:
-                  projectId: ${projectId}
-                  region: ${region}
-                  jobName: "text-scene-adapter-job"
-                  timeoutSeconds: 1800
-                  envVars:
-                    - name: BUCKET
-                      value: ${bucket}
-                    - name: SCENE_ID
-                      value: ${childSceneId}
-                    - name: REQUEST_OBJECT
-                      value: ${childRequestObject}
-                    - name: TEXTGEN_PREFIX
-                      value: ${childTextgenPrefix}
-                    - name: ASSETS_PREFIX
-                      value: ${childAssetsPrefix}
-                    - name: LAYOUT_PREFIX
-                      value: ${childLayoutPrefix}
-                    - name: SEG_PREFIX
-                      value: ${childSegPrefix}
+                  bucket: ${bucket}
+                  childSceneId: ${childSceneId}
+                  childRequestObject: ${childRequestObject}
+                  childTextgenPrefix: ${childTextgenPrefix}
+                  childAssetsPrefix: ${childAssetsPrefix}
+                  childLayoutPrefix: ${childLayoutPrefix}
+                  childSegPrefix: ${childSegPrefix}
+                  seedIndex: ${seedIndex}
+                  textGenRuntime: ${textGenRuntime}
+                  textGenMaxSeeds: ${textGenMaxSeeds}
+                  textGenStandardProfile: ${textGenStandardProfile}
+                  textGenPremiumProfile: ${textGenPremiumProfile}
+                  textVmName: ${textVmName}
+                  textVmZone: ${textVmZone}
+                  textVmRepoDir: ${textVmRepoDir}
+                  textVmTimeoutSeconds: ${textVmTimeoutSeconds}
+                result: textStageResult
+                next: maybe_count_runtime_fallback
+            - maybe_count_runtime_fallback:
+                switch:
+                  - condition: '${default(textStageResult.fallback_to_cloudrun, false)}'
+                    next: increment_runtime_fallback_count
+                next: run_downstream_for_child
+            - increment_runtime_fallback_count:
+                assign:
+                  - cloudrunFallbackCount: ${cloudrunFallbackCount + 1}
+                next: run_downstream_for_child
             - run_downstream_for_child:
                 call: run_stage2_to_stage5
                 args:
@@ -288,6 +395,7 @@ main:
                   bucket: ${bucket}
                   sceneId: ${childSceneId}
                 result: downstreamStatus
+                next: append_variant_entry
             - append_variant_entry:
                 assign:
                   - variantEntryJson: '${"{\"scene_id\":\"" + childSceneId + "\",\"seed\":" + string(seedIndex) + "}"}'
@@ -304,7 +412,7 @@ main:
             - maybe_fallback_switch:
                 switch:
                   - condition: '${allowImageFallback and imageObjectCandidate != "" and text.match_regex(imageObjectCandidate, "^scenes/[^/]+/images/[^/]+\\.([Pp][Nn][Gg]|[Jj][Pp][Ee]?[Gg])$")}'
-                    next: fallback_to_image_orchestrator
+                    next: fallback_to_image_mode
             - set_text_failure_error:
                 assign:
                   - errorCode: "text_stage_failed"
@@ -318,14 +426,19 @@ main:
           - seedIndex: ${seedIndex + 1}
         next: text_seed_loop_check
 
-    - fallback_to_image_orchestrator:
-        call: run_image_orchestrator
+    - fallback_to_image_mode:
+        call: run_image_path_compat
         args:
           projectId: ${projectId}
           region: ${region}
           bucket: ${bucket}
           imageObject: ${imageObjectCandidate}
           generation: ${imageGeneration}
+          imagePathMode: ${imagePathMode}
+          imageOrchestratorWorkflow: ${imageOrchestratorWorkflow}
+          imageLegacyWorkflow: ${imageLegacyWorkflow}
+          geniesimCompleteObject: ${geniesimCompleteObject}
+          legacyWaitTimeoutSeconds: ${imageLegacyWaitSeconds}
         result: imageFallbackResult
         next: write_completion_marker_fallback
 
@@ -350,8 +463,18 @@ main:
             "fallback_used": true,
             "fallback_image_object": imageObjectCandidate,
             "text_gen_runtime": textGenRuntime,
+            "image_path_mode": imageFallbackResult.mode,
+            "image_workflow": imageFallbackResult.workflow_name,
             "timestamp": time.format(sys.now())
           })}'
+        next: release_lock_before_done_fallback
+
+    - release_lock_before_done_fallback:
+        call: release_source_lock_if_needed
+        args:
+          bucket: ${bucket}
+          lockObject: ${lockObject}
+          lockAcquired: ${lockAcquired}
         next: done_fallback
 
     - done_fallback:
@@ -362,6 +485,8 @@ main:
           seed_count: ${seedCount}
           completed_variants: ${completedVariants}
           fallback_used: true
+          image_path_mode: ${imageFallbackResult.mode}
+          image_workflow: ${imageFallbackResult.workflow_name}
 
     - write_variants_index:
         switch:
@@ -400,8 +525,17 @@ main:
             "completed_variants": completedVariants,
             "fallback_used": false,
             "text_gen_runtime": textGenRuntime,
+            "cloudrun_fallback_count": cloudrunFallbackCount,
             "timestamp": time.format(sys.now())
           })}'
+        next: release_lock_before_done_text
+
+    - release_lock_before_done_text:
+        call: release_source_lock_if_needed
+        args:
+          bucket: ${bucket}
+          lockObject: ${lockObject}
+          lockAcquired: ${lockAcquired}
         next: done_text
 
     - done_text:
@@ -412,6 +546,7 @@ main:
           seed_count: ${seedCount}
           completed_variants: ${completedVariants}
           fallback_used: false
+          cloudrun_fallback_count: ${cloudrunFallbackCount}
 
     - write_failure_and_raise:
         assign:
@@ -420,6 +555,7 @@ main:
               status: "failed"
               timestamp: '${time.format(sys.now())}'
               input_object: ${object}
+              input_generation: ${objectGeneration}
               source_mode: ${requestSourceMode}
               failed_stage: ${failedStage}
               error:
@@ -430,6 +566,8 @@ main:
                 workflow_execution_id: '${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}'
                 completed_variants: ${completedVariants}
                 fallback_used: ${fallbackUsed}
+                lock_object: ${lockObject}
+                lock_acquired: ${lockAcquired}
         next: write_failure_marker
 
     - write_failure_marker:
@@ -448,6 +586,14 @@ main:
                 args:
                   text: '${"Failed to write source orchestrator failure marker: " + writeFailureErr.message}'
                   severity: "WARNING"
+        next: release_lock_before_raise
+
+    - release_lock_before_raise:
+        call: release_source_lock_if_needed
+        args:
+          bucket: ${bucket}
+          lockObject: ${lockObject}
+          lockAcquired: ${lockAcquired}
         next: raise_failure
 
     - raise_failure:
@@ -655,15 +801,323 @@ run_stage2_to_stage5:
           arena_export: ${arenaState}
 
 
-run_image_orchestrator:
-  params: [projectId, region, bucket, imageObject, generation]
+run_text_stage1_for_child:
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenRuntime, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
   steps:
-    - call_orchestrator:
+    - runtime_switch:
+        switch:
+          - condition: '${textGenRuntime == "vm"}'
+            next: run_vm_first
+          - condition: '${textGenRuntime == "cloudrun"}'
+            next: run_cloudrun_direct
+        next: invalid_runtime
+
+    - run_vm_first:
+        try:
+          call: run_text_jobs_on_vm
+          args:
+            projectId: ${projectId}
+            region: ${region}
+            bucket: ${bucket}
+            childSceneId: ${childSceneId}
+            childRequestObject: ${childRequestObject}
+            childTextgenPrefix: ${childTextgenPrefix}
+            childAssetsPrefix: ${childAssetsPrefix}
+            childLayoutPrefix: ${childLayoutPrefix}
+            childSegPrefix: ${childSegPrefix}
+            seedIndex: ${seedIndex}
+            textGenMaxSeeds: ${textGenMaxSeeds}
+            textGenStandardProfile: ${textGenStandardProfile}
+            textGenPremiumProfile: ${textGenPremiumProfile}
+            textVmName: ${textVmName}
+            textVmZone: ${textVmZone}
+            textVmRepoDir: ${textVmRepoDir}
+            textVmTimeoutSeconds: ${textVmTimeoutSeconds}
+          result: vmResult
+        except:
+          as: vmErr
+          steps:
+            - set_vm_err_message:
+                assign:
+                  - vmErrMessage: '${string(vmErr.message)}'
+            - vm_error_switch:
+                switch:
+                  - condition: '${text.match_regex(vmErrMessage, "^\\[vm_transient\\].*")}'
+                    next: run_cloudrun_after_vm_error
+                next: rethrow_vm_error
+            - rethrow_vm_error:
+                raise: ${vmErrMessage}
+        next: return_vm_result
+
+    - run_cloudrun_after_vm_error:
+        call: run_text_jobs_on_cloudrun
+        args:
+          projectId: ${projectId}
+          region: ${region}
+          bucket: ${bucket}
+          childSceneId: ${childSceneId}
+          childRequestObject: ${childRequestObject}
+          childTextgenPrefix: ${childTextgenPrefix}
+          childAssetsPrefix: ${childAssetsPrefix}
+          childLayoutPrefix: ${childLayoutPrefix}
+          childSegPrefix: ${childSegPrefix}
+          seedIndex: ${seedIndex}
+          textGenMaxSeeds: ${textGenMaxSeeds}
+          textGenStandardProfile: ${textGenStandardProfile}
+          textGenPremiumProfile: ${textGenPremiumProfile}
+        result: cloudrunFallbackResult
+        next: return_cloudrun_fallback
+
+    - return_vm_result:
+        return:
+          runtime_used: "vm"
+          fallback_to_cloudrun: false
+
+    - return_cloudrun_fallback:
+        return:
+          runtime_used: "cloudrun"
+          fallback_to_cloudrun: true
+          fallback_reason: ${vmErrMessage}
+
+    - run_cloudrun_direct:
+        call: run_text_jobs_on_cloudrun
+        args:
+          projectId: ${projectId}
+          region: ${region}
+          bucket: ${bucket}
+          childSceneId: ${childSceneId}
+          childRequestObject: ${childRequestObject}
+          childTextgenPrefix: ${childTextgenPrefix}
+          childAssetsPrefix: ${childAssetsPrefix}
+          childLayoutPrefix: ${childLayoutPrefix}
+          childSegPrefix: ${childSegPrefix}
+          seedIndex: ${seedIndex}
+          textGenMaxSeeds: ${textGenMaxSeeds}
+          textGenStandardProfile: ${textGenStandardProfile}
+          textGenPremiumProfile: ${textGenPremiumProfile}
+        result: cloudrunResult
+        next: return_cloudrun_direct
+
+    - return_cloudrun_direct:
+        return:
+          runtime_used: "cloudrun"
+          fallback_to_cloudrun: false
+
+    - invalid_runtime:
+        raise: '${"Unsupported TEXT_GEN_RUNTIME: " + textGenRuntime}'
+
+
+run_text_jobs_on_cloudrun:
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile]
+  steps:
+    - run_text_gen_job:
+        call: run_cloud_run_job_and_wait
+        args:
+          projectId: ${projectId}
+          region: ${region}
+          jobName: "text-scene-gen-job"
+          timeoutSeconds: 1800
+          envVars:
+            - name: BUCKET
+              value: ${bucket}
+            - name: SCENE_ID
+              value: ${childSceneId}
+            - name: REQUEST_OBJECT
+              value: ${childRequestObject}
+            - name: TEXTGEN_PREFIX
+              value: ${childTextgenPrefix}
+            - name: TEXT_SEED
+              value: '${string(seedIndex)}'
+            - name: DEFAULT_SOURCE_MODE
+              value: "text"
+            - name: TEXT_GEN_MAX_SEEDS
+              value: '${string(textGenMaxSeeds)}'
+            - name: TEXT_GEN_STANDARD_PROFILE
+              value: ${textGenStandardProfile}
+            - name: TEXT_GEN_PREMIUM_PROFILE
+              value: ${textGenPremiumProfile}
+            - name: TEXT_GEN_RUNTIME
+              value: "cloudrun"
+        result: textGenStatus
+        next: run_text_adapter_job
+
+    - run_text_adapter_job:
+        call: run_cloud_run_job_and_wait
+        args:
+          projectId: ${projectId}
+          region: ${region}
+          jobName: "text-scene-adapter-job"
+          timeoutSeconds: 1800
+          envVars:
+            - name: BUCKET
+              value: ${bucket}
+            - name: SCENE_ID
+              value: ${childSceneId}
+            - name: REQUEST_OBJECT
+              value: ${childRequestObject}
+            - name: TEXTGEN_PREFIX
+              value: ${childTextgenPrefix}
+            - name: ASSETS_PREFIX
+              value: ${childAssetsPrefix}
+            - name: LAYOUT_PREFIX
+              value: ${childLayoutPrefix}
+            - name: SEG_PREFIX
+              value: ${childSegPrefix}
+        result: textAdapterStatus
+        next: return_result
+
+    - return_result:
+        return:
+          status: "SUCCEEDED"
+          runtime_used: "cloudrun"
+
+
+run_text_jobs_on_vm:
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
+  steps:
+    - run_text_jobs_via_cloud_build:
+        try:
+          call: googleapis.cloudbuild.v1.projects.builds.create
+          args:
+            projectId: ${projectId}
+            body:
+              steps:
+                - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+                  entrypoint: "bash"
+                  env:
+                    - '${"PROJECT_ID=" + projectId}'
+                    - '${"VM_NAME=" + textVmName}'
+                    - '${"VM_ZONE=" + textVmZone}'
+                    - '${"VM_REPO_DIR=" + textVmRepoDir}'
+                    - '${"BUCKET=" + bucket}'
+                    - '${"SCENE_ID=" + childSceneId}'
+                    - '${"REQUEST_OBJECT=" + childRequestObject}'
+                    - '${"TEXTGEN_PREFIX=" + childTextgenPrefix}'
+                    - '${"TEXT_SEED=" + string(seedIndex)}'
+                    - '${"TEXT_GEN_MAX_SEEDS=" + string(textGenMaxSeeds)}'
+                    - '${"TEXT_GEN_STANDARD_PROFILE=" + textGenStandardProfile}'
+                    - '${"TEXT_GEN_PREMIUM_PROFILE=" + textGenPremiumProfile}'
+                    - '${"ASSETS_PREFIX=" + childAssetsPrefix}'
+                    - '${"LAYOUT_PREFIX=" + childLayoutPrefix}'
+                    - '${"SEG_PREFIX=" + childSegPrefix}'
+                  args:
+                    - "-c"
+                    - |
+                      set -euo pipefail
+
+                      BUCKET_Q=$(printf '%q' "${BUCKET}")
+                      SCENE_ID_Q=$(printf '%q' "${SCENE_ID}")
+                      REQUEST_OBJECT_Q=$(printf '%q' "${REQUEST_OBJECT}")
+                      TEXTGEN_PREFIX_Q=$(printf '%q' "${TEXTGEN_PREFIX}")
+                      TEXT_SEED_Q=$(printf '%q' "${TEXT_SEED}")
+                      TEXT_GEN_MAX_SEEDS_Q=$(printf '%q' "${TEXT_GEN_MAX_SEEDS}")
+                      TEXT_GEN_STANDARD_PROFILE_Q=$(printf '%q' "${TEXT_GEN_STANDARD_PROFILE}")
+                      TEXT_GEN_PREMIUM_PROFILE_Q=$(printf '%q' "${TEXT_GEN_PREMIUM_PROFILE}")
+                      ASSETS_PREFIX_Q=$(printf '%q' "${ASSETS_PREFIX}")
+                      LAYOUT_PREFIX_Q=$(printf '%q' "${LAYOUT_PREFIX}")
+                      SEG_PREFIX_Q=$(printf '%q' "${SEG_PREFIX}")
+
+                      REMOTE_CMD="cd ${VM_REPO_DIR} && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} TEXT_SEED=${TEXT_SEED_Q} DEFAULT_SOURCE_MODE=text TEXT_GEN_MAX_SEEDS=${TEXT_GEN_MAX_SEEDS_Q} TEXT_GEN_STANDARD_PROFILE=${TEXT_GEN_STANDARD_PROFILE_Q} TEXT_GEN_PREMIUM_PROFILE=${TEXT_GEN_PREMIUM_PROFILE_Q} TEXT_GEN_RUNTIME=vm python text-scene-gen-job/generate_text_scene.py && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} ASSETS_PREFIX=${ASSETS_PREFIX_Q} LAYOUT_PREFIX=${LAYOUT_PREFIX_Q} SEG_PREFIX=${SEG_PREFIX_Q} python text-scene-adapter-job/adapt_text_scene.py"
+
+                      gcloud compute ssh "${VM_NAME}" \
+                        --project="${PROJECT_ID}" \
+                        --zone="${VM_ZONE}" \
+                        --command="${REMOTE_CMD}"
+              timeout: '${string(textVmTimeoutSeconds + 600) + "s"}'
+              options:
+                logging: CLOUD_LOGGING_ONLY
+          result: vmBuild
+        except:
+          as: vmStartErr
+          steps:
+            - raise_vm_start_transient:
+                raise: '${"[vm_transient] Failed to start VM text stage via Cloud Build: " + vmStartErr.message}'
+        next: init_vm_build_poll
+
+    - init_vm_build_poll:
+        assign:
+          - vmBuildId: '${if(vmBuild.metadata != null and vmBuild.metadata.build != null and vmBuild.metadata.build.id != null, vmBuild.metadata.build.id, if(vmBuild.id != null, vmBuild.id, ""))}'
+          - vmBuildPollStartTime: '${time.format(sys.now())}'
+        next: ensure_vm_build_id
+
+    - ensure_vm_build_id:
+        switch:
+          - condition: '${vmBuildId == ""}'
+            next: missing_vm_build_id
+        next: check_vm_build_status
+
+    - missing_vm_build_id:
+        raise: '${"[vm_transient] VM text stage Cloud Build returned no build ID for scene " + childSceneId}'
+
+    - check_vm_build_status:
+        call: googleapis.cloudbuild.v1.projects.builds.get
+        args:
+          projectId: ${projectId}
+          id: ${vmBuildId}
+        result: vmBuildStatus
+        next: vm_build_status_switch
+
+    - vm_build_status_switch:
+        switch:
+          - condition: '${vmBuildStatus.status == "SUCCESS"}'
+            next: return_vm_build_success
+          - condition: '${vmBuildStatus.status == "TIMEOUT" or vmBuildStatus.status == "INTERNAL_ERROR" or vmBuildStatus.status == "EXPIRED" or vmBuildStatus.status == "CANCELLED"}'
+            next: raise_vm_build_transient
+          - condition: '${vmBuildStatus.status == "FAILURE"}'
+            next: raise_vm_build_non_transient
+        next: check_vm_build_timeout
+
+    - check_vm_build_timeout:
+        assign:
+          - vmBuildPollNow: '${time.format(sys.now())}'
+          - vmBuildPollElapsedSeconds: '${time.parse(vmBuildPollNow) - time.parse(vmBuildPollStartTime)}'
+        next: vm_build_timeout_switch
+
+    - vm_build_timeout_switch:
+        switch:
+          - condition: '${vmBuildPollElapsedSeconds >= textVmTimeoutSeconds}'
+            next: raise_vm_build_transient_timeout
+        next: wait_vm_build_poll
+
+    - wait_vm_build_poll:
+        call: sys.sleep
+        args:
+          seconds: 20
+        next: check_vm_build_status
+
+    - raise_vm_build_transient:
+        raise: '${"[vm_transient] VM text stage build unstable for scene " + childSceneId + " (build " + vmBuildId + ", status=" + vmBuildStatus.status + ")"}'
+
+    - raise_vm_build_transient_timeout:
+        raise: '${"[vm_transient] VM text stage build polling timed out for scene " + childSceneId + " (build " + vmBuildId + ")"}'
+
+    - raise_vm_build_non_transient:
+        raise: '${"[vm_non_transient] VM text stage build failed for scene " + childSceneId + " (build " + vmBuildId + ")"}'
+
+    - return_vm_build_success:
+        return:
+          status: "SUCCEEDED"
+          runtime_used: "vm"
+          build_id: ${vmBuildId}
+
+
+run_image_path_compat:
+  params: [projectId, region, bucket, imageObject, generation, imagePathMode, imageOrchestratorWorkflow, imageLegacyWorkflow, geniesimCompleteObject, legacyWaitTimeoutSeconds]
+  steps:
+    - mode_switch:
+        switch:
+          - condition: '${imagePathMode == "orchestrator"}'
+            next: run_orchestrator_workflow
+          - condition: '${imagePathMode == "legacy_chain"}'
+            next: run_legacy_workflow
+        next: invalid_image_mode
+
+    - run_orchestrator_workflow:
         call: run_workflow_and_wait
         args:
           projectId: ${projectId}
           region: ${region}
-          workflowName: "image-to-scene-orchestrator"
+          workflowName: ${imageOrchestratorWorkflow}
           pollIntervalSeconds: 30
           argument:
             data:
@@ -671,9 +1125,140 @@ run_image_orchestrator:
               name: ${imageObject}
               generation: ${generation}
         result: orchestratorResult
-        next: return_result
+        next: return_orchestrator_result
 
-    - return_result:
+    - return_orchestrator_result:
         return:
-          status: "SUCCEEDED"
+          mode: "orchestrator"
+          workflow_name: ${imageOrchestratorWorkflow}
           workflow_execution: ${orchestratorResult.name}
+          waited_for_downstream: false
+
+    - run_legacy_workflow:
+        call: run_workflow_and_wait
+        args:
+          projectId: ${projectId}
+          region: ${region}
+          workflowName: ${imageLegacyWorkflow}
+          pollIntervalSeconds: 30
+          argument:
+            data:
+              bucket: ${bucket}
+              name: ${imageObject}
+              generation: ${generation}
+        result: legacyWorkflowResult
+        next: wait_for_legacy_downstream
+
+    - wait_for_legacy_downstream:
+        call: wait_for_gcs_marker
+        args:
+          bucket: ${bucket}
+          object: ${geniesimCompleteObject}
+          timeoutSeconds: ${legacyWaitTimeoutSeconds}
+          pollIntervalSeconds: 30
+        result: legacyDownstreamMarker
+        next: return_legacy_result
+
+    - return_legacy_result:
+        return:
+          mode: "legacy_chain"
+          workflow_name: ${imageLegacyWorkflow}
+          workflow_execution: ${legacyWorkflowResult.name}
+          waited_for_downstream: true
+          downstream_marker: ${geniesimCompleteObject}
+
+    - invalid_image_mode:
+        raise: '${"Unsupported IMAGE_PATH_MODE: " + imagePathMode}'
+
+
+wait_for_gcs_marker:
+  params: [bucket, object, timeoutSeconds, pollIntervalSeconds]
+  steps:
+    - init_timer:
+        assign:
+          - waitStartTime: '${time.format(sys.now())}'
+        next: poll_marker
+
+    - poll_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${object}
+            alt: "media"
+          result: markerPayload
+        except:
+          as: markerErr
+          steps:
+            - marker_not_found_switch:
+                switch:
+                  - condition: '${markerErr.code == 404}'
+                    next: check_wait_timeout
+                next: marker_read_error
+            - marker_read_error:
+                raise: '${"Failed to read marker " + object + ": " + markerErr.message}'
+        next: return_marker
+
+    - check_wait_timeout:
+        assign:
+          - waitNow: '${time.format(sys.now())}'
+          - waitElapsedSeconds: '${time.parse(waitNow) - time.parse(waitStartTime)}'
+        next: wait_timeout_switch
+
+    - wait_timeout_switch:
+        switch:
+          - condition: '${waitElapsedSeconds >= timeoutSeconds}'
+            next: wait_timeout_error
+        next: wait_before_poll
+
+    - wait_before_poll:
+        call: sys.sleep
+        args:
+          seconds: ${pollIntervalSeconds}
+        next: poll_marker
+
+    - wait_timeout_error:
+        raise: '${"Timed out waiting for marker " + object + " after " + string(timeoutSeconds) + " seconds"}'
+
+    - return_marker:
+        return:
+          object: ${object}
+          payload: ${markerPayload}
+
+
+release_source_lock_if_needed:
+  params: [bucket, lockObject, lockAcquired]
+  steps:
+    - release_switch:
+        switch:
+          - condition: ${lockAcquired}
+            next: delete_lock
+        next: return_not_released
+
+    - delete_lock:
+        try:
+          call: googleapis.storage.v1.objects.delete
+          args:
+            bucket: ${bucket}
+            object: ${lockObject}
+        except:
+          as: lockDeleteErr
+          steps:
+            - ignore_missing_lock:
+                switch:
+                  - condition: '${lockDeleteErr.code == 404}'
+                    next: return_released
+            - log_lock_delete_warning:
+                call: sys.log
+                args:
+                  text: '${"Failed to release source lock " + lockObject + ": " + lockDeleteErr.message}'
+                  severity: "WARNING"
+        next: return_released
+
+    - return_released:
+        return:
+          released: true
+
+    - return_not_released:
+        return:
+          released: false

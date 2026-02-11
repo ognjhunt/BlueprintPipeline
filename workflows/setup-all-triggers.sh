@@ -7,18 +7,17 @@
 # workflows in a single command.
 #
 # It will create triggers for:
-#   1. episode-generation-pipeline (manual - uses GKE directly)
-#   2. source-orchestrator (text-first scene requests)
-#   3. usd-assembly-pipeline
-#   4. genie-sim-export-pipeline
-#   5. arena-export-pipeline (3 triggers for different sources)
-#   6. objects-pipeline
-#   7. genie-sim-import-poller (fallback)
-#   8. dream2flow-preparation-pipeline (manual, disabled unless enabled)
-#   9. dwm-preparation-pipeline (manual, disabled unless enabled)
+#   - source-orchestrator (text-first scene requests)
+#   - image path trigger(s), based on IMAGE_PATH_MODE
+#     - orchestrator mode: image-to-scene-orchestrator trigger
+#     - legacy_chain mode: image-to-scene-pipeline + marker-chain triggers
+#   - objects-pipeline
+#   - genie-sim-import-poller (fallback)
 #
 # Usage:
-#   ./setup-all-triggers.sh <project_id> [bucket_name] [region]
+#   ./setup-all-triggers.sh <project_id> [bucket_name] [region] [image_path_mode]
+# image_path_mode:
+#   orchestrator (default) | legacy_chain
 #
 # Prerequisites:
 #   - gcloud CLI authenticated
@@ -40,6 +39,7 @@ NC='\033[0m' # No Color
 PROJECT_ID=${1:-$(gcloud config get-value project)}
 BUCKET=${2:-"${PROJECT_ID}-blueprint-scenes"}
 REGION=${3:-"us-central1"}
+IMAGE_PATH_MODE=${4:-${IMAGE_PATH_MODE:-"orchestrator"}}
 
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║     BlueprintPipeline EventArc Trigger Master Setup             ║${NC}"
@@ -49,6 +49,7 @@ echo "Configuration:"
 echo "  Project ID: ${PROJECT_ID}"
 echo "  Bucket: ${BUCKET}"
 echo "  Region: ${REGION}"
+echo "  Image Path Mode: ${IMAGE_PATH_MODE}"
 echo ""
 
 # =============================================================================
@@ -65,6 +66,7 @@ failed_setups=()
 run_setup_script() {
     local script_name=$1
     local description=$2
+    local extra_args=${3:-}
 
     echo -e "${BLUE}─────────────────────────────────────────────────────────────${NC}"
     echo -e "${BLUE}Setting up: ${description}${NC}"
@@ -77,7 +79,7 @@ run_setup_script() {
         return 1
     fi
 
-    if bash "${script_name}" "${PROJECT_ID}" "${BUCKET}" "${REGION}" 2>&1; then
+    if bash "${script_name}" "${PROJECT_ID}" "${BUCKET}" "${REGION}" ${extra_args} 2>&1; then
         setup_status["${script_name}"]="SUCCESS"
         echo -e "${GREEN}✓ ${description} setup complete${NC}"
     else
@@ -89,12 +91,19 @@ run_setup_script() {
     echo ""
 }
 
-# Run all setup scripts in order
-run_setup_script "setup-image-trigger.sh" "Image-to-Scene Pipeline"
-run_setup_script "setup-source-orchestrator-trigger.sh" "Source Orchestrator (Text-First)"
-run_setup_script "setup-usd-assembly-trigger.sh" "USD Assembly Pipeline"
-run_setup_script "setup-genie-sim-export-trigger.sh" "Genie Sim Export Pipeline"
-run_setup_script "setup-arena-export-trigger.sh" "Arena Export Pipeline"
+# Run all setup scripts in order.
+# IMAGE_PATH_MODE=orchestrator: avoid marker-chain trigger duplication by using orchestrator-only topology.
+# IMAGE_PATH_MODE=legacy_chain: keep the legacy marker-chain topology active.
+if [ "${IMAGE_PATH_MODE}" = "orchestrator" ]; then
+    run_setup_script "setup-orchestrator-trigger.sh" "Image-to-Scene Orchestrator"
+    run_setup_script "setup-source-orchestrator-trigger.sh" "Source Orchestrator (Text-First)" "${IMAGE_PATH_MODE}"
+else
+    run_setup_script "setup-image-trigger.sh" "Image-to-Scene Pipeline"
+    run_setup_script "setup-source-orchestrator-trigger.sh" "Source Orchestrator (Text-First)" "${IMAGE_PATH_MODE}"
+    run_setup_script "setup-usd-assembly-trigger.sh" "USD Assembly Pipeline"
+    run_setup_script "setup-genie-sim-export-trigger.sh" "Genie Sim Export Pipeline"
+    run_setup_script "setup-arena-export-trigger.sh" "Arena Export Pipeline"
+fi
 run_setup_script "setup-objects-trigger.sh" "Objects Pipeline"
 run_setup_script "setup-genie-sim-import-poller.sh" "Genie Sim Import Poller (Fallback)"
 
@@ -134,13 +143,22 @@ if [ ${fail_count} -eq 0 ]; then
     echo -e "${GREEN}═════════════════════════════════════════════════════════════${NC}"
     echo ""
     echo "Pipeline Triggers Created:"
-    echo "  0. image-upload-pipeline-trigger → Trigger on scenes/{scene_id}/images/* uploads"
-    echo "  1. scene-request-source-orchestrator-trigger → Trigger on scene_request.json uploads"
-    echo "  2. usd-assembly-trigger      → Trigger on .regen3d_complete"
-    echo "  3. genie-sim-export-trigger  → Trigger on .variation_pipeline_complete"
-    echo "  4. arena-export-* (3 triggers) → Trigger on .usd_complete, .geniesim_complete, .isaac_lab_complete (ignores .geniesim_submitted)"
-    echo "  5. objects-trigger           → Trigger on scene_layout.json uploads"
-    echo "  6. genie-sim-import-poller → Scheduled fallback poller"
+    if [ "${IMAGE_PATH_MODE}" = "orchestrator" ]; then
+        echo "  0. image-upload-orchestrator-trigger → Trigger on scenes/{scene_id}/images/* uploads"
+        echo "  1. scene-request-source-orchestrator-trigger → Trigger on scene_request.json uploads"
+        echo "  2. objects-trigger           → Trigger on scene_layout.json uploads"
+        echo "  3. genie-sim-import-poller  → Scheduled fallback poller"
+        echo ""
+        echo "Note: marker-chain triggers (usd/geniesim/arena) were intentionally skipped to avoid duplicate topology."
+    else
+        echo "  0. image-upload-pipeline-trigger → Trigger on scenes/{scene_id}/images/* uploads"
+        echo "  1. scene-request-source-orchestrator-trigger → Trigger on scene_request.json uploads"
+        echo "  2. usd-assembly-trigger      → Trigger on .regen3d_complete"
+        echo "  3. genie-sim-export-trigger  → Trigger on .variation_pipeline_complete"
+        echo "  4. arena-export-* (3 triggers) → Trigger on .usd_complete, .geniesim_complete, .isaac_lab_complete (ignores .geniesim_submitted)"
+        echo "  5. objects-trigger           → Trigger on scene_layout.json uploads"
+        echo "  6. genie-sim-import-poller  → Scheduled fallback poller"
+    fi
     echo ""
     echo "Manual Setup Still Required:"
     echo "  • Episode Generation: Uses GKE directly (see episode-generation-job/scripts/setup_eventarc_trigger.sh)"

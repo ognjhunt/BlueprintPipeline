@@ -30,3 +30,55 @@ def test_scene_request_schema_rejects_unknown_source_mode() -> None:
     }
     with pytest.raises(Exception):
         validate_json_schema(payload, schema)
+
+
+def test_scene_request_schema_accepts_valid_image_request() -> None:
+    schema = load_schema("scene_request_v1.schema.json")
+    payload = {
+        "schema_version": "v1",
+        "scene_id": "scene_img_001",
+        "source_mode": "image",
+        "image": {
+            "gcs_uri": "gs://bucket/scenes/scene_img_001/images/photo.png",
+        },
+    }
+    validate_json_schema(payload, schema)
+
+
+def test_scene_request_schema_accepts_auto_mode() -> None:
+    schema = load_schema("scene_request_v1.schema.json")
+    payload = {
+        "schema_version": "v1",
+        "scene_id": "scene_auto_001",
+        "source_mode": "auto",
+        "prompt": "A warehouse for robotic bin picking",
+        "image": {
+            "gcs_uri": "gs://bucket/scenes/scene_auto_001/images/scan.jpg",
+        },
+    }
+    validate_json_schema(payload, schema)
+
+
+def test_scene_request_schema_declares_no_additional_properties() -> None:
+    """Verify the schema itself declares additionalProperties: false.
+
+    The minimal validator fallback (when jsonschema is not installed) does not
+    enforce additionalProperties at runtime, so we validate the schema
+    declaration directly to ensure it will be enforced in production where
+    jsonschema is available.
+    """
+    schema = load_schema("scene_request_v1.schema.json")
+    assert schema.get("additionalProperties") is False, (
+        "scene_request_v1 schema should set additionalProperties: false"
+    )
+
+
+def test_scene_request_schema_rejects_missing_scene_id() -> None:
+    schema = load_schema("scene_request_v1.schema.json")
+    payload = {
+        "schema_version": "v1",
+        "source_mode": "text",
+        "prompt": "A room",
+    }
+    with pytest.raises(Exception):
+        validate_json_schema(payload, schema)

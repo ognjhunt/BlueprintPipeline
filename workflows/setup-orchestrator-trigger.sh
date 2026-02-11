@@ -29,7 +29,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 PROJECT_ID=${1:-$(gcloud config get-value project)}
-BUCKET=${2:-"${PROJECT_ID}.appspot.com"}
+BUCKET=${2:-"${PROJECT_ID}-blueprint-scenes"}
 WORKFLOW_REGION=${3:-"us-central1"}
 
 # Eventarc trigger must be in the same location as the GCS bucket.

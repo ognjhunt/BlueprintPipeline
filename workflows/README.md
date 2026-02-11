@@ -35,6 +35,22 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 ## Primary entrypoints
 - YAML workflow definitions and the `setup-*.sh` scripts.
 
+## Source Orchestrator (text-first)
+The `source-orchestrator.yaml` workflow is the text-first entry point for scene generation.
+It replaces Stage 1 reconstruction with LLM/template-based scene generation from a text prompt,
+then feeds the result into the same Stage 2-5 pipeline used by the image path.
+
+- **Text path**: `text-scene-gen-job` → `text-scene-adapter-job` → Stage 2-5
+- **Text runtime modes**: `TEXT_GEN_RUNTIME=vm|cloudrun` (`vm` default, transient infra fallback to `cloudrun`)
+- **Image path (compat mode)**:
+  - `IMAGE_PATH_MODE=orchestrator` delegates to `image-to-scene-orchestrator`
+  - `IMAGE_PATH_MODE=legacy_chain` delegates to `image-to-scene-pipeline` and waits for `.geniesim_complete`
+- **Auto path**: tries text first, falls back to image if text fails and an image is present
+- **Multi-seed**: `seed_count > 1` fans out to child scene IDs (`{scene_id}-s001`, `-s002`, etc.)
+- **Child request path**: fanout requests are written to `scenes/<child_scene_id>/internal/scene_request.generated.json` (non-trigger path)
+- **Dedupe lock**: per-generation lock at `scenes/<scene_id>/locks/source-orchestrator-<generation>.lock` prevents concurrent duplicate executions
+- **Fallback**: fail-fast — if any seed fails, the entire request falls back to image (does not retry remaining seeds)
+
 ## Source Request Contract (Text-First)
 `source-orchestrator.yaml` expects prompt requests at:
 
@@ -111,6 +127,14 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `TEXT_GEN_PREMIUM_PROFILE`: profile label injected into text-scene-gen-job for `quality_tier=premium`.
 - `TEXT_GEN_MAX_SEEDS`: max allowed `seed_count` for `scene_request.json`. Defaults to `16`.
 - `TEXT_GEN_ENABLE_IMAGE_FALLBACK`: allow `auto`/`text` fallback to image path when text source fails. Defaults to `true`.
+- `IMAGE_PATH_MODE`: image compatibility mode (`orchestrator` or `legacy_chain`). Defaults to `orchestrator`.
+- `IMAGE_ORCHESTRATOR_WORKFLOW_NAME`: workflow used when `IMAGE_PATH_MODE=orchestrator`. Defaults to `image-to-scene-orchestrator`.
+- `IMAGE_LEGACY_WORKFLOW_NAME`: workflow used when `IMAGE_PATH_MODE=legacy_chain`. Defaults to `image-to-scene-pipeline`.
+- `IMAGE_LEGACY_CHAIN_WAIT_SECONDS`: timeout while waiting for `scenes/<scene_id>/geniesim/.geniesim_complete` in legacy-chain mode. Defaults to `7200`.
+- `TEXT_GEN_VM_NAME`: VM name used when `TEXT_GEN_RUNTIME=vm`. Defaults to `isaac-sim-ubuntu`.
+- `TEXT_GEN_VM_ZONE`: VM zone used when `TEXT_GEN_RUNTIME=vm`. Defaults to `us-east1-c`.
+- `TEXT_GEN_VM_REPO_DIR`: repository directory on the VM for text Stage 1 scripts. Defaults to `~/BlueprintPipeline`.
+- `TEXT_GEN_VM_TIMEOUT_SECONDS`: VM text-stage Cloud Build polling timeout. Defaults to `2400`.
 - `ENABLE_VLM_QUALITY_AUDIT`: enables VLM episode audit in Genie Sim export/import path. Defaults to `1` in `genie-sim-export-pipeline.yaml`.
 - `FIREBASE_STORAGE_BUCKET`: required in production workflow environments that enable Firebase uploads for Genie Sim export/import.
 - `GENIESIM_CIRCUIT_BREAKER_THRESHOLD`: maximum consecutive failures before Genie Sim export/import workflows short-circuit. Defaults to `3`.

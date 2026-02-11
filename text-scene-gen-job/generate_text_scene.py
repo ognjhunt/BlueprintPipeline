@@ -70,16 +70,48 @@ def _evaluate_package_quality(package: Dict[str, Any]) -> bool:
     """Return True when package is acceptable for Stage 1 completion."""
     quality = package.get("quality_gate_report") or {}
     metrics = quality.get("metrics") or {}
-    object_count = int(metrics.get("object_count") or 0)
-    collision_rate_pct = float(metrics.get("collision_rate_pct") or 100.0)
-    stability_pct = float(metrics.get("stability_pct") or 0.0)
+    object_count_raw = metrics.get("object_count")
+    collision_rate_raw = metrics.get("collision_rate_pct")
+    stability_raw = metrics.get("stability_pct")
+
+    object_count = int(0 if object_count_raw is None else object_count_raw)
+    collision_rate_pct = float(100.0 if collision_rate_raw is None else collision_rate_raw)
+    stability_pct = float(0.0 if stability_raw is None else stability_raw)
 
     if object_count < 5:
+        logger.info(
+            "[TEXT-GEN] quality-gate fail scene=%s object_count=%s collision_rate_pct=%s stability_pct=%s",
+            package.get("scene_id"),
+            object_count,
+            collision_rate_pct,
+            stability_pct,
+        )
         return False
     if collision_rate_pct > 6.0:
+        logger.info(
+            "[TEXT-GEN] quality-gate fail scene=%s object_count=%s collision_rate_pct=%s stability_pct=%s",
+            package.get("scene_id"),
+            object_count,
+            collision_rate_pct,
+            stability_pct,
+        )
         return False
     if stability_pct < 85.0:
+        logger.info(
+            "[TEXT-GEN] quality-gate fail scene=%s object_count=%s collision_rate_pct=%s stability_pct=%s",
+            package.get("scene_id"),
+            object_count,
+            collision_rate_pct,
+            stability_pct,
+        )
         return False
+    logger.info(
+        "[TEXT-GEN] quality-gate pass scene=%s object_count=%s collision_rate_pct=%s stability_pct=%s",
+        package.get("scene_id"),
+        object_count,
+        collision_rate_pct,
+        stability_pct,
+    )
     return True
 
 
