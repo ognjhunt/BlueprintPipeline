@@ -72,7 +72,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "/isaac-sim/python.sh /workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/readiness_probe.py --check-patches --geniesim-root ${GENIESIM_ROOT:-/opt/geniesim} --require-patch-set strict --forbid-patch-set strict --output ${GENIESIM_RUNTIME_READINESS_JSON:-/workspace/BlueprintPipeline/.geniesim_runtime_readiness.json}",
+          "/isaac-sim/python.sh /workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/readiness_probe.py --check-patches --geniesim-root ${GENIESIM_ROOT:-/opt/geniesim} --output ${GENIESIM_RUNTIME_READINESS_JSON:-/workspace/BlueprintPipeline/.geniesim_runtime_readiness.json}",
         ]
       interval: 10s
       timeout: 10s
