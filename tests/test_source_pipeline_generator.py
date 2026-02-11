@@ -7,18 +7,26 @@ from pathlib import Path
 
 import pytest
 
+import tools.source_pipeline.generator as generator_mod
 from tools.source_pipeline.generator import (
+    LLMPlanResult,
     _build_placement_graph,
     _compute_quality_metrics,
     _default_dims_for_category,
     _extract_room_type,
     _is_articulated,
+    _llm_plan_enabled,
     _physics_hints,
     _room_template,
     generate_text_scene_package,
     resolve_provider_chain,
 )
 from tools.source_pipeline.request import QualityTier
+
+
+@pytest.fixture(autouse=True)
+def _disable_llm_for_stable_tests(monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_GEN_USE_LLM", "false")
 
 
 def test_generate_text_scene_package_produces_valid_structure() -> None:
@@ -217,7 +225,8 @@ def test_compute_quality_metrics_with_collisions() -> None:
     assert metrics["mean_collision_depth_mm"] > 0.0
 
 
-def test_quality_gate_report_has_cost_field() -> None:
+def test_quality_gate_report_has_cost_field(monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_GEN_USE_LLM", "false")
     result = generate_text_scene_package(
         scene_id="scene_cost",
         prompt="A kitchen",
@@ -263,3 +272,38 @@ def test_generate_text_scene_seed_is_stable_across_processes() -> None:
     out2 = subprocess.check_output([sys.executable, "-c", probe], cwd=repo_root, text=True).strip()
 
     assert json.loads(out1) == json.loads(out2)
+
+
+def test_llm_plan_enabled_defaults_to_true_when_env_missing(monkeypatch) -> None:
+    monkeypatch.delenv("TEXT_GEN_USE_LLM", raising=False)
+    assert _llm_plan_enabled() is True
+
+
+def test_generate_text_scene_package_records_llm_fallback_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_GEN_USE_LLM", "true")
+
+    def _fake_llm_plan(**_: object) -> LLMPlanResult:
+        return LLMPlanResult(
+            payload=None,
+            provider=None,
+            attempts=4,
+            failure_reason="openai:TimeoutError",
+        )
+
+    monkeypatch.setattr(generator_mod, "_try_llm_plan", _fake_llm_plan)
+
+    result = generate_text_scene_package(
+        scene_id="scene_llm_fallback",
+        prompt="A dense kitchen scene with articulated cabinets",
+        quality_tier=QualityTier.PREMIUM,
+        seed=3,
+        provider_policy="openai_primary",
+    )
+
+    assert result["used_llm"] is False
+    assert result["llm_attempts"] == 4
+    assert result["llm_failure_reason"] == "openai:TimeoutError"
+    assert result["fallback_strategy"] == "deterministic_template"
+    report = result["quality_gate_report"]
+    assert report["generation_mode"] == "deterministic_fallback"
+    assert report["llm_attempts"] == 4

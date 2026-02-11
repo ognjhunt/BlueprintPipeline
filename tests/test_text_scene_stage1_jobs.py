@@ -89,11 +89,16 @@ def test_text_stage1_jobs_integration_writes_canonical_artifacts(
     monkeypatch.setenv("TEXT_GEN_MAX_SEEDS", "16")
     monkeypatch.setenv("TEXT_GEN_STANDARD_PROFILE", "standard_v1")
     monkeypatch.setenv("TEXT_GEN_PREMIUM_PROFILE", "premium_v1")
+    monkeypatch.setenv("TEXT_GEN_USE_LLM", "false")
     monkeypatch.delenv("TEXT_GEN_QUALITY_TIER", raising=False)
 
     assert gen_module.main() == 0
     assert (gcs_root / textgen_prefix / "package.json").is_file()
     assert (gcs_root / textgen_prefix / ".textgen_complete").is_file()
+    completion = json.loads((gcs_root / textgen_prefix / ".textgen_complete").read_text(encoding="utf-8"))
+    assert completion["generation_mode"] in {"llm", "deterministic_fallback"}
+    assert "llm_attempts" in completion
+    assert "llm_fallback_used" in completion
 
     monkeypatch.setenv("ASSETS_PREFIX", assets_prefix)
     monkeypatch.setenv("LAYOUT_PREFIX", layout_prefix)

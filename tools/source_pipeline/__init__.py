@@ -18,6 +18,13 @@ from .adapter import (
     materialize_placeholder_assets,
 )
 from .generator import generate_text_scene_package
+from .prompt_engine import (
+    PromptGenerationResult,
+    build_prompt_constraints_metadata,
+    compute_novelty_score,
+    generate_prompt,
+    load_prompt_matrix,
+)
 
 __all__ = [
     "PipelineSourceMode",
@@ -34,4 +41,9 @@ __all__ = [
     "build_manifest_layout_inventory",
     "materialize_placeholder_assets",
     "generate_text_scene_package",
+    "PromptGenerationResult",
+    "build_prompt_constraints_metadata",
+    "compute_novelty_score",
+    "generate_prompt",
+    "load_prompt_matrix",
 ]

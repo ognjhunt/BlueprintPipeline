@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import re
@@ -11,12 +12,22 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .request import QualityTier
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class ProviderDecision:
     provider: str
     policy: str
     used_llm: bool
+
+
+@dataclass(frozen=True)
+class LLMPlanResult:
+    payload: Optional[Dict[str, Any]]
+    provider: Optional[str]
+    attempts: int
+    failure_reason: Optional[str]
 
 
 def resolve_provider_chain(policy: str) -> List[str]:
@@ -265,8 +276,22 @@ def _build_placement_graph(objects: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _llm_plan_enabled() -> bool:
-    raw = os.getenv("TEXT_GEN_USE_LLM", "false").strip().lower()
+    raw = os.getenv("TEXT_GEN_USE_LLM", "true").strip().lower()
     return raw in {"1", "true", "yes", "y", "on"}
+
+
+def _llm_retry_config() -> Tuple[int, float]:
+    attempts_raw = os.getenv("TEXT_GEN_LLM_MAX_ATTEMPTS", "3").strip()
+    backoff_raw = os.getenv("TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS", "2").strip()
+    try:
+        max_attempts = int(attempts_raw)
+    except ValueError:
+        max_attempts = 3
+    try:
+        backoff_seconds = float(backoff_raw)
+    except ValueError:
+        backoff_seconds = 2.0
+    return max(1, max_attempts), max(0.0, backoff_seconds)
 
 
 def _try_llm_plan(
@@ -274,16 +299,21 @@ def _try_llm_plan(
     prompt: str,
     provider_chain: Sequence[str],
     quality_tier: QualityTier,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+) -> LLMPlanResult:
     """Attempt an LLM-generated scene plan; fall back to deterministic templates."""
 
     if not _llm_plan_enabled():
-        return None, None
+        return LLMPlanResult(payload=None, provider=None, attempts=0, failure_reason="llm_disabled")
 
     try:
         from tools.llm_client import create_llm_client, LLMProvider
-    except Exception:
-        return None, None
+    except Exception as exc:
+        return LLMPlanResult(
+            payload=None,
+            provider=None,
+            attempts=0,
+            failure_reason=f"llm_client_unavailable:{exc.__class__.__name__}",
+        )
 
     provider_map = {
         "openai": LLMProvider.OPENAI,
@@ -297,27 +327,50 @@ def _try_llm_plan(
         "objects must be a list of {name,category,sim_role}. "
         "Allowed sim_role: static, articulated_furniture, articulated_appliance, manipulable_object."
     )
+    max_attempts, retry_backoff_seconds = _llm_retry_config()
+    llm_attempts = 0
+    failure_reason: Optional[str] = None
 
-    for provider_name in provider_chain:
-        provider = provider_map.get(provider_name)
-        if provider is None:
-            continue
-        try:
-            client = create_llm_client(provider=provider, fallback_enabled=False, reasoning_effort=effort)
-            response = client.generate(
-                prompt=f"{system_prompt}\n\nUser prompt: {prompt}",
-                json_output=True,
-            )
-            text = (response.text or "").strip()
-            if not text:
+    for round_idx in range(1, max_attempts + 1):
+        for provider_name in provider_chain:
+            provider = provider_map.get(provider_name)
+            if provider is None:
                 continue
-            payload = json.loads(text)
-            if isinstance(payload, dict) and isinstance(payload.get("objects"), list):
-                return payload, provider_name
-        except Exception:
-            continue
 
-    return None, None
+            llm_attempts += 1
+            try:
+                client = create_llm_client(provider=provider, fallback_enabled=False, reasoning_effort=effort)
+                response = client.generate(
+                    prompt=f"{system_prompt}\n\nUser prompt: {prompt}",
+                    json_output=True,
+                )
+                text = (response.text or "").strip()
+                if not text:
+                    failure_reason = f"{provider_name}:empty_response"
+                    continue
+
+                payload = json.loads(text)
+                if isinstance(payload, dict) and isinstance(payload.get("objects"), list):
+                    return LLMPlanResult(
+                        payload=payload,
+                        provider=provider_name,
+                        attempts=llm_attempts,
+                        failure_reason=None,
+                    )
+                failure_reason = f"{provider_name}:invalid_payload"
+            except Exception as exc:
+                failure_reason = f"{provider_name}:{exc.__class__.__name__}"
+                continue
+
+        if round_idx < max_attempts and retry_backoff_seconds > 0:
+            time.sleep(retry_backoff_seconds * round_idx)
+
+    return LLMPlanResult(
+        payload=None,
+        provider=None,
+        attempts=llm_attempts,
+        failure_reason=failure_reason or "llm_generation_failed",
+    )
 
 
 def generate_text_scene_package(
@@ -337,13 +390,27 @@ def generate_text_scene_package(
     provider_chain = resolve_provider_chain(provider_policy)
     provider_decision = ProviderDecision(provider=provider_chain[0], policy=provider_policy, used_llm=False)
 
-    llm_payload, llm_provider = _try_llm_plan(
+    llm_plan = _try_llm_plan(
         prompt=prompt,
         provider_chain=provider_chain,
         quality_tier=quality_tier,
     )
+    llm_payload = llm_plan.payload
+    llm_provider = llm_plan.provider
+    llm_attempts = llm_plan.attempts
+    llm_failure_reason = llm_plan.failure_reason
     if llm_payload is not None and llm_provider is not None:
         provider_decision = ProviderDecision(provider=llm_provider, policy=provider_policy, used_llm=True)
+        llm_failure_reason = None
+    fallback_strategy = "none" if provider_decision.used_llm else "deterministic_template"
+    if not provider_decision.used_llm:
+        logger.info(
+            "[TEXT-GEN] llm-plan-fallback scene=%s attempts=%s reason=%s strategy=%s",
+            scene_id,
+            llm_attempts,
+            llm_failure_reason,
+            fallback_strategy,
+        )
 
     seed_material = f"{scene_id}|{prompt}|{seed}|{quality_tier.value}".encode("utf-8")
     rng_seed = int.from_bytes(sha256(seed_material).digest()[:8], "big") % (2**32)
@@ -446,6 +513,10 @@ def generate_text_scene_package(
         "timing": {
             "generation_seconds": round(elapsed, 4),
         },
+        "generation_mode": "llm" if provider_decision.used_llm else "deterministic_fallback",
+        "llm_attempts": llm_attempts,
+        "llm_failure_reason": llm_failure_reason,
+        "fallback_strategy": fallback_strategy,
         "status": "passed",
     }
 
@@ -458,6 +529,9 @@ def generate_text_scene_package(
         "provider_policy": provider_policy,
         "provider_used": provider_decision.provider,
         "used_llm": provider_decision.used_llm,
+        "llm_attempts": llm_attempts,
+        "llm_failure_reason": llm_failure_reason,
+        "fallback_strategy": fallback_strategy,
         "prompt": prompt,
         "constraints": constraints,
         "objects": objects,

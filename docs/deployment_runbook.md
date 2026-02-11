@@ -260,8 +260,12 @@ Key source-orchestrator env vars to set at deploy time:
 - `TEXT_GEN_RUNTIME`
 - `TEXT_GEN_STANDARD_PROFILE`
 - `TEXT_GEN_PREMIUM_PROFILE`
+- `TEXT_GEN_USE_LLM`
+- `TEXT_GEN_LLM_MAX_ATTEMPTS`
+- `TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS`
 - `TEXT_GEN_MAX_SEEDS`
 - `TEXT_GEN_ENABLE_IMAGE_FALLBACK`
+- `ARENA_EXPORT_REQUIRED`
 - `IMAGE_PATH_MODE`
 - `IMAGE_ORCHESTRATOR_WORKFLOW_NAME`
 - `IMAGE_LEGACY_WORKFLOW_NAME`
@@ -270,6 +274,37 @@ Key source-orchestrator env vars to set at deploy time:
 - `TEXT_GEN_VM_ZONE`
 - `TEXT_GEN_VM_REPO_DIR`
 - `TEXT_GEN_VM_TIMEOUT_SECONDS`
+
+For autonomous 1/day text mode, deploy scheduler + daily workflow:
+
+```bash
+cd workflows
+
+TEXT_DAILY_QUOTA=1 \
+TEXT_AUTONOMY_TIMEZONE=America/New_York \
+TEXT_AUTONOMY_PROVIDER_POLICY=openai_primary \
+TEXT_AUTONOMY_QUALITY_TIER=premium \
+bash setup-text-autonomy-scheduler.sh <project_id> <bucket> <region>
+```
+
+Daily autonomy env vars:
+- `TEXT_AUTONOMY_STATE_PREFIX`
+- `TEXT_AUTONOMY_TIMEZONE`
+- `TEXT_DAILY_QUOTA`
+- `TEXT_DAILY_PAUSE_AFTER_CONSEC_FAILS`
+- `TEXT_AUTONOMY_PROVIDER_POLICY`
+- `TEXT_AUTONOMY_QUALITY_TIER`
+- `TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK`
+- `TEXT_AUTONOMY_SEED_COUNT`
+- `TEXT_AUTONOMY_EMITTER_JOB_NAME`
+- `TEXT_AUTONOMY_EMITTER_TIMEOUT_SECONDS`
+- `TEXT_AUTONOMY_SOURCE_WAIT_TIMEOUT_SECONDS`
+- `TEXT_AUTONOMY_SOURCE_WAIT_POLL_SECONDS`
+
+Auto-pause behavior:
+- State object: `automation/text_daily/state.json`
+- Pause marker: `automation/text_daily/.paused`
+- Run summary: `automation/text_daily/runs/<YYYY-MM-DD>/run_summary.json`
 
 Optionally run a canary workflow with a known scene ID:
 

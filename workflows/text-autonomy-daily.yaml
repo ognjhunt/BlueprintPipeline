@@ -1,0 +1,610 @@
+# text-autonomy-daily.yaml
+#
+# Daily autonomous text-mode run controller.
+#
+# Responsibilities:
+#  1) Acquire daily workflow lock
+#  2) Respect pause state/marker
+#  3) Invoke text-request-emitter-job
+#  4) Wait for source-orchestrator success/failure markers per emitted scene
+#  5) Update autonomy state, auto-pause on repeated failures, and emit run summary
+
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
+          - bucket: '${default(map.get(args, "bucket"), default(sys.get_env("PRIMARY_BUCKET"), projectId + "-blueprint-scenes"))}'
+          - statePrefix: '${default(sys.get_env("TEXT_AUTONOMY_STATE_PREFIX"), "automation/text_daily")}'
+          - timezone: '${default(sys.get_env("TEXT_AUTONOMY_TIMEZONE"), "America/New_York")}'
+          - runTimestamp: '${time.format(sys.now())}'
+          - runDateParts: '${text.split(runTimestamp, "T")}'
+          - runDate: '${default(map.get(args, "run_date"), runDateParts[0])}'
+          - lockObject: '${statePrefix + "/locks/" + runDate + ".workflow.lock"}'
+          - pauseObject: '${statePrefix + "/.paused"}'
+          - stateObject: '${statePrefix + "/state.json"}'
+          - emittedIndexObject: '${statePrefix + "/runs/" + runDate + "/emitted_requests.json"}'
+          - runSummaryObject: '${statePrefix + "/runs/" + runDate + "/run_summary.json"}'
+          - emitterJobName: '${default(sys.get_env("TEXT_AUTONOMY_EMITTER_JOB_NAME"), "text-request-emitter-job")}'
+          - emitterTimeoutSeconds: '${int(default(sys.get_env("TEXT_AUTONOMY_EMITTER_TIMEOUT_SECONDS"), "900"))}'
+          - dailyQuota: '${int(default(sys.get_env("TEXT_DAILY_QUOTA"), "1"))}'
+          - pauseAfterConsecutiveFails: '${int(default(sys.get_env("TEXT_DAILY_PAUSE_AFTER_CONSEC_FAILS"), "3"))}'
+          - providerPolicy: '${default(sys.get_env("TEXT_AUTONOMY_PROVIDER_POLICY"), "openai_primary")}'
+          - qualityTier: '${default(sys.get_env("TEXT_AUTONOMY_QUALITY_TIER"), "premium")}'
+          - allowImageFallback: '${text.lower(default(sys.get_env("TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK"), "false")) == "true"}'
+          - seedCount: '${int(default(sys.get_env("TEXT_AUTONOMY_SEED_COUNT"), "1"))}'
+          - sourceWaitTimeoutSeconds: '${int(default(sys.get_env("TEXT_AUTONOMY_SOURCE_WAIT_TIMEOUT_SECONDS"), "21600"))}'
+          - sourceWaitPollSeconds: '${int(default(sys.get_env("TEXT_AUTONOMY_SOURCE_WAIT_POLL_SECONDS"), "30"))}'
+          - lockAcquired: false
+          - pauseMarkerExists: false
+          - statePayload: {}
+          - previousConsecutiveFailures: 0
+          - previousPaused: false
+          - previousLastSuccessAt: null
+          - previousLastFailureAt: null
+          - sceneIds: []
+          - successCount: 0
+          - failedCount: 0
+          - firstFailedScene: ""
+          - runStatus: "UNKNOWN"
+          - runError: ""
+          - pausedAfterRun: false
+          - newConsecutiveFailures: 0
+        next: acquire_lock
+
+    - acquire_lock:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${lockObject}
+            uploadType: "media"
+            ifGenerationMatch: 0
+            body: '${json.encode({
+              "schema_version": "v1",
+              "workflow": "text-autonomy-daily",
+              "run_date": runDate,
+              "timestamp": runTimestamp
+            })}'
+        except:
+          as: lockErr
+          steps:
+            - lock_conflict_switch:
+                switch:
+                  - condition: '${lockErr.code == 409 or lockErr.code == 412}'
+                    next: duplicate_run
+                next: lock_acquire_failure
+            - duplicate_run:
+                return:
+                  status: "SKIPPED"
+                  reason: "duplicate_run"
+                  run_date: ${runDate}
+                  lock_object: ${lockObject}
+            - lock_acquire_failure:
+                raise: '${"Failed to acquire daily autonomy lock: " + lockErr.message}'
+        next: mark_lock_acquired
+
+    - mark_lock_acquired:
+        assign:
+          - lockAcquired: true
+        next: check_pause_marker
+
+    - check_pause_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${pauseObject}
+        except:
+          as: pauseErr
+          steps:
+            - pause_marker_switch:
+                switch:
+                  - condition: '${pauseErr.code == 404}'
+                    next: read_state
+                next: pause_marker_read_failure
+            - pause_marker_read_failure:
+                raise: '${"Failed to read pause marker: " + pauseErr.message}'
+        next: set_pause_marker_exists
+
+    - set_pause_marker_exists:
+        assign:
+          - pauseMarkerExists: true
+        next: read_state
+
+    - read_state:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${stateObject}
+            alt: "media"
+          result: stateRaw
+        except:
+          as: stateReadErr
+          steps:
+            - missing_state_switch:
+                switch:
+                  - condition: '${stateReadErr.code == 404}'
+                    next: set_empty_state
+                next: state_read_failure
+            - set_empty_state:
+                assign:
+                  - stateRaw: '{}'
+                next: parse_state
+            - state_read_failure:
+                raise: '${"Failed to read autonomy state: " + stateReadErr.message}'
+        next: parse_state
+
+    - parse_state:
+        try:
+          assign:
+            - statePayload: '${json.decode(stateRaw)}'
+            - previousConsecutiveFailures: '${int(default(map.get(statePayload, "consecutive_failures"), 0))}'
+            - previousPausedRaw: '${default(map.get(statePayload, "paused"), false)}'
+            - previousPausedRawStr: '${text.lower(string(previousPausedRaw))}'
+            - previousPaused: '${previousPausedRawStr == "true" or previousPausedRawStr == "1" or previousPausedRawStr == "yes" or previousPausedRawStr == "on"}'
+            - previousLastSuccessAt: '${default(map.get(statePayload, "last_success_at"), null)}'
+            - previousLastFailureAt: '${default(map.get(statePayload, "last_failure_at"), null)}'
+        except:
+          as: stateParseErr
+          steps:
+            - set_default_state_after_parse_error:
+                assign:
+                  - statePayload: {}
+                  - previousConsecutiveFailures: 0
+                  - previousPaused: false
+                  - previousLastSuccessAt: null
+                  - previousLastFailureAt: null
+        next: pause_gate
+
+    - pause_gate:
+        switch:
+          - condition: '${pauseMarkerExists or previousPaused}'
+            next: skip_paused
+        next: run_emitter
+
+    - skip_paused:
+        assign:
+          - runStatus: "PAUSED"
+          - runError: "autonomy_paused"
+        next: write_summary
+
+    - run_emitter:
+        try:
+          call: run_cloud_run_job_and_wait
+          args:
+            projectId: ${projectId}
+            region: ${region}
+            jobName: ${emitterJobName}
+            timeoutSeconds: ${emitterTimeoutSeconds}
+            envVars:
+              - name: BUCKET
+                value: ${bucket}
+              - name: TEXT_DAILY_QUOTA
+                value: '${string(dailyQuota)}'
+              - name: TEXT_AUTONOMY_STATE_PREFIX
+                value: ${statePrefix}
+              - name: TEXT_AUTONOMY_TIMEZONE
+                value: ${timezone}
+              - name: TEXT_AUTONOMY_RUN_DATE
+                value: ${runDate}
+              - name: TEXT_AUTONOMY_PROVIDER_POLICY
+                value: ${providerPolicy}
+              - name: TEXT_AUTONOMY_QUALITY_TIER
+                value: ${qualityTier}
+              - name: TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK
+                value: '${if(allowImageFallback, "true", "false")}'
+              - name: TEXT_AUTONOMY_SEED_COUNT
+                value: '${string(seedCount)}'
+          result: emitterExec
+        except:
+          as: emitterErr
+          steps:
+            - emitter_failed:
+                assign:
+                  - runStatus: "FAILED"
+                  - runError: '${"emitter_failed: " + emitterErr.message}'
+                next: update_state_for_failure
+        next: read_emitted_index
+
+    - read_emitted_index:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${emittedIndexObject}
+            alt: "media"
+          result: emittedIndexRaw
+        except:
+          as: emittedIndexErr
+          steps:
+            - emitted_index_failed:
+                assign:
+                  - runStatus: "FAILED"
+                  - runError: '${"emitted_index_missing: " + emittedIndexErr.message}'
+                next: update_state_for_failure
+        next: parse_emitted_index
+
+    - parse_emitted_index:
+        try:
+          assign:
+            - emittedIndexPayload: '${json.decode(emittedIndexRaw)}'
+            - sceneIds: '${default(map.get(emittedIndexPayload, "scene_ids"), [])}'
+        except:
+          as: emittedParseErr
+          steps:
+            - emitted_parse_failed:
+                assign:
+                  - runStatus: "FAILED"
+                  - runError: '${"emitted_index_invalid_json: " + emittedParseErr.message}'
+                next: update_state_for_failure
+        next: validate_scene_ids
+
+    - validate_scene_ids:
+        switch:
+          - condition: '${len(sceneIds) == 0}'
+            next: no_scene_ids_failure
+        next: wait_for_scene_outcomes
+
+    - no_scene_ids_failure:
+        assign:
+          - runStatus: "FAILED"
+          - runError: "emitted_index_empty"
+        next: update_state_for_failure
+
+    - wait_for_scene_outcomes:
+        for:
+          value: sceneId
+          in: ${sceneIds}
+          steps:
+            - wait_scene_terminal:
+                call: wait_for_scene_terminal
+                args:
+                  bucket: ${bucket}
+                  sceneId: ${sceneId}
+                  timeoutSeconds: ${sourceWaitTimeoutSeconds}
+                  pollIntervalSeconds: ${sourceWaitPollSeconds}
+                result: sceneTerminal
+            - scene_result_switch:
+                switch:
+                  - condition: '${sceneTerminal.status == "FAILED"}'
+                    next: mark_scene_failure
+                next: mark_scene_success
+            - mark_scene_failure:
+                assign:
+                  - failedCount: ${failedCount + 1}
+                  - firstFailedScene: '${if(firstFailedScene == "", sceneId, firstFailedScene)}'
+                next: scene_loop_continue
+            - mark_scene_success:
+                assign:
+                  - successCount: ${successCount + 1}
+                next: scene_loop_continue
+            - scene_loop_continue:
+                assign:
+                  - runStatus: ${runStatus}
+        next: decide_scene_outcome
+
+    - decide_scene_outcome:
+        switch:
+          - condition: '${failedCount > 0}'
+            next: set_failure_after_wait
+        next: set_success_after_wait
+
+    - set_failure_after_wait:
+        assign:
+          - runStatus: "FAILED"
+          - runError: '${"source_orchestrator_failed_scene: " + firstFailedScene}'
+        next: update_state_for_failure
+
+    - set_success_after_wait:
+        assign:
+          - runStatus: "SUCCESS"
+          - runError: ""
+        next: update_state_for_success
+
+    - update_state_for_success:
+        assign:
+          - newConsecutiveFailures: 0
+          - pausedAfterRun: false
+        next: write_state_object
+
+    - update_state_for_failure:
+        assign:
+          - newConsecutiveFailures: '${previousConsecutiveFailures + 1}'
+          - pausedAfterRun: '${newConsecutiveFailures >= pauseAfterConsecutiveFails}'
+        next: write_state_object
+
+    - write_state_object:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${stateObject}
+          uploadType: "media"
+          body: '${json.encode({
+            "schema_version": "v1",
+            "consecutive_failures": newConsecutiveFailures,
+            "paused": pausedAfterRun,
+            "last_success_at": if(runStatus == "SUCCESS", runTimestamp, previousLastSuccessAt),
+            "last_failure_at": if(runStatus == "FAILED", runTimestamp, previousLastFailureAt),
+            "updated_at": runTimestamp,
+            "last_run_date": runDate,
+            "last_run_status": runStatus,
+            "last_run_error": runError
+          })}'
+        next: pause_marker_switch_after_run
+
+    - pause_marker_switch_after_run:
+        switch:
+          - condition: ${pausedAfterRun}
+            next: write_pause_marker
+        next: clear_pause_marker
+
+    - write_pause_marker:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${pauseObject}
+          uploadType: "media"
+          body: '${json.encode({
+            "schema_version": "v1",
+            "paused": true,
+            "reason": "consecutive_failures_threshold",
+            "consecutive_failures": newConsecutiveFailures,
+            "threshold": pauseAfterConsecutiveFails,
+            "timestamp": runTimestamp,
+            "run_date": runDate
+          })}'
+        next: write_summary
+
+    - clear_pause_marker:
+        try:
+          call: googleapis.storage.v1.objects.delete
+          args:
+            bucket: ${bucket}
+            object: ${pauseObject}
+        except:
+          as: pauseDeleteErr
+          steps:
+            - ignore_missing_pause_marker:
+                switch:
+                  - condition: '${pauseDeleteErr.code == 404}'
+                    next: write_summary
+            - pause_delete_failure:
+                raise: '${"Failed to clear pause marker: " + pauseDeleteErr.message}'
+        next: write_summary
+
+    - write_summary:
+        call: googleapis.storage.v1.objects.insert
+        args:
+          bucket: ${bucket}
+          name: ${runSummaryObject}
+          uploadType: "media"
+          body: '${json.encode({
+            "schema_version": "v1",
+            "workflow": "text-autonomy-daily",
+            "run_date": runDate,
+            "timestamp": runTimestamp,
+            "status": runStatus,
+            "error": runError,
+            "bucket": bucket,
+            "state_object": stateObject,
+            "emitted_index_object": emittedIndexObject,
+            "scene_count": len(sceneIds),
+            "success_count": successCount,
+            "failed_count": failedCount,
+            "pause_after_run": pausedAfterRun,
+            "consecutive_failures": newConsecutiveFailures,
+            "daily_quota": dailyQuota,
+            "quality_tier": qualityTier,
+            "provider_policy": providerPolicy,
+            "timezone": timezone
+          })}'
+        next: release_lock
+
+    - release_lock:
+        call: release_lock_if_needed
+        args:
+          bucket: ${bucket}
+          lockObject: ${lockObject}
+          lockAcquired: ${lockAcquired}
+        next: final_switch
+
+    - final_switch:
+        switch:
+          - condition: '${runStatus == "FAILED"}'
+            next: raise_run_failed
+          - condition: '${runStatus == "PAUSED"}'
+            next: return_paused
+        next: return_success
+
+    - raise_run_failed:
+        raise: '${"text-autonomy-daily failed: " + runError}'
+
+    - return_paused:
+        return:
+          status: "PAUSED"
+          run_date: ${runDate}
+          summary_object: ${runSummaryObject}
+
+    - return_success:
+        return:
+          status: ${runStatus}
+          run_date: ${runDate}
+          summary_object: ${runSummaryObject}
+          emitted_index_object: ${emittedIndexObject}
+          success_count: ${successCount}
+          failed_count: ${failedCount}
+
+
+run_cloud_run_job_and_wait:
+  params: [projectId, region, jobName, timeoutSeconds, envVars]
+  steps:
+    - run_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env: ${envVars}
+            timeout: '${string(timeoutSeconds) + "s"}'
+        result: jobExec
+        next: set_execution_name
+
+    - set_execution_name:
+        assign:
+          - executionName: '${if(jobExec.metadata != null and jobExec.metadata.name != null, jobExec.metadata.name, jobExec.name)}'
+        next: poll_execution
+
+    - poll_execution:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${executionName}
+        result: jobStatus
+        next: check_execution_status
+
+    - check_execution_status:
+        assign:
+          - jobState: '${if(jobStatus.state != null, jobStatus.state, if(jobStatus.status != null, jobStatus.status.state, null))}'
+          - failedCount: '${if(jobStatus.failedCount != null, jobStatus.failedCount, if(jobStatus.status != null, jobStatus.status.failedCount, 0))}'
+          - successCount: '${if(jobStatus.succeededCount != null, jobStatus.succeededCount, if(jobStatus.status != null, jobStatus.status.succeededCount, 0))}'
+        next: execution_status_switch
+
+    - execution_status_switch:
+        switch:
+          - condition: '${jobState == "FAILED" or failedCount > 0}'
+            next: raise_execution_failure
+          - condition: '${jobState == "SUCCEEDED" or successCount > 0}'
+            next: return_execution_success
+        next: wait_before_poll
+
+    - wait_before_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: poll_execution
+
+    - raise_execution_failure:
+        raise: '${"Cloud Run job failed: " + jobName + " (" + executionName + ")"}'
+
+    - return_execution_success:
+        return:
+          execution_name: ${executionName}
+          state: ${jobState}
+
+
+wait_for_scene_terminal:
+  params: [bucket, sceneId, timeoutSeconds, pollIntervalSeconds]
+  steps:
+    - init:
+        assign:
+          - successObject: '${"scenes/" + sceneId + "/.source_orchestrator_complete"}'
+          - failureObject: '${"scenes/" + sceneId + "/.source_orchestrator_failed"}'
+          - startedAt: '${time.format(sys.now())}'
+        next: poll_success
+
+    - poll_success:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${successObject}
+            alt: "media"
+          result: successPayload
+        except:
+          as: successErr
+          steps:
+            - success_missing_switch:
+                switch:
+                  - condition: '${successErr.code == 404}'
+                    next: poll_failure
+                next: success_read_failure
+            - success_read_failure:
+                raise: '${"Failed reading success marker for scene " + sceneId + ": " + successErr.message}'
+        next: return_success
+
+    - poll_failure:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${failureObject}
+            alt: "media"
+          result: failurePayload
+        except:
+          as: failureErr
+          steps:
+            - failure_missing_switch:
+                switch:
+                  - condition: '${failureErr.code == 404}'
+                    next: check_timeout
+                next: failure_read_failure
+            - failure_read_failure:
+                raise: '${"Failed reading failure marker for scene " + sceneId + ": " + failureErr.message}'
+        next: return_failure
+
+    - check_timeout:
+        assign:
+          - nowTs: '${time.format(sys.now())}'
+          - elapsedSeconds: '${time.parse(nowTs) - time.parse(startedAt)}'
+        next: timeout_switch
+
+    - timeout_switch:
+        switch:
+          - condition: '${elapsedSeconds >= timeoutSeconds}'
+            next: raise_timeout
+        next: wait_and_repeat
+
+    - wait_and_repeat:
+        call: sys.sleep
+        args:
+          seconds: ${pollIntervalSeconds}
+        next: poll_success
+
+    - raise_timeout:
+        raise: '${"Timed out waiting for source-orchestrator completion for scene " + sceneId + " after " + string(timeoutSeconds) + "s"}'
+
+    - return_success:
+        return:
+          scene_id: ${sceneId}
+          status: "SUCCESS"
+          marker: ${successObject}
+
+    - return_failure:
+        return:
+          scene_id: ${sceneId}
+          status: "FAILED"
+          marker: ${failureObject}
+
+
+release_lock_if_needed:
+  params: [bucket, lockObject, lockAcquired]
+  steps:
+    - switch_lock:
+        switch:
+          - condition: ${lockAcquired}
+            next: delete_lock
+        next: done
+
+    - delete_lock:
+        try:
+          call: googleapis.storage.v1.objects.delete
+          args:
+            bucket: ${bucket}
+            object: ${lockObject}
+        except:
+          as: lockDeleteErr
+          steps:
+            - ignore_missing_lock:
+                switch:
+                  - condition: '${lockDeleteErr.code == 404}'
+                    next: done
+            - lock_delete_failure:
+                raise: '${"Failed to release autonomy lock " + lockObject + ": " + lockDeleteErr.message}'
+        next: done
+
+    - done:
+        return: true

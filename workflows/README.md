@@ -27,6 +27,7 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 | `scene-batch.yaml` | Manual only | Provide a manifest object with a scene list |
 | `scene-generation-pipeline.yaml` | Cloud Scheduler / manual | Scheduler (disabled by default) or manual run |
 | `source-orchestrator.yaml` | Eventarc (GCS finalized) | `scenes/*/prompts/scene_request.json` |
+| `text-autonomy-daily.yaml` | Cloud Scheduler | Daily autonomous text request emission + downstream completion watch |
 | `training-pipeline.yaml` | Eventarc custom event | Event type `blueprintpipeline.episodes.imported` |
 | `upsell-features-pipeline.yaml` | Manual only | Manual run with `.episodes_complete` payload |
 | `usd-assembly-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` |
@@ -42,6 +43,8 @@ then feeds the result into the same Stage 2-5 pipeline used by the image path.
 
 - **Text path**: `text-scene-gen-job` → `text-scene-adapter-job` → Stage 2-5
 - **Text runtime modes**: `TEXT_GEN_RUNTIME=vm|cloudrun` (`vm` default, transient infra fallback to `cloudrun`)
+- **LLM-first Stage 1**: `TEXT_GEN_USE_LLM=true` default with deterministic fallback metadata and retry controls
+- **Stage 5 strictness**: `ARENA_EXPORT_REQUIRED=true` default (text completion requires Arena success)
 - **Image path (compat mode)**:
   - `IMAGE_PATH_MODE=orchestrator` delegates to `image-to-scene-orchestrator`
   - `IMAGE_PATH_MODE=legacy_chain` delegates to `image-to-scene-pipeline` and waits for `.geniesim_complete`
@@ -125,8 +128,12 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `TEXT_GEN_RUNTIME`: source-orchestrator runtime profile hint for text Stage 1 (`vm`, `cloudrun`, etc.). Defaults to `vm`.
 - `TEXT_GEN_STANDARD_PROFILE`: profile label injected into text-scene-gen-job for `quality_tier=standard`.
 - `TEXT_GEN_PREMIUM_PROFILE`: profile label injected into text-scene-gen-job for `quality_tier=premium`.
+- `TEXT_GEN_USE_LLM`: enables LLM-first scene planning in Stage 1. Defaults to `true`.
+- `TEXT_GEN_LLM_MAX_ATTEMPTS`: max LLM planning retry rounds in Stage 1. Defaults to `3`.
+- `TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS`: Stage 1 LLM retry backoff base seconds. Defaults to `2`.
 - `TEXT_GEN_MAX_SEEDS`: max allowed `seed_count` for `scene_request.json`. Defaults to `16`.
 - `TEXT_GEN_ENABLE_IMAGE_FALLBACK`: allow `auto`/`text` fallback to image path when text source fails. Defaults to `true`.
+- `ARENA_EXPORT_REQUIRED`: enforce Stage 5 arena success before source completion. Defaults to `true`.
 - `IMAGE_PATH_MODE`: image compatibility mode (`orchestrator` or `legacy_chain`). Defaults to `orchestrator`.
 - `IMAGE_ORCHESTRATOR_WORKFLOW_NAME`: workflow used when `IMAGE_PATH_MODE=orchestrator`. Defaults to `image-to-scene-orchestrator`.
 - `IMAGE_LEGACY_WORKFLOW_NAME`: workflow used when `IMAGE_PATH_MODE=legacy_chain`. Defaults to `image-to-scene-pipeline`.
@@ -135,6 +142,10 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `TEXT_GEN_VM_ZONE`: VM zone used when `TEXT_GEN_RUNTIME=vm`. Defaults to `us-east1-c`.
 - `TEXT_GEN_VM_REPO_DIR`: repository directory on the VM for text Stage 1 scripts. Defaults to `~/BlueprintPipeline`.
 - `TEXT_GEN_VM_TIMEOUT_SECONDS`: VM text-stage Cloud Build polling timeout. Defaults to `2400`.
+- `TEXT_AUTONOMY_STATE_PREFIX`: daily text autonomy state root. Defaults to `automation/text_daily`.
+- `TEXT_AUTONOMY_TIMEZONE`: scheduler/workflow timezone hint for daily runs. Defaults to `America/New_York`.
+- `TEXT_DAILY_QUOTA`: number of scenes emitted per daily run. Defaults to `1`.
+- `TEXT_DAILY_PAUSE_AFTER_CONSEC_FAILS`: auto-pause threshold for autonomy workflow. Defaults to `3`.
 - `ENABLE_VLM_QUALITY_AUDIT`: enables VLM episode audit in Genie Sim export/import path. Defaults to `1` in `genie-sim-export-pipeline.yaml`.
 - `FIREBASE_STORAGE_BUCKET`: required in production workflow environments that enable Firebase uploads for Genie Sim export/import.
 - `GENIESIM_CIRCUIT_BREAKER_THRESHOLD`: maximum consecutive failures before Genie Sim export/import workflows short-circuit. Defaults to `3`.
@@ -180,6 +191,24 @@ This keeps new workloads running during regional outages while preserving idempo
 
 ## How to run locally
 - Run trigger setup scripts directly (e.g., `./setup-all-triggers.sh`) after exporting the required credentials.
+
+## Text autonomy daily workflow usage
+`text-autonomy-daily.yaml` runs fully autonomous daily text generation by invoking
+`text-request-emitter-job`, then waiting for source-orchestrator scene completion.
+
+Setup:
+```bash
+cd workflows
+TEXT_DAILY_QUOTA=1 \
+TEXT_AUTONOMY_TIMEZONE=America/New_York \
+bash setup-text-autonomy-scheduler.sh <project_id> <bucket> <region>
+```
+
+State objects:
+- `automation/text_daily/state.json`
+- `automation/text_daily/.paused`
+- `automation/text_daily/runs/<YYYY-MM-DD>/emitted_requests.json`
+- `automation/text_daily/runs/<YYYY-MM-DD>/run_summary.json`
 
 ## Scene batch workflow usage
 The `scene-batch.yaml` workflow runs the batch pipeline across a list of scene IDs

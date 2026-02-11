@@ -1,0 +1,56 @@
+substitutions:
+  _REGION: us-central1
+  _REPO: blueprint-jobs
+  _JOB_NAME: text-request-emitter-job
+  _MEMORY: 2Gi
+  _CPU: "1"
+  _TIMEOUT: 900s
+  _MAX_RETRIES: "1"
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'text-request-emitter-job/Dockerfile'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}'
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if gcloud run jobs describe ${_JOB_NAME} --region=${_REGION} --format='value(name)' 2>/dev/null; then
+          gcloud run jobs update ${_JOB_NAME} \
+            --region=${_REGION} \
+            --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA} \
+            --memory=${_MEMORY} \
+            --cpu=${_CPU} \
+            --task-timeout=${_TIMEOUT} \
+            --max-retries=${_MAX_RETRIES}
+        else
+          gcloud run jobs create ${_JOB_NAME} \
+            --region=${_REGION} \
+            --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA} \
+            --memory=${_MEMORY} \
+            --cpu=${_CPU} \
+            --task-timeout=${_TIMEOUT} \
+            --max-retries=${_MAX_RETRIES}
+        fi
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

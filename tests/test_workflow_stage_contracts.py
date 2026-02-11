@@ -213,3 +213,40 @@ def test_source_orchestrator_image_mode_validates_and_delegates():
 
     # Image URI regex validation
     assert "([Pp][Nn][Gg]|[Jj][Pp][Ee]?[Gg])" in workflow
+
+
+def test_source_orchestrator_stage5_strict_toggle_present():
+    workflow = Path("workflows/source-orchestrator.yaml").read_text(encoding="utf-8")
+
+    assert "ARENA_EXPORT_REQUIRED" in workflow
+    assert "arenaExportRequired" in workflow
+    assert "- run_stage5_requirement_switch:" in workflow
+    assert "- run_stage5_required:" in workflow
+    assert "- run_stage5_non_blocking:" in workflow
+    assert "arena_required" in workflow
+
+
+def test_text_autonomy_daily_workflow_contract_has_lock_pause_emit_wait_state():
+    workflow = Path("workflows/text-autonomy-daily.yaml").read_text(encoding="utf-8")
+
+    assert "- acquire_lock:" in workflow
+    assert "ifGenerationMatch: 0" in workflow
+    assert "TEXT_DAILY_PAUSE_AFTER_CONSEC_FAILS" in workflow
+    assert "text-request-emitter-job" in workflow
+    assert "wait_for_scene_terminal:" in workflow
+    assert ".source_orchestrator_complete" in workflow
+    assert ".source_orchestrator_failed" in workflow
+    assert "consecutive_failures" in workflow
+    assert "run_summary.json" in workflow
+    assert "newConsecutiveFailures" in workflow
+    assert "newConsecutiveFailures >= pauseAfterConsecutiveFails" in workflow
+
+
+def test_setup_text_autonomy_scheduler_has_expected_schedule_defaults():
+    script = Path("workflows/setup-text-autonomy-scheduler.sh").read_text(encoding="utf-8")
+
+    assert 'SCHEDULER_SCHEDULE=${TEXT_AUTONOMY_SCHEDULER_CRON:-"0 9 * * *"}' in script
+    assert 'SCHEDULER_TIMEZONE=${TEXT_AUTONOMY_TIMEZONE:-"America/New_York"}' in script
+    assert 'TEXT_DAILY_QUOTA=${TEXT_DAILY_QUOTA:-"1"}' in script
+    assert "TEXT_AUTONOMY_STATE_PREFIX" in script
+    assert "setup-text-autonomy-scheduler.sh" in script

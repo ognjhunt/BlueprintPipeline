@@ -1,0 +1,42 @@
+{
+  "schema_version": "v1",
+  "max_candidates": 6,
+  "novelty_threshold": 0.35,
+  "dedupe_window": 60,
+  "coverage_rebalance": true,
+  "dimensions": {
+    "archetype": [
+      {"value": "kitchen", "weight": 1.4},
+      {"value": "office", "weight": 1.2},
+      {"value": "warehouse", "weight": 1.0},
+      {"value": "lab", "weight": 1.0},
+      {"value": "living_room", "weight": 0.9},
+      {"value": "bedroom", "weight": 0.8}
+    ],
+    "task_family": [
+      {"value": "pick_and_place", "weight": 1.4},
+      {"value": "sorting", "weight": 1.0},
+      {"value": "rearrangement", "weight": 1.0},
+      {"value": "container_interaction", "weight": 0.9},
+      {"value": "surface_clearing", "weight": 0.8}
+    ],
+    "style": [
+      {"value": "modern", "weight": 1.0},
+      {"value": "industrial", "weight": 0.9},
+      {"value": "minimal", "weight": 0.8},
+      {"value": "lived_in", "weight": 1.1},
+      {"value": "high_utilization", "weight": 1.0}
+    ],
+    "complexity": [
+      {"value": "medium_density_10_to_14_objects", "weight": 1.0},
+      {"value": "high_density_15_to_22_objects", "weight": 1.3},
+      {"value": "articulation_heavy_layout", "weight": 0.9}
+    ],
+    "manipulation_focus": [
+      {"value": "small_items_on_surfaces", "weight": 1.1},
+      {"value": "containers_and_drawers", "weight": 1.0},
+      {"value": "mixed_static_and_articulated", "weight": 1.0},
+      {"value": "precision_reach_and_grasp", "weight": 0.9}
+    ]
+  }
+}

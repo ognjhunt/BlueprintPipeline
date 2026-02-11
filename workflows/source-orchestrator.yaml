@@ -14,7 +14,7 @@
 #   - usd-assembly-pipeline
 #   - variation-assets-pipeline
 #   - genie-sim-export-pipeline
-#   - arena-export-pipeline (non-blocking)
+#   - arena-export-pipeline (required by default; env-tunable)
 
 main:
   params: [event]
@@ -37,8 +37,12 @@ main:
           - textGenRuntime: '${text.lower(default(sys.get_env("TEXT_GEN_RUNTIME"), "vm"))}'
           - textGenStandardProfile: '${default(sys.get_env("TEXT_GEN_STANDARD_PROFILE"), "standard_v1")}'
           - textGenPremiumProfile: '${default(sys.get_env("TEXT_GEN_PREMIUM_PROFILE"), "premium_v1")}'
+          - textGenUseLlm: '${text.lower(default(sys.get_env("TEXT_GEN_USE_LLM"), "true"))}'
+          - textGenLlmMaxAttempts: '${default(sys.get_env("TEXT_GEN_LLM_MAX_ATTEMPTS"), "3")}'
+          - textGenLlmRetryBackoffSeconds: '${default(sys.get_env("TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS"), "2")}'
           - textGenMaxSeeds: '${int(default(sys.get_env("TEXT_GEN_MAX_SEEDS"), "16"))}'
           - textGenEnableImageFallback: '${text.lower(default(sys.get_env("TEXT_GEN_ENABLE_IMAGE_FALLBACK"), "true")) == "true"}'
+          - arenaExportRequired: '${text.lower(default(sys.get_env("ARENA_EXPORT_REQUIRED"), "true")) == "true"}'
           - imagePathMode: '${text.lower(default(sys.get_env("IMAGE_PATH_MODE"), "orchestrator"))}'
           - imageOrchestratorWorkflow: '${default(sys.get_env("IMAGE_ORCHESTRATOR_WORKFLOW_NAME"), "image-to-scene-orchestrator")}'
           - imageLegacyWorkflow: '${default(sys.get_env("IMAGE_LEGACY_WORKFLOW_NAME"), "image-to-scene-pipeline")}'
@@ -372,6 +376,9 @@ main:
                   textGenMaxSeeds: ${textGenMaxSeeds}
                   textGenStandardProfile: ${textGenStandardProfile}
                   textGenPremiumProfile: ${textGenPremiumProfile}
+                  textGenUseLlm: ${textGenUseLlm}
+                  textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
+                  textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
                   textVmName: ${textVmName}
                   textVmZone: ${textVmZone}
                   textVmRepoDir: ${textVmRepoDir}
@@ -394,6 +401,7 @@ main:
                   region: ${region}
                   bucket: ${bucket}
                   sceneId: ${childSceneId}
+                  arenaExportRequired: ${arenaExportRequired}
                 result: downstreamStatus
                 next: append_variant_entry
             - append_variant_entry:
@@ -705,7 +713,7 @@ run_workflow_and_wait:
 
 
 run_stage2_to_stage5:
-  params: [projectId, region, bucket, sceneId]
+  params: [projectId, region, bucket, sceneId, arenaExportRequired]
   steps:
     - derive:
         assign:
@@ -758,9 +766,29 @@ run_stage2_to_stage5:
               bucket: ${bucket}
               name: '${scenePrefix + "/variation_assets/.variation_pipeline_complete"}'
         result: geniesimResult
-        next: run_stage5
+        next: run_stage5_requirement_switch
 
-    - run_stage5:
+    - run_stage5_requirement_switch:
+        switch:
+          - condition: ${arenaExportRequired}
+            next: run_stage5_required
+        next: run_stage5_non_blocking
+
+    - run_stage5_required:
+        call: run_workflow_and_wait
+        args:
+          projectId: ${projectId}
+          region: ${region}
+          workflowName: "arena-export-pipeline"
+          pollIntervalSeconds: 30
+          argument:
+            data:
+              bucket: ${bucket}
+              name: '${scenePrefix + "/geniesim/.geniesim_complete"}'
+        result: arenaRequiredResult
+        next: set_arena_success
+
+    - run_stage5_non_blocking:
         try:
           call: run_workflow_and_wait
           args:
@@ -799,10 +827,11 @@ run_stage2_to_stage5:
           variation_assets: "SUCCEEDED"
           geniesim_export: "SUCCEEDED"
           arena_export: ${arenaState}
+          arena_required: ${arenaExportRequired}
 
 
 run_text_stage1_for_child:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenRuntime, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenRuntime, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
   steps:
     - runtime_switch:
         switch:
@@ -829,6 +858,9 @@ run_text_stage1_for_child:
             textGenMaxSeeds: ${textGenMaxSeeds}
             textGenStandardProfile: ${textGenStandardProfile}
             textGenPremiumProfile: ${textGenPremiumProfile}
+            textGenUseLlm: ${textGenUseLlm}
+            textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
+            textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
             textVmName: ${textVmName}
             textVmZone: ${textVmZone}
             textVmRepoDir: ${textVmRepoDir}
@@ -865,6 +897,9 @@ run_text_stage1_for_child:
           textGenMaxSeeds: ${textGenMaxSeeds}
           textGenStandardProfile: ${textGenStandardProfile}
           textGenPremiumProfile: ${textGenPremiumProfile}
+          textGenUseLlm: ${textGenUseLlm}
+          textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
+          textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
         result: cloudrunFallbackResult
         next: return_cloudrun_fallback
 
@@ -895,6 +930,9 @@ run_text_stage1_for_child:
           textGenMaxSeeds: ${textGenMaxSeeds}
           textGenStandardProfile: ${textGenStandardProfile}
           textGenPremiumProfile: ${textGenPremiumProfile}
+          textGenUseLlm: ${textGenUseLlm}
+          textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
+          textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
         result: cloudrunResult
         next: return_cloudrun_direct
 
@@ -908,7 +946,7 @@ run_text_stage1_for_child:
 
 
 run_text_jobs_on_cloudrun:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds]
   steps:
     - run_text_gen_job:
         call: run_cloud_run_job_and_wait
@@ -936,6 +974,12 @@ run_text_jobs_on_cloudrun:
               value: ${textGenStandardProfile}
             - name: TEXT_GEN_PREMIUM_PROFILE
               value: ${textGenPremiumProfile}
+            - name: TEXT_GEN_USE_LLM
+              value: ${textGenUseLlm}
+            - name: TEXT_GEN_LLM_MAX_ATTEMPTS
+              value: ${textGenLlmMaxAttempts}
+            - name: TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS
+              value: ${textGenLlmRetryBackoffSeconds}
             - name: TEXT_GEN_RUNTIME
               value: "cloudrun"
         result: textGenStatus
@@ -973,7 +1017,7 @@ run_text_jobs_on_cloudrun:
 
 
 run_text_jobs_on_vm:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
   steps:
     - run_text_jobs_via_cloud_build:
         try:
@@ -997,6 +1041,9 @@ run_text_jobs_on_vm:
                     - '${"TEXT_GEN_MAX_SEEDS=" + string(textGenMaxSeeds)}'
                     - '${"TEXT_GEN_STANDARD_PROFILE=" + textGenStandardProfile}'
                     - '${"TEXT_GEN_PREMIUM_PROFILE=" + textGenPremiumProfile}'
+                    - '${"TEXT_GEN_USE_LLM=" + textGenUseLlm}'
+                    - '${"TEXT_GEN_LLM_MAX_ATTEMPTS=" + textGenLlmMaxAttempts}'
+                    - '${"TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=" + textGenLlmRetryBackoffSeconds}'
                     - '${"ASSETS_PREFIX=" + childAssetsPrefix}'
                     - '${"LAYOUT_PREFIX=" + childLayoutPrefix}'
                     - '${"SEG_PREFIX=" + childSegPrefix}'
@@ -1013,11 +1060,14 @@ run_text_jobs_on_vm:
                       TEXT_GEN_MAX_SEEDS_Q=$(printf '%q' "${TEXT_GEN_MAX_SEEDS}")
                       TEXT_GEN_STANDARD_PROFILE_Q=$(printf '%q' "${TEXT_GEN_STANDARD_PROFILE}")
                       TEXT_GEN_PREMIUM_PROFILE_Q=$(printf '%q' "${TEXT_GEN_PREMIUM_PROFILE}")
+                      TEXT_GEN_USE_LLM_Q=$(printf '%q' "${TEXT_GEN_USE_LLM}")
+                      TEXT_GEN_LLM_MAX_ATTEMPTS_Q=$(printf '%q' "${TEXT_GEN_LLM_MAX_ATTEMPTS}")
+                      TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q=$(printf '%q' "${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS}")
                       ASSETS_PREFIX_Q=$(printf '%q' "${ASSETS_PREFIX}")
                       LAYOUT_PREFIX_Q=$(printf '%q' "${LAYOUT_PREFIX}")
                       SEG_PREFIX_Q=$(printf '%q' "${SEG_PREFIX}")
 
-                      REMOTE_CMD="cd ${VM_REPO_DIR} && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} TEXT_SEED=${TEXT_SEED_Q} DEFAULT_SOURCE_MODE=text TEXT_GEN_MAX_SEEDS=${TEXT_GEN_MAX_SEEDS_Q} TEXT_GEN_STANDARD_PROFILE=${TEXT_GEN_STANDARD_PROFILE_Q} TEXT_GEN_PREMIUM_PROFILE=${TEXT_GEN_PREMIUM_PROFILE_Q} TEXT_GEN_RUNTIME=vm python text-scene-gen-job/generate_text_scene.py && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} ASSETS_PREFIX=${ASSETS_PREFIX_Q} LAYOUT_PREFIX=${LAYOUT_PREFIX_Q} SEG_PREFIX=${SEG_PREFIX_Q} python text-scene-adapter-job/adapt_text_scene.py"
+                      REMOTE_CMD="cd ${VM_REPO_DIR} && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} TEXT_SEED=${TEXT_SEED_Q} DEFAULT_SOURCE_MODE=text TEXT_GEN_MAX_SEEDS=${TEXT_GEN_MAX_SEEDS_Q} TEXT_GEN_STANDARD_PROFILE=${TEXT_GEN_STANDARD_PROFILE_Q} TEXT_GEN_PREMIUM_PROFILE=${TEXT_GEN_PREMIUM_PROFILE_Q} TEXT_GEN_USE_LLM=${TEXT_GEN_USE_LLM_Q} TEXT_GEN_LLM_MAX_ATTEMPTS=${TEXT_GEN_LLM_MAX_ATTEMPTS_Q} TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q} TEXT_GEN_RUNTIME=vm python text-scene-gen-job/generate_text_scene.py && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} ASSETS_PREFIX=${ASSETS_PREFIX_Q} LAYOUT_PREFIX=${LAYOUT_PREFIX_Q} SEG_PREFIX=${SEG_PREFIX_Q} python text-scene-adapter-job/adapt_text_scene.py"
 
                       gcloud compute ssh "${VM_NAME}" \
                         --project="${PROJECT_ID}" \

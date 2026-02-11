@@ -200,6 +200,24 @@ def main() -> int:
     _write_json(output_root / "placement_graph.json", package.get("placement_graph") or {"relations": []})
     _write_json(output_root / "quality_gate_report.json", package.get("quality_gate_report") or {})
 
+    quality_report = package.get("quality_gate_report") or {}
+    quality_metrics = quality_report.get("metrics") or {}
+    generation_mode = "llm" if package.get("used_llm") else "deterministic_fallback"
+    llm_attempts = int(package.get("llm_attempts") or 0)
+    llm_fallback_used = generation_mode == "deterministic_fallback" and llm_attempts > 0
+    llm_failure_reason = package.get("llm_failure_reason")
+
+    logger.info(
+        "[TEXT-GEN] quality-eval scene=%s decision=%s metrics=%s generation_mode=%s llm_attempts=%s llm_fallback_used=%s llm_failure_reason=%s",
+        scene_id,
+        "pass",
+        json.dumps(quality_metrics, sort_keys=True),
+        generation_mode,
+        llm_attempts,
+        llm_fallback_used,
+        llm_failure_reason,
+    )
+
     completion_payload = {
         "scene_id": scene_id,
         "status": "completed",
@@ -210,6 +228,10 @@ def main() -> int:
         "seed": seed,
         "profile": profile,
         "retry_used": retry_used,
+        "generation_mode": generation_mode,
+        "llm_attempts": llm_attempts,
+        "llm_fallback_used": llm_fallback_used,
+        "llm_failure_reason": llm_failure_reason,
         "request_object": request_object,
         "textgen_prefix": textgen_prefix,
     }
