@@ -33,6 +33,9 @@ def test_usd_assembly_enforces_strict_defaults_and_failure_paths():
     assert "- replicator_failure_policy_switch:" in workflow
     assert "- release_lock_after_required_replicator_failure:" in workflow
     assert "- raise_required_replicator_error:" in workflow
+    assert "- isaac_lab_failure_policy_switch:" in workflow
+    assert "- release_lock_after_required_isaac_lab_failure:" in workflow
+    assert "- raise_required_isaac_lab_error:" in workflow
 
 
 def test_usd_assembly_hybrid_strict_gate_uses_required_articulation_and_markers():
@@ -194,6 +197,10 @@ def test_source_orchestrator_runtime_branches_include_vm_and_cloudrun():
     assert "VERTEX_INDEX_ENDPOINT" in workflow
     assert "TEXT_SAM3D_TEXT_ENDPOINTS" in workflow
     assert "TEXT_HUNYUAN_TEXT_ENDPOINTS" in workflow
+    assert "TEXT_SCENE_GEN_JOB_NAME" in workflow
+    assert "TEXT_SCENE_ADAPTER_JOB_NAME" in workflow
+    assert 'jobName: \'${default(sys.get_env("TEXT_SCENE_GEN_JOB_NAME"), "text-scene-gen-job")}\'' in workflow
+    assert 'jobName: \'${default(sys.get_env("TEXT_SCENE_ADAPTER_JOB_NAME"), "text-scene-adapter-job")}\'' in workflow
 
 
 def test_source_orchestrator_image_mode_branches_include_orchestrator_and_legacy_chain():
@@ -242,6 +249,16 @@ def test_source_orchestrator_stage5_strict_toggle_present():
     assert "- run_stage5_required:" in workflow
     assert "- run_stage5_non_blocking:" in workflow
     assert "arena_required" in workflow
+
+
+def test_source_orchestrator_stage5_required_enforces_success_status():
+    workflow = Path("workflows/source-orchestrator.yaml").read_text(encoding="utf-8")
+
+    assert "- set_required_arena_status:" in workflow
+    assert "- required_stage5_status_switch:" in workflow
+    assert 'arenaRequiredStatus == "SUCCESS"' in workflow
+    assert "- raise_required_stage5_non_success:" in workflow
+    assert "Arena export returned non-success status" in workflow
 
 
 def test_text_autonomy_daily_workflow_contract_has_lock_pause_emit_wait_state():
@@ -304,6 +321,8 @@ def test_setup_source_orchestrator_trigger_includes_text_asset_retrieval_envs():
     assert "TEXT_ASSET_GENERATION_ENABLED" in script
     assert "TEXT_ASSET_GENERATION_PROVIDER" in script
     assert "TEXT_ASSET_GENERATION_PROVIDER_CHAIN" in script
+    assert "TEXT_SCENE_GEN_JOB_NAME" in script
+    assert "TEXT_SCENE_ADAPTER_JOB_NAME" in script
     assert "TEXT_SAM3D_API_HOST" in script
     assert "TEXT_SAM3D_TEXT_ENDPOINTS" in script
     assert "TEXT_HUNYUAN_API_HOST" in script
@@ -317,6 +336,7 @@ def test_asset_replication_workflow_and_trigger_contract():
 
     assert "asset-replication-job" in workflow
     assert "automation/asset_replication/queue" in workflow
+    assert '"^" + queuePrefix + "/.+\\\\.json$"' in workflow
     assert "QUEUE_OBJECT" in workflow
     assert "B2_S3_ENDPOINT" not in workflow
     assert "B2_BUCKET" not in workflow

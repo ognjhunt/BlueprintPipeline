@@ -430,6 +430,25 @@ Auto-pause behavior:
 - Pause marker: `automation/text_daily/.paused`
 - Run summary: `automation/text_daily/runs/<YYYY-MM-DD>/run_summary.json`
 
+## Runtime Readiness Checklist (Stage 1-5)
+
+Required Cloud Run jobs in `us-central1` for VM + Cloud Run hybrid runtime:
+- `text-request-emitter-job`
+- `text-scene-gen-job`
+- `text-scene-adapter-job`
+- `asset-replication-job`
+- `isaac-lab-job`
+- `genie-sim-export-job`
+- `arena-export-job`
+
+Not required as Cloud Run jobs in the current Stage 4 architecture:
+- `genie-sim-submit-job`
+- `genie-sim-gpu-job`
+
+Stage 4 contract:
+- `genie-sim-export-pipeline.yaml` requires `genie-sim-export-job` in Cloud Run.
+- Submission/execution remains on the Cloud Build + GKE/local runtime path.
+
 Optionally run a canary workflow with a known scene ID:
 
 ```bash

@@ -1,10 +1,10 @@
 substitutions:
   _REGION: us-central1
-  _REPO: pipeline-jobs
-  _JOB_NAME: asset-replication-job
+  _REPO: blueprint-jobs
+  _JOB_NAME: isaac-lab-job
   _MEMORY: 2Gi
-  _CPU: "1"
-  _TIMEOUT: 3600s
+  _CPU: "2"
+  _TIMEOUT: 1800s
   _MAX_RETRIES: "1"
 
 steps:
@@ -12,7 +12,7 @@ steps:
     args:
       - "build"
       - "-f"
-      - "asset-replication-job/Dockerfile"
+      - "isaac-lab-job/Dockerfile"
       - "-t"
       - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}"
       - "-t"

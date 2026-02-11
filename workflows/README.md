@@ -44,6 +44,7 @@ then feeds the result into the same Stage 2-5 pipeline used by the image path.
 
 - **Text path**: `text-scene-gen-job` → `text-scene-adapter-job` → Stage 2-5
 - **Text runtime modes**: `TEXT_GEN_RUNTIME=vm|cloudrun` (`vm` default, transient infra fallback to `cloudrun`)
+- **Stage 1 Cloud Run overrides**: `TEXT_SCENE_GEN_JOB_NAME` and `TEXT_SCENE_ADAPTER_JOB_NAME` allow non-default job names
 - **LLM-first Stage 1**: `TEXT_GEN_USE_LLM=true` default with deterministic fallback metadata and retry controls
 - **Stage 5 strictness**: `ARENA_EXPORT_REQUIRED=true` default (text completion requires Arena success)
 - **Image path (compat mode)**:
@@ -54,6 +55,11 @@ then feeds the result into the same Stage 2-5 pipeline used by the image path.
 - **Child request path**: fanout requests are written to `scenes/<child_scene_id>/internal/scene_request.generated.json` (non-trigger path)
 - **Dedupe lock**: per-generation lock at `scenes/<scene_id>/locks/source-orchestrator-<generation>.lock` prevents concurrent duplicate executions
 - **Fallback**: fail-fast — if any seed fails, the entire request falls back to image (does not retry remaining seeds)
+
+## Stage 4 Runtime Contract
+- Required Cloud Run job: `genie-sim-export-job`.
+- `genie-sim-submit-job` and `genie-sim-gpu-job` are not required as Cloud Run jobs in the current architecture.
+- Submission/execution is handled by the existing Cloud Build + GKE/local runtime path in `genie-sim-export-pipeline.yaml`.
 
 ## Source Request Contract (Text-First)
 `source-orchestrator.yaml` expects prompt requests at:
@@ -127,6 +133,8 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `PRIMARY_BUCKET`: default bucket for manual or scheduler-driven workflows (replaces hardcoded bucket names).
 - `DEFAULT_SOURCE_MODE`: source-orchestrator default request mode (`text`, `image`, `auto`). Defaults to `text`.
 - `TEXT_GEN_RUNTIME`: source-orchestrator runtime profile hint for text Stage 1 (`vm`, `cloudrun`, etc.). Defaults to `vm`.
+- `TEXT_SCENE_GEN_JOB_NAME`: Stage 1 Cloud Run job name override for text scene generation. Defaults to `text-scene-gen-job`.
+- `TEXT_SCENE_ADAPTER_JOB_NAME`: Stage 1 Cloud Run job name override for text scene adaptation. Defaults to `text-scene-adapter-job`.
 - `TEXT_GEN_STANDARD_PROFILE`: profile label injected into text-scene-gen-job for `quality_tier=standard`.
 - `TEXT_GEN_PREMIUM_PROFILE`: profile label injected into text-scene-gen-job for `quality_tier=premium`.
 - `TEXT_GEN_USE_LLM`: enables LLM-first scene planning in Stage 1. Defaults to `true`.

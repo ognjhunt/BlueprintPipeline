@@ -24,7 +24,7 @@ main:
 
     - filter_queue_objects:
         switch:
-          - condition: '${text.match_regex(object, "^automation/asset_replication/queue/.+\\.json$")}'
+          - condition: '${text.match_regex(object, "^" + queuePrefix + "/.+\\.json$")}'
             next: run_replication_job
         next: skip
 

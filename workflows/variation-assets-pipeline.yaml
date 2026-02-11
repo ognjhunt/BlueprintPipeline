@@ -649,6 +649,30 @@ main:
         args:
           text: '${"Simready job completed for scene " + sceneId + " variation assets"}'
           severity: "INFO"
+        next: update_progress_after_simready
+
+    - update_progress_after_simready:
+        try:
+          call: googleapis.storage.v1.objects.insert
+          args:
+            bucket: ${bucket}
+            name: ${variationAssetsProgressMarker}
+            uploadType: "media"
+            body: ${json.encode({
+              "scene_id": sceneId,
+              "variation_assets_prefix": variationAssetsPrefix,
+              "updated_at": time.format(sys.now()),
+              "stages_completed": ["variation_gen", "simready"],
+              "variation_asset_count": variationAssetCount
+            })}
+        except:
+          as: progressErr
+          steps:
+            - log_progress_update_warning:
+                call: sys.log
+                args:
+                  text: '${"WARNING: Failed to update progress marker after simready for " + sceneId + ": " + progressErr.message}'
+                  severity: "WARNING"
         next: init_isaac_refresh_gate
 
     - simready_failed:

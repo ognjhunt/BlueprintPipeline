@@ -1642,7 +1642,7 @@ main:
         next: release_lock_before_done
 
     - isaac_lab_failed:
-        # Isaac Lab failure is non-fatal - scene is usable for sim without RL tasks
+        # Isaac Lab failure is fatal when requireIsaac=true; otherwise it is partial success.
         assign:
           - isaacLabEndTime: '${time.format(sys.now())}'
           - isaacLabDurationSeconds: '${time.parse(isaacLabEndTime) - time.parse(isaacLabStartTime)}'

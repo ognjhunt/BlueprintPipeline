@@ -35,6 +35,8 @@ main:
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - defaultSourceMode: '${text.lower(default(sys.get_env("DEFAULT_SOURCE_MODE"), "text"))}'
           - textGenRuntime: '${text.lower(default(sys.get_env("TEXT_GEN_RUNTIME"), "vm"))}'
+          - textSceneGenJobName: '${default(sys.get_env("TEXT_SCENE_GEN_JOB_NAME"), "text-scene-gen-job")}'
+          - textSceneAdapterJobName: '${default(sys.get_env("TEXT_SCENE_ADAPTER_JOB_NAME"), "text-scene-adapter-job")}'
           - textGenStandardProfile: '${default(sys.get_env("TEXT_GEN_STANDARD_PROFILE"), "standard_v1")}'
           - textGenPremiumProfile: '${default(sys.get_env("TEXT_GEN_PREMIUM_PROFILE"), "premium_v1")}'
           - textGenUseLlm: '${text.lower(default(sys.get_env("TEXT_GEN_USE_LLM"), "true"))}'
@@ -491,6 +493,7 @@ main:
                   region: ${region}
                   bucket: ${bucket}
                   sceneId: ${childSceneId}
+                  arenaExportRequired: ${arenaExportRequired}
                 result: downstreamStatus
                 next: append_variant_entry
             - append_variant_entry:
@@ -799,14 +802,36 @@ run_workflow_and_wait:
         return:
           name: ${workflowExecution.name}
           state: ${workflowStatus.state}
+          result: '${if(default(workflowStatus.result, "") == "", {}, json.decode(workflowStatus.result))}'
 
 
 run_stage2_to_stage5:
-  params: [projectId, region, bucket, sceneId]
+  params: [projectId, region, bucket, sceneId, arenaExportRequired]
   steps:
     - derive:
         assign:
           - scenePrefix: '${"scenes/" + sceneId}'
+          - arenaState: "SKIPPED"
+        next: validate_stage1_outputs
+
+    # Pre-Stage 2: validate that Stage 1 produced the required scene_manifest.json
+    - validate_stage1_outputs:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${scenePrefix + "/assets/scene_manifest.json"}'
+          result: manifestCheck
+        except:
+          as: e
+          steps:
+            - log_manifest_missing:
+                call: sys.log
+                args:
+                  text: '${"FATAL: scene_manifest.json missing for " + sceneId + " at " + scenePrefix + "/assets/scene_manifest.json — Stage 1 output incomplete, cannot proceed to Stage 2"}'
+                  severity: "ERROR"
+            - raise_manifest_missing:
+                raise: '${"Stage 1 output incomplete: scene_manifest.json missing for " + sceneId}'
         next: run_stage2
 
     - run_stage2:
@@ -840,17 +865,91 @@ run_stage2_to_stage5:
             enable_stage3_isaac_refresh: true
             require_isaac: true
         result: variationResult
-        next: log_stage4_delegation
+        next: run_stage4
 
-    # Stage 4 (Genie Sim export) and Stage 5 (Arena export) are triggered by
-    # EventArc on their respective completion markers (.variation_pipeline_complete
-    # and .geniesim_complete). They are NOT invoked synchronously here to avoid
-    # duplicate execution — both markers already have EventArc triggers configured.
-    - log_stage4_delegation:
-        call: sys.log
+    - run_stage4:
+        call: run_workflow_and_wait
         args:
-          text: '${"[source-orchestrator] Stages 1-3 complete for " + sceneId + ". Stage 4 (genie-sim-export) will be triggered by EventArc on .variation_pipeline_complete marker."}'
-          severity: "INFO"
+          projectId: ${projectId}
+          region: ${region}
+          workflowName: "genie-sim-export-pipeline"
+          pollIntervalSeconds: 30
+          argument:
+            data:
+              bucket: ${bucket}
+              name: '${scenePrefix + "/variation_assets/.variation_pipeline_complete"}'
+        result: geniesimResult
+        next: run_stage5_requirement_switch
+
+    - run_stage5_requirement_switch:
+        switch:
+          - condition: ${arenaExportRequired}
+            next: run_stage5_required
+        next: run_stage5_non_blocking
+
+    - run_stage5_required:
+        call: run_workflow_and_wait
+        args:
+          projectId: ${projectId}
+          region: ${region}
+          workflowName: "arena-export-pipeline"
+          pollIntervalSeconds: 30
+          argument:
+            data:
+              bucket: ${bucket}
+              name: '${scenePrefix + "/geniesim/.geniesim_complete"}'
+        result: arenaRequiredResult
+        next: set_required_arena_status
+
+    - set_required_arena_status:
+        assign:
+          - arenaRequiredStatus: '${default(map.get(default(arenaRequiredResult.result, {}), "status"), "UNKNOWN")}'
+        next: required_stage5_status_switch
+
+    - required_stage5_status_switch:
+        switch:
+          - condition: '${arenaRequiredStatus == "SUCCESS"}'
+            next: return_required_stage5_success
+        next: raise_required_stage5_non_success
+
+    - return_required_stage5_success:
+        assign:
+          - arenaState: "SUCCEEDED"
+        next: return_summary
+
+    - raise_required_stage5_non_success:
+        raise: '${"Arena export returned non-success status for scene " + sceneId + " (status=" + arenaRequiredStatus + ", required=true)"}'
+
+    - run_stage5_non_blocking:
+        try:
+          call: run_workflow_and_wait
+          args:
+            projectId: ${projectId}
+            region: ${region}
+            workflowName: "arena-export-pipeline"
+            pollIntervalSeconds: 30
+            argument:
+              data:
+                bucket: ${bucket}
+                name: '${scenePrefix + "/geniesim/.geniesim_complete"}'
+          result: arenaResult
+        except:
+          as: arenaErr
+          steps:
+            - log_arena_warning:
+                call: sys.log
+                args:
+                  text: '${"[source-orchestrator] arena export non-blocking failure for " + sceneId + ": " + arenaErr.message}'
+                  severity: "WARNING"
+            - set_arena_failed:
+                assign:
+                  - arenaState: "FAILED"
+                next: return_summary
+        next: set_non_blocking_arena_success
+
+    - set_non_blocking_arena_success:
+        assign:
+          - arenaState: "SUCCEEDED"
         next: return_summary
 
     - return_summary:
@@ -858,8 +957,9 @@ run_stage2_to_stage5:
           scene_id: ${sceneId}
           usd_assembly: "SUCCEEDED"
           variation_assets: "SUCCEEDED"
-          geniesim_export: "DELEGATED_TO_EVENTARC"
-          arena_export: "DELEGATED_TO_EVENTARC"
+          geniesim_export: "SUCCEEDED"
+          arena_export: ${arenaState}
+          arena_required: ${arenaExportRequired}
 
 
 run_text_stage1_for_child:
@@ -1120,7 +1220,7 @@ run_text_jobs_on_cloudrun:
         args:
           projectId: ${projectId}
           region: ${region}
-          jobName: "text-scene-gen-job"
+          jobName: '${default(sys.get_env("TEXT_SCENE_GEN_JOB_NAME"), "text-scene-gen-job")}'
           timeoutSeconds: 1800
           envVars:
             - name: BUCKET
@@ -1157,7 +1257,7 @@ run_text_jobs_on_cloudrun:
         args:
           projectId: ${projectId}
           region: ${region}
-          jobName: "text-scene-adapter-job"
+          jobName: '${default(sys.get_env("TEXT_SCENE_ADAPTER_JOB_NAME"), "text-scene-adapter-job")}'
           timeoutSeconds: 1800
           envVars:
             - name: BUCKET
