@@ -211,11 +211,20 @@ else:
 echo "[t4-test] Step 7/7: Downloading results to ${LOCAL_RESULTS_DIR}..."
 mkdir -p "${LOCAL_RESULTS_DIR}"
 
-# Download episode JSONs
-gcloud compute scp --recurse \
-  "${VM_NAME}:~/BlueprintPipeline/${SCENE_DIR}/geniesim/recordings/" \
-  "${LOCAL_RESULTS_DIR}/" \
-  --zone="${VM_ZONE}" 2>/dev/null || echo "[t4-test] No recording files to download."
+# Download episode JSONs (individual files to avoid gcloud scp --recurse nesting bug)
+_remote_rec_dir="~/BlueprintPipeline/${SCENE_DIR}/geniesim/recordings"
+_rec_files=$(ssh_cmd "ls ${_remote_rec_dir}/ 2>/dev/null" 2>/dev/null || true)
+if [ -n "${_rec_files}" ]; then
+  for _f in ${_rec_files}; do
+    gcloud compute scp \
+      "${VM_NAME}:${_remote_rec_dir}/${_f}" \
+      "${LOCAL_RESULTS_DIR}/${_f}" \
+      --zone="${VM_ZONE}" 2>/dev/null || true
+  done
+  echo "[t4-test] Downloaded $(echo "${_rec_files}" | wc -w | tr -d ' ') recording files."
+else
+  echo "[t4-test] No recording files to download."
+fi
 
 # Download log
 gcloud compute scp \

@@ -141,10 +141,10 @@ ssh_cmd bash -c "'
   if sudo docker images geniesim-server:latest --format \"{{.ID}}\" | head -1 | grep -q .; then
     echo \"geniesim-server:latest image already exists.\"
     sudo docker images geniesim-server:latest --format \"table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}\"
-    echo \"To rebuild: sudo docker build -f Dockerfile.geniesim-server -t geniesim-server:latest .\"
+    echo \"To rebuild: sudo docker build -f Dockerfile.geniesim-server-nocurobo -t geniesim-server:latest .\"
   else
     echo \"Building geniesim-server image...\"
-    sudo docker build -f Dockerfile.geniesim-server -t geniesim-server:latest . 2>&1 | tail -20
+    sudo docker build -f Dockerfile.geniesim-server-nocurobo -t geniesim-server:latest . 2>&1 | tail -20
     echo \"Build complete.\"
     sudo docker images geniesim-server:latest --format \"table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}\"
   fi
