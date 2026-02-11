@@ -16,7 +16,7 @@ set -euo pipefail
 # =============================================================================
 
 VM_NAME="${T4_VM_NAME:-geniesim-t4-test}"
-VM_ZONE="${T4_VM_ZONE:-us-east1-b}"
+VM_ZONE="${T4_VM_ZONE:-asia-east1-c}"
 MACHINE_TYPE="${T4_MACHINE_TYPE:-n1-standard-8}"
 GPU_TYPE="nvidia-tesla-t4"
 GPU_COUNT=1

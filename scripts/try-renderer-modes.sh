@@ -21,7 +21,7 @@ set -euo pipefail
 # =============================================================================
 
 VM_NAME="${T4_VM_NAME:-geniesim-t4-test}"
-VM_ZONE="${T4_VM_ZONE:-us-east1-b}"
+VM_ZONE="${T4_VM_ZONE:-asia-east1-c}"
 SCENE_DIR="${T4_TEST_SCENE:-test_scenes/scenes/lightwheel_kitchen}"
 LOCAL_RESULTS_DIR="${T4_RESULTS_DIR:-./t4_renderer_mode_results}"
 # Renderer modes to try, in order

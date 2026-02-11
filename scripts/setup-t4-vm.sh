@@ -13,7 +13,7 @@ set -euo pipefail
 # =============================================================================
 
 VM_NAME="${T4_VM_NAME:-geniesim-t4-test}"
-VM_ZONE="${T4_VM_ZONE:-us-east1-b}"
+VM_ZONE="${T4_VM_ZONE:-asia-east1-c}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 
 # GitHub repo URL (used for cloning on the VM)

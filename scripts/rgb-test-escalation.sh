@@ -51,7 +51,7 @@ _winning_details=""
 # ── Helper: Check if T4 VM exists ────────────────────────────────────────────
 t4_vm_exists() {
   local vm_name="${T4_VM_NAME:-geniesim-t4-test}"
-  local vm_zone="${T4_VM_ZONE:-us-east1-b}"
+  local vm_zone="${T4_VM_ZONE:-asia-east1-c}"
   gcloud compute instances describe "${vm_name}" --zone="${vm_zone}" &>/dev/null
 }
 
@@ -131,7 +131,7 @@ if [ "${_success}" = "false" ] && [ "${SKIP_T4}" = "0" ]; then
   # Stop T4 VM to save money before trying L40S
   echo "[escalation] Stopping T4 VM..."
   T4_VM_NAME="${T4_VM_NAME:-geniesim-t4-test}"
-  T4_VM_ZONE="${T4_VM_ZONE:-us-east1-b}"
+  T4_VM_ZONE="${T4_VM_ZONE:-asia-east1-c}"
   gcloud compute instances stop "${T4_VM_NAME}" --zone="${T4_VM_ZONE}" 2>/dev/null || true
 fi
 
