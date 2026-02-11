@@ -93,6 +93,73 @@ def test_hdf5_exporter_handles_dependency(load_job_module, sample_episodes: list
 
 
 @pytest.mark.unit
+def test_hdf5_exporter_supports_nested_run_schema(load_job_module, tmp_path: Path) -> None:
+    exporters = load_job_module("episode_generation", "multi_format_exporters.py")
+    exporter = exporters.HDF5Exporter(output_path=tmp_path / "nested_dataset.hdf5", verbose=False)
+
+    if not exporter._h5py_available:
+        pytest.skip("h5py not available")
+
+    episodes = [
+        {
+            "episode_id": "episode_nested_000000",
+            "task": "Pick and place",
+            "frames": [
+                {
+                    "ee_pos": [0.1, 0.2, 0.3],
+                    "ee_quat": [1.0, 0.0, 0.0, 0.0],
+                    "ee_vel": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    "gripper_openness": 0.25,
+                    "action": [0.0] * 8,
+                    "reward": 0.0,
+                    "observation": {
+                        "robot_state": {
+                            "joint_positions": [0.1] * 7,
+                            "joint_velocities": [0.01] * 7,
+                            "joint_efforts": [0.2] * 7,
+                        },
+                        "privileged": {
+                            "contact_forces": {"grip_force_N": 1.5}
+                        },
+                    },
+                },
+                {
+                    "ee_pos": [0.15, 0.25, 0.35],
+                    "ee_quat": [1.0, 0.0, 0.0, 0.0],
+                    "ee_vel": [0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    "gripper_openness": 0.35,
+                    "action": [0.1] * 8,
+                    "reward": 1.0,
+                    "observation": {
+                        "robot_state": {
+                            "joint_positions": [0.2] * 7,
+                            "joint_velocities": [0.02] * 7,
+                            "joint_efforts": [0.3] * 7,
+                        },
+                        "privileged": {
+                            "contact_forces": {"grip_force_N": 2.0}
+                        },
+                    },
+                },
+            ],
+        }
+    ]
+
+    output_path = exporter.export_episodes(
+        episodes=episodes,
+        splits={"train": ["episode_nested_000000"]},
+        robot_type="franka",
+    )
+    h5py = exporter._h5py
+    with h5py.File(output_path, "r") as handle:
+        demo = handle["data"]["demo_0"]
+        assert demo["obs"]["joint_positions"].shape == (2, 7)
+        assert demo["obs"]["joint_efforts"].shape == (2, 7)
+        assert demo["obs"]["ee_position"].shape == (2, 3)
+        assert demo["obs"]["gripper_force"].shape == (2,)
+
+
+@pytest.mark.unit
 def test_rosbag_exporter_fallback(load_job_module, sample_episodes: list[dict], tmp_path: Path) -> None:
     exporters = load_job_module("episode_generation", "multi_format_exporters.py")
     exporter = exporters.ROSBagExporter(output_dir=tmp_path / "rosbag", verbose=False)

@@ -101,6 +101,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -5608,18 +5609,6 @@ class GenieSimLocalFramework:
         _require_dynamic_toggle = parse_bool_env(
             os.getenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE"), default=False,
         )
-        # In kinematic mode with REQUIRE_REAL_EFFORTS=false, stale PhysX efforts
-        # are explicitly allowed to use inverse-dynamics backfill, including when
-        # STRICT_REAL_ONLY=1. This preserves strict fail-closed behavior for
-        # normal runs while honoring the explicit effort override contract.
-        if _keep_kinematic and not _require_real_efforts:
-            if stale_ratio is not None and stale_ratio > 0.9:
-                logger.info(
-                    "[STRICT] Kinematic mode: stale PhysX efforts (ratio=%.3f) "
-                    "replaced by inverse dynamics backfill. REQUIRE_REAL_EFFORTS=false.",
-                    stale_ratio,
-                )
-            return
         # Phase B grasp-only toggle: objects are kinematic at rest but dynamic during
         # manipulation. Non-manipulation phases (approach, retreat) may still produce
         # identical efforts. Stale ratio 0.3-0.9 is expected and acceptable.
@@ -5639,8 +5628,8 @@ class GenieSimLocalFramework:
                     "Check server logs for [TOGGLE] messages.",
                     stale_ratio,
                 )
-                # Don't hard-fail stale-ratio in Phase B toggle mode.
-                _phase_b_stale_diagnostic_only = True
+                # Keep fail-closed semantics in strict mode.
+                _phase_b_stale_diagnostic_only = False
 
         diagnostics = {
             "efforts_source": efforts_source,
@@ -5649,6 +5638,8 @@ class GenieSimLocalFramework:
             "effort_missing_count": int(effort_missing_count),
             "total_frames": int(total_frames),
             "strict_real_only": _strict_real_only,
+            "keep_objects_kinematic": _keep_kinematic,
+            "require_real_efforts": _require_real_efforts,
         }
         if stale_ratio is not None:
             diagnostics["stale_ratio"] = float(stale_ratio)
@@ -5714,10 +5705,6 @@ class GenieSimLocalFramework:
     ) -> None:
         """Fail closed for strict-realism contact channels during manipulation."""
         if not getattr(self, "_strict_realism", False):
-            return
-        # Respect REQUIRE_REAL_CONTACTS=false — kinematic objects cannot produce
-        # PhysX contacts, so skip strict contact enforcement when disabled.
-        if not parse_bool_env(os.getenv("REQUIRE_REAL_CONTACTS"), default=True):
             return
         if not manipulation_phase:
             return
@@ -5807,10 +5794,6 @@ class GenieSimLocalFramework:
         if not getattr(self, "_strict_realism", False):
             return
         if not requires_motion:
-            return
-        # Respect REQUIRE_OBJECT_MOTION=false — kinematic objects cannot move,
-        # so all object motion checks are impossible to satisfy.
-        if not parse_bool_env(os.getenv("REQUIRE_OBJECT_MOTION"), default=True):
             return
 
         threshold_m = float(
@@ -6906,7 +6889,7 @@ class GenieSimLocalFramework:
                 _marker = _marker.strip()
                 if _rel and _marker:
                     forbidden_specs.append((_rel, _marker))
-        if self._strict_realism and parse_bool_env(os.getenv("REQUIRE_OBJECT_MOTION"), default=True):
+        if self._strict_realism:
             forbidden_specs.append(
                 ("source/data_collection/server/command_controller.py", "BPv7_keep_kinematic")
             )
@@ -11192,7 +11175,9 @@ class GenieSimLocalFramework:
                             "mode": cert_eval.get("mode", getattr(self, "_physics_cert_mode", "strict")),
                             "passed": bool(cert_eval.get("passed", False)),
                             "critical_failures": list(cert_eval.get("critical_failures") or []),
+                            "warnings": list(cert_eval.get("warnings") or []),
                             "metrics": cert_eval.get("metrics") or {},
+                            "synthesis_provenance": cert_eval.get("synthesis_provenance") or {},
                             "gate_versions": cert_eval.get("gate_versions") or {},
                         }
                         task_outcome = cert_eval.get("task_outcome") or task_outcome
@@ -11250,6 +11235,60 @@ class GenieSimLocalFramework:
                 if _canonical_success is not None:
                     task_success = bool(_canonical_success)
 
+            _strict_flags_effective = {
+                "STRICT_REALISM": bool(getattr(self, "_strict_realism", False)),
+                "STRICT_REAL_ONLY": bool(getattr(self, "_strict_real_only", False)),
+                "REQUIRE_REAL_CONTACTS": parse_bool_env(os.getenv("REQUIRE_REAL_CONTACTS"), default=True),
+                "REQUIRE_REAL_EFFORTS": parse_bool_env(os.getenv("REQUIRE_REAL_EFFORTS"), default=True),
+                "REQUIRE_OBJECT_MOTION": parse_bool_env(os.getenv("REQUIRE_OBJECT_MOTION"), default=True),
+                "GENIESIM_KEEP_OBJECTS_KINEMATIC": parse_bool_env(
+                    os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False,
+                ),
+            }
+            _strict_realism_manifest = {
+                "strict_flags_effective": _strict_flags_effective,
+                "normalization_passes_applied": [],
+                "cert_gate_results": {
+                    "mode": certification.get("mode"),
+                    "passed": bool(certification.get("passed", False)),
+                    "critical_failures": list(certification.get("critical_failures") or []),
+                    "warnings": list(certification.get("warnings") or []),
+                },
+            }
+
+            _pose_source_histogram: Dict[str, Counter[str]] = defaultdict(Counter)
+            for _frame in frames:
+                _obj_poses = _frame.get("object_poses")
+                if not isinstance(_obj_poses, dict):
+                    continue
+                for _oid, _pose_entry in _obj_poses.items():
+                    if not isinstance(_pose_entry, dict):
+                        continue
+                    _pose_src = str(_pose_entry.get("source") or "").strip() or "unknown"
+                    _pose_source_histogram[str(_oid)][_pose_src] += 1
+
+            object_dynamics_truth: Dict[str, Dict[str, Any]] = {}
+            if isinstance(object_metadata, dict):
+                for _oid, _meta_entry in object_metadata.items():
+                    _meta_dict = _meta_entry if isinstance(_meta_entry, dict) else {}
+                    _mass_source = str(
+                        _meta_dict.get("mass_source")
+                        or _meta_dict.get("estimation_source")
+                        or ("provided" if _meta_dict.get("mass_kg") is not None else "unknown")
+                    )
+                    _friction_source = str(
+                        _meta_dict.get("friction_source")
+                        or ("provided" if _meta_dict.get("friction") is not None else "unknown")
+                    )
+                    _pose_counter = _pose_source_histogram.get(str(_oid), Counter())
+                    _pose_source = _pose_counter.most_common(1)[0][0] if _pose_counter else "unknown"
+                    object_dynamics_truth[str(_oid)] = {
+                        "is_kinematic": bool(_strict_flags_effective["GENIESIM_KEEP_OBJECTS_KINEMATIC"]),
+                        "mass_source": _mass_source,
+                        "friction_source": _friction_source,
+                        "pose_source": _pose_source,
+                    }
+
             with open(episode_path, "w") as f:
                 json.dump({
                     "schema_version": "2.1",
@@ -11261,6 +11300,8 @@ class GenieSimLocalFramework:
                     "channel_completeness": channel_completeness,
                     "object_id_map": object_id_map,
                     "physics_data_provenance": physics_data_provenance,
+                    "strict_realism_manifest": _strict_realism_manifest,
+                    "object_dynamics_truth": object_dynamics_truth,
                     "task_name": task.get("task_name") or llm_metadata.get("task_name") or "unknown_task",
                     "task_type": task.get("task_type"),
                     "target_object": task.get("target_object"),
@@ -12348,8 +12389,7 @@ class GenieSimLocalFramework:
             # Inject synthetic scene_state when empty (mock/skip-server mode).
             # In production, empty scene_state is an error — real data is required.
             _scene_state_missing = not obs.get("scene_state")
-            _require_obj_motion = os.environ.get("REQUIRE_OBJECT_MOTION", "true").lower() not in ("false", "0", "no")
-            if _scene_state_missing and _strict_realism and _requires_motion_task and _require_obj_motion:
+            if _scene_state_missing and _strict_realism and _requires_motion_task:
                 self._raise_fatal_realism(
                     "STRICT_OBJECT_MOTION_SCENE_STATE_MISSING",
                     (
@@ -12612,14 +12652,13 @@ class GenieSimLocalFramework:
                 obs["scene_state_provenance"] = "physx_server"
             elif _has_scene_objects and not _scene_state_missing:
                 # Scene state has objects but data_source is unexpected.
-                # For kinematic mode the server still reports real (static)
-                # poses, so label truthfully as "server_static".
+                # In kinematic mode this is still static/non-dynamic data and
+                # must not be counted as strict server-backed motion evidence.
                 _keep_kin = parse_bool_env(
                     os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False,
                 )
                 if _keep_kin:
-                    obs.setdefault("scene_state_provenance", "server_static")
-                    _real_scene_state_count += 1
+                    obs.setdefault("scene_state_provenance", "kinematic_static")
             _cf = obs.get("camera_frames", {})
             if _cf and any(
                 v.get("rgb") is not None
@@ -13010,9 +13049,8 @@ class GenieSimLocalFramework:
                             _attached_has_real_pose = True  # server reports actual movement
                         break
             if _attached_object_id is not None and _ee_pos_units is not None and not _attached_has_real_pose:
-                _require_obj_motion = parse_bool_env(os.getenv("REQUIRE_OBJECT_MOTION"), default=True)
                 _keep_kin_prov = parse_bool_env(os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False)
-                _strict_disallow_kinematic_proxy = _strict_real_only or (_cert_strict and _require_obj_motion)
+                _strict_disallow_kinematic_proxy = _strict_real_only or _cert_strict
                 if _strict_disallow_kinematic_proxy and not _keep_kin_prov:
                     # Objects SHOULD be dynamic but aren't — block EE-offset proxy
                     if obs.get("scene_state_provenance") != "kinematic_ee_offset_blocked":
@@ -13030,7 +13068,7 @@ class GenieSimLocalFramework:
                                 "attached_object_id": _attached_object_id,
                                 "scene_state_provenance": obs.get("scene_state_provenance"),
                                 "strict_real_only": _strict_real_only,
-                                "requires_object_motion": _require_obj_motion,
+                                "requires_object_motion": _requires_motion_task,
                             },
                         )
                 else:
@@ -13050,12 +13088,11 @@ class GenieSimLocalFramework:
                             if _obj.get("object_id") == _attached_object_id:
                                 _update_pose_dict(_obj, _new_pos)
                                 break
-                    # When objects are kinematic by design, the base scene state
-                    # is from the server (real static poses). Label as
-                    # "server_static" so certification recognises it; otherwise
-                    # use "kinematic_ee_offset" for non-strict scenarios.
+                    # Kinematic EE-offset is synthetic pose reconstruction.
+                    # Keep explicit kinematic provenance so strict certification
+                    # cannot treat it as server-backed dynamic motion.
                     if _keep_kin_prov:
-                        obs["scene_state_provenance"] = "server_static"
+                        obs["scene_state_provenance"] = "kinematic_static"
                     else:
                         obs["scene_state_provenance"] = "kinematic_ee_offset"
 
@@ -13134,8 +13171,7 @@ class GenieSimLocalFramework:
                         )
                         _contact_query_warned = True
                     collision_provenance = "joint_limits_only"
-                    _require_contacts_here = parse_bool_env(os.getenv("REQUIRE_REAL_CONTACTS"), default=True)
-                    if _strict_realism and _manipulation_phase and _require_contacts_here:
+                    if _strict_realism and _manipulation_phase:
                         self._raise_fatal_realism(
                             "STRICT_CONTACT_RPC_UNAVAILABLE",
                             (
@@ -13154,8 +13190,7 @@ class GenieSimLocalFramework:
             if collision_provenance is None:
                 collision_provenance = "physx_joint_effort" if _has_real_efforts else "joint_limits_only"
             frame_data["collision_provenance"] = collision_provenance
-            _require_contacts_prov = parse_bool_env(os.getenv("REQUIRE_REAL_CONTACTS"), default=True)
-            if _strict_realism and _manipulation_phase and collision_provenance != "physx_contact_report" and _require_contacts_prov:
+            if _strict_realism and _manipulation_phase and collision_provenance != "physx_contact_report":
                 self._raise_fatal_realism(
                     "STRICT_CONTACT_PROVENANCE",
                     (
@@ -13305,13 +13340,13 @@ class GenieSimLocalFramework:
                                     break
                         obs["scene_state_provenance"] = "kinematic_ee_offset"
                     else:
-                        # In kinematic mode the server still backs the static
-                        # poses, so "server_static" is the truthful label.
+                        # In kinematic mode this remains non-dynamic evidence;
+                        # keep explicit kinematic provenance.
                         _keep_kin_attach = parse_bool_env(
                             os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"), default=False,
                         )
                         if _keep_kin_attach:
-                            obs["scene_state_provenance"] = "server_static"
+                            obs["scene_state_provenance"] = "kinematic_static"
                         else:
                             obs["scene_state_provenance"] = "kinematic_ee_offset_blocked"
 
@@ -13639,6 +13674,50 @@ class GenieSimLocalFramework:
                             _cam_data["depth"] = (_depth_arr + _depth_noise).tolist()
                         except Exception:
                             pass  # Non-critical; skip if depth format unexpected
+
+            # Mandatory per-frame channel provenance tags used by downstream
+            # quality/certification gates and external buyers.
+            frame_data["joint_efforts_source"] = str(frame_data.get("efforts_source") or "none")
+            frame_data["contacts_source"] = str(frame_data.get("collision_provenance") or "none")
+            _object_pose_sources: List[str] = []
+            _obj_poses_frame = frame_data.get("object_poses")
+            if isinstance(_obj_poses_frame, dict):
+                for _pose_entry in _obj_poses_frame.values():
+                    if isinstance(_pose_entry, dict):
+                        _src = str(_pose_entry.get("source") or "").strip()
+                        if _src:
+                            _object_pose_sources.append(_src)
+            if not _object_pose_sources:
+                frame_data["object_pose_source"] = "unavailable"
+            elif len(set(_object_pose_sources)) == 1:
+                frame_data["object_pose_source"] = _object_pose_sources[0]
+            else:
+                frame_data["object_pose_source"] = "mixed"
+                frame_data["object_pose_source_details"] = sorted(set(_object_pose_sources))
+
+            _rgb_source = "unavailable"
+            _camera_frames_obs = obs.get("camera_frames") if isinstance(obs, dict) else None
+            if isinstance(_camera_frames_obs, dict) and _camera_frames_obs:
+                _rgb_tags: List[str] = []
+                for _cam_payload in _camera_frames_obs.values():
+                    if not isinstance(_cam_payload, dict):
+                        continue
+                    _rgb_val = _cam_payload.get("rgb")
+                    if _rgb_val is None:
+                        _rgb_tags.append("missing")
+                    elif isinstance(_rgb_val, str) and _rgb_val.endswith(".npy"):
+                        _rgb_tags.append("npy_reference")
+                    elif isinstance(_rgb_val, (bytes, bytearray, list, str, np.ndarray)):
+                        _rgb_tags.append("captured")
+                    else:
+                        _rgb_tags.append("unknown")
+                if "captured" in _rgb_tags:
+                    _rgb_source = "isaac_sim_camera"
+                elif "npy_reference" in _rgb_tags:
+                    _rgb_source = "isaac_sim_camera_npy_ref"
+                elif _rgb_tags:
+                    _rgb_source = _rgb_tags[0]
+            frame_data["rgb_source"] = _rgb_source
 
             # --- Fix 3: Split observation into sensors (proprio) vs privileged (GT state) ---
             _obs_full = frame_data.get("observation", {})
@@ -14139,16 +14218,16 @@ class GenieSimLocalFramework:
         # When objects are kinematic (GENIESIM_KEEP_OBJECTS_KINEMATIC=1), PhysX
         # cannot generate real contacts and synthesis is the only viable path.
         # Block synthesis only when strict_real_only AND objects are NOT kinematic.
-        _keep_kin = parse_bool_env(
-            os.getenv("GENIESIM_KEEP_OBJECTS_KINEMATIC"),
+        _allow_synthetic_contacts = parse_bool_env(
+            os.getenv("GENIESIM_ALLOW_SYNTHETIC_COLLISION_CONTACTS"),
             default=False,
         )
         if _estimated_effort_count > 0 and _attached_object_id:
-            if _strict_real_only and not _keep_kin:
+            if _strict_realism or _strict_real_only:
                 self._raise_fatal_realism(
                     "STRICT_SYNTHETIC_CONTACTS_FORBIDDEN",
                     (
-                        "Strict real-only forbids synthetic collision_contacts derived "
+                        "Strict realism forbids synthetic collision_contacts derived "
                         "from inverse-dynamics efforts."
                     ),
                     diagnostics={
@@ -14156,68 +14235,71 @@ class GenieSimLocalFramework:
                         "attached_object_id": _attached_object_id,
                     },
                 )
-            _synth_contact_count = 0
-            _real_contact_preserved_count = 0
-            for _frame in frames:
-                _phase = str(_frame.get("phase", "")).lower()
-                _gc = _frame.get("gripper_command", "open")
-                _ee_p = _frame.get("ee_pos")
-                if _gc != "closed" or not _ee_p or _phase not in (
-                    "grasp", "lift", "transport", "pre_place", "place",
-                ):
-                    continue
-                # Skip frames that already have real PhysX contacts — never
-                # overwrite real data with synthesized heuristics.
-                _existing_prov = _frame.get("collision_provenance", "")
-                if _existing_prov == "physx_contact_report":
-                    _existing_contacts = _frame.get("collision_contacts", [])
-                    if _existing_contacts:
-                        _real_contact_preserved_count += 1
+            if _allow_synthetic_contacts:
+                _synth_contact_count = 0
+                _real_contact_preserved_count = 0
+                for _frame in frames:
+                    _phase = str(_frame.get("phase", "")).lower()
+                    _gc = _frame.get("gripper_command", "open")
+                    _ee_p = _frame.get("ee_pos")
+                    if _gc != "closed" or not _ee_p or _phase not in (
+                        "grasp", "lift", "transport", "pre_place", "place",
+                    ):
                         continue
-                _obs_rs = _frame.get("observation", {}).get("robot_state", {})
-                _efforts = _obs_rs.get("joint_efforts", [])
-                if gripper_indices:
-                    _ge = [float(_efforts[idx]) for idx in gripper_indices if idx < len(_efforts)]
-                else:
-                    _ge = [float(e) for e in _efforts[arm_dof:]] if len(_efforts) > arm_dof else [0.0]
-                _gf = max(sum(abs(e) for e in _ge), 1.0)
-                _contacts = [
-                    {
-                        "body_a": "gripper_right_finger",
-                        "body_b": _attached_object_id,
-                        "force_N": round(_gf / 2, 4),
-                        "force_vector": [round(_gf / 2, 4), 0.0, 0.0],
-                        "normal": [1.0, 0.0, 0.0],
-                        "position": [round(float(_ee_p[0]), 4), round(float(_ee_p[1]), 4), round(float(_ee_p[2]), 4)],
-                        "penetration_depth": 0.001,
-                    },
-                    {
-                        "body_a": "gripper_left_finger",
-                        "body_b": _attached_object_id,
-                        "force_N": round(_gf / 2, 4),
-                        "force_vector": [round(-_gf / 2, 4), 0.0, 0.0],
-                        "normal": [-1.0, 0.0, 0.0],
-                        "position": [round(float(_ee_p[0]), 4), round(float(_ee_p[1]), 4), round(float(_ee_p[2]), 4)],
-                        "penetration_depth": 0.001,
-                    },
-                ]
-                _frame["collision_contacts"] = _contacts
-                _frame["contact_count"] = len(_contacts)
-                _frame["collision_provenance"] = "synthesized_from_id_efforts"
-                _frame["collision_free_physics"] = False
-                _synth_contact_count += 1
-            if _real_contact_preserved_count > 0:
-                logger.info(
-                    "Preserved real PhysX contacts for %d frames (not overwritten by synthesis).",
-                    _real_contact_preserved_count,
-                )
-            if _synth_contact_count > 0:
-                logger.info(
-                    "Synthesized collision_contacts for %d/%d frames during manipulation phases "
-                    "(real=%d, synthesized=%d).",
-                    _synth_contact_count, len(frames),
-                    _real_contact_preserved_count, _synth_contact_count,
-                )
+                    # Skip frames that already have real PhysX contacts — never
+                    # overwrite real data with synthesized heuristics.
+                    _existing_prov = _frame.get("collision_provenance", "")
+                    if _existing_prov == "physx_contact_report":
+                        _existing_contacts = _frame.get("collision_contacts", [])
+                        if _existing_contacts:
+                            _real_contact_preserved_count += 1
+                            continue
+                    _obs_rs = _frame.get("observation", {}).get("robot_state", {})
+                    _efforts = _obs_rs.get("joint_efforts", [])
+                    if gripper_indices:
+                        _ge = [float(_efforts[idx]) for idx in gripper_indices if idx < len(_efforts)]
+                    else:
+                        _ge = [float(e) for e in _efforts[arm_dof:]] if len(_efforts) > arm_dof else [0.0]
+                    _gf = max(sum(abs(e) for e in _ge), 1.0)
+                    _contacts = [
+                        {
+                            "body_a": "gripper_right_finger",
+                            "body_b": _attached_object_id,
+                            "force_N": round(_gf / 2, 4),
+                            "force_vector": [round(_gf / 2, 4), 0.0, 0.0],
+                            "normal": [1.0, 0.0, 0.0],
+                            "position": [round(float(_ee_p[0]), 4), round(float(_ee_p[1]), 4), round(float(_ee_p[2]), 4)],
+                            "penetration_depth": 0.001,
+                            "provenance": "synthesized_from_id_efforts",
+                        },
+                        {
+                            "body_a": "gripper_left_finger",
+                            "body_b": _attached_object_id,
+                            "force_N": round(_gf / 2, 4),
+                            "force_vector": [round(-_gf / 2, 4), 0.0, 0.0],
+                            "normal": [-1.0, 0.0, 0.0],
+                            "position": [round(float(_ee_p[0]), 4), round(float(_ee_p[1]), 4), round(float(_ee_p[2]), 4)],
+                            "penetration_depth": 0.001,
+                            "provenance": "synthesized_from_id_efforts",
+                        },
+                    ]
+                    _frame["collision_contacts"] = _contacts
+                    _frame["contact_count"] = len(_contacts)
+                    _frame["collision_provenance"] = "synthesized_from_id_efforts"
+                    _frame["collision_free_physics"] = False
+                    _synth_contact_count += 1
+                if _real_contact_preserved_count > 0:
+                    logger.info(
+                        "Preserved real PhysX contacts for %d frames (not overwritten by synthesis).",
+                        _real_contact_preserved_count,
+                    )
+                if _synth_contact_count > 0:
+                    logger.warning(
+                        "Synthesized collision_contacts for %d/%d frames during manipulation phases "
+                        "(real=%d, synthesized=%d).",
+                        _synth_contact_count, len(frames),
+                        _real_contact_preserved_count, _synth_contact_count,
+                    )
 
         # Refresh missing-effort count after backfill
         _effort_missing_count = 0
@@ -14256,11 +14338,9 @@ class GenieSimLocalFramework:
                             total_frames=len(frames),
                             stale_ratio=_stale_ratio,
                         )
-                    # Allow ID replacement when REQUIRE_REAL_EFFORTS=false (even in
-                    # strict mode).  Kinematic objects produce physically-frozen
-                    # efforts — ID estimates are more realistic than stale PhysX data.
-                    _allow_id_replacement = not _strict_realism or not parse_bool_env(
-                        os.getenv("REQUIRE_REAL_EFFORTS"), default=True,
+                    _allow_id_replacement = (
+                        not _strict_realism
+                        and parse_bool_env(os.getenv("GENIESIM_ALLOW_ID_BACKFILL"), default=True)
                     )
                     if not _allow_id_replacement:
                         logger.error(
@@ -15004,6 +15084,14 @@ class GenieSimLocalFramework:
                         _sanitized["rgb_encoding"] = _rgb_encoding
                     if _depth_encoding:
                         _sanitized["depth_encoding"] = _depth_encoding
+                    _sanitized["render_backend"] = os.getenv("BP_RENDERER_MODE", "unknown")
+                    _sanitized["sync_step_id"] = int(_frame_idx)
+                    _sanitized["decode_ok"] = False
+                    _sanitized["depth_decode_ok"] = False
+                    _sanitized["is_black"] = True
+                    _sanitized["nonzero_ratio"] = 0.0
+                    _sanitized["unique_color_count"] = 0
+                    _sanitized["depth_all_non_finite"] = False
 
                     for _key in ("rgb", "depth"):
                         _val = camera_data.get(_key)
@@ -15033,6 +15121,16 @@ class GenieSimLocalFramework:
                         if _arr is not None and isinstance(_arr, np.ndarray):
                             # Validate RGB frame quality
                             if _key == "rgb":
+                                _sanitized["decode_ok"] = True
+                                _nonzero = int(np.count_nonzero(_arr))
+                                _total = int(_arr.size)
+                                _sanitized["nonzero_ratio"] = round(_nonzero / float(max(1, _total)), 6)
+                                _sanitized["is_black"] = _nonzero == 0
+                                try:
+                                    _flat_rgb = _arr.reshape(-1, _arr.shape[-1])[:, :3] if _arr.ndim >= 3 else _arr.reshape(-1, 1)
+                                    _sanitized["unique_color_count"] = int(np.unique(_flat_rgb, axis=0).shape[0])
+                                except Exception:
+                                    _sanitized["unique_color_count"] = 0
                                 try:
                                     from tools.camera_io import validate_rgb_frame_quality, save_debug_thumbnail
                                     from data_fidelity import require_valid_rgb, DataFidelityError
@@ -15053,6 +15151,8 @@ class GenieSimLocalFramework:
                                                 gate_name="rgb_quality",
                                                 diagnostics=_rgb_diag,
                                             )
+                                    _sanitized["is_black"] = bool(_rgb_diag.get("is_black", False))
+                                    _sanitized["unique_color_count"] = int(_rgb_diag.get("unique_colors", 0) or 0)
                                     # Save debug thumbnail for human verification
                                     if _frames_dir is not None:
                                         save_debug_thumbnail(
@@ -15062,6 +15162,12 @@ class GenieSimLocalFramework:
                                         )
                                 except ImportError:
                                     pass
+                            elif _key == "depth":
+                                _sanitized["depth_decode_ok"] = True
+                                try:
+                                    _sanitized["depth_all_non_finite"] = bool(np.all(~np.isfinite(_arr)))
+                                except Exception:
+                                    _sanitized["depth_all_non_finite"] = False
                             try:
                                 _ref = _save_array(_arr, _key)
                                 if _ref is not None:

@@ -35,13 +35,13 @@ countertops, background areas) to find small or partially hidden objects.
 Use code execution to crop and inspect areas that might contain objects you missed.
 
 Return a JSON array of short noun phrases, one per object type.
-Include structural elements like "floor", "wall", "ceiling" if visible.
+Do not include pure structural/background surfaces like "floor", "wall", "ceiling", or "window".
 Be specific: prefer "office chair" over just "chair", "potted plant" over "plant".
 Prefer whole, room-level objects over tiny parts.
 Do not list tiny components like screws, knobs, handles, hinges, or display sub-parts.
 If an object has likely articulated parts, encode that cue naturally in the label.
 Examples: "desk with drawers", "cabinet with doors", "box with hinged lid".
-Look specifically for drawers, doors, hinges, knobs, handles, or lids.
+Look for articulated object cues (drawers/doors/lids), but return the parent object label.
 Do NOT include people.
 Return at most 25 labels.
 
@@ -51,6 +51,22 @@ Example output: ["office chair", "wooden desk", "monitor", "potted plant", "floo
 _TINY_PART_KEYWORDS = {
     "knob", "handle", "hinge", "screw", "button", "switch", "dial", "display panel",
     "control panel", "baseboard", "window frame", "trim",
+}
+
+_STRUCTURAL_LABEL_KEYWORDS = {
+    "floor",
+    "wall",
+    "ceiling",
+    "window",
+    "window curtain",
+    "curtain",
+    "countertop",
+    "tile",
+    "tiles",
+    "baseboard",
+    "trim",
+    "column",
+    "pillar",
 }
 
 _NORMALIZATION_STOPWORDS = {
@@ -176,12 +192,24 @@ def _normalize_label_text(label: str) -> str:
 
 def _tokenize(label: str) -> List[str]:
     norm = _normalize_label_text(label)
-    return [token for token in norm.split() if token and token not in _NORMALIZATION_STOPWORDS]
+    tokens = []
+    for token in norm.split():
+        if not token or token in _NORMALIZATION_STOPWORDS:
+            continue
+        if token.endswith("s") and len(token) > 4 and not token.endswith("ss"):
+            token = token[:-1]
+        tokens.append(token)
+    return tokens
 
 
 def _is_tiny_part_label(label: str) -> bool:
     norm = _normalize_label_text(label)
     return any(keyword in norm for keyword in _TINY_PART_KEYWORDS)
+
+
+def _is_structural_label(label: str) -> bool:
+    norm = _normalize_label_text(label)
+    return any(keyword == norm or keyword in norm for keyword in _STRUCTURAL_LABEL_KEYWORDS)
 
 
 def _is_semantic_duplicate(candidate_tokens: List[str], kept_tokens: List[str]) -> bool:
@@ -218,6 +246,8 @@ def _post_process_labels(
         if not tokens:
             continue
         if mode == "quality" and _is_tiny_part_label(label):
+            continue
+        if mode == "quality" and _is_structural_label(label):
             continue
         if any(_is_semantic_duplicate(tokens, existing) for existing in kept_tokens):
             continue

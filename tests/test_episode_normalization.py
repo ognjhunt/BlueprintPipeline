@@ -1,3 +1,5 @@
+import pytest
+
 from tools.quality_gates.episode_normalization import (
     normalize_episode_for_certification,
     _retro_downgrade_task_success,
@@ -96,7 +98,12 @@ def test_normalize_episode_for_certification_fills_sparse_fields_but_does_not_fa
         assert frame.get("ee_acc") is not None
         rs = frame["observation"]["robot_state"]
         assert isinstance(rs.get("joint_accelerations"), list) and len(rs["joint_accelerations"]) > 0
-        assert isinstance(frame.get("object_poses"), dict) and frame["object_poses"]
+        assert frame.get("object_poses") in (None, {})
+    assert episode.get("normalization_passes_applied") == [
+        "ensure_ee_quat",
+        "ensure_ee_vel_acc",
+        "ensure_joint_accelerations",
+    ]
 
     task = {
         "task_type": episode["task_type"],
@@ -115,7 +122,7 @@ def test_normalize_episode_for_certification_fills_sparse_fields_but_does_not_fa
     assert "EE_TARGET_GEOMETRY_IMPLAUSIBLE" in report["critical_failures"]
 
 
-def test_normalize_stale_effort_replacement_preserves_non_physx_frames() -> None:
+def test_normalize_stale_effort_replacement_disabled_by_default() -> None:
     episode = {
         "episode_id": "task_0_ep0001",
         "task_name": "task_0",
@@ -189,13 +196,71 @@ def test_normalize_stale_effort_replacement_preserves_non_physx_frames() -> None
 
     for idx in (0, 1, 2):
         frame = episode["frames"][idx]
-        assert frame.get("efforts_source") == "estimated_inverse_dynamics"
+        assert frame.get("efforts_source") == "physx"
         efforts = frame["observation"]["robot_state"]["joint_efforts"]
-        assert any(abs(float(e) - 0.1) > 1e-6 for e in efforts)
+        assert efforts == [0.1] * 7
 
     preserved_frame = episode["frames"][3]
     assert preserved_frame.get("efforts_source") == "real_sensor"
     assert preserved_frame["observation"]["robot_state"]["joint_efforts"] == [9.0] * 7
+
+
+def test_normalize_stale_effort_replacement_can_be_explicitly_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EPISODE_NORMALIZATION_ALLOW_EFFORT_ID_BACKFILL", "1")
+    episode = {
+        "episode_id": "task_0_ep0002",
+        "task_name": "task_0",
+        "task_type": "pick_place",
+        "target_object": "lightwheel_kitchen_obj_Toaster003",
+        "frames": [
+            {
+                "dt": 0.1,
+                "timestamp": 0.0,
+                "ee_pos": [0.0, 0.0, 0.0],
+                "efforts_source": "physx",
+                "observation": {
+                    "robot_state": {
+                        "joint_positions": [0.1] * 7,
+                        "joint_velocities": [0.0] * 7,
+                        "joint_efforts": [0.1] * 7,
+                    },
+                },
+            },
+            {
+                "dt": 0.1,
+                "timestamp": 0.1,
+                "ee_pos": [0.1, 0.0, 0.0],
+                "efforts_source": "physx",
+                "observation": {
+                    "robot_state": {
+                        "joint_positions": [0.2] * 7,
+                        "joint_velocities": [0.1] * 7,
+                        "joint_efforts": [0.1] * 7,
+                    },
+                },
+            },
+            {
+                "dt": 0.1,
+                "timestamp": 0.2,
+                "ee_pos": [0.2, 0.0, 0.0],
+                "efforts_source": "physx",
+                "observation": {
+                    "robot_state": {
+                        "joint_positions": [0.3] * 7,
+                        "joint_velocities": [0.2] * 7,
+                        "joint_efforts": [0.1] * 7,
+                    },
+                },
+            },
+        ],
+    }
+
+    normalize_episode_for_certification(episode)
+    assert "replace_stale_efforts_with_inverse_dynamics" in episode.get("normalization_passes_applied", [])
+    for frame in episode["frames"]:
+        assert frame.get("efforts_source") == "estimated_inverse_dynamics"
 
 
 def test_retro_downgrade_overrides_success_when_zero_displacement() -> None:

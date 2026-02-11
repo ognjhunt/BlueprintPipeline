@@ -30,6 +30,13 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _normalize_obj_token(name: Optional[str], *, strip_numeric_suffix: bool = True) -> str:
     token = str(name or "").strip()
     if not token:
@@ -213,7 +220,7 @@ def _compute_alignment_offset(
     """
     target_token = _normalize_obj_token(target_object_id)
     if not target_token:
-        return np.zeros(3, dtype=float), "server_static"
+        return np.zeros(3, dtype=float), "offline_synthesis_privileged"
 
     grasp_proximity_max_m = _env_float("PHYSICS_CERT_GRASP_PROXIMITY_MAX_M", 0.15)
 
@@ -234,7 +241,7 @@ def _compute_alignment_offset(
 
     # If it's already plausible, don't shift anything.
     if not math.isfinite(min_raw_dist) or min_raw_dist <= grasp_proximity_max_m:
-        return np.zeros(3, dtype=float), "server_static"
+        return np.zeros(3, dtype=float), "offline_synthesis_privileged"
 
     # Find first close frame with a target pose.
     for f in frames:
@@ -251,10 +258,10 @@ def _compute_alignment_offset(
         except Exception:
             continue
         if float(np.linalg.norm(offset)) <= 1e-9:
-            return np.zeros(3, dtype=float), "server_static"
-        return offset, "server_static_aligned_to_ee"
+            return np.zeros(3, dtype=float), "offline_synthesis_privileged"
+        return offset, "offline_synthesis_privileged_aligned_to_ee"
 
-    return np.zeros(3, dtype=float), "server_static"
+    return np.zeros(3, dtype=float), "offline_synthesis_privileged"
 
 
 _MASS_ESTIMATES_KG: Dict[str, float] = {
@@ -288,6 +295,7 @@ _MASS_ESTIMATES_KG: Dict[str, float] = {
 def _ensure_object_metadata(episode: Dict[str, Any], frames: List[Dict[str, Any]]) -> None:
     if not isinstance(episode, dict):
         return
+    allow_estimates = _env_bool("EPISODE_NORMALIZATION_ALLOW_OBJECT_METADATA_ESTIMATION", False)
     existing = episode.get("object_metadata")
     if isinstance(existing, dict) and existing:
         # Backfill mass_kg where it is None in existing metadata.
@@ -296,15 +304,21 @@ def _ensure_object_metadata(episode: Dict[str, Any], frames: List[Dict[str, Any]
                 continue
             if meta_entry.get("mass_kg") is not None:
                 continue
+            if not allow_estimates:
+                continue
             token = _normalize_obj_token(oid)
             mass = _MASS_ESTIMATES_KG.get(token)
             if mass is not None:
                 meta_entry["mass_kg"] = float(mass)
                 meta_entry["estimation_source"] = "hardcoded_fallback"
+                meta_entry["mass_source"] = "heuristic_estimate"
         return
     # Create a minimal object_metadata dict (best-effort).
     meta: Dict[str, Any] = {}
     if not frames:
+        episode["object_metadata"] = meta
+        return
+    if not allow_estimates:
         episode["object_metadata"] = meta
         return
     for obj in _privileged_scene_objects(frames[0]):
@@ -317,7 +331,11 @@ def _ensure_object_metadata(episode: Dict[str, Any], frames: List[Dict[str, Any]
         mass = _MASS_ESTIMATES_KG.get(token)
         if mass is None:
             continue
-        meta[str(oid)] = {"mass_kg": float(mass), "estimation_source": "hardcoded_fallback"}
+        meta[str(oid)] = {
+            "mass_kg": float(mass),
+            "estimation_source": "hardcoded_fallback",
+            "mass_source": "heuristic_estimate",
+        }
     episode["object_metadata"] = meta
 
 
@@ -412,54 +430,29 @@ def ensure_object_poses_from_privileged_scene_state(
 
 
 def _fix_kinematic_provenance(frames: List[Dict[str, Any]]) -> None:
-    """Rewrite kinematic-mode provenance values to server-backed equivalents.
-
-    When GENIESIM_KEEP_OBJECTS_KINEMATIC=1, objects are kinematic by design and
-    the server correctly reports their static positions.  The provenance label
-    ``kinematic_ee_offset_blocked`` was an artefact of the strict-mode guard
-    that prevented EE-offset tracking; it does NOT mean the scene state came
-    from an unreliable source.  Relabel to ``server_static`` so the
-    certification server-backing gate recognises these frames.
-
-    Frames with no provenance at all (None / empty string) are also set to
-    ``server_static`` — they correspond to approach/retreat phases where the
-    server reports valid kinematic poses but the provenance field was never
-    populated.
-
-    ``synthetic_fallback`` is also relabelled: for kinematic-mode episodes the
-    framework injected synthetic scene_state because the server omitted
-    static-object poses from the per-frame observation, but the server DID
-    back those positions (they were defined at scene load and remain at rest).
-    """
-    _keep_kin = os.environ.get("GENIESIM_KEEP_OBJECTS_KINEMATIC", "0").lower() in ("1", "true", "yes")
-    _relabel = {None, "", "kinematic_ee_offset_blocked"}
-    if _keep_kin:
-        _relabel.add("synthetic_fallback")
+    """Optional compatibility relabel for legacy recertification only."""
+    if not _env_bool("EPISODE_NORMALIZATION_ALLOW_PROVENANCE_RELABEL", False):
+        return
     for f in frames:
         obs = f.get("observation")
         if not isinstance(obs, dict):
             continue
-        prov = obs.get("scene_state_provenance")
-        if prov in _relabel:
-            obs["scene_state_provenance"] = "server_static"
+        prov = str(obs.get("scene_state_provenance") or "")
+        if prov == "manifest_fallback":
+            obs["scene_state_provenance"] = "offline_synthesis_manifest"
 
 
 def _fix_object_pose_sources(frames: List[Dict[str, Any]]) -> None:
-    """Relabel ``manifest_fallback`` object-pose sources.
-
-    Under kinematic mode the manifest IS the authoritative source for objects
-    whose prims cannot be resolved on the server.  ``manifest_fallback``
-    contains the substring ``kinematic`` nowhere, but using ``server_cached``
-    is more semantically correct and avoids any future gate that might treat
-    "fallback" as non-server.
-    """
+    """Optional compatibility relabel for legacy manifests."""
+    if not _env_bool("EPISODE_NORMALIZATION_ALLOW_PROVENANCE_RELABEL", False):
+        return
     for f in frames:
         obj_poses = f.get("object_poses")
         if not isinstance(obj_poses, dict):
             continue
         for _oid, pose in obj_poses.items():
             if isinstance(pose, dict) and pose.get("source") == "manifest_fallback":
-                pose["source"] = "server_cached"
+                pose["source"] = "offline_synthesis_manifest"
 
 
 _MANIPULATION_PHASES = frozenset((
@@ -624,15 +617,42 @@ def normalize_episode_for_certification(episode: Dict[str, Any]) -> Dict[str, An
     if not isinstance(frames, list) or not frames:
         return episode
 
+    normalization_passes: List[str] = []
     dt_s = _infer_dt_s(frames)
     _ensure_ee_quat(frames)
+    normalization_passes.append("ensure_ee_quat")
     _ensure_ee_vel_acc(frames, dt_s=dt_s)
+    normalization_passes.append("ensure_ee_vel_acc")
     _ensure_joint_accelerations(frames, dt_s=dt_s)
-    ensure_object_poses_from_privileged_scene_state(episode, frames)
+    normalization_passes.append("ensure_joint_accelerations")
+
+    if _env_bool("EPISODE_NORMALIZATION_ALLOW_OBJECT_POSE_MATERIALIZATION", False):
+        ensure_object_poses_from_privileged_scene_state(episode, frames)
+        normalization_passes.append("materialize_object_poses_from_privileged")
+
     _fix_kinematic_provenance(frames)
+    if _env_bool("EPISODE_NORMALIZATION_ALLOW_PROVENANCE_RELABEL", False):
+        normalization_passes.append("relabel_scene_state_provenance")
     _fix_object_pose_sources(frames)
-    _synthesize_manipulation_contacts(episode, frames)
+    if _env_bool("EPISODE_NORMALIZATION_ALLOW_PROVENANCE_RELABEL", False):
+        normalization_passes.append("relabel_object_pose_sources")
+
+    if _env_bool("EPISODE_NORMALIZATION_ALLOW_CONTACT_SYNTHESIS", False):
+        _synthesize_manipulation_contacts(episode, frames)
+        normalization_passes.append("synthesize_manipulation_contacts")
+
     _ensure_object_metadata(episode, frames)
-    _replace_stale_efforts_with_inverse_dynamics(frames, dt_s=dt_s)
-    _retro_downgrade_task_success(episode)
+    if _env_bool("EPISODE_NORMALIZATION_ALLOW_OBJECT_METADATA_ESTIMATION", False):
+        normalization_passes.append("estimate_object_metadata")
+
+    if _env_bool("EPISODE_NORMALIZATION_ALLOW_EFFORT_ID_BACKFILL", False):
+        _replace_stale_efforts_with_inverse_dynamics(frames, dt_s=dt_s)
+        normalization_passes.append("replace_stale_efforts_with_inverse_dynamics")
+
+    if _env_bool("EPISODE_NORMALIZATION_ALLOW_TASK_SUCCESS_REWRITE", False):
+        _retro_downgrade_task_success(episode)
+        normalization_passes.append("retro_downgrade_task_success")
+
+    if isinstance(episode, dict):
+        episode["normalization_passes_applied"] = normalization_passes
     return episode

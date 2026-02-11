@@ -17,6 +17,7 @@ GENIESIM_SERVER_LOG=${GENIESIM_SERVER_LOG:-/tmp/geniesim_server.log}
 GENIESIM_MAX_SERVER_RESTARTS=${GENIESIM_MAX_SERVER_RESTARTS:-3}
 GENIESIM_PATCH_CHECK_STRICT=${GENIESIM_PATCH_CHECK_STRICT:-0}
 GENIESIM_CAMERA_REQUIRE_DISPLAY=${GENIESIM_CAMERA_REQUIRE_DISPLAY:-1}
+GENIESIM_ALLOW_DEGRADED_XVFB=${GENIESIM_ALLOW_DEGRADED_XVFB:-0}
 GENIESIM_STRICT_RUNTIME_READINESS=${GENIESIM_STRICT_RUNTIME_READINESS:-0}
 GENIESIM_STRICT_FAIL_ACTION=${GENIESIM_STRICT_FAIL_ACTION:-error}
 GENIESIM_KEEP_OBJECTS_KINEMATIC=${GENIESIM_KEEP_OBJECTS_KINEMATIC:-0}
@@ -69,6 +70,7 @@ export ISAAC_SIM_PATH
 export GENIESIM_RUNTIME_READINESS_JSON
 export GENIESIM_RUNTIME_PRESTART_JSON
 export GENIESIM_KEEP_OBJECTS_KINEMATIC
+export GENIESIM_ALLOW_DEGRADED_XVFB
 export GENIESIM_STRICT_RUNTIME_READINESS
 export GENIESIM_STRICT_FAIL_ACTION
 export GENIESIM_SERVER_CUROBO_MODE
@@ -424,15 +426,33 @@ XCONF
     fi
 
     if [ "${_xorg_started}" = "0" ]; then
-      if [ "${ENABLE_CAMERAS}" = "1" ] && [ "${GENIESIM_CAMERA_REQUIRE_DISPLAY}" = "1" ]; then
+      _strict_realism_norm="$(printf '%s' "${STRICT_REALISM:-0}" | tr '[:upper:]' '[:lower:]')"
+      _strict_realism_enabled=0
+      if [ "${_strict_realism_norm}" = "1" ] || [ "${_strict_realism_norm}" = "true" ] || [ "${_strict_realism_norm}" = "yes" ] || [ "${_strict_realism_norm}" = "on" ]; then
+        _strict_realism_enabled=1
+      fi
+      _allow_degraded="${GENIESIM_ALLOW_DEGRADED_XVFB}"
+      if [ "${GENIESIM_CAMERA_REQUIRE_DISPLAY}" = "0" ]; then
+        _allow_degraded=1
+      fi
+      if [ "${ENABLE_CAMERAS}" = "1" ] && { [ "${GENIESIM_CAMERA_REQUIRE_DISPLAY}" = "1" ] || [ "${_strict_realism_enabled}" = "1" ]; }; then
         echo "[geniesim] ERROR: Camera rendering requires a valid X display socket." >&2
         echo "[geniesim] ERROR: DISPLAY='${DISPLAY:-<unset>}' socket='${_display_socket:-<none>}'" >&2
-        echo "[geniesim] ERROR: Start host Xorg (:99) or set GENIESIM_CAMERA_REQUIRE_DISPLAY=0 for degraded Xvfb fallback." >&2
+        echo "[geniesim] ERROR: Start host Xorg (:99); strict realism forbids degraded Xvfb fallback." >&2
+        exit 1
+      fi
+      if [ "${ENABLE_CAMERAS}" = "1" ] && [ "${_allow_degraded}" != "1" ]; then
+        echo "[geniesim] ERROR: Xorg unavailable and degraded Xvfb fallback is disabled." >&2
+        echo "[geniesim] ERROR: Set GENIESIM_ALLOW_DEGRADED_XVFB=1 only for non-sellable diagnostics." >&2
         exit 1
       fi
 
       if command -v Xvfb >/dev/null 2>&1; then
-        echo "[geniesim] WARNING: No host X display found — using degraded Xvfb fallback (camera RGB may be black)"
+        if [ "${ENABLE_CAMERAS}" = "1" ]; then
+          echo "[geniesim] WARNING: No host X display found — using degraded Xvfb fallback (non-sellable diagnostics only)"
+        else
+          echo "[geniesim] INFO: No host X display found — starting Xvfb for non-camera mode"
+        fi
         Xvfb :99 -screen 0 1280x720x24 +extension GLX +render -noreset &>/dev/null &
         export DISPLAY=:99
         sleep 1

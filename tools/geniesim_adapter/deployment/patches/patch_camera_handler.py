@@ -173,8 +173,13 @@ CAMERA_HANDLER = textwrap.dedent("""\
         # Default camera intrinsics (approximate)
         _fx = _fy = float(_w)
         _ppx, _ppy = float(_w) / 2.0, float(_h) / 2.0
+        _strict_realism = _os.environ.get("STRICT_REALISM", "").lower() in ("1", "true", "yes", "on")
+        _fail_on_capture_error = _os.environ.get(
+            "GENIESIM_FAIL_ON_CAMERA_CAPTURE_ERROR",
+            "1" if _strict_realism else "0",
+        ).lower() in ("1", "true", "yes", "on")
 
-        # Fallback: black frame so gRPC never crashes
+        # Fallback payload for non-strict diagnostic mode only.
         result = {
             "camera_info": {
                 "width": _w, "height": _h,
@@ -503,6 +508,11 @@ CAMERA_HANDLER = textwrap.dedent("""\
                         _uniq, _std = _bp_rgb_quality(result["rgb"])
                     if _retry:
                         print(f"[PATCH] Camera {camera_prim_path} quality retry={_retry} unique={_uniq} std={_std:.2f}")
+                    if (_uniq < _min_colors or _std < _min_std) and _fail_on_capture_error:
+                        raise RuntimeError(
+                            f"Camera quality remained below threshold after retries: "
+                            f"unique_colors={_uniq} (min={_min_colors}), std={_std:.2f} (min={_min_std})"
+                        )
 
             depth_data = depth_annot.get_data()
             if depth_data is not None:
@@ -527,13 +537,25 @@ CAMERA_HANDLER = textwrap.dedent("""\
 
         except Exception as e:
             import traceback
-            print(f"[PATCH] Camera capture failed (returning black frame): {e}")
+            print(f"[PATCH] Camera capture failed: {e}")
             traceback.print_exc()
+            if _fail_on_capture_error:
+                raise
 
         # Serialize numpy arrays to bytes for gRPC transport and flatten structure
         _rgb_arr = result.get("rgb")
         _depth_arr = result.get("depth")
         _cam_info = result.get("camera_info", {})
+        if _fail_on_capture_error:
+            if _rgb_arr is None or _depth_arr is None:
+                raise RuntimeError("Camera capture missing rgb/depth payload in strict mode")
+            try:
+                if np.count_nonzero(_rgb_arr) == 0:
+                    raise RuntimeError("Camera RGB payload is fully black in strict mode")
+            except Exception:
+                raise
+            if np.all(~np.isfinite(_depth_arr)):
+                raise RuntimeError("Camera depth payload is all non-finite in strict mode")
 
         # Flatten camera_info to top level and serialize images to bytes
         flat_result = {
@@ -549,6 +571,8 @@ CAMERA_HANDLER = textwrap.dedent("""\
             "camera_prim_path": camera_prim_path,
             # Keep nested camera_info for backward compatibility
             "camera_info": _cam_info,
+            "render_backend": _os.environ.get("BP_RENDERER_MODE", "unknown"),
+            "sync_step_id": cls._bp_total_frames_rendered.get(camera_prim_path, 0),
         }
 
         # Serialize RGB to bytes
@@ -557,11 +581,24 @@ CAMERA_HANDLER = textwrap.dedent("""\
             flat_result["rgb_shape"] = list(_rgb_arr.shape)
             flat_result["rgb_dtype"] = str(_rgb_arr.dtype)
             flat_result["rgb_encoding"] = "raw_rgb_uint8"
+            _rgb_nonzero = int(np.count_nonzero(_rgb_arr))
+            flat_result["decode_ok"] = True
+            flat_result["is_black"] = _rgb_nonzero == 0
+            flat_result["nonzero_ratio"] = round(_rgb_nonzero / float(max(1, _rgb_arr.size)), 6)
+            try:
+                _flat_rgb = _rgb_arr.reshape(-1, _rgb_arr.shape[-1])[:, :3] if _rgb_arr.ndim >= 3 else _rgb_arr.reshape(-1, 1)
+                flat_result["unique_color_count"] = int(np.unique(_flat_rgb, axis=0).shape[0])
+            except Exception:
+                flat_result["unique_color_count"] = 0
         else:
             flat_result["rgb"] = bytes(_h * _w * 3)
             flat_result["rgb_shape"] = [_h, _w, 3]
             flat_result["rgb_dtype"] = "uint8"
             flat_result["rgb_encoding"] = "raw_rgb_uint8"
+            flat_result["decode_ok"] = False
+            flat_result["is_black"] = True
+            flat_result["nonzero_ratio"] = 0.0
+            flat_result["unique_color_count"] = 0
 
         # Serialize depth to bytes
         if _depth_arr is not None and hasattr(_depth_arr, "tobytes"):
@@ -575,10 +612,14 @@ CAMERA_HANDLER = textwrap.dedent("""\
             flat_result["depth"] = _depth_arr.tobytes()
             flat_result["depth_shape"] = list(_depth_arr.shape)
             flat_result["depth_dtype"] = str(_depth_arr.dtype)
+            flat_result["depth_decode_ok"] = True
+            flat_result["depth_all_non_finite"] = bool(_n_finite == 0)
         else:
             flat_result["depth"] = bytes(_h * _w * 4)  # float32 = 4 bytes
             flat_result["depth_shape"] = [_h, _w]
             flat_result["depth_dtype"] = "float32"
+            flat_result["depth_decode_ok"] = False
+            flat_result["depth_all_non_finite"] = True
 
         _depth_dtype = str(flat_result.get("depth_dtype", "float32")).lower()
         if "float32" in _depth_dtype:

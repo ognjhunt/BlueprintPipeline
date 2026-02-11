@@ -57,8 +57,8 @@ The orchestrator workflow calls each sub-workflow directly via the `googleapis.w
   5. **Point cloud extraction**: Extracts per-object point clouds from VGGT depth
   6. **Pose matching**: Differentiable rendering aligns GLBs to image (150 iters per object, ~4.5 min each)
   7. **Scene assembly**: Combines all posed GLBs into `combined_scene.glb`
-- Generates SimReady assets (materials, physics)
-- Assembles initial USD scene
+- Adapts reconstruction outputs into BlueprintPipeline `regen3d/` + `assets/` artifacts
+- Emits `.regen3d_complete` for Stage 2 (`usd-assembly-pipeline`)
 - Uploads results back to GCS
 
 **Known issues:**

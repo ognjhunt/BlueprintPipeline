@@ -85,6 +85,7 @@ References:
 """
 
 import argparse
+from collections import Counter
 import hashlib
 import importlib.util
 import json
@@ -132,7 +133,7 @@ from tools.config import (
     load_pipeline_step_timeouts,
     load_quality_config as load_quality_gate_config,
 )
-from tools.config.env import parse_bool_env, parse_int_env
+from tools.config.env import parse_bool_env, parse_float_env, parse_int_env
 from tools.config.production_mode import resolve_pipeline_environment, resolve_production_mode
 from tools.config.seed_manager import configure_pipeline_seed
 from tools.error_handling.errors import ErrorCategory, ErrorContext, PipelineError
@@ -2957,6 +2958,59 @@ class LocalPipelineRunner:
         if allow_materialless_requested and self._is_production_mode():
             issues.append("REGEN3D_ALLOW_MATERIALLESS is not allowed in production mode.")
 
+        max_objects_quality = parse_int_env(
+            os.getenv("REGEN3D_MAX_OBJECTS_QUALITY"),
+            default=18,
+            min_value=1,
+            name="REGEN3D_MAX_OBJECTS_QUALITY",
+        )
+        max_objects_compat = parse_int_env(
+            os.getenv("REGEN3D_MAX_OBJECTS_COMPAT"),
+            default=40,
+            min_value=1,
+            name="REGEN3D_MAX_OBJECTS_COMPAT",
+        )
+        max_instances_quality = parse_int_env(
+            os.getenv("REGEN3D_MAX_INSTANCES_PER_CLASS_QUALITY"),
+            default=4,
+            min_value=1,
+            name="REGEN3D_MAX_INSTANCES_PER_CLASS_QUALITY",
+        )
+        max_instances_compat = parse_int_env(
+            os.getenv("REGEN3D_MAX_INSTANCES_PER_CLASS_COMPAT"),
+            default=10,
+            min_value=1,
+            name="REGEN3D_MAX_INSTANCES_PER_CLASS_COMPAT",
+        )
+        max_masks_quality = parse_int_env(
+            os.getenv("REGEN3D_MAX_MASKS"),
+            default=40,
+            min_value=1,
+            name="REGEN3D_MAX_MASKS",
+        )
+        min_mask_ratio_quality = parse_float_env(
+            os.getenv("REGEN3D_MIN_MASK_AREA_RATIO_QUALITY"),
+            default=0.0002,
+            min_value=0.0,
+            max_value=1.0,
+            name="REGEN3D_MIN_MASK_AREA_RATIO_QUALITY",
+        )
+        max_tiny_masks_quality = parse_int_env(
+            os.getenv("REGEN3D_MAX_TINY_MASKS_QUALITY"),
+            default=2,
+            min_value=0,
+            name="REGEN3D_MAX_TINY_MASKS_QUALITY",
+        )
+        details["max_object_limit"] = (
+            max_objects_quality if quality_mode == "quality" else max_objects_compat
+        )
+        details["max_instances_per_class_limit"] = (
+            max_instances_quality if quality_mode == "quality" else max_instances_compat
+        )
+        details["max_mask_limit"] = max_masks_quality
+        details["min_mask_area_ratio_quality"] = min_mask_ratio_quality
+        details["max_tiny_masks_quality"] = max_tiny_masks_quality
+
         if foreground_count <= 0:
             issues.append("No reconstructed foreground objects were produced.")
         if not has_background:
@@ -2965,6 +3019,46 @@ class LocalPipelineRunner:
             issues.append("scene_manifest.json has no objects.")
         if not isinstance(layout_objects, list) or not layout_objects:
             issues.append("scene_layout_scaled.json has no objects.")
+        max_object_limit = (
+            max_objects_quality if quality_mode == "quality" else max_objects_compat
+        )
+        if foreground_count > max_object_limit:
+            issues.append(
+                "Foreground object count exceeds Stage 1 cap: "
+                f"{foreground_count} > {max_object_limit}."
+            )
+
+        def _class_name_for_object(obj: Any) -> str:
+            raw_id = str(getattr(obj, "id", "") or "").strip()
+            if not raw_id:
+                mesh_path = str(getattr(obj, "mesh_path", "") or "").strip()
+                raw_id = Path(mesh_path).stem if mesh_path else "unknown"
+            return re.sub(r"__\(\d+,\s*\d+\)$", "", raw_id)
+
+        class_counts = Counter(
+            _class_name_for_object(obj)
+            for obj in (getattr(regen3d_output, "objects", []) or [])
+        )
+        details["foreground_class_counts"] = dict(class_counts)
+        max_instances_limit = (
+            max_instances_quality
+            if quality_mode == "quality"
+            else max_instances_compat
+        )
+        repeat_offenders = {
+            label: count
+            for label, count in class_counts.items()
+            if count > max_instances_limit
+        }
+        details["foreground_class_repeat_offenders"] = repeat_offenders
+        if repeat_offenders:
+            joined = ", ".join(
+                f"{label}={count}" for label, count in sorted(repeat_offenders.items())
+            )
+            issues.append(
+                "Foreground class repetition exceeds Stage 1 cap: "
+                f"{joined} (limit={max_instances_limit})."
+            )
 
         mesh_stats: Dict[str, Any] = {
             "checked": 0,
@@ -3010,6 +3104,64 @@ class LocalPipelineRunner:
                 "REGEN3D_ALLOW_TEXTURELESS=true)."
             )
 
+        combined_scene_path = self.regen3d_dir / "glb" / "scene" / "combined_scene.glb"
+        combined_scene_info = self._inspect_glb_metadata(combined_scene_path)
+        details["combined_scene"] = {
+            "path": str(combined_scene_path),
+            "exists": bool(combined_scene_info.get("exists")),
+            "meshes": int(combined_scene_info.get("meshes", 0)),
+            "materials": int(combined_scene_info.get("materials", 0)),
+            "textures": int(combined_scene_info.get("textures", 0)),
+            "parse_error": combined_scene_info.get("parse_error"),
+        }
+        if not combined_scene_info["exists"]:
+            issues.append(
+                "Combined scene GLB is missing at regen3d/glb/scene/combined_scene.glb."
+            )
+        elif combined_scene_info["parse_error"]:
+            issues.append(
+                "Combined scene GLB is unreadable: "
+                f"{combined_scene_info['parse_error']}."
+            )
+        elif combined_scene_info["meshes"] <= 0:
+            issues.append("Combined scene GLB contains no mesh primitives.")
+        elif combined_scene_info["materials"] <= 0 and not allow_materialless:
+            issues.append("Combined scene GLB contains no material definitions.")
+        elif (
+            quality_mode == "quality"
+            and not allow_textureless
+            and combined_scene_info["textures"] <= 0
+        ):
+            issues.append(
+                "Combined scene GLB contains no texture definitions "
+                "(quality mode requires textures unless "
+                "REGEN3D_ALLOW_TEXTURELESS=true)."
+            )
+
+        mask_stats = self._inspect_mask_quality(
+            self.regen3d_dir / "masks",
+            tiny_ratio_threshold=float(min_mask_ratio_quality),
+        )
+        details["mask_stats"] = mask_stats
+        if mask_stats.get("file_count", 0) > max_masks_quality:
+            issues.append(
+                "Mask count exceeds Stage 1 cap: "
+                f"{mask_stats.get('file_count', 0)} > {max_masks_quality}."
+            )
+        if mask_stats.get("zero_area", 0) > 0:
+            issues.append(
+                f"Detected {mask_stats.get('zero_area')} zero-area mask(s)."
+            )
+        if (
+            quality_mode == "quality"
+            and mask_stats.get("tiny_area", 0) > max_tiny_masks_quality
+        ):
+            issues.append(
+                "Detected too many tiny masks for quality mode: "
+                f"{mask_stats.get('tiny_area')} > {max_tiny_masks_quality} "
+                f"(threshold={min_mask_ratio_quality:.6f})."
+            )
+
         details["issues"] = list(issues)
 
         if issues:
@@ -3043,6 +3195,61 @@ class LocalPipelineRunner:
             context="stage1 quality report",
         )
         return report_path
+
+    def _inspect_mask_quality(
+        self,
+        mask_dir: Path,
+        *,
+        tiny_ratio_threshold: float,
+    ) -> Dict[str, Any]:
+        """Inspect binary masks for zero-area and tiny-fragment issues."""
+        stats: Dict[str, Any] = {
+            "path": str(mask_dir),
+            "available": mask_dir.is_dir(),
+            "file_count": 0,
+            "checked": 0,
+            "zero_area": 0,
+            "tiny_area": 0,
+            "tiny_ratio_threshold": tiny_ratio_threshold,
+            "zero_area_samples": [],
+            "tiny_area_samples": [],
+            "read_errors": [],
+            "pillow_available": True,
+        }
+        if not mask_dir.is_dir():
+            return stats
+
+        mask_paths = sorted(mask_dir.glob("*.png"))
+        stats["file_count"] = len(mask_paths)
+        if not mask_paths:
+            return stats
+
+        try:
+            from PIL import Image
+        except Exception:
+            stats["pillow_available"] = False
+            return stats
+
+        for path in mask_paths:
+            try:
+                arr = np.array(Image.open(path).convert("L"))
+            except Exception as exc:
+                stats["read_errors"].append(f"{path.name}: {exc}")
+                continue
+            area = int(np.count_nonzero(arr))
+            total = int(arr.size)
+            ratio = (area / total) if total else 0.0
+            stats["checked"] += 1
+            if area == 0:
+                stats["zero_area"] += 1
+                if len(stats["zero_area_samples"]) < 10:
+                    stats["zero_area_samples"].append(path.name)
+                continue
+            if ratio < tiny_ratio_threshold:
+                stats["tiny_area"] += 1
+                if len(stats["tiny_area_samples"]) < 10:
+                    stats["tiny_area_samples"].append(path.name)
+        return stats
 
     def _inspect_glb_metadata(self, glb_path: Path) -> Dict[str, Any]:
         """Inspect high-level GLB metadata required by Stage 1 quality gating."""

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -14,9 +15,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from tools.camera_io import is_placeholder_depth, is_placeholder_rgb
+from tools.camera_io import (
+    is_placeholder_depth,
+    is_placeholder_rgb,
+    load_camera_frame,
+)
 
-GATE_VERSION = "1.2.1"
+GATE_VERSION = "1.3.0"
 GATE_CODES = (
     "KINEMATIC_OBJECT_POSE_USED",
     "SNAPBACK_OR_TELEPORT_DETECTED",
@@ -233,6 +238,11 @@ def _valid_contact_stats(
                 continue
             body_a = str(c.get("body_a") or "")
             body_b = str(c.get("body_b") or "")
+            provenance = str(
+                c.get("provenance")
+                or frame.get("collision_provenance")
+                or ""
+            ).lower()
             force = c.get("force_N")
             try:
                 force_val = float(force if force is not None else 0.0)
@@ -241,6 +251,17 @@ def _valid_contact_stats(
             pen = c.get("penetration_depth")
             pen_ok = pen is None or isinstance(pen, (int, float))
             if not body_a and not body_b and abs(force_val) <= 1e-9 and not pen:
+                has_placeholder = True
+            if any(
+                token in provenance
+                for token in (
+                    "offline",
+                    "synth",
+                    "estimated",
+                    "heuristic",
+                    "kinematic",
+                )
+            ):
                 has_placeholder = True
             if body_a and body_b and force_val > 0.0 and pen_ok:
                 frame_valid = True
@@ -268,24 +289,248 @@ def _valid_contact_stats(
     }
 
 
-def _camera_placeholder_present(frames: List[Dict[str, Any]]) -> bool:
-    # Fast check: detect placeholders on the first non-empty camera frame.
+def _synthesis_provenance(frames: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compute per-channel breakdown of real simulation vs synthesized data.
+
+    Returns a dict mapping each channel to its real/synthesized fractions and
+    source labels so buyers can assess data provenance at a glance.
+    """
+    total = max(1, len(frames))
+
+    # -- Joint efforts provenance --
+    effort_real = 0
+    effort_synthesized = 0
+    effort_sources: Counter[str] = Counter()
+    for frame in frames:
+        src = str(frame.get("efforts_source") or "").lower()
+        effort_sources[src or "unknown"] += 1
+        if src in ("physx", "physx_server"):
+            effort_real += 1
+        else:
+            effort_synthesized += 1
+
+    # -- Contact provenance --
+    contact_real = 0
+    contact_synthesized = 0
+    contact_empty = 0
+    for frame in frames:
+        contacts = frame.get("collision_contacts")
+        if not isinstance(contacts, list) or not contacts:
+            contact_empty += 1
+            continue
+        provenance_tags = {str(c.get("provenance") or "").lower() for c in contacts if isinstance(c, dict)}
+        if any("synthesis" in p or "offline" in p for p in provenance_tags):
+            contact_synthesized += 1
+        else:
+            contact_real += 1
+
+    # -- Object pose provenance --
+    pose_real = 0
+    pose_synthesized = 0
+    pose_sources: Counter[str] = Counter()
+    for frame in frames:
+        obj_poses = frame.get("object_poses", {})
+        if not isinstance(obj_poses, dict) or not obj_poses:
+            pose_synthesized += 1
+            continue
+        frame_sources = set()
+        for pose in obj_poses.values():
+            if isinstance(pose, dict):
+                frame_sources.add(str(pose.get("source") or "").lower())
+        for src in frame_sources:
+            pose_sources[src or "unknown"] += 1
+        if any("physx" in s or "dynamic" in s for s in frame_sources):
+            pose_real += 1
+        else:
+            pose_synthesized += 1
+
+    # -- Scene state provenance --
+    scene_real = 0
+    scene_synthesized = 0
+    for frame in frames:
+        obs = frame.get("observation", {})
+        if not isinstance(obs, dict):
+            scene_synthesized += 1
+            continue
+        prov = str(obs.get("scene_state_provenance") or "").lower()
+        if "kinematic" in prov or "synthetic" in prov or not prov:
+            scene_synthesized += 1
+        else:
+            scene_real += 1
+
+    # -- Joint velocities (finite-differenced = synthesized) --
+    vel_real = 0
+    vel_synthesized = 0
+    for frame in frames:
+        obs = frame.get("observation", {})
+        rs = obs.get("robot_state", {}) if isinstance(obs, dict) else {}
+        if isinstance(rs.get("joint_velocities"), list) and rs["joint_velocities"]:
+            # Primary source-of-truth is robot_state.joint_velocities_source.
+            # Keep top-level velocity_source as backward-compatible fallback.
+            src = str(
+                rs.get("joint_velocities_source")
+                or frame.get("velocity_source")
+                or ""
+            ).lower()
+            if src in ("physx", "physx_server", "server", "isaac_sim"):
+                vel_real += 1
+            elif src in ("finite_difference", "derived", "estimated", "synthetic"):
+                vel_synthesized += 1
+            else:
+                # In legacy episodes source is often omitted for real server velocities.
+                data_src = str(obs.get("data_source") or "").lower() if isinstance(obs, dict) else ""
+                scene_prov = str(obs.get("scene_state_provenance") or "").lower() if isinstance(obs, dict) else ""
+                if (
+                    data_src in ("between_waypoints", "real_composed")
+                    and "kinematic" not in scene_prov
+                    and "synthetic" not in scene_prov
+                ):
+                    vel_real += 1
+                else:
+                    vel_synthesized += 1
+
+    return {
+        "joint_efforts": {
+            "real_fraction": round(effort_real / float(total), 4),
+            "synthesized_fraction": round(effort_synthesized / float(total), 4),
+            "sources": dict(effort_sources.most_common()),
+        },
+        "collision_contacts": {
+            "real_fraction": round(contact_real / float(total), 4),
+            "synthesized_fraction": round(contact_synthesized / float(total), 4),
+            "empty_fraction": round(contact_empty / float(total), 4),
+        },
+        "object_poses": {
+            "real_fraction": round(pose_real / float(total), 4),
+            "synthesized_fraction": round(pose_synthesized / float(total), 4),
+            "sources": dict(pose_sources.most_common()),
+        },
+        "scene_state": {
+            "real_fraction": round(scene_real / float(total), 4),
+            "synthesized_fraction": round(scene_synthesized / float(total), 4),
+        },
+        "joint_velocities": {
+            "real_fraction": round(vel_real / float(total), 4),
+            "synthesized_fraction": round(vel_synthesized / float(total), 4),
+        },
+    }
+
+
+def _camera_payload_present(frames: List[Dict[str, Any]]) -> bool:
     for frame in frames:
         obs = frame.get("observation", {})
         cams = obs.get("camera_frames") if isinstance(obs, dict) else None
         if not isinstance(cams, dict) or not cams:
             continue
         for cam in cams.values():
+            if isinstance(cam, dict) and (cam.get("rgb") is not None or cam.get("depth") is not None):
+                return True
+    return False
+
+
+def _camera_quality_stats(frames: List[Dict[str, Any]]) -> Dict[str, Any]:
+    stats: Dict[str, Any] = {
+        "camera_payload_present": False,
+        "camera_frames_present": 0,
+        "rgb_payload_frames": 0,
+        "rgb_decode_failures": 0,
+        "rgb_placeholder_frames": 0,
+        "rgb_black_frames": 0,
+        "rgb_decoded_frames": 0,
+        "rgb_unique_hashes": 0,
+        "depth_payload_frames": 0,
+        "depth_decode_failures": 0,
+        "depth_placeholder_frames": 0,
+        "depth_all_non_finite_frames": 0,
+        "depth_decoded_frames": 0,
+        "depth_unique_hashes": 0,
+        "degenerate_rgb_stream": False,
+        "degenerate_depth_stream": False,
+    }
+    rgb_hashes: set[str] = set()
+    depth_hashes: set[str] = set()
+
+    for frame in frames:
+        obs = frame.get("observation", {})
+        cams = obs.get("camera_frames") if isinstance(obs, dict) else None
+        if not isinstance(cams, dict) or not cams:
+            continue
+        stats["camera_payload_present"] = True
+        stats["camera_frames_present"] += 1
+        for cam in cams.values():
             if not isinstance(cam, dict):
                 continue
-            rgb = cam.get("rgb")
-            depth = cam.get("depth")
-            if rgb is not None and is_placeholder_rgb(np.asarray(rgb)):
-                return True
-            if depth is not None and is_placeholder_depth(np.asarray(depth)):
-                return True
-        break
-    return False
+
+            if cam.get("rgb") is not None:
+                stats["rgb_payload_frames"] += 1
+                rgb_payload = cam.get("rgb")
+                if isinstance(rgb_payload, str) and rgb_payload.endswith(".npy") and not Path(rgb_payload).is_file():
+                    stats["rgb_decode_failures"] += 1
+                    rgb_arr = None
+                else:
+                    rgb_arr = load_camera_frame(cam, "rgb")
+                if rgb_arr is None:
+                    if not (isinstance(rgb_payload, str) and rgb_payload.endswith(".npy")):
+                        stats["rgb_decode_failures"] += 1
+                else:
+                    stats["rgb_decoded_frames"] += 1
+                    if is_placeholder_rgb(rgb_arr):
+                        stats["rgb_placeholder_frames"] += 1
+                    if int(np.count_nonzero(rgb_arr)) == 0:
+                        stats["rgb_black_frames"] += 1
+                    try:
+                        rgb_hashes.add(hashlib.md5(rgb_arr.tobytes()).hexdigest())  # noqa: S324
+                    except Exception:
+                        pass
+
+            if cam.get("depth") is not None:
+                stats["depth_payload_frames"] += 1
+                depth_payload = cam.get("depth")
+                if isinstance(depth_payload, str) and depth_payload.endswith(".npy") and not Path(depth_payload).is_file():
+                    stats["depth_decode_failures"] += 1
+                    depth_arr = None
+                else:
+                    depth_arr = load_camera_frame(cam, "depth")
+                if depth_arr is None:
+                    if not (isinstance(depth_payload, str) and depth_payload.endswith(".npy")):
+                        stats["depth_decode_failures"] += 1
+                else:
+                    stats["depth_decoded_frames"] += 1
+                    if is_placeholder_depth(depth_arr):
+                        stats["depth_placeholder_frames"] += 1
+                    if np.all(~np.isfinite(depth_arr)):
+                        stats["depth_all_non_finite_frames"] += 1
+                    try:
+                        depth_hashes.add(hashlib.md5(depth_arr.tobytes()).hexdigest())  # noqa: S324
+                    except Exception:
+                        pass
+
+    stats["rgb_unique_hashes"] = len(rgb_hashes)
+    stats["depth_unique_hashes"] = len(depth_hashes)
+    stats["degenerate_rgb_stream"] = (
+        stats["rgb_decoded_frames"] >= 3 and stats["rgb_unique_hashes"] <= 1
+    )
+    stats["degenerate_depth_stream"] = (
+        stats["depth_decoded_frames"] >= 3 and stats["depth_unique_hashes"] <= 1
+    )
+    return stats
+
+
+def _camera_placeholder_present(frames: List[Dict[str, Any]]) -> bool:
+    stats = _camera_quality_stats(frames)
+    depth_all_non_finite = (
+        stats["depth_decoded_frames"] > 0
+        and stats["depth_all_non_finite_frames"] == stats["depth_decoded_frames"]
+    )
+    return bool(
+        stats["rgb_decode_failures"] > 0
+        or stats["depth_decode_failures"] > 0
+        or stats["rgb_placeholder_frames"] > 0
+        or stats["depth_placeholder_frames"] > 0
+        or stats["degenerate_rgb_stream"]
+        or stats["degenerate_depth_stream"]
+        or depth_all_non_finite
+    )
 
 
 def _camera_frame_coverage(frames: List[Dict[str, Any]]) -> Tuple[float, int, int]:
@@ -309,6 +554,49 @@ def _camera_frame_coverage(frames: List[Dict[str, Any]]) -> Tuple[float, int, in
         if frame_ok:
             complete += 1
     return complete / float(total), complete, total
+
+
+def _effort_source_stats(frames: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = max(1, len(frames))
+    real_frames = 0
+    frames_with_effort = 0
+    missing_or_zero = 0
+    source_counts: Counter[str] = Counter()
+    for frame in frames:
+        source = str(frame.get("efforts_source") or "").lower() or "unknown"
+        source_counts[source] += 1
+        obs = frame.get("observation", {})
+        rs = obs.get("robot_state", {}) if isinstance(obs, dict) else {}
+        efforts = rs.get("joint_efforts")
+        has_effort = isinstance(efforts, list) and len(efforts) > 0
+        if has_effort:
+            frames_with_effort += 1
+        has_nonzero_effort = False
+        if has_effort:
+            try:
+                has_nonzero_effort = any(abs(float(v)) > 1e-9 for v in efforts)
+            except Exception:
+                has_nonzero_effort = False
+        obs_data_source = str(obs.get("data_source") or "").lower() if isinstance(obs, dict) else ""
+        scene_prov = str(obs.get("scene_state_provenance") or "").lower() if isinstance(obs, dict) else ""
+        infer_real_unknown = (
+            source in ("unknown", "")
+            and has_nonzero_effort
+            and obs_data_source in ("between_waypoints", "real_composed", "server")
+            and "synthetic" not in scene_prov
+            and "kinematic" not in scene_prov
+        )
+        if (source in ("physx", "physx_server") and has_nonzero_effort) or infer_real_unknown:
+            real_frames += 1
+        else:
+            missing_or_zero += 1
+    return {
+        "real_effort_frames": real_frames,
+        "real_effort_frame_ratio": round(real_frames / float(total), 4),
+        "effort_frames_present": frames_with_effort,
+        "effort_frames_missing_or_nonreal": missing_or_zero,
+        "efforts_source_histogram": dict(source_counts.most_common()),
+    }
 
 
 def _task_requires_motion(task: Dict[str, Any]) -> bool:
@@ -483,14 +771,14 @@ def run_episode_certification(
     kinematic_frames = 0
     for frame in frames:
         obs = frame.get("observation", {})
-        prov = str(obs.get("scene_state_provenance") if isinstance(obs, dict) else "")
-        if "kinematic_ee_offset" in prov:
+        prov = str(obs.get("scene_state_provenance") if isinstance(obs, dict) else "").lower()
+        if "kinematic" in prov:
             kinematic_frames += 1
             continue
         obj_poses = frame.get("object_poses", {})
         if isinstance(obj_poses, dict):
             for pose in obj_poses.values():
-                if isinstance(pose, dict) and "kinematic_ee_offset" in str(pose.get("source", "")):
+                if isinstance(pose, dict) and "kinematic" in str(pose.get("source", "")).lower():
                     kinematic_frames += 1
                     break
     kinematic_ratio = kinematic_frames / float(max(1, len(frames)))
@@ -533,13 +821,9 @@ def run_episode_certification(
         _has_target_motion = len(target_positions) >= 2 and end_disp >= min_target_displacement_m
         metrics["target_motion_present"] = bool(_has_target_motion)
         if not _has_target_motion:
-            # When objects are fully kinematic, displacement is always 0 — this
-            # is a known physics-mode limitation, not a pipeline failure.  Skip
-            # the gate so kinematic-mode episodes can certify; re-enable once
-            # Phase B dynamic toggle produces real displacement.
-            if _keep_kinematic:
-                pass  # Expected: kinematic objects cannot displace.
-            else:
+            if mode_norm == "strict":
+                gate_failures.append("EE_TARGET_GEOMETRY_IMPLAUSIBLE")
+            elif not _keep_kinematic:
                 gate_failures.append("EE_TARGET_GEOMETRY_IMPLAUSIBLE")
     else:
         metrics["target_motion_present"] = None
@@ -626,6 +910,8 @@ def run_episode_certification(
     metrics["server_target_source_ratio"] = (
         round(float(_target_source), 4) if _target_source is not None else None
     )
+    if has_target and _target_source is not None and _target_source < target_frame_presence_required:
+        gate_failures.append("TARGET_SCHEMA_INCOMPLETE")
     _target_vel_cov = _target_velocity_coverage(frames, target_id) if has_target else None
     metrics["target_velocity_coverage"] = (
         round(float(_target_vel_cov), 4) if _target_vel_cov is not None else None
@@ -637,6 +923,10 @@ def run_episode_certification(
     metrics["ee_velocity_coverage"] = channel_completeness.get("ee_vel", 0.0)
     metrics["ee_acceleration_coverage"] = channel_completeness.get("ee_acc", 0.0)
     if any(v < required_channel_completeness for v in channel_completeness.values()):
+        gate_failures.append("CHANNEL_INCOMPLETE")
+    effort_stats = _effort_source_stats(frames)
+    metrics.update(effort_stats)
+    if mode_norm == "strict" and effort_stats.get("real_effort_frame_ratio", 0.0) < 1.0:
         gate_failures.append("CHANNEL_INCOMPLETE")
     stale_effort_stats = _stale_effort_stats(frames)
     metrics.update(stale_effort_stats)
@@ -685,20 +975,43 @@ def run_episode_certification(
         else:
             gate_failures.append("SCENE_STATE_NOT_SERVER_BACKED")
 
-    # Camera completeness/placeholder gate (required for RGB profile or explicit camera-required mode).
-    camera_required = bool(episode_meta.get("camera_required")) or modality_profile != "no_rgb"
+    # Camera completeness/placeholder gate.
+    # Camera validation is required if:
+    # - metadata says camera is required
+    # - modality profile is RGB-enabled
+    # - the episode already contains camera payloads (even when modality metadata is stale)
+    camera_payload_present = _camera_payload_present(frames)
+    camera_required = (
+        bool(episode_meta.get("camera_required"))
+        or modality_profile != "no_rgb"
+        or camera_payload_present
+    )
     if _skip_camera_hardcap:
         camera_required = False  # Proprioception-only mode: skip camera gates.
     metrics["camera_required"] = camera_required
+    metrics["camera_payload_present"] = camera_payload_present
+    camera_quality = _camera_quality_stats(frames) if camera_required else {"camera_payload_present": camera_payload_present}
+    metrics["camera_quality"] = camera_quality
     if camera_required:
         camera_cov, camera_complete_frames, camera_total_frames = _camera_frame_coverage(frames)
         metrics["camera_complete_frame_ratio"] = round(camera_cov, 4)
         metrics["camera_complete_frames"] = camera_complete_frames
         metrics["camera_total_frames"] = camera_total_frames
-        if camera_cov < 1.0 or _camera_placeholder_present(frames):
-            gate_failures.append("CAMERA_PLACEHOLDER_PRESENT")
-    elif modality_profile != "no_rgb":
-        if _camera_placeholder_present(frames):
+        depth_all_non_finite = (
+            camera_quality.get("depth_decoded_frames", 0) > 0
+            and camera_quality.get("depth_all_non_finite_frames", 0)
+            == camera_quality.get("depth_decoded_frames", 0)
+        )
+        if (
+            camera_cov < 1.0
+            or camera_quality.get("rgb_decode_failures", 0) > 0
+            or camera_quality.get("depth_decode_failures", 0) > 0
+            or camera_quality.get("rgb_placeholder_frames", 0) > 0
+            or camera_quality.get("depth_placeholder_frames", 0) > 0
+            or camera_quality.get("degenerate_rgb_stream", False)
+            or camera_quality.get("degenerate_depth_stream", False)
+            or depth_all_non_finite
+        ):
             gate_failures.append("CAMERA_PLACEHOLDER_PRESENT")
 
     # Build task outcome and object mapping.
@@ -722,15 +1035,44 @@ def run_episode_certification(
     passed = len(critical_failures) == 0
 
     dataset_tier = "physics_certified" if passed else "raw_preserved"
+
+    # Synthesis provenance: per-channel breakdown of real vs synthesized data.
+    # This allows buyers to assess what fraction of the data came from real
+    # simulation output vs post-hoc generation/normalization.
+    synthesis_provenance = _synthesis_provenance(frames)
+    metrics["synthesis_provenance"] = synthesis_provenance
+
+    # Warn when certification passes primarily on synthesized data.
+    _warnings: List[str] = []
+    if passed:
+        sp = synthesis_provenance
+        for channel in (
+            "joint_efforts",
+            "collision_contacts",
+            "object_poses",
+            "scene_state",
+            "joint_velocities",
+        ):
+            channel_stats = sp.get(channel) if isinstance(sp, dict) else None
+            if not isinstance(channel_stats, dict):
+                continue
+            synth_fraction = channel_stats.get("synthesized_fraction")
+            if isinstance(synth_fraction, (int, float)) and synth_fraction > 0.5:
+                _warnings.append(f"{channel} {synth_fraction:.0%} synthesized")
+    if _keep_kinematic:
+        _warnings.append("objects are kinematic — no real physics displacement")
+
     return {
         "mode": mode_norm,
         "passed": passed,
         "critical_failures": critical_failures,
+        "warnings": _warnings,
         "metrics": metrics,
         "gate_versions": {"physics_certification": GATE_VERSION},
         "dataset_tier": dataset_tier,
         "task_outcome": task_outcome,
         "channel_completeness": channel_completeness,
+        "synthesis_provenance": synthesis_provenance,
         "object_id_map": object_id_map,
     }
 

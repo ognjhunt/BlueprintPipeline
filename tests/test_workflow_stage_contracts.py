@@ -82,3 +82,14 @@ def test_orchestrator_passes_strict_defaults_into_stage2_and_stage3_events():
     assert "require_replicator: true" in workflow
     assert "require_isaac: true" in workflow
     assert "enable_stage3_isaac_refresh: true" in workflow
+
+
+def test_orchestrator_stage1_explicitly_runs_reconstruction_steps_only():
+    workflow = Path("workflows/image-to-scene-orchestrator.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "run_pipeline_gcs.sh ${SCENE_ID_Q} ${BUCKET_Q} ${OBJECT_NAME_Q} "
+        "${OBJECT_GENERATION_Q} regen3d-reconstruct,regen3d"
+    ) in workflow

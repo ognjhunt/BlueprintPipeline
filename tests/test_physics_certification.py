@@ -14,6 +14,7 @@ def _frame(
     position=None,
     closed: bool = False,
     effort_value: float = 0.1,
+    efforts_source: str = "physx",
 ):
     if position is None:
         position = [0.1, 0.0, 0.2]
@@ -42,6 +43,7 @@ def _frame(
                 "normal": [0.0, 0.0, 1.0],
             }
         ],
+        "efforts_source": efforts_source,
         "observation": {
             "data_source": "real_composed",
             "scene_state_provenance": scene_provenance,
@@ -239,8 +241,8 @@ def test_physics_certification_fails_static_target_motion_task():
     assert report["dataset_tier"] == "raw_preserved"
 
 
-def test_phase_b_env_skips_motion_gate_when_kinematic(monkeypatch):
-    # Kinematic objects cannot displace — motion gate is skipped.
+def test_phase_b_env_does_not_skip_motion_gate_when_kinematic(monkeypatch):
+    # Strict mode remains fail-closed even when kinematic env flags are present.
     monkeypatch.setenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE", "1")
     monkeypatch.setenv("GENIESIM_KEEP_OBJECTS_KINEMATIC", "1")
 
@@ -252,7 +254,7 @@ def test_phase_b_env_skips_motion_gate_when_kinematic(monkeypatch):
     task = {"task_type": "pick_place", "target_object": "lightwheel_kitchen_obj_Toaster003"}
     report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
 
-    assert "EE_TARGET_GEOMETRY_IMPLAUSIBLE" not in report["critical_failures"]
+    assert "EE_TARGET_GEOMETRY_IMPLAUSIBLE" in report["critical_failures"]
 
 
 def test_motion_gate_fires_when_not_kinematic(monkeypatch):
@@ -418,6 +420,104 @@ def test_physics_certification_flags_snapback_or_teleport() -> None:
 
     assert report["passed"] is False
     assert "SNAPBACK_OR_TELEPORT_DETECTED" in report["critical_failures"]
+
+
+def test_physics_certification_warns_on_any_majority_synthesized_channel() -> None:
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], effort_value=0.1),
+        _frame(position=[0.11, 0.0, 0.2], effort_value=0.2),
+        _frame(position=[0.12, 0.0, 0.2], effort_value=0.3),
+    ]
+    target = "lightwheel_kitchen_obj_Toaster003"
+    for idx, frame in enumerate(frames):
+        frame["efforts_source"] = "physx"
+        frame["collision_contacts"][0]["provenance"] = "physx_contact_report"
+        frame["object_poses"][target]["source"] = "physx_server"
+        if idx < 2:
+            frame["observation"]["robot_state"]["joint_velocities_source"] = "finite_difference"
+
+    task = {"task_type": "inspect", "target_object": target}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is True
+    assert report["warnings"] == ["joint_velocities 67% synthesized"]
+    assert report["synthesis_provenance"]["joint_velocities"]["synthesized_fraction"] == 0.6667
+    assert report["metrics"]["synthesis_provenance"] == report["synthesis_provenance"]
+
+
+def test_physics_certification_fails_when_efforts_not_real_physx() -> None:
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], effort_value=0.1),
+        _frame(position=[0.11, 0.0, 0.2], effort_value=0.2),
+        _frame(position=[0.12, 0.0, 0.2], effort_value=0.3),
+    ]
+    for frame in frames:
+        frame["efforts_source"] = "estimated_inverse_dynamics"
+        frame["collision_contacts"][0]["provenance"] = "physx_contact_report"
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is False
+    assert "CHANNEL_INCOMPLETE" in report["critical_failures"]
+
+
+def test_physics_certification_requires_camera_checks_when_payload_present() -> None:
+    frames = [_frame(position=[0.1, 0.0, 0.2]), _frame(position=[0.11, 0.0, 0.2])]
+    for frame in frames:
+        frame["observation"]["camera_frames"] = {
+            "wrist": {
+                "width": 2,
+                "height": 2,
+                "rgb": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],  # placeholder-like
+                "depth": [[float("inf"), float("inf")], [float("inf"), float("inf")]],
+            }
+        }
+    meta = _episode_meta()
+    meta["modality_profile"] = "no_rgb"
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+
+    report = run_episode_certification(frames, meta, task, mode="strict")
+    assert report["passed"] is False
+    assert "CAMERA_PLACEHOLDER_PRESENT" in report["critical_failures"]
+    assert report["metrics"]["camera_required"] is True
+
+
+def test_physics_certification_flags_unresolved_camera_paths() -> None:
+    frames = [_frame(position=[0.1, 0.0, 0.2]), _frame(position=[0.11, 0.0, 0.2])]
+    for frame in frames:
+        frame["observation"]["camera_frames"] = {
+            "wrist": {
+                "width": 640,
+                "height": 480,
+                "rgb": "missing_rgb.npy",
+                "depth": "missing_depth.npy",
+            }
+        }
+    meta = _episode_meta()
+    meta["modality_profile"] = "no_rgb"
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+
+    report = run_episode_certification(frames, meta, task, mode="strict")
+    assert report["passed"] is False
+    assert "CAMERA_PLACEHOLDER_PRESENT" in report["critical_failures"]
+
+
+def test_physics_certification_joint_velocity_provenance_infers_real_when_server_backed() -> None:
+    frames = [
+        _frame(position=[0.1, 0.0, 0.2], effort_value=0.1),
+        _frame(position=[0.11, 0.0, 0.2], effort_value=0.2),
+    ]
+    for frame in frames:
+        frame["efforts_source"] = "physx"
+        frame["collision_contacts"][0]["provenance"] = "physx_contact_report"
+
+    task = {"task_type": "inspect", "target_object": "lightwheel_kitchen_obj_Toaster003"}
+    report = run_episode_certification(frames, _episode_meta(), task, mode="strict")
+
+    assert report["passed"] is True
+    assert report["synthesis_provenance"]["joint_velocities"]["real_fraction"] == 1.0
+    assert report["synthesis_provenance"]["joint_velocities"]["synthesized_fraction"] == 0.0
+    assert "joint_velocities 100% synthesized" not in report["warnings"]
 
 
 def test_write_run_certification_report_outputs_json_and_jsonl(tmp_path: Path):

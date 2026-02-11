@@ -611,17 +611,130 @@ class HDF5Exporter:
         rewards = []
         dones = []
 
+        def _get_nested(payload: Dict[str, Any], path: Tuple[str, ...]) -> Any:
+            current: Any = payload
+            for key in path:
+                if not isinstance(current, dict):
+                    return None
+                current = current.get(key)
+                if current is None:
+                    return None
+            return current
+
+        def _first_non_none(*values: Any) -> Any:
+            for value in values:
+                if value is not None:
+                    return value
+            return None
+
+        def _as_list(value: Any, default: List[float]) -> List[float]:
+            if isinstance(value, list):
+                return value
+            if isinstance(value, tuple):
+                return list(value)
+            return list(default)
+
+        def _as_float(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float(default)
+
         for i, frame in enumerate(frames):
+            obs = frame.get("observation", {}) if isinstance(frame, dict) else {}
+            rs = obs.get("robot_state", {}) if isinstance(obs, dict) else {}
+            ee_pose = rs.get("ee_pose", {}) if isinstance(rs, dict) else {}
+            ee_pose_pos = ee_pose.get("position") if isinstance(ee_pose, dict) else None
+            ee_pose_rot = ee_pose.get("orientation") if isinstance(ee_pose, dict) else None
+
             # Observations
-            obs_data["joint_positions"].append(frame.get("joint_positions", []))
-            obs_data["joint_velocities"].append(frame.get("joint_velocities", []))
-            obs_data["joint_torques"].append(frame.get("joint_torques", []))
-            obs_data["joint_efforts"].append(frame.get("joint_efforts", []))
-            obs_data["gripper_position"].append(frame.get("gripper_position", 0.0))
-            obs_data["gripper_force"].append(frame.get("gripper_force", 0.0))
-            obs_data["ee_position"].append(frame.get("ee_position", [0, 0, 0]))
-            obs_data["ee_orientation"].append(frame.get("ee_orientation", [1, 0, 0, 0]))
-            obs_data["ee_velocity"].append(frame.get("ee_velocity", [0, 0, 0, 0, 0, 0]))
+            obs_data["joint_positions"].append(
+                _as_list(
+                    _first_non_none(frame.get("joint_positions"), rs.get("joint_positions")),
+                    [],
+                )
+            )
+            obs_data["joint_velocities"].append(
+                _as_list(
+                    _first_non_none(frame.get("joint_velocities"), rs.get("joint_velocities")),
+                    [],
+                )
+            )
+            obs_data["joint_torques"].append(
+                _as_list(
+                    _first_non_none(frame.get("joint_torques"), rs.get("joint_torques")),
+                    [],
+                )
+            )
+            obs_data["joint_efforts"].append(
+                _as_list(
+                    _first_non_none(frame.get("joint_efforts"), rs.get("joint_efforts")),
+                    [],
+                )
+            )
+            obs_data["gripper_position"].append(
+                _as_float(
+                    _first_non_none(
+                        frame.get("gripper_position"),
+                        frame.get("gripper_openness"),
+                        rs.get("gripper_openness"),
+                        _get_nested(rs, ("gripper_state", "openness")),
+                    ),
+                    0.0,
+                )
+            )
+            obs_data["gripper_force"].append(
+                _as_float(
+                    _first_non_none(
+                        frame.get("gripper_force"),
+                        _get_nested(frame, ("contact_forces", "grip_force_N")),
+                        _get_nested(obs, ("privileged", "contact_forces", "grip_force_N")),
+                    ),
+                    0.0,
+                )
+            )
+            obs_data["ee_position"].append(
+                _as_list(
+                    _first_non_none(
+                        frame.get("ee_position"),
+                        frame.get("ee_pos"),
+                        rs.get("ee_pos"),
+                        [
+                            _as_float(_get_nested(ee_pose_pos or {}, ("x",))),
+                            _as_float(_get_nested(ee_pose_pos or {}, ("y",))),
+                            _as_float(_get_nested(ee_pose_pos or {}, ("z",))),
+                        ] if isinstance(ee_pose_pos, dict) else None,
+                    ),
+                    [0, 0, 0],
+                )
+            )
+            obs_data["ee_orientation"].append(
+                _as_list(
+                    _first_non_none(
+                        frame.get("ee_orientation"),
+                        frame.get("ee_quat"),
+                        rs.get("ee_quat"),
+                        [
+                            _as_float(_get_nested(ee_pose_rot or {}, ("w",)), 1.0),
+                            _as_float(_get_nested(ee_pose_rot or {}, ("x",))),
+                            _as_float(_get_nested(ee_pose_rot or {}, ("y",))),
+                            _as_float(_get_nested(ee_pose_rot or {}, ("z",))),
+                        ] if isinstance(ee_pose_rot, dict) else None,
+                    ),
+                    [1, 0, 0, 0],
+                )
+            )
+            obs_data["ee_velocity"].append(
+                _as_list(
+                    _first_non_none(
+                        frame.get("ee_velocity"),
+                        frame.get("ee_vel"),
+                        rs.get("ee_velocity"),
+                        rs.get("ee_vel"),
+                    ),
+                    [0, 0, 0, 0, 0, 0],
+                )
+            )
 
             # Actions
             actions.append(frame.get("action", []))

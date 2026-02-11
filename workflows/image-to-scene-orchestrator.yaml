@@ -4,7 +4,7 @@
 # by directly calling sub-workflows. Replaces the chain of Eventarc triggers.
 #
 # Stages:
-#   1. VM Reconstruction  — start GPU VM, run run_pipeline_gcs.sh (regen3d, simready, usd)
+#   1. VM Reconstruction  — start GPU VM, run run_pipeline_gcs.sh (regen3d-reconstruct, regen3d)
 #   2. USD Assembly        — call usd-assembly-pipeline (GLB→USDZ, simready, interactive, full USD, replicator, isaac baseline)
 #   3. Variation Assets    — call variation-assets-pipeline (variation-gen, simready, isaac refresh-only)
 #   4. GenieSim Export     — call genie-sim-export-pipeline (export + GKE GPU job)
@@ -283,7 +283,7 @@ main:
                       OBJECT_NAME_Q=$(printf '%q' "${OBJECT_NAME}")
                       OBJECT_GENERATION_Q=$(printf '%q' "${OBJECT_GENERATION}")
 
-                      REMOTE_CMD="cd ~/BlueprintPipeline && bash run_pipeline_gcs.sh ${SCENE_ID_Q} ${BUCKET_Q} ${OBJECT_NAME_Q} ${OBJECT_GENERATION_Q}"
+                      REMOTE_CMD="cd ~/BlueprintPipeline && bash run_pipeline_gcs.sh ${SCENE_ID_Q} ${BUCKET_Q} ${OBJECT_NAME_Q} ${OBJECT_GENERATION_Q} regen3d-reconstruct,regen3d"
 
                       gcloud compute ssh "${VM_NAME}" \
                         --project="${PROJECT_ID}" \

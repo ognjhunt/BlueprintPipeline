@@ -368,7 +368,7 @@ def test_strict_effort_semantics_reject_estimated_efforts(
 
 
 @pytest.mark.unit
-def test_strict_effort_semantics_allow_kinematic_override_when_real_efforts_disabled(
+def test_strict_effort_semantics_no_kinematic_override_when_real_efforts_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -377,25 +377,26 @@ def test_strict_effort_semantics_allow_kinematic_override_when_real_efforts_disa
     monkeypatch.setenv("REQUIRE_REAL_EFFORTS", "false")
     framework = _make_framework(tmp_path, monkeypatch)
 
-    # In strict mode, stale PhysX is diagnostic-only when kinematic override is
-    # explicitly enabled via REQUIRE_REAL_EFFORTS=false.
-    framework._enforce_strict_effort_semantics(
-        efforts_source="physx",
-        real_effort_count=10,
-        estimated_effort_count=0,
-        effort_missing_count=0,
-        total_frames=10,
-        stale_ratio=1.0,
-    )
+    with pytest.raises(lf.FatalRealismError) as excinfo:
+        framework._enforce_strict_effort_semantics(
+            efforts_source="physx",
+            real_effort_count=10,
+            estimated_effort_count=0,
+            effort_missing_count=0,
+            total_frames=10,
+            stale_ratio=1.0,
+        )
+    assert excinfo.value.reason_code == "STRICT_EFFORTS_STALE"
 
-    # Estimated ID source is also accepted in this explicit override mode.
-    framework._enforce_strict_effort_semantics(
-        efforts_source="estimated_inverse_dynamics",
-        real_effort_count=0,
-        estimated_effort_count=10,
-        effort_missing_count=0,
-        total_frames=10,
-    )
+    with pytest.raises(lf.FatalRealismError) as excinfo:
+        framework._enforce_strict_effort_semantics(
+            efforts_source="estimated_inverse_dynamics",
+            real_effort_count=0,
+            estimated_effort_count=10,
+            effort_missing_count=0,
+            total_frames=10,
+        )
+    assert excinfo.value.reason_code == "STRICT_EFFORTS_SOURCE"
 
 
 @pytest.mark.unit
