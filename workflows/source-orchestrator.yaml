@@ -491,7 +491,6 @@ main:
                   region: ${region}
                   bucket: ${bucket}
                   sceneId: ${childSceneId}
-                  arenaExportRequired: ${arenaExportRequired}
                 result: downstreamStatus
                 next: append_variant_entry
             - append_variant_entry:
@@ -803,12 +802,11 @@ run_workflow_and_wait:
 
 
 run_stage2_to_stage5:
-  params: [projectId, region, bucket, sceneId, arenaExportRequired]
+  params: [projectId, region, bucket, sceneId]
   steps:
     - derive:
         assign:
           - scenePrefix: '${"scenes/" + sceneId}'
-          - arenaState: "SKIPPED"
         next: run_stage2
 
     - run_stage2:
@@ -842,72 +840,17 @@ run_stage2_to_stage5:
             enable_stage3_isaac_refresh: true
             require_isaac: true
         result: variationResult
-        next: run_stage4
+        next: log_stage4_delegation
 
-    - run_stage4:
-        call: run_workflow_and_wait
+    # Stage 4 (Genie Sim export) and Stage 5 (Arena export) are triggered by
+    # EventArc on their respective completion markers (.variation_pipeline_complete
+    # and .geniesim_complete). They are NOT invoked synchronously here to avoid
+    # duplicate execution — both markers already have EventArc triggers configured.
+    - log_stage4_delegation:
+        call: sys.log
         args:
-          projectId: ${projectId}
-          region: ${region}
-          workflowName: "genie-sim-export-pipeline"
-          pollIntervalSeconds: 30
-          argument:
-            data:
-              bucket: ${bucket}
-              name: '${scenePrefix + "/variation_assets/.variation_pipeline_complete"}'
-        result: geniesimResult
-        next: run_stage5_requirement_switch
-
-    - run_stage5_requirement_switch:
-        switch:
-          - condition: ${arenaExportRequired}
-            next: run_stage5_required
-        next: run_stage5_non_blocking
-
-    - run_stage5_required:
-        call: run_workflow_and_wait
-        args:
-          projectId: ${projectId}
-          region: ${region}
-          workflowName: "arena-export-pipeline"
-          pollIntervalSeconds: 30
-          argument:
-            data:
-              bucket: ${bucket}
-              name: '${scenePrefix + "/geniesim/.geniesim_complete"}'
-        result: arenaRequiredResult
-        next: set_arena_success
-
-    - run_stage5_non_blocking:
-        try:
-          call: run_workflow_and_wait
-          args:
-            projectId: ${projectId}
-            region: ${region}
-            workflowName: "arena-export-pipeline"
-            pollIntervalSeconds: 30
-            argument:
-              data:
-                bucket: ${bucket}
-                name: '${scenePrefix + "/geniesim/.geniesim_complete"}'
-          result: arenaResult
-        except:
-          as: arenaErr
-          steps:
-            - log_arena_warning:
-                call: sys.log
-                args:
-                  text: '${"[source-orchestrator] arena export non-blocking failure for " + sceneId + ": " + arenaErr.message}'
-                  severity: "WARNING"
-            - set_arena_failed:
-                assign:
-                  - arenaState: "FAILED"
-                next: return_summary
-        next: set_arena_success
-
-    - set_arena_success:
-        assign:
-          - arenaState: "SUCCEEDED"
+          text: '${"[source-orchestrator] Stages 1-3 complete for " + sceneId + ". Stage 4 (genie-sim-export) will be triggered by EventArc on .variation_pipeline_complete marker."}'
+          severity: "INFO"
         next: return_summary
 
     - return_summary:
@@ -915,9 +858,8 @@ run_stage2_to_stage5:
           scene_id: ${sceneId}
           usd_assembly: "SUCCEEDED"
           variation_assets: "SUCCEEDED"
-          geniesim_export: "SUCCEEDED"
-          arena_export: ${arenaState}
-          arena_required: ${arenaExportRequired}
+          geniesim_export: "DELEGATED_TO_EVENTARC"
+          arena_export: "DELEGATED_TO_EVENTARC"
 
 
 run_text_stage1_for_child:

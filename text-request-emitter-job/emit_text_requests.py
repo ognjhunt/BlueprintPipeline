@@ -143,6 +143,8 @@ def main() -> int:
     quota = int(os.getenv("TEXT_DAILY_QUOTA", "1"))
     if quota < 1:
         raise ValueError(f"TEXT_DAILY_QUOTA must be >= 1, got {quota}")
+    if quota > 100:
+        raise ValueError(f"TEXT_DAILY_QUOTA exceeds safety ceiling of 100, got {quota}")
 
     seed_count = int(os.getenv("TEXT_AUTONOMY_SEED_COUNT", "1"))
     if seed_count < 1:

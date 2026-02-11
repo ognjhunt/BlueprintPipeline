@@ -47,6 +47,7 @@ main:
           - sceneIds: []
           - successCount: 0
           - failedCount: 0
+          - imageFallbackCount: 0
           - firstFailedScene: ""
           - runStatus: "UNKNOWN"
           - runError: ""
@@ -272,11 +273,17 @@ main:
                 switch:
                   - condition: '${sceneTerminal.status == "FAILED"}'
                     next: mark_scene_failure
+                  - condition: '${default(map.get(default(sceneTerminal.payload, {}), "source_type"), "") == "image_fallback"}'
+                    next: mark_scene_fallback
                 next: mark_scene_success
             - mark_scene_failure:
                 assign:
                   - failedCount: ${failedCount + 1}
                   - firstFailedScene: '${if(firstFailedScene == "", sceneId, firstFailedScene)}'
+                next: scene_loop_continue
+            - mark_scene_fallback:
+                assign:
+                  - imageFallbackCount: ${imageFallbackCount + 1}
                 next: scene_loop_continue
             - mark_scene_success:
                 assign:
@@ -291,6 +298,8 @@ main:
         switch:
           - condition: '${failedCount > 0}'
             next: set_failure_after_wait
+          - condition: '${imageFallbackCount > 0 and successCount == 0}'
+            next: set_partial_after_wait
         next: set_success_after_wait
 
     - set_failure_after_wait:
@@ -298,6 +307,12 @@ main:
           - runStatus: "FAILED"
           - runError: '${"source_orchestrator_failed_scene: " + firstFailedScene}'
         next: update_state_for_failure
+
+    - set_partial_after_wait:
+        assign:
+          - runStatus: "PARTIAL"
+          - runError: '${"all_scenes_fell_back_to_image (" + string(imageFallbackCount) + " fallbacks)"}'
+        next: update_state_for_success
 
     - set_success_after_wait:
         assign:
@@ -395,6 +410,7 @@ main:
             "scene_count": len(sceneIds),
             "success_count": successCount,
             "failed_count": failedCount,
+            "image_fallback_count": imageFallbackCount,
             "pause_after_run": pausedAfterRun,
             "consecutive_failures": newConsecutiveFailures,
             "daily_quota": dailyQuota,
@@ -572,6 +588,7 @@ wait_for_scene_terminal:
           scene_id: ${sceneId}
           status: "SUCCESS"
           marker: ${successObject}
+          payload: ${successPayload}
 
     - return_failure:
         return:

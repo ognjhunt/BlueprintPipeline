@@ -836,7 +836,19 @@ main:
         assign:
           - interactiveSummaryMissing: '${default(interactiveSummaryMissing, false)}'
           - interactiveSummaryPayload: ${json.decode(default(interactiveSummaryRaw, '{}'))}
+          - interactiveRequiredFailureCountFromMarker: ${interactiveRequiredFailureCount}
           - interactiveRequiredFailureCount: '${if(default(map.get(interactiveSummaryPayload, "required_failure_count"), null) != null, map.get(interactiveSummaryPayload, "required_failure_count"), interactiveRequiredFailureCount)}'
+        next: log_interactive_count_override_check
+
+    - log_interactive_count_override_check:
+        switch:
+          - condition: '${interactiveRequiredFailureCountFromMarker != interactiveRequiredFailureCount}'
+            steps:
+              - log_count_override:
+                  call: sys.log
+                  args:
+                    text: '${"WARNING: interactive required_failure_count overridden by summary for scene " + sceneId + " (marker=" + string(interactiveRequiredFailureCountFromMarker) + ", summary=" + string(interactiveRequiredFailureCount) + ")"}'
+                    severity: "WARNING"
         next: evaluate_interactive_policy
 
     - evaluate_interactive_policy:
@@ -1349,6 +1361,28 @@ main:
         args:
           text: '${"Replicator bundle generation completed for scene " + sceneId + " - starting Isaac Lab task generation"}'
           severity: "INFO"
+        next: verify_replicator_marker
+
+    - verify_replicator_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${replicatorPrefix + "/.replicator_complete"}'
+          result: replicatorMarkerObject
+        except:
+          as: e
+          steps:
+            - log_replicator_marker_missing:
+                call: sys.log
+                args:
+                  text: '${"WARNING: .replicator_complete marker missing after replicator-job succeeded for scene " + sceneId + " (error: " + e.message + ")"}'
+                  severity: "WARNING"
+            - replicator_marker_missing_policy:
+                switch:
+                  - condition: ${requireReplicator}
+                    next: release_lock_after_required_replicator_failure
+                next: init_isaac_lab_metrics
         next: init_isaac_lab_metrics
 
     - replicator_failed:
@@ -1583,6 +1617,28 @@ main:
         args:
           text: '${"Isaac Lab task generation completed for scene " + sceneId}'
           severity: "INFO"
+        next: verify_isaac_lab_marker
+
+    - verify_isaac_lab_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${isaacLabPrefix + "/.isaac_lab_complete"}'
+          result: isaacLabMarkerObject
+        except:
+          as: e
+          steps:
+            - log_isaac_lab_marker_missing:
+                call: sys.log
+                args:
+                  text: '${"WARNING: .isaac_lab_complete marker missing after isaac-lab-job succeeded for scene " + sceneId + " (error: " + e.message + ")"}'
+                  severity: "WARNING"
+            - isaac_lab_marker_missing_policy:
+                switch:
+                  - condition: ${requireIsaac}
+                    next: release_lock_after_required_isaac_lab_failure
+                next: release_lock_before_done_without_isaac_lab
         next: release_lock_before_done
 
     - isaac_lab_failed:
@@ -1618,7 +1674,23 @@ main:
         args:
           text: '${"WARNING: Isaac Lab baseline generation failed for scene " + sceneId + " (require_isaac=" + string(requireIsaac) + ")"}'
           severity: "WARNING"
+        next: isaac_lab_failure_policy_switch
+
+    - isaac_lab_failure_policy_switch:
+        switch:
+          - condition: ${requireIsaac}
+            next: release_lock_after_required_isaac_lab_failure
         next: release_lock_before_done_without_isaac_lab
+
+    - release_lock_after_required_isaac_lab_failure:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
+        next: raise_required_isaac_lab_error
+
+    - raise_required_isaac_lab_error:
+        raise: '${"Isaac Lab job failed and REQUIRE_ISAAC=true for scene " + sceneId}'
 
     - release_lock_after_required_replicator_failure:
         call: googleapis.storage.v1.objects.delete

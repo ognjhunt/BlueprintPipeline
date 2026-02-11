@@ -558,6 +558,55 @@ main:
         args:
           text: '${"Genie Sim export triggered for scene " + sceneId + " (robot: " + robotType + ", commercial_only: " + string(filterCommercial) + ")"}'
           severity: "INFO"
+        next: preflight_check_scene_manifest
+
+    # Pre-flight: verify critical upstream assets exist before launching expensive GPU jobs
+    - preflight_check_scene_manifest:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${assetsPrefix + "/scene_manifest.json"}'
+          result: preflightManifestObject
+        except:
+          as: e
+          steps:
+            - log_preflight_manifest_missing:
+                call: sys.log
+                args:
+                  text: '${"FATAL: scene_manifest.json missing for " + sceneId + " at " + assetsPrefix + "/scene_manifest.json — cannot proceed with Genie Sim export"}'
+                  severity: "ERROR"
+            - write_preflight_failure:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${geniesimFailedMarker}
+                  uploadType: "media"
+                  body:
+                    scene_id: ${sceneId}
+                    status: "failed"
+                    error:
+                      code: "PREFLIGHT_MISSING_SCENE_MANIFEST"
+                      message: '${"scene_manifest.json not found at " + assetsPrefix + "/scene_manifest.json"}'
+            - raise_preflight_error:
+                raise: '${"Pre-flight failed: scene_manifest.json missing for " + sceneId}'
+        next: preflight_check_replicator
+
+    - preflight_check_replicator:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${replicatorPrefix + "/.replicator_complete"}'
+          result: preflightReplicatorObject
+        except:
+          as: e
+          steps:
+            - log_preflight_replicator_warning:
+                call: sys.log
+                args:
+                  text: '${"WARNING: .replicator_complete marker missing for " + sceneId + " — proceeding without replicator validation"}'
+                  severity: "WARNING"
         next: init_export_metrics
 
     - init_export_metrics:

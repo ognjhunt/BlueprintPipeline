@@ -521,12 +521,48 @@ def _generate_asset_with_hunyuan3d(
     return _generate_asset_with_api_provider(root=root, obj=obj, obj_dir=obj_dir, provider="hunyuan3d")
 
 
+def _check_generated_asset_cache(
+    *,
+    root: Path,
+    obj: Mapping[str, Any],
+    obj_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    """Check if a previously generated asset exists in the cache."""
+    if not _is_truthy(os.getenv("TEXT_ASSET_GENERATED_CACHE_ENABLED"), default=True):
+        return None
+    cache_prefix = (os.getenv("TEXT_ASSET_GENERATED_CACHE_PREFIX") or "asset-library/generated-text").strip().strip("/")
+    if not cache_prefix:
+        return None
+    category = str(obj.get("category") or "object").strip().lower()
+    name = str(obj.get("name") or category).strip().lower()
+    description = str(obj.get("description") or "").strip().lower()
+    for provider in _asset_generation_provider_chain():
+        digest = sha256(f"{provider}|{category}|{name}|{description}".encode("utf-8")).hexdigest()[:12]
+        cache_dir = root / cache_prefix / category / digest
+        if cache_dir.is_dir() and any(cache_dir.iterdir()):
+            logger.info("[ADAPTER] cache hit for %s/%s (provider=%s, digest=%s)", category, name, provider, digest)
+            shutil.copytree(cache_dir, obj_dir, dirs_exist_ok=True)
+            glb_files = list(obj_dir.glob("*.glb"))
+            return {
+                "asset_path": glb_files[0].relative_to(root).as_posix() if glb_files else None,
+                "source_kind": "generated_cached",
+                "provider": provider,
+                "cache_digest": digest,
+            }
+    return None
+
+
 def _generate_asset_with_provider(
     *,
     root: Path,
     obj: Mapping[str, Any],
     obj_dir: Path,
 ) -> Optional[Dict[str, Any]]:
+    # Check cache before calling provider APIs
+    cached = _check_generated_asset_cache(root=root, obj=obj, obj_dir=obj_dir)
+    if cached is not None:
+        return cached
+
     providers = _asset_generation_provider_chain()
     for provider in providers:
         if provider == "sam3d":

@@ -75,6 +75,10 @@ def _evaluate_package_quality(package: Dict[str, Any]) -> bool:
     stability_raw = metrics.get("stability_pct")
 
     object_count = int(0 if object_count_raw is None else object_count_raw)
+    if collision_rate_raw is None:
+        logger.warning("[TEXT-GEN] collision_rate_pct missing from quality gate report, treating as fail (100.0)")
+    if stability_raw is None:
+        logger.warning("[TEXT-GEN] stability_pct missing from quality gate report, treating as fail (0.0)")
     collision_rate_pct = float(100.0 if collision_rate_raw is None else collision_rate_raw)
     stability_pct = float(0.0 if stability_raw is None else stability_raw)
 

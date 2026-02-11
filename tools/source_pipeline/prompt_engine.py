@@ -288,7 +288,7 @@ def _expand_prompt_with_llm(
                 continue
 
         if round_idx < max_attempts and retry_backoff_seconds > 0:
-            time.sleep(retry_backoff_seconds * round_idx)
+            time.sleep(retry_backoff_seconds * (2 ** round_idx))
 
     return base_prompt, False, attempts, failure_reason or "llm_generation_failed", None
 
