@@ -76,7 +76,8 @@ RUN ${ISAAC_SIM_PATH}/python.sh -m pip install grpcio-tools 2>/dev/null || true 
         --python_out=/opt/geniesim/source/data_collection/common/aimdk/protocol \
         /tmp/contact_report.proto \
     && rm /tmp/contact_report.proto
-RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
+RUN ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_curobo_import_guard.py \
+    && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_omnigraph_dedup.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_data_collector_render_config.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_camera_handler.py \
     && ${ISAAC_SIM_PATH}/python.sh /tmp/patches/patch_object_pose_handler.py \

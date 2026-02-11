@@ -191,6 +191,9 @@ PATCHES_DIR="/workspace/BlueprintPipeline/tools/geniesim_adapter/deployment/patc
 if [ -d "${PATCHES_DIR}" ]; then
   echo "[geniesim] Applying runtime patches (GENIESIM_ROOT=${GENIESIM_ROOT})..."
 
+  # cuRobo import guard (must run early — prevents crash when cuRobo not installed)
+  _apply_patch_script "${PATCHES_DIR}/patch_curobo_import_guard.py" "curobo_import_guard" "0"
+
   # Optional quality/compat patches
   _apply_patch_script "${PATCHES_DIR}/patch_camera_handler.py" "camera_handler" "0"
   _apply_patch_script "${PATCHES_DIR}/patch_observation_cameras.py" "observation_cameras" "0"
