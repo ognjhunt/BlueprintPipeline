@@ -14,7 +14,7 @@
 #     1739220750732768
 #
 # Default steps:
-#   regen3d-reconstruct,regen3d,simready,usd
+#   regen3d-reconstruct,regen3d
 # =============================================================================
 
 set -euo pipefail
@@ -23,7 +23,7 @@ SCENE_ID="${1:?Usage: $0 <scene_id> <bucket> <object_name> <generation> [steps]}
 BUCKET="${2:?Usage: $0 <scene_id> <bucket> <object_name> <generation> [steps]}"
 OBJECT_NAME="${3:?Usage: $0 <scene_id> <bucket> <object_name> <generation> [steps]}"
 OBJECT_GENERATION="${4:?Usage: $0 <scene_id> <bucket> <object_name> <generation> [steps]}"
-STEPS="${5:-regen3d-reconstruct,regen3d,simready,usd}"
+STEPS="${5:-regen3d-reconstruct,regen3d}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCENE_DIR="/tmp/blueprint_scenes/${SCENE_ID}"
@@ -38,6 +38,41 @@ mkdir -p "${STATE_ROOT}"
 
 timestamp_utc() {
     date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+preflight_runner_dependencies() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "[GCS-Runner] ERROR: python3 is not installed or not on PATH."
+        echo "[GCS-Runner] Install Python 3 and retry."
+        return 1
+    fi
+
+    local missing_modules
+    set +e
+    missing_modules="$(
+        python3 - <<'PY'
+import importlib.util
+
+required = ("numpy", "yaml")
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+if missing:
+    print(",".join(missing))
+    raise SystemExit(1)
+PY
+    )"
+    local rc=$?
+    set -e
+    if [ "${rc}" -ne 0 ]; then
+        echo "[GCS-Runner] ERROR: Local runner dependency preflight failed."
+        if [ -n "${missing_modules}" ]; then
+            echo "[GCS-Runner] Missing Python modules: ${missing_modules}"
+        fi
+        echo "[GCS-Runner] Install required modules on this host and retry:"
+        echo "  python3 -m pip install numpy PyYAML"
+        return "${rc}"
+    fi
+
+    return 0
 }
 
 lock_state() {
@@ -191,39 +226,49 @@ mkdir -p "${SCENE_DIR}"
 # ─── Run pipeline with GCS sync ───────────────────────────────────────────────
 echo "[GCS-Runner] Starting pipeline with GCS sync..."
 echo ""
-
-set +e
-python3 "${SCRIPT_DIR}/tools/run_local_pipeline.py" \
-    --scene-dir "${SCENE_DIR}" \
-    --steps "${STEPS}" \
-    --gcs-bucket "${BUCKET}" \
-    --gcs-download-inputs \
-    --gcs-upload-outputs \
-    --gcs-input-object "${OBJECT_NAME}" \
-    --gcs-input-generation "${OBJECT_GENERATION}" \
-    --gcs-upload-concurrency "${GCS_UPLOAD_CONCURRENCY:-4}" \
-    --fail-fast \
-    > >(tee "${LOG_FILE}") 2>&1 &
-PIPE_PID=$!
-
-lock_state
-write_state "${OBJECT_GENERATION}" "${PIPE_PID}" "running"
-unlock_state
-
-wait "${PIPE_PID}"
-PIPELINE_EXIT=$?
-set -e
-
-lock_state
-read_state
-if [ "${CURRENT_GENERATION}" = "${OBJECT_GENERATION}" ]; then
-    if [ "${PIPELINE_EXIT}" -eq 0 ]; then
-        write_state "${OBJECT_GENERATION}" "" "completed"
-    else
+PIPELINE_EXIT=0
+if ! preflight_runner_dependencies | tee "${LOG_FILE}"; then
+    PIPELINE_EXIT=1
+    lock_state
+    read_state
+    if [ "${CURRENT_GENERATION}" = "${OBJECT_GENERATION}" ]; then
         write_state "${OBJECT_GENERATION}" "" "failed"
     fi
+    unlock_state
+else
+    set +e
+    python3 "${SCRIPT_DIR}/tools/run_local_pipeline.py" \
+        --scene-dir "${SCENE_DIR}" \
+        --steps "${STEPS}" \
+        --gcs-bucket "${BUCKET}" \
+        --gcs-download-inputs \
+        --gcs-upload-outputs \
+        --gcs-input-object "${OBJECT_NAME}" \
+        --gcs-input-generation "${OBJECT_GENERATION}" \
+        --gcs-upload-concurrency "${GCS_UPLOAD_CONCURRENCY:-4}" \
+        --fail-fast \
+        > >(tee "${LOG_FILE}") 2>&1 &
+    PIPE_PID=$!
+
+    lock_state
+    write_state "${OBJECT_GENERATION}" "${PIPE_PID}" "running"
+    unlock_state
+
+    wait "${PIPE_PID}"
+    PIPELINE_EXIT=$?
+    set -e
+
+    lock_state
+    read_state
+    if [ "${CURRENT_GENERATION}" = "${OBJECT_GENERATION}" ]; then
+        if [ "${PIPELINE_EXIT}" -eq 0 ]; then
+            write_state "${OBJECT_GENERATION}" "" "completed"
+        else
+            write_state "${OBJECT_GENERATION}" "" "failed"
+        fi
+    fi
+    unlock_state
 fi
-unlock_state
 
 echo ""
 echo "============================================================"

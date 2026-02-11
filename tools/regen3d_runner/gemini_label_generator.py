@@ -37,6 +37,8 @@ Use code execution to crop and inspect areas that might contain objects you miss
 Return a JSON array of short noun phrases, one per object type.
 Include structural elements like "floor", "wall", "ceiling" if visible.
 Be specific: prefer "office chair" over just "chair", "potted plant" over "plant".
+Prefer whole, room-level objects over tiny parts.
+Do not list tiny components like screws, knobs, handles, hinges, or display sub-parts.
 If an object has likely articulated parts, encode that cue naturally in the label.
 Examples: "desk with drawers", "cabinet with doors", "box with hinged lid".
 Look specifically for drawers, doors, hinges, knobs, handles, or lids.
@@ -46,8 +48,22 @@ Return at most 25 labels.
 Example output: ["office chair", "wooden desk", "monitor", "potted plant", "floor"]
 """
 
+_TINY_PART_KEYWORDS = {
+    "knob", "handle", "hinge", "screw", "button", "switch", "dial", "display panel",
+    "control panel", "baseboard", "window frame", "trim",
+}
 
-def generate_labels_from_image(image_path: str) -> List[str]:
+_NORMALIZATION_STOPWORDS = {
+    "a", "an", "the", "with", "and", "of", "in", "on", "for", "to",
+}
+
+
+def generate_labels_from_image(
+    image_path: str,
+    *,
+    max_labels: int = 12,
+    quality_mode: str = "quality",
+) -> List[str]:
     """Call Gemini to analyze an image and return object labels.
 
     Args:
@@ -96,6 +112,11 @@ def generate_labels_from_image(image_path: str) -> List[str]:
         parsed = _extract_json_from_text(response.text)
 
     labels = _parse_label_response(parsed)
+    labels = _post_process_labels(
+        labels,
+        max_labels=max_labels,
+        quality_mode=quality_mode,
+    )
 
     if not labels:
         raise RuntimeError(
@@ -143,3 +164,66 @@ def _parse_label_response(data) -> List[str]:
                 return [str(l) for l in val if isinstance(l, str) and l.strip()]
 
     return []
+
+
+def _normalize_label_text(label: str) -> str:
+    text = label.strip().lower()
+    text = re.sub(r"[_-]+", " ", text)
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _tokenize(label: str) -> List[str]:
+    norm = _normalize_label_text(label)
+    return [token for token in norm.split() if token and token not in _NORMALIZATION_STOPWORDS]
+
+
+def _is_tiny_part_label(label: str) -> bool:
+    norm = _normalize_label_text(label)
+    return any(keyword in norm for keyword in _TINY_PART_KEYWORDS)
+
+
+def _is_semantic_duplicate(candidate_tokens: List[str], kept_tokens: List[str]) -> bool:
+    if not candidate_tokens or not kept_tokens:
+        return False
+    cset = set(candidate_tokens)
+    kset = set(kept_tokens)
+    if cset == kset:
+        return True
+    # Treat subset/superset as duplicates for near-identical labels.
+    if cset.issubset(kset) or kset.issubset(cset):
+        return True
+    overlap = len(cset & kset)
+    return overlap > 0 and overlap >= min(len(cset), len(kset))
+
+
+def _post_process_labels(
+    raw_labels: List[str],
+    *,
+    max_labels: int,
+    quality_mode: str,
+) -> List[str]:
+    if max_labels < 1:
+        max_labels = 1
+    mode = (quality_mode or "quality").strip().lower()
+    filtered: List[str] = []
+    kept_tokens: List[List[str]] = []
+
+    for raw in raw_labels:
+        label = " ".join(raw.strip().split())
+        if not label:
+            continue
+        tokens = _tokenize(label)
+        if not tokens:
+            continue
+        if mode == "quality" and _is_tiny_part_label(label):
+            continue
+        if any(_is_semantic_duplicate(tokens, existing) for existing in kept_tokens):
+            continue
+        filtered.append(label)
+        kept_tokens.append(tokens)
+        if len(filtered) >= max_labels:
+            break
+
+    return filtered

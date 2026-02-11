@@ -52,6 +52,12 @@ def test_replicator_bundle_job_end_to_end(
              "transform": {"position": {"x": 2.0, "y": 0.5, "z": 0.9},
                            "rotation_euler": {"roll": 0, "pitch": 0, "yaw": 0},
                            "scale": {"x": 1, "y": 1, "z": 1}}},
+            {"id": "dishwasher_01", "category": "dishwasher", "sim_role": "articulated_appliance",
+             "articulation": {"required": True, "type": "revolute"},
+             "asset": {"path": "objects/dishwasher_01/asset.usdz", "source": "blueprintpipeline"},
+             "transform": {"position": {"x": 2.6, "y": 0.2, "z": 0.9},
+                           "rotation_euler": {"roll": 0, "pitch": 0, "yaw": 0},
+                           "scale": {"x": 1, "y": 1, "z": 1}}},
             {"id": "plate_01", "category": "dish", "sim_role": "manipulable_object",
              "asset": {"path": "objects/plate_01/asset.usdz", "source": "blueprintpipeline"},
              "transform": {"position": {"x": 2.3, "y": 0.1, "z": 0.9},
@@ -98,6 +104,23 @@ def test_replicator_bundle_job_end_to_end(
     manifest_data = json.loads(manifest_path.read_text())
     asset_names = {asset["name"] for asset in manifest_data["assets"]}
     assert {"dirty_plate", "dirty_mug"}.issubset(asset_names)
+
+    affordance_graph_path = output_dir / "affordance_graph.json"
+    assert affordance_graph_path.is_file()
+    affordance_graph = json.loads(affordance_graph_path.read_text())
+    assert affordance_graph["scene_id"] == "test_scene"
+    assert affordance_graph["regions"]
+    assert "dish_loading" in affordance_graph["policy_region_map"]
+    articulation_target_ids = {
+        target["object_id"] for target in affordance_graph.get("articulation_targets", [])
+    }
+    assert "dishwasher_01" in articulation_target_ids
+
+    marker_path = output_dir / ".replicator_complete"
+    assert marker_path.is_file()
+    marker = json.loads(marker_path.read_text())
+    assert marker["status"] == "completed"
+    assert marker["scene_id"] == "test_scene"
 
     placement_text = (output_dir / "placement_regions" / "placement_regions.usda").read_text()
     assert "countertop_region" in placement_text

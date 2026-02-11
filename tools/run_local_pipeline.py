@@ -90,6 +90,7 @@ import logging
 import re
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -2848,6 +2849,27 @@ class LocalPipelineRunner:
         )
         self.log(f"Wrote inventory: {inventory_path}")
 
+        quality_ok, quality_message, quality_details = self._validate_stage1_quality(
+            regen3d_output=regen3d_output,
+            manifest=manifest,
+            layout=layout,
+        )
+        quality_report_path = self._write_stage1_quality_report(
+            quality_ok=quality_ok,
+            quality_message=quality_message,
+            quality_details=quality_details,
+        )
+        if not quality_ok:
+            failure_outputs = dict(quality_details)
+            failure_outputs["stage1_quality_report"] = str(quality_report_path)
+            return StepResult(
+                step=PipelineStep.REGEN3D,
+                success=False,
+                duration_seconds=0,
+                message=quality_message,
+                outputs=failure_outputs,
+            )
+
         # Write completion marker
         marker_path = self.assets_dir / ".regen3d_complete"
         marker_content = {
@@ -2871,8 +2893,161 @@ class LocalPipelineRunner:
                 "manifest": str(manifest_path),
                 "layout": str(layout_path),
                 "objects_count": len(regen3d_output.objects),
+                "stage1_quality_report": str(quality_report_path),
             },
         )
+
+    def _validate_stage1_quality(
+        self,
+        *,
+        regen3d_output: Any,
+        manifest: Dict[str, Any],
+        layout: Dict[str, Any],
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """Validate Stage 1 reconstruction outputs before emitting completion marker."""
+        issues: List[str] = []
+        details: Dict[str, Any] = {}
+
+        foreground_count = len(getattr(regen3d_output, "objects", []) or [])
+        has_background = getattr(regen3d_output, "background", None) is not None
+        manifest_objects = manifest.get("objects") if isinstance(manifest, dict) else None
+        layout_objects = layout.get("objects") if isinstance(layout, dict) else None
+
+        details["foreground_object_count"] = foreground_count
+        details["has_background"] = has_background
+        details["manifest_object_count"] = (
+            len(manifest_objects) if isinstance(manifest_objects, list) else 0
+        )
+        details["layout_object_count"] = (
+            len(layout_objects) if isinstance(layout_objects, list) else 0
+        )
+        quality_mode = os.getenv("REGEN3D_QUALITY_MODE", "quality").strip().lower()
+        if quality_mode not in {"quality", "compat"}:
+            quality_mode = "quality"
+        allow_textureless = parse_bool_env(
+            os.getenv("REGEN3D_ALLOW_TEXTURELESS"),
+            default=False,
+        )
+        details["quality_mode"] = quality_mode
+        details["allow_textureless_override"] = allow_textureless
+
+        if foreground_count <= 0:
+            issues.append("No reconstructed foreground objects were produced.")
+        if not has_background:
+            issues.append("Background mesh is missing.")
+        if not isinstance(manifest_objects, list) or not manifest_objects:
+            issues.append("scene_manifest.json has no objects.")
+        if not isinstance(layout_objects, list) or not layout_objects:
+            issues.append("scene_layout_scaled.json has no objects.")
+
+        mesh_stats: Dict[str, Any] = {
+            "checked": 0,
+            "with_materials": 0,
+            "with_textures": 0,
+            "parse_errors": [],
+        }
+        for obj in (getattr(regen3d_output, "objects", []) or []):
+            mesh_path_value = getattr(obj, "mesh_path", "")
+            if not mesh_path_value:
+                continue
+            mesh_path = Path(mesh_path_value)
+            info = self._inspect_glb_metadata(mesh_path)
+            if info["exists"]:
+                mesh_stats["checked"] += 1
+            if info["parse_error"]:
+                mesh_stats["parse_errors"].append(
+                    f"{mesh_path.name}: {info['parse_error']}"
+                )
+                continue
+            if info["materials"] > 0:
+                mesh_stats["with_materials"] += 1
+            if info["textures"] > 0:
+                mesh_stats["with_textures"] += 1
+            if info["meshes"] <= 0:
+                mesh_stats["parse_errors"].append(
+                    f"{mesh_path.name}: no mesh primitives found"
+                )
+
+        details["mesh_stats"] = mesh_stats
+        if mesh_stats["checked"] <= 0:
+            issues.append("No readable object GLB assets were found.")
+        elif mesh_stats["with_materials"] <= 0:
+            issues.append("Object GLBs contain no material definitions.")
+        elif (
+            quality_mode == "quality"
+            and not allow_textureless
+            and mesh_stats["with_textures"] <= 0
+        ):
+            issues.append(
+                "Object GLBs contain no texture definitions "
+                "(quality mode requires textures unless "
+                "REGEN3D_ALLOW_TEXTURELESS=true)."
+            )
+
+        details["issues"] = list(issues)
+
+        if issues:
+            return (
+                False,
+                "Stage 1 quality gate failed: " + " ".join(issues),
+                details,
+            )
+        return True, "Stage 1 quality gate passed", details
+
+    def _write_stage1_quality_report(
+        self,
+        *,
+        quality_ok: bool,
+        quality_message: str,
+        quality_details: Dict[str, Any],
+    ) -> Path:
+        """Write a machine-readable Stage 1 quality report."""
+        report_path = self.assets_dir / "stage1_quality_report.json"
+        report_payload = {
+            "scene_id": self.scene_id,
+            "status": "pass" if quality_ok else "fail",
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "message": quality_message,
+            "details": quality_details,
+        }
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        _safe_write_text(
+            report_path,
+            json.dumps(report_payload, indent=2),
+            context="stage1 quality report",
+        )
+        return report_path
+
+    def _inspect_glb_metadata(self, glb_path: Path) -> Dict[str, Any]:
+        """Inspect high-level GLB metadata required by Stage 1 quality gating."""
+        info: Dict[str, Any] = {
+            "exists": glb_path.is_file(),
+            "meshes": 0,
+            "materials": 0,
+            "textures": 0,
+            "parse_error": None,
+        }
+        if not info["exists"]:
+            info["parse_error"] = "missing file"
+            return info
+        try:
+            data = glb_path.read_bytes()
+            if data[:4] != b"glTF":
+                info["parse_error"] = "not a GLB file"
+                return info
+            if len(data) < 20:
+                info["parse_error"] = "truncated GLB header"
+                return info
+            json_chunk_len, _ = struct.unpack_from("<II", data, 12)
+            json_start = 20
+            json_end = json_start + json_chunk_len
+            gltf_json = json.loads(data[json_start:json_end].decode("utf-8"))
+            info["meshes"] = len(gltf_json.get("meshes", []) or [])
+            info["materials"] = len(gltf_json.get("materials", []) or [])
+            info["textures"] = len(gltf_json.get("textures", []) or [])
+        except Exception as exc:
+            info["parse_error"] = str(exc)
+        return info
 
     def _annotate_articulation_requirements(
         self,

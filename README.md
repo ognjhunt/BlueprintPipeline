@@ -37,12 +37,11 @@ environment variables, then set one or both of the cost thresholds below:
 
 ## Pipeline Architecture
 
-```
-image → 3D-RE-GEN → regen3d-job → simready-job → usd-assembly-job → replicator-job → isaac-lab-job
-                          ↓              ↓              ↓                 ↓               ↓
-                     manifest      physics       scene.usda       replicator/        isaac_lab/
-                      layout        props                       placement_regions   env_cfg.py
-                    inventory                                   variation_manifest  train_cfg.yaml
+``` 
+image → 3D-RE-GEN → regen3d-job → simready-job → interactive-job → usd-assembly-job → replicator-job → isaac-lab-job (baseline)
+                                                                                                                ↓
+                                                                                                  variation-assets-pipeline
+                                                                                              (variation-gen → simready → isaac refresh)
 ```
 
 ## Quick Start
@@ -233,8 +232,8 @@ ensure OpenUSD is installed so the USD assembly job can import `pxr`.
 | `interactive-job` | Add articulation (Particulate) | GLB meshes | URDF + segmented meshes |
 | `simready-job` | Add physics properties | Manifest | `simready.usda` per object |
 | `usd-assembly-job` | Build final USD scene | Manifest + layout | `scene.usda` |
-| `replicator-job` | Generate domain randomization | Manifest + inventory | `placement_regions.usda`, policy scripts |
-| `isaac-lab-job` | Generate RL training tasks | Manifest + USD | `env_cfg.py`, `train_cfg.yaml`, etc. |
+| `replicator-job` | Generate domain randomization | Manifest + inventory | `placement_regions.usda`, policy scripts, `affordance_graph.json` (+ `articulation_targets`) |
+| `isaac-lab-job` | Generate RL training tasks | Manifest + USD + replicator graph | Baseline package + `task_spawn_plan_baseline.json`; refresh mode writes `task_spawn_plan_refresh.json` |
 
 ## Output Structure
 
@@ -255,6 +254,8 @@ scenes/{scene_id}/
 ├── assets/
 │   ├── scene_manifest.json         # Canonical manifest
 │   ├── .regen3d_complete           # Completion marker
+│   ├── .interactive_complete       # Articulation completion marker (when run)
+│   ├── .interactive_summary.json   # Articulation diagnostics
 │   └── obj_{id}/
 │       └── asset.glb
 ├── layout/
@@ -274,7 +275,10 @@ scenes/{scene_id}/
     ├── task_{policy}.py            # Task implementation
     ├── train_cfg.yaml              # Training hyperparameters
     ├── randomizations.py           # Domain randomization hooks
-    └── reward_functions.py         # Reward modules
+    ├── reward_functions.py         # Reward modules
+    ├── task_spawn_plan_baseline.json
+    ├── task_spawn_plan_refresh.json
+    └── .isaac_lab_refresh_complete
 ```
 
 ## Definition of Done
@@ -317,6 +321,12 @@ so ensure your prefixes match that convention when configuring jobs.
 | `SIMREADY_ALLOW_DETERMINISTIC_PHYSICS` | Allow deterministic (LLM-free) physics when Gemini is unavailable | `false` |
 | `SIMREADY_FALLBACK_MIN_COVERAGE` | Minimum coverage ratio for deterministic fallback physics (0-1) | `0.6` |
 | `SIMREADY_NON_LLM_MIN_QUALITY` | Minimum quality ratio for non-LLM physics checks (0-1) | `0.85` |
+| `INTERACTIVE_FAILURE_POLICY` | Stage-2 articulation gate policy (`hybrid_strict`/`strict`/`warn`) | `hybrid_strict` |
+| `REQUIRE_REPLICATOR` | Fail Stage 2 when replicator fails | `true` |
+| `REQUIRE_ISAAC` | Require at least one Isaac pass across baseline/refresh | `true` |
+| `ENABLE_STAGE3_ISAAC_REFRESH` | Enable Stage-3 refresh-only Isaac pass | `true` |
+| `ISAAC_REFRESH_ONLY` | Isaac job mode switch for refresh-only planning | `false` |
+| `VARIATION_ASSETS_PREFIX` | Variation assets path for Stage-3 refresh planning | `scenes/{id}/variation_assets` |
 
 Example defaults for production runs:
 

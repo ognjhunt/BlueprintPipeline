@@ -97,6 +97,11 @@ class Regen3DConfig:
     sam3_threshold: float = 0.4
     sam3_model: str = "facebook/sam3"
 
+    # Quality controls
+    quality_mode: str = "quality"  # quality | compat
+    max_labels: int = 12
+    max_masks: int = 40
+
     # Require background mesh (full scene mode)
     require_background: bool = True
 
@@ -116,6 +121,9 @@ class Regen3DConfig:
         labels = [l.strip() for l in labels_str.split(",") if l.strip()]
 
         seg_backend = os.getenv("REGEN3D_SEG_BACKEND", "grounded_sam").lower()
+        quality_mode = os.getenv("REGEN3D_QUALITY_MODE", "quality").strip().lower()
+        if quality_mode not in {"quality", "compat"}:
+            quality_mode = "quality"
 
         return cls(
             vm_host=os.getenv("REGEN3D_VM_HOST", "isaac-sim-ubuntu"),
@@ -147,6 +155,9 @@ class Regen3DConfig:
             seg_backend=seg_backend,
             sam3_threshold=float(os.getenv("REGEN3D_SAM3_THRESHOLD", "0.4")),
             sam3_model=os.getenv("REGEN3D_SAM3_MODEL", "facebook/sam3"),
+            quality_mode=quality_mode,
+            max_labels=max(1, int(os.getenv("REGEN3D_MAX_LABELS", "12"))),
+            max_masks=max(1, int(os.getenv("REGEN3D_MAX_MASKS", "40"))),
             require_background=os.getenv("REGEN3D_REQUIRE_BACKGROUND", "true").lower()
             in ("true", "1", "yes"),
             repair_missing_emptyroom_pointcloud=os.getenv(
@@ -265,9 +276,59 @@ class Regen3DRunner:
 
             # Step 4b: Run SAM3 segmentation (replaces 3D-RE-GEN Step 1)
             if self.config.seg_backend == "sam3":
-                self._run_sam3_segmentation(
+                sam3_result = self._run_sam3_segmentation(
                     remote_image_path, remote_output_dir
                 )
+                mask_count = int(sam3_result.get("mask_count", 0) or 0)
+                if (
+                    self.config.quality_mode == "quality"
+                    and not sam3_result.get("fallback_used")
+                    and mask_count > self.config.max_masks
+                ):
+                    strict_labels = self._shrink_labels_for_mask_guard()
+                    if not strict_labels or strict_labels == self.config.labels:
+                        return ReconstructionResult(
+                            success=False,
+                            scene_id=scene_id,
+                            objects_count=0,
+                            duration_seconds=time.monotonic() - start_time,
+                            output_dir=output_dir,
+                            error=(
+                                "SAM3 produced too many masks "
+                                f"({mask_count} > {self.config.max_masks}) "
+                                "and no stricter label retry was possible."
+                            ),
+                        )
+                    self.log(
+                        "SAM3 mask explosion guard triggered "
+                        f"({mask_count} > {self.config.max_masks}); "
+                        f"retrying with stricter labels: {strict_labels}",
+                        "WARNING",
+                    )
+                    self.config.labels = strict_labels
+                    self._generate_and_upload_config(
+                        remote_image_path, remote_output_dir, scene_id
+                    )
+                    self._clear_remote_segmentation_outputs(remote_output_dir)
+                    strict_result = self._run_sam3_segmentation(
+                        remote_image_path,
+                        remote_output_dir,
+                        strict_failure=True,
+                    )
+                    strict_mask_count = int(strict_result.get("mask_count", 0) or 0)
+                    if strict_mask_count > self.config.max_masks:
+                        return ReconstructionResult(
+                            success=False,
+                            scene_id=scene_id,
+                            objects_count=0,
+                            duration_seconds=time.monotonic() - start_time,
+                            output_dir=output_dir,
+                            error=(
+                                "SAM3 retry still produced too many masks "
+                                f"({strict_mask_count} > {self.config.max_masks}). "
+                                "Refine labels or switch backend."
+                            ),
+                        )
 
             # Step 5: Run the pipeline
             effective_steps = self.config.steps
@@ -299,6 +360,21 @@ class Regen3DRunner:
                             error=f"3D-RE-GEN pipeline failed before Step 7 (exit {rc})",
                             remote_log=stderr[-2000:] if stderr else "",
                         )
+                    if self.config.quality_mode == "quality" and 1 in pre_steps:
+                        mask_count = self._count_remote_masks(remote_output_dir)
+                        if mask_count > self.config.max_masks:
+                            return ReconstructionResult(
+                                success=False,
+                                scene_id=scene_id,
+                                objects_count=0,
+                                duration_seconds=time.monotonic() - start_time,
+                                output_dir=output_dir,
+                                error=(
+                                    "Grounded-SAM produced too many masks "
+                                    f"({mask_count} > {self.config.max_masks}). "
+                                    "Reduce label breadth or switch to SAM3."
+                                ),
+                            )
 
                 if self.config.repair_missing_emptyroom_pointcloud:
                     self._ensure_step7_background_pointcloud(remote_output_dir)
@@ -320,6 +396,21 @@ class Regen3DRunner:
                 rc, _, stderr = self._execute_pipeline(
                     scene_id, remote_output_dir, steps_override=effective_steps
                 )
+                if self.config.quality_mode == "quality" and 1 in effective_steps:
+                    mask_count = self._count_remote_masks(remote_output_dir)
+                    if mask_count > self.config.max_masks:
+                        return ReconstructionResult(
+                            success=False,
+                            scene_id=scene_id,
+                            objects_count=0,
+                            duration_seconds=time.monotonic() - start_time,
+                            output_dir=output_dir,
+                            error=(
+                                "Grounded-SAM produced too many masks "
+                                f"({mask_count} > {self.config.max_masks}). "
+                                "Reduce label breadth or switch to SAM3."
+                            ),
+                        )
 
             if rc != 0:
                 return ReconstructionResult(
@@ -643,9 +734,55 @@ class Regen3DRunner:
         from tools.regen3d_runner.gemini_label_generator import (
             generate_labels_from_image,
         )
-        labels = generate_labels_from_image(str(input_image))
+        labels = generate_labels_from_image(
+            str(input_image),
+            max_labels=self.config.max_labels,
+            quality_mode=self.config.quality_mode,
+        )
         self.config.labels = labels
         self.log(f"Auto-labels ({len(labels)}): {labels}")
+
+    def _shrink_labels_for_mask_guard(self) -> List[str]:
+        """Build a stricter label list to reduce over-segmentation retries."""
+        if not self.config.labels:
+            return []
+
+        structural_tokens = {
+            "floor", "wall", "ceiling", "window", "door", "countertop", "shelf"
+        }
+        tiny_part_tokens = {"knob", "handle", "hinge", "switch", "button"}
+
+        def _is_structural(label: str) -> bool:
+            low = label.lower()
+            return any(token in low for token in structural_tokens)
+
+        def _is_tiny_part(label: str) -> bool:
+            low = label.lower()
+            return any(token in low for token in tiny_part_tokens)
+
+        core_labels = [
+            label for label in self.config.labels
+            if not _is_structural(label) and not _is_tiny_part(label)
+        ]
+        structural_labels = [label for label in self.config.labels if _is_structural(label)]
+
+        target = max(4, min(self.config.max_labels, self.config.max_labels // 2 or 1))
+        tightened = core_labels[:target]
+        if len(tightened) < target:
+            tightened.extend(structural_labels[: target - len(tightened)])
+        if not tightened:
+            tightened = self.config.labels[:target]
+        return tightened
+
+    def _clear_remote_segmentation_outputs(self, remote_output_dir: str) -> None:
+        """Remove stale segmentation artifacts before a strict retry."""
+        cmd = (
+            f"rm -rf {shlex.quote(remote_output_dir)}/findings/fullSize/* "
+            f"{shlex.quote(remote_output_dir)}/findings/banana/* "
+            f"{shlex.quote(remote_output_dir)}/masks/* "
+            f"{shlex.quote(remote_output_dir)}/findings/.sam3_failed"
+        )
+        self._vm.ssh_exec(cmd, stream_logs=False, check=False)
 
     def _setup_sam3_env(self) -> None:
         """Ensure the SAM3 Python 3.12 venv exists on the remote VM."""

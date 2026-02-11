@@ -87,7 +87,11 @@ def test_run_reconstruction_clears_native_output_before_download(
     monkeypatch.setattr(runner, "_setup_remote", lambda: None)
     monkeypatch.setattr(runner, "_upload_input_image", lambda *_args, **_kwargs: "/remote/input.jpg")
     monkeypatch.setattr(runner, "_generate_and_upload_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_clear_remote_segmentation_outputs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_clear_remote_segmentation_outputs", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner, "_execute_pipeline", lambda *_args, **_kwargs: (0, "", ""))
+    monkeypatch.setattr(runner, "_count_remote_masks", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(runner, "_create_glb_symlinks", lambda *_args, **_kwargs: None)
 
     def _fake_download_outputs(_remote_output_dir: str, local_dir: Path) -> None:
         assert not (local_dir / "stale.txt").exists()
@@ -126,12 +130,18 @@ def test_from_env_defaults_match_reconstruct_config(monkeypatch) -> None:
     monkeypatch.delenv("REGEN3D_VM_ZONE", raising=False)
     monkeypatch.delenv("REGEN3D_REPO_PATH", raising=False)
     monkeypatch.delenv("REGEN3D_SETUP_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("REGEN3D_QUALITY_MODE", raising=False)
+    monkeypatch.delenv("REGEN3D_MAX_LABELS", raising=False)
+    monkeypatch.delenv("REGEN3D_MAX_MASKS", raising=False)
 
     cfg = Regen3DConfig.from_env()
     assert cfg.seg_backend == "grounded_sam"
     assert cfg.vm_zone == "us-east1-c"
     assert cfg.repo_path == "/home/nijelhunt1/3D-RE-GEN"
     assert cfg.setup_timeout_s == 3600
+    assert cfg.quality_mode == "quality"
+    assert cfg.max_labels == 12
+    assert cfg.max_masks == 40
 
 
 def test_compare_backends_calls_setup_remote(monkeypatch, tmp_path: Path) -> None:
@@ -312,6 +322,258 @@ def test_harvest_handles_missing_object_glbs(tmp_path: Path) -> None:
 
     assert result.objects_count == 0
     assert "No object GLBs found in glb/ or 3D/ directories" in result.warnings
+
+
+def test_harvest_finds_hunyuan_shape_glb_fallback(tmp_path: Path) -> None:
+    native_dir = tmp_path / "native"
+    target_dir = tmp_path / "regen3d"
+    obj_name = "chair__(100, 200)"
+    obj_dir = native_dir / "3D" / obj_name
+    obj_dir.mkdir(parents=True, exist_ok=True)
+    (obj_dir / f"{obj_name}_shape.glb").write_bytes(create_minimal_glb())
+
+    scene_dir = native_dir / "glb" / "scene"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    (scene_dir / "combined_scene.glb").write_bytes(create_minimal_glb())
+    transforms = {
+        obj_name: [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+    }
+    (scene_dir / "transforms.json").write_text(json.dumps(transforms, indent=2))
+
+    result = harvest_regen3d_native_output(native_dir, target_dir, scene_id="scene")
+    assert result.objects_count == 1
+    assert (target_dir / "objects" / "obj_0" / "mesh.glb").is_file()
+
+
+def test_vm_executor_download_dir_uses_find_with_symlink_support(monkeypatch, tmp_path: Path) -> None:
+    vm = VMExecutor(
+        VMConfig(host="example-host", zone="example-zone"),
+        verbose=False,
+    )
+    captured_cmds: list[str] = []
+    downloaded_paths: list[tuple[str, Path]] = []
+
+    def _fake_ssh_exec(command: str, *args, **kwargs):
+        captured_cmds.append(command)
+        return (0, "/remote/out/3D/chair/chair.glb\n", "")
+
+    def _fake_scp_download(remote_path: str, local_path: Path):
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(b"glb")
+        downloaded_paths.append((remote_path, local_path))
+
+    monkeypatch.setattr(vm, "ssh_exec", _fake_ssh_exec)
+    monkeypatch.setattr(vm, "scp_download", _fake_scp_download)
+
+    output = vm.scp_download_dir("/remote/out", tmp_path / "local")
+    assert output
+    assert any("-type l" in cmd and "find -L" in cmd for cmd in captured_cmds)
+    assert downloaded_paths[0][0].endswith("chair.glb")
+    assert downloaded_paths[0][1].is_file()
+
+
+def test_run_reconstruction_fails_when_background_missing_and_required(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from tools.regen3d_runner import runner as runner_module
+
+    input_image = tmp_path / "input.jpg"
+    input_image.write_bytes(b"mock")
+    output_dir = tmp_path / "regen3d"
+
+    runner = Regen3DRunner(
+        config=Regen3DConfig(gemini_api_key="", labels=["chair"], require_background=True),
+        verbose=False,
+    )
+
+    monkeypatch.setattr(runner, "_ensure_vm_ready", lambda: None)
+    monkeypatch.setattr(runner, "_setup_remote", lambda: None)
+    monkeypatch.setattr(runner, "_upload_input_image", lambda *_args, **_kwargs: "/remote/input.jpg")
+    monkeypatch.setattr(runner, "_generate_and_upload_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_execute_pipeline", lambda *_args, **_kwargs: (0, "", ""))
+    monkeypatch.setattr(runner, "_count_remote_masks", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(runner, "_create_glb_symlinks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_download_outputs", lambda *_args, **_kwargs: None)
+
+    def _fake_harvest(**kwargs):
+        return HarvestResult(
+            target_dir=kwargs["target_dir"],
+            objects_count=1,
+            has_background=False,
+            has_camera=True,
+            has_depth=False,
+            warnings=["No background mesh found"],
+        )
+
+    monkeypatch.setattr(runner_module, "harvest_regen3d_native_output", _fake_harvest)
+
+    result = runner.run_reconstruction(
+        input_image=input_image,
+        scene_id="scene",
+        output_dir=output_dir,
+    )
+
+    assert not result.success
+    assert "Background mesh not produced" in (result.error or "")
+
+
+def test_run_reconstruction_sam3_mask_guard_retries_with_stricter_labels(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from tools.regen3d_runner import runner as runner_module
+
+    input_image = tmp_path / "input.jpg"
+    input_image.write_bytes(b"mock")
+    output_dir = tmp_path / "regen3d"
+
+    cfg = Regen3DConfig(
+        gemini_api_key="",
+        labels=[
+            "stacked washer and dryer",
+            "control knob",
+            "digital display panel",
+            "woven basket",
+            "wall",
+            "floor",
+            "detergent bottle",
+        ],
+        seg_backend="sam3",
+        quality_mode="quality",
+        max_masks=5,
+    )
+    runner = Regen3DRunner(config=cfg, verbose=False)
+
+    monkeypatch.setattr(runner, "_ensure_vm_ready", lambda: None)
+    monkeypatch.setattr(runner, "_setup_remote", lambda: None)
+    monkeypatch.setattr(runner, "_upload_input_image", lambda *_args, **_kwargs: "/remote/input.jpg")
+    monkeypatch.setattr(runner, "_generate_and_upload_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_execute_pipeline", lambda *_args, **_kwargs: (0, "", ""))
+    monkeypatch.setattr(runner, "_count_remote_masks", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(runner, "_create_glb_symlinks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_download_outputs", lambda *_args, **_kwargs: None)
+
+    cleared = {"count": 0}
+    monkeypatch.setattr(
+        runner,
+        "_clear_remote_segmentation_outputs",
+        lambda *_args, **_kwargs: cleared.__setitem__("count", cleared["count"] + 1),
+    )
+
+    calls = {"count": 0}
+
+    def _fake_sam3(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {"mask_count": 12, "fallback_used": False, "error": None}
+        return {"mask_count": 3, "fallback_used": False, "error": None}
+
+    monkeypatch.setattr(runner, "_run_sam3_segmentation", _fake_sam3)
+
+    def _fake_harvest(**kwargs):
+        return HarvestResult(
+            target_dir=kwargs["target_dir"],
+            objects_count=2,
+            has_background=True,
+            has_camera=True,
+            has_depth=False,
+            warnings=[],
+        )
+
+    monkeypatch.setattr(runner_module, "harvest_regen3d_native_output", _fake_harvest)
+
+    result = runner.run_reconstruction(
+        input_image=input_image,
+        scene_id="scene",
+        output_dir=output_dir,
+    )
+
+    assert result.success
+    assert calls["count"] == 2
+    assert cleared["count"] == 1
+    assert len(runner.config.labels) < 7
+
+
+def test_run_reconstruction_sam3_mask_guard_fails_if_retry_still_too_high(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_image = tmp_path / "input.jpg"
+    input_image.write_bytes(b"mock")
+    output_dir = tmp_path / "regen3d"
+
+    runner = Regen3DRunner(
+        config=Regen3DConfig(
+            gemini_api_key="",
+            labels=["washer", "dryer", "basket", "floor", "wall", "knob"],
+            seg_backend="sam3",
+            quality_mode="quality",
+            max_masks=4,
+        ),
+        verbose=False,
+    )
+
+    monkeypatch.setattr(runner, "_ensure_vm_ready", lambda: None)
+    monkeypatch.setattr(runner, "_setup_remote", lambda: None)
+    monkeypatch.setattr(runner, "_upload_input_image", lambda *_args, **_kwargs: "/remote/input.jpg")
+    monkeypatch.setattr(runner, "_generate_and_upload_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_clear_remote_segmentation_outputs", lambda *_args, **_kwargs: None)
+
+    calls = {"count": 0}
+
+    def _fake_sam3(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {"mask_count": 10, "fallback_used": False, "error": None}
+        return {"mask_count": 8, "fallback_used": False, "error": None}
+
+    monkeypatch.setattr(runner, "_run_sam3_segmentation", _fake_sam3)
+
+    result = runner.run_reconstruction(
+        input_image=input_image,
+        scene_id="scene",
+        output_dir=output_dir,
+    )
+
+    assert not result.success
+    assert "too many masks" in (result.error or "").lower()
+
+
+def test_run_reconstruction_grounded_sam_mask_guard_fails_fast(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_image = tmp_path / "input.jpg"
+    input_image.write_bytes(b"mock")
+    output_dir = tmp_path / "regen3d"
+
+    runner = Regen3DRunner(
+        config=Regen3DConfig(
+            gemini_api_key="",
+            labels=["chair"],
+            seg_backend="grounded_sam",
+            quality_mode="quality",
+            max_masks=2,
+            steps=[1],
+        ),
+        verbose=False,
+    )
+    monkeypatch.setattr(runner, "_ensure_vm_ready", lambda: None)
+    monkeypatch.setattr(runner, "_setup_remote", lambda: None)
+    monkeypatch.setattr(runner, "_upload_input_image", lambda *_args, **_kwargs: "/remote/input.jpg")
+    monkeypatch.setattr(runner, "_generate_and_upload_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runner, "_execute_pipeline", lambda *_args, **_kwargs: (0, "", ""))
+    monkeypatch.setattr(runner, "_count_remote_masks", lambda *_args, **_kwargs: 9)
+
+    result = runner.run_reconstruction(
+        input_image=input_image,
+        scene_id="scene",
+        output_dir=output_dir,
+    )
+
+    assert not result.success
+    assert "too many masks" in (result.error or "").lower()
 
 
 def test_vm_executor_retries_on_ssh_exit_255_when_check_false(monkeypatch) -> None:

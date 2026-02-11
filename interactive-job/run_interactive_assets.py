@@ -254,6 +254,23 @@ def write_status_marker(
     return marker_path
 
 
+def write_interactive_summary(
+    assets_root: Path,
+    scene_id: str,
+    summary: Dict[str, Any],
+) -> Path:
+    """Write a concise interactive summary artifact for downstream diagnostics."""
+    summary_path = assets_root / ".interactive_summary.json"
+    payload = {
+        "scene_id": scene_id,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **summary,
+    }
+    save_json(payload, summary_path)
+    log(f"Wrote interactive summary: {summary_path}")
+    return summary_path
+
+
 def write_placeholder_warning_marker(
     assets_root: Path,
     scene_id: str,
@@ -376,11 +393,30 @@ def find_crop_image(obj_dir: Path, multiview_root: Path, obj_id: str) -> Optiona
 
 def is_required_articulation_object(obj: Dict[str, Any]) -> bool:
     """Return True when object is explicitly marked articulation-required."""
+    sim_role = str(obj.get("sim_role", "") or "").strip().lower()
+    if sim_role in {"articulated_furniture", "articulated_appliance"}:
+        return True
     if obj.get("articulation_required") is True:
         return True
     articulation = obj.get("articulation")
     if isinstance(articulation, dict) and articulation.get("required") is True:
         return True
+    return False
+
+
+def is_articulation_candidate_object(obj: Dict[str, Any]) -> bool:
+    """Return True when object should be considered for articulation processing."""
+    if is_required_articulation_object(obj):
+        return True
+    if obj.get("articulation_hint"):
+        return True
+    articulation = obj.get("articulation")
+    if isinstance(articulation, dict):
+        if articulation.get("type"):
+            return True
+        hints = articulation.get("hints")
+        if isinstance(hints, list) and len(hints) > 0:
+            return True
     return False
 
 
@@ -1936,9 +1972,20 @@ def main() -> None:
         sys.exit(1)
     objects = scene_assets.get("objects", [])
 
-    # Filter interactive objects
-    interactive_objects = [o for o in objects if o.get("type") == "interactive"]
+    process_all_interactive = env_flag(os.getenv("INTERACTIVE_PROCESS_ALL"), default=False)
+    all_interactive_objects = [o for o in objects if o.get("type") == "interactive"]
+    if process_all_interactive:
+        interactive_objects = list(all_interactive_objects)
+    else:
+        interactive_objects = [o for o in all_interactive_objects if is_articulation_candidate_object(o)]
     required_interactive_objects = [o for o in interactive_objects if is_required_articulation_object(o)]
+    interactive_summary_base = {
+        "total_objects_in_manifest": len(objects),
+        "interactive_objects_in_manifest": len(all_interactive_objects),
+        "candidate_interactive_count": len(interactive_objects),
+        "required_interactive_count": len(required_interactive_objects),
+        "process_all_interactive": process_all_interactive,
+    }
 
     # Print configuration
     log("=" * 60)
@@ -1952,7 +1999,10 @@ def main() -> None:
     log(f"Particulate Mode: {particulate_mode}")
     log(f"Particulate Endpoint: {particulate_endpoint or '(none - static mode)'}")
     log(f"Mode: {mode}")
-    log(f"Interactive objects: {len(interactive_objects)}")
+    log(f"Interactive objects in manifest: {len(all_interactive_objects)}")
+    log(f"Interactive candidate objects: {len(interactive_objects)}")
+    log(f"Required articulation objects: {len(required_interactive_objects)}")
+    log(f"INTERACTIVE_PROCESS_ALL: {process_all_interactive}")
     log(f"Production mode: {production_mode}")
     if production_mode:
         source_value = production_value.strip() if isinstance(production_value, str) else production_value
@@ -2121,6 +2171,7 @@ def main() -> None:
             "backend": resolved_backend,
             "particulate_mode": particulate_mode,
             "particulate_endpoint": particulate_endpoint or None,
+            "required_interactive_count": len(required_interactive_objects),
         }
         write_status_marker(
             assets_root,
@@ -2128,6 +2179,18 @@ def main() -> None:
             status="success",
             summary=summary,
             warnings=warnings,
+        )
+        write_interactive_summary(
+            assets_root,
+            scene_id,
+            {
+                **interactive_summary_base,
+                "status": "success",
+                "processed_count": len(interactive_objects),
+                "ok_count": 0,
+                "error_count": 0,
+                "required_failure_count": 0,
+            },
         )
         return
 
@@ -2155,12 +2218,25 @@ def main() -> None:
             "backend": resolved_backend,
             "particulate_mode": particulate_mode,
             "particulate_endpoint": particulate_endpoint or None,
+            "required_interactive_count": len(required_interactive_objects),
         }
         write_status_marker(
             assets_root,
             scene_id,
             status="success",
             summary=summary,
+        )
+        write_interactive_summary(
+            assets_root,
+            scene_id,
+            {
+                **interactive_summary_base,
+                "status": "success",
+                "processed_count": 0,
+                "ok_count": 0,
+                "error_count": 0,
+                "required_failure_count": 0,
+            },
         )
 
         log("Done (no objects)")
@@ -2308,6 +2384,7 @@ def main() -> None:
         "particulate_mode": particulate_mode,
         "particulate_endpoint": particulate_endpoint or None,
         "required_failures": required_failures,
+        "required_interactive_count": len(required_interactive_objects),
     }
 
     if required_failures:
@@ -2328,6 +2405,19 @@ def main() -> None:
         summary=summary,
         errors=error_payloads,
         warnings=warning_payloads,
+    )
+    write_interactive_summary(
+        assets_root,
+        scene_id,
+        {
+            **interactive_summary_base,
+            "status": status,
+            "processed_count": len(interactive_objects),
+            "ok_count": ok_count,
+            "error_count": error_count,
+            "required_failure_count": len(required_failures),
+            "required_failures": required_failures,
+        },
     )
     if status == "failure":
         failure_reason = "required_articulation_unmet" if required_failures else "articulation_failed"

@@ -277,6 +277,75 @@ def wire_usdz_references(
     return wired_count
 
 
+def _required_articulation_ids(scene_assets: Dict) -> List[str]:
+    """Collect object IDs that require articulation outputs."""
+    required_ids: List[str] = []
+    for obj in scene_assets.get("objects", []):
+        obj_id = str(obj.get("id") or "").strip()
+        if not obj_id:
+            continue
+        sim_role = str(obj.get("sim_role") or "").strip().lower()
+        if sim_role in {"articulated_furniture", "articulated_appliance"}:
+            required_ids.append(obj_id)
+            continue
+        articulation = obj.get("articulation") or {}
+        if isinstance(articulation, dict) and articulation.get("required") is True:
+            required_ids.append(obj_id)
+    return sorted(set(required_ids))
+
+
+def _validate_required_interactive_outputs(
+    root: Path,
+    assets_prefix: str,
+    required_ids: List[str],
+) -> Tuple[bool, str]:
+    """Validate that interactive outputs exist for all required articulation IDs."""
+    if not required_ids:
+        return True, "no_required_articulation"
+
+    assets_root = root / assets_prefix
+    status_marker = assets_root / ".interactive_complete"
+    if not status_marker.is_file():
+        return False, f"missing {status_marker}"
+
+    try:
+        status_payload = load_json(status_marker)
+    except Exception as exc:
+        return False, f"failed to parse {status_marker}: {exc}"
+
+    status = str(status_payload.get("status") or "").strip().lower()
+    if status not in {"success", "partial"}:
+        return False, f"interactive status is '{status or 'unknown'}'"
+
+    summary = status_payload.get("summary") or {}
+    required_failures = summary.get("required_failures") or []
+    if isinstance(required_failures, list) and len(required_failures) > 0:
+        return False, f"required articulation failures reported: {required_failures}"
+
+    results_path = assets_root / "interactive" / "interactive_results.json"
+    if not results_path.is_file():
+        return False, f"missing {results_path}"
+
+    try:
+        results_payload = load_json(results_path)
+    except Exception as exc:
+        return False, f"failed to parse {results_path}: {exc}"
+
+    articulated_ids: Set[str] = set()
+    for entry in results_payload.get("objects", []):
+        obj_id = str(entry.get("id") or "").strip()
+        if not obj_id:
+            continue
+        if entry.get("is_articulated"):
+            articulated_ids.add(obj_id)
+
+    missing = sorted(set(required_ids) - articulated_ids)
+    if missing:
+        return False, f"missing articulated outputs for required objects: {missing}"
+
+    return True, "ok"
+
+
 # -----------------------------------------------------------------------------
 # Validation
 # -----------------------------------------------------------------------------
@@ -329,6 +398,7 @@ def assemble_scene(
     except FileNotFoundError as exc:
         print(f"[ERROR] {exc}")
         return 1
+    required_articulation_ids = _required_articulation_ids(scene_assets)
 
     print("\n[PHASE 1] Discovering GLB assets...")
     conversions = find_glb_assets(scene_assets, root, assets_prefix)
@@ -376,6 +446,24 @@ def assemble_scene(
         return 1
     print(f"  Wired {wired} object references")
 
+    if required_articulation_ids:
+        print("\n[PHASE 4.4] Validating required interactive outputs...")
+        interactive_valid, interactive_reason = _validate_required_interactive_outputs(
+            root=root,
+            assets_prefix=assets_prefix,
+            required_ids=required_articulation_ids,
+        )
+        if not interactive_valid:
+            print(
+                "[ERROR] Required articulated objects detected but interactive outputs "
+                f"are not valid: {interactive_reason}"
+            )
+            return 1
+        print(
+            "  Required interactive outputs validated "
+            f"({len(required_articulation_ids)} objects)"
+        )
+
     # [PHASE 4.5] Wire articulated assets from interactive-job
     articulated_count = 0
     if HAVE_ARTICULATION_WIRING:
@@ -398,8 +486,17 @@ def assemble_scene(
                     manifest_path.write_text(json.dumps(updated_manifest, indent=2))
                     print(f"  Updated manifest with articulation data")
         except Exception as e:
+            if required_articulation_ids:
+                print(f"[ERROR] Articulation wiring failed for required objects: {e}")
+                return 1
             print(f"[WARN] Articulation wiring failed (non-fatal): {e}")
     else:
+        if required_articulation_ids:
+            print(
+                "\n[ERROR] Articulation wiring module is unavailable while required "
+                "articulated objects are present"
+            )
+            return 1
         print("\n[PHASE 4.5] Articulation wiring not available (skipping)")
 
     # [PHASE 4.7] Fix physics conflicts from referenced assets

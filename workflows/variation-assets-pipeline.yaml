@@ -6,6 +6,7 @@
 #   1. Triggers on .replicator_complete marker from replicator-job
 #   2. Runs variation-gen-job to generate variation asset specifications
 #   3. Runs simready-job to add physics properties to the assets
+#   4. Runs isaac-lab-job refresh-only pass to update task spawn plans from generated variations
 #
 # Note: With 3D-RE-GEN pipeline, 3D model generation is handled by regen3d-job.
 #
@@ -42,16 +43,24 @@ main:
         assign:
           - parts: '${text.split(object, "/")}'
           - sceneId: ${parts[1]}
+          - assetsPrefix: '${"scenes/" + sceneId + "/assets"}'
+          - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
+          - isaacLabPrefix: '${"scenes/" + sceneId + "/isaac_lab"}'
           - variationAssetsPrefix: '${"scenes/" + sceneId + "/variation_assets"}'
           - variationAssetsProgressMarker: '${"scenes/" + sceneId + "/variation_assets/.progress.json"}'
           - variationAssetsReportObject: '${"scenes/" + sceneId + "/variation_assets/generation_report.json"}'
           - variationAssetsFailedMarker: '${"scenes/" + sceneId + "/variation_assets/.failed"}'
           - variationSimreadyFailedMarker: '${"scenes/" + sceneId + "/variation_assets/simready/.failed"}'
+          - isaacLabRefreshCompleteObject: '${"scenes/" + sceneId + "/isaac_lab/.isaac_lab_refresh_complete"}'
           - variationGenJobName: "variation-gen-job"
           - variationGenTimeoutSeconds: '${int(default(sys.get_env("VARIATION_GEN_TIMEOUT_SECONDS"), "1800"))}'
           - simreadyJobName: "simready-job"
           - simreadyTimeoutSeconds: '${int(default(sys.get_env("SIMREADY_TIMEOUT_SECONDS"), "3600"))}'
+          - isaacLabJobName: "isaac-lab-job"
+          - isaacLabTimeoutSeconds: '${int(default(sys.get_env("ISAAC_LAB_TIMEOUT_SECONDS"), "1800"))}'
+          - enableStage3IsaacRefresh: '${default(map.get(event, "enable_stage3_isaac_refresh"), default(sys.get_env("ENABLE_STAGE3_ISAAC_REFRESH"), "true")) == "true"}'
+          - requireIsaac: '${default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")) == "true"}'
         next: log_start
 
     - log_start:
@@ -64,8 +73,10 @@ main:
     - init_pipeline_metrics:
         assign:
           - pipelineStartTime: '${time.format(sys.now())}'
-          - pipelineTimeoutSeconds: '${variationGenTimeoutSeconds + simreadyTimeoutSeconds}'
+          - pipelineTimeoutSeconds: '${variationGenTimeoutSeconds + simreadyTimeoutSeconds + if(enableStage3IsaacRefresh, isaacLabTimeoutSeconds, 0)}'
           - pipelineStatus: "SUCCESS"
+          - isaacRefreshState: "SKIPPED"
+          - isaacRefreshExecutionName: ""
         next: emit_pipeline_metrics_start
 
     - emit_pipeline_metrics_start:
@@ -413,22 +424,43 @@ main:
           args:
             bucket: ${bucket}
             object: '${variationAssetsPrefix + "/variation_assets.json"}'
-          result: variationAssetsJson
+            alt: "media"
+          result: variationAssetsJsonRaw
         except:
           as: e
           steps:
-            - no_assets_generated:
+            - no_assets_generated_missing_file:
                 call: sys.log
                 args:
                   text: '${"No variation assets were generated for scene " + sceneId + " - pipeline complete"}'
                   severity: "INFO"
                 next: set_pipeline_status_no_assets
-        next: init_simready_metrics
+        next: parse_variation_assets_json
+
+    - parse_variation_assets_json:
+        assign:
+          - variationAssetsJson: ${json.decode(variationAssetsJsonRaw)}
+          - variationAssetCount: '${len(default(map.get(variationAssetsJson, "objects"), []))}'
+        next: variation_assets_count_switch
+
+    - variation_assets_count_switch:
+        switch:
+          - condition: ${variationAssetCount > 0}
+            next: init_simready_metrics
+        next: no_assets_generated
+
+    - no_assets_generated:
+        call: sys.log
+        args:
+          text: '${"No variation asset objects were generated for scene " + sceneId + " - skipping variation simready/refresh"}'
+          severity: "INFO"
+        next: set_pipeline_status_no_assets
 
     - set_pipeline_status_no_assets:
         assign:
           - pipelineStatus: "SUCCESS_NO_ASSETS"
-        next: finalize_pipeline_metrics
+          - variationAssetCount: 0
+        next: ensure_at_least_one_isaac_pass
 
     # =========================================================================
     # Stage 2: Add physics properties to variation assets
@@ -617,7 +649,7 @@ main:
         args:
           text: '${"Simready job completed for scene " + sceneId + " variation assets"}'
           severity: "INFO"
-        next: set_pipeline_status_success
+        next: init_isaac_refresh_gate
 
     - simready_failed:
         assign:
@@ -651,12 +683,261 @@ main:
         args:
           text: '${"WARNING: Simready job failed for scene " + sceneId + " variation assets - assets may not have physics properties"}'
           severity: "WARNING"
+        next: ensure_at_least_one_isaac_pass
+
+    - init_isaac_refresh_gate:
+        assign:
+          - isaacRefreshState: "SKIPPED"
+        next: stage3_isaac_refresh_switch
+
+    - stage3_isaac_refresh_switch:
+        switch:
+          - condition: '${enableStage3IsaacRefresh and variationAssetCount > 0}'
+            next: init_isaac_refresh_metrics
+        next: ensure_at_least_one_isaac_pass
+
+    - init_isaac_refresh_metrics:
+        assign:
+          - isaacRefreshStartTime: '${time.format(sys.now())}'
+        next: emit_isaac_refresh_metrics_start
+
+    - emit_isaac_refresh_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "variation-assets-pipeline"
+            job: ${isaacLabJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${isaacLabTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${isaacRefreshStartTime}
+            mode: "refresh_only"
+          severity: "INFO"
+        next: run_isaac_refresh_job
+
+    - run_isaac_refresh_job:
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + isaacLabJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+                      - name: USD_PREFIX
+                        value: ${usdPrefix}
+                      - name: REPLICATOR_PREFIX
+                        value: ${replicatorPrefix}
+                      - name: ISAAC_LAB_PREFIX
+                        value: ${isaacLabPrefix}
+                      - name: VARIATION_ASSETS_PREFIX
+                        value: ${variationAssetsPrefix}
+                      - name: ISAAC_REFRESH_ONLY
+                        value: "true"
+                      - name: RUN_RUNTIME_VALIDATION
+                        value: "false"
+              timeout: '${string(isaacLabTimeoutSeconds) + "s"}'
+          result: isaacRefreshExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 5  # default per policy_configs/retry_policy.yaml
+          backoff:
+            initial_delay: 1
+            max_delay: 60
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_isaac_refresh_start_error:
+                call: sys.log
+                args:
+                  text: '${"WARNING: Failed to start Isaac refresh job after retries for scene " + sceneId + ": " + e.message}'
+                  severity: "WARNING"
+            - set_isaac_refresh_failed_on_start:
+                assign:
+                  - isaacRefreshState: "FAILED"
+        next: check_isaac_refresh_start_failure
+
+    - check_isaac_refresh_start_failure:
+        switch:
+          - condition: '${isaacRefreshState == "FAILED"}'
+            next: ensure_at_least_one_isaac_pass
+        next: set_isaac_refresh_execution_name
+
+    - set_isaac_refresh_execution_name:
+        assign:
+          - isaacRefreshExecutionName: '${if(isaacRefreshExec.metadata != null and isaacRefreshExec.metadata.name != null, isaacRefreshExec.metadata.name, isaacRefreshExec.name)}'
+        next: wait_for_isaac_refresh
+
+    - wait_for_isaac_refresh:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${isaacRefreshExecutionName}
+        result: isaacRefreshStatus
+        next: check_isaac_refresh_status
+
+    - check_isaac_refresh_status:
+        assign:
+          - isaacRefreshJobState: '${if(isaacRefreshStatus.state != null, isaacRefreshStatus.state, if(isaacRefreshStatus.status != null, isaacRefreshStatus.status.state, null))}'
+          - isaacRefreshFailedCount: '${if(isaacRefreshStatus.failedCount != null, isaacRefreshStatus.failedCount, if(isaacRefreshStatus.status != null, isaacRefreshStatus.status.failedCount, null))}'
+          - isaacRefreshSucceededCount: '${if(isaacRefreshStatus.succeededCount != null, isaacRefreshStatus.succeededCount, if(isaacRefreshStatus.status != null, isaacRefreshStatus.status.succeededCount, null))}'
+        next: isaac_refresh_status_switch
+
+    - isaac_refresh_status_switch:
+        switch:
+          - condition: '${isaacRefreshJobState == "FAILED" or (isaacRefreshFailedCount != null and isaacRefreshFailedCount > 0)}'
+            next: isaac_refresh_failed
+          - condition: '${isaacRefreshJobState == "SUCCEEDED" or (isaacRefreshSucceededCount != null and isaacRefreshSucceededCount > 0)}'
+            next: log_isaac_refresh_complete
+        next: wait_isaac_refresh_poll
+
+    - wait_isaac_refresh_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_isaac_refresh
+
+    - log_isaac_refresh_complete:
+        assign:
+          - isaacRefreshEndTime: '${time.format(sys.now())}'
+          - isaacRefreshDurationSeconds: '${time.parse(isaacRefreshEndTime) - time.parse(isaacRefreshStartTime)}'
+          - isaacRefreshTimeoutUsageRatio: '${isaacRefreshDurationSeconds / isaacLabTimeoutSeconds}'
+          - isaacRefreshTimedOut: '${isaacRefreshDurationSeconds >= isaacLabTimeoutSeconds}'
+          - isaacRefreshState: "SUCCEEDED"
+        next: emit_isaac_refresh_metrics_complete
+
+    - emit_isaac_refresh_metrics_complete:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "variation-assets-pipeline"
+            job: ${isaacLabJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${isaacLabTimeoutSeconds}
+            duration_seconds: ${isaacRefreshDurationSeconds}
+            timeout_usage_ratio: ${isaacRefreshTimeoutUsageRatio}
+            timed_out: ${isaacRefreshTimedOut}
+            status: "SUCCEEDED"
+            start_time: ${isaacRefreshStartTime}
+            end_time: ${isaacRefreshEndTime}
+            mode: "refresh_only"
+          severity: "INFO"
+        next: log_isaac_refresh_complete_message
+
+    - log_isaac_refresh_complete_message:
+        call: sys.log
+        args:
+          text: '${"Isaac refresh-only pass completed for scene " + sceneId}'
+          severity: "INFO"
+        next: verify_isaac_refresh_marker
+
+    - verify_isaac_refresh_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${isaacLabRefreshCompleteObject}
+          result: isaacRefreshMarkerObject
+        except:
+          as: e
+          steps:
+            - log_isaac_refresh_marker_missing:
+                call: sys.log
+                args:
+                  text: '${"WARNING: Isaac refresh marker missing for scene " + sceneId + ": " + e.message}'
+                  severity: "WARNING"
+            - set_isaac_refresh_failed_missing_marker:
+                assign:
+                  - isaacRefreshState: "FAILED"
+        next: ensure_at_least_one_isaac_pass
+
+    - isaac_refresh_failed:
+        assign:
+          - isaacRefreshEndTime: '${time.format(sys.now())}'
+          - isaacRefreshDurationSeconds: '${time.parse(isaacRefreshEndTime) - time.parse(isaacRefreshStartTime)}'
+          - isaacRefreshTimeoutUsageRatio: '${isaacRefreshDurationSeconds / isaacLabTimeoutSeconds}'
+          - isaacRefreshTimedOut: '${isaacRefreshDurationSeconds >= isaacLabTimeoutSeconds}'
+          - isaacRefreshState: "FAILED"
+        next: emit_isaac_refresh_metrics_failed
+
+    - emit_isaac_refresh_metrics_failed:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "complete"
+            workflow: "variation-assets-pipeline"
+            job: ${isaacLabJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${isaacLabTimeoutSeconds}
+            duration_seconds: ${isaacRefreshDurationSeconds}
+            timeout_usage_ratio: ${isaacRefreshTimeoutUsageRatio}
+            timed_out: ${isaacRefreshTimedOut}
+            status: "FAILED"
+            start_time: ${isaacRefreshStartTime}
+            end_time: ${isaacRefreshEndTime}
+            mode: "refresh_only"
+          severity: "WARNING"
+        next: ensure_at_least_one_isaac_pass
+
+    - ensure_at_least_one_isaac_pass:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${isaacLabPrefix + "/.isaac_lab_complete"}'
+          result: isaacBaselineMarker
+        except:
+          as: e
+          steps:
+            - set_isaac_baseline_missing:
+                assign:
+                  - isaacBaselinePresent: false
+        next: set_isaac_baseline_present
+
+    - set_isaac_baseline_present:
+        assign:
+          - isaacBaselinePresent: '${default(isaacBaselinePresent, true)}'
+        next: enforce_isaac_required_gate
+
+    - enforce_isaac_required_gate:
+        switch:
+          - condition: '${requireIsaac and not isaacBaselinePresent and isaacRefreshState != "SUCCEEDED"}'
+            next: fail_missing_required_isaac
+        next: finalize_isaac_success_path
+
+    - finalize_isaac_success_path:
+        switch:
+          - condition: '${pipelineStatus == "SUCCESS_NO_ASSETS"}'
+            next: write_completion_marker
         next: set_pipeline_status_success
 
     - set_pipeline_status_success:
         assign:
           - pipelineStatus: "SUCCESS"
         next: write_completion_marker
+
+    - fail_missing_required_isaac:
+        assign:
+          - pipelineStatus: "FAILED_REQUIRED_ISAAC"
+          - errorMsg: '${"No successful Isaac pass for scene " + sceneId + " (baseline_present=" + string(isaacBaselinePresent) + ", refresh_state=" + isaacRefreshState + ", require_isaac=true)"}'
+        next: raise_missing_required_isaac
+
+    - raise_missing_required_isaac:
+        raise: ${errorMsg}
 
     # =========================================================================
     # Write completion marker and finish
@@ -717,6 +998,7 @@ main:
           message: '${"Variation assets pipeline completed for scene " + sceneId}'
           variation_gen_execution: ${variationGenExec.name}
           simready_execution: ${simreadyExec.name}
+          isaac_refresh_execution: ${isaacRefreshExecutionName}
           outputs:
             variation_assets: '${variationAssetsPrefix}'
             assets_json: '${variationAssetsPrefix + "/variation_assets.json"}'

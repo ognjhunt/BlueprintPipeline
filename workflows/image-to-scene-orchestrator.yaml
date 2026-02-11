@@ -5,8 +5,8 @@
 #
 # Stages:
 #   1. VM Reconstruction  — start GPU VM, run run_pipeline_gcs.sh (regen3d, simready, usd)
-#   2. USD Assembly        — call usd-assembly-pipeline (GLB→USDZ, simready, replicator, isaac-lab)
-#   3. Variation Assets    — call variation-assets-pipeline (variation-gen, simready)
+#   2. USD Assembly        — call usd-assembly-pipeline (GLB→USDZ, simready, interactive, full USD, replicator, isaac baseline)
+#   3. Variation Assets    — call variation-assets-pipeline (variation-gen, simready, isaac refresh-only)
 #   4. GenieSim Export     — call genie-sim-export-pipeline (export + GKE GPU job)
 #   5. Arena Export        — call arena-export-pipeline (non-blocking, best-effort)
 #
@@ -489,7 +489,7 @@ main:
         args:
           text: '${"[orchestrator] Stage 2/5: USD Assembly for scene " + sceneId}'
           severity: "INFO"
-        next: call_usd_assembly
+        next: build_usd_assembly_arg
 
     - build_usd_assembly_arg:
         assign:
@@ -498,6 +498,10 @@ main:
               name: '${scenePrefix + "/assets/.regen3d_complete"}'
           - usdAssemblyEvent:
               data: ${usdAssemblyEventData}
+              interactive_failure_policy: "hybrid_strict"
+              require_replicator: true
+              require_isaac: true
+        next: call_usd_assembly
     - call_usd_assembly:
         try:
           call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.create
@@ -565,7 +569,7 @@ main:
         args:
           text: '${"[orchestrator] Stage 3/5: Variation Assets for scene " + sceneId}'
           severity: "INFO"
-        next: call_variation_assets
+        next: build_variation_assets_arg
 
     - build_variation_assets_arg:
         assign:
@@ -574,6 +578,9 @@ main:
               name: '${scenePrefix + "/replicator/.replicator_complete"}'
           - variationEvent:
               data: ${variationEventData}
+              enable_stage3_isaac_refresh: true
+              require_isaac: true
+        next: call_variation_assets
     - call_variation_assets:
         try:
           call: googleapis.workflowexecutions.v1.projects.locations.workflows.executions.create

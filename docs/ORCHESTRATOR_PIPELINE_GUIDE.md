@@ -35,7 +35,7 @@ Previously, each pipeline stage wrote a GCS marker file (e.g., `.regen3d_complet
 
 ### Now: Single Orchestrator
 
-The orchestrator workflow calls each sub-workflow directly via the `googleapis.workflowexecutions.v1` API. No inter-stage triggers needed. Each sub-workflow YAML is **unchanged** — the orchestrator constructs synthetic GCS events matching each sub-workflow's expected input format.
+The orchestrator workflow calls each sub-workflow directly via the `googleapis.workflowexecutions.v1` API. No inter-stage triggers needed. The orchestrator constructs synthetic GCS events matching each sub-workflow's expected input format.
 
 ## Pipeline Stages
 
@@ -75,8 +75,10 @@ The orchestrator workflow calls each sub-workflow directly via the `googleapis.w
 **What it does:**
 - GLB → USDZ conversion
 - SimReady asset assembly
-- Replicator rendering
-- Isaac Lab scene setup
+- Interactive articulation pass (required for articulated-required scenes)
+- Final USD scene assembly with articulation wiring
+- Replicator bundle generation (required in strict mode)
+- Isaac Lab baseline task package generation
 
 ### Stage 3: Variation Assets (~5-15 min)
 
@@ -86,6 +88,7 @@ The orchestrator workflow calls each sub-workflow directly via the `googleapis.w
 **What it does:**
 - Generates scene variations (lighting, materials, object placement)
 - Creates SimReady variation assets
+- Runs Isaac Lab refresh-only pass to update spawn/task plans from generated variations
 
 ### Stage 4: GenieSim Export (~10-30 min)
 
@@ -318,8 +321,8 @@ gsutil notification delete projects/_/buckets/<bucket>/notificationConfigs/<id>
 | `workflows/image-to-scene-orchestrator.yaml` | Master orchestrator workflow (915 lines) |
 | `workflows/setup-orchestrator-trigger.sh` | Deploy workflow + create Eventarc trigger |
 | `workflows/cleanup-old-triggers.sh` | Delete replaced multi-trigger chain triggers |
-| `workflows/usd-assembly-pipeline.yaml` | Stage 2 sub-workflow (unchanged) |
-| `workflows/variation-assets-pipeline.yaml` | Stage 3 sub-workflow (unchanged) |
+| `workflows/usd-assembly-pipeline.yaml` | Stage 2 sub-workflow (convert → simready → interactive → full USD → replicator → isaac baseline) |
+| `workflows/variation-assets-pipeline.yaml` | Stage 3 sub-workflow (variation-gen → simready → isaac refresh-only) |
 | `workflows/genie-sim-export-pipeline.yaml` | Stage 4 sub-workflow (unchanged) |
 | `workflows/arena-export-pipeline.yaml` | Stage 5 sub-workflow (unchanged) |
 | `workflows/image-to-scene-pipeline.yaml` | Legacy Stage 1 standalone (kept for independent use) |
@@ -371,11 +374,17 @@ gs://bucket/scenes/my_scene/
 │   └── kitchen.jpeg                    # Uploaded image (trigger input)
 ├── assets/
 │   ├── .regen3d_complete               # Stage 1 completion marker
+│   ├── .interactive_complete           # Stage 2 interactive completion marker (when run)
+│   ├── .interactive_summary.json       # Stage 2 interactive diagnostics
 │   ├── *.glb, *.usdz                   # 3D reconstruction outputs
 │   └── scene_assets.json               # Asset catalog
 ├── replicator/
 │   ├── .replicator_complete            # Stage 2 completion marker
 │   └── ...                             # Replicator renders
+├── isaac_lab/
+│   ├── .isaac_lab_complete             # Stage 2 baseline Isaac completion marker
+│   ├── .isaac_lab_refresh_complete     # Stage 3 refresh completion marker
+│   └── ...                             # Isaac task outputs
 ├── variation_assets/
 │   ├── .variation_pipeline_complete    # Stage 3 completion marker
 │   └── ...                             # Scene variations

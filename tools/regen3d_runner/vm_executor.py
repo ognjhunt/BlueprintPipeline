@@ -350,9 +350,10 @@ class VMExecutor:
         local_dir = Path(local_dir)
         local_dir.mkdir(parents=True, exist_ok=True)
 
-        # List remote files
+        # List remote files. Use -L and include links so symlinked compatibility
+        # outputs (e.g., {name}.glb -> {name}_shape.glb) are downloaded too.
         rc, stdout, _ = self.ssh_exec(
-            f"find {shlex.quote(remote_dir)} -type f 2>/dev/null",
+            f"find -L {shlex.quote(remote_dir)} \\( -type f -o -type l \\) 2>/dev/null",
             stream_logs=False,
             check=False,
         )

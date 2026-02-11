@@ -180,7 +180,16 @@ def _harvest_objects(
     if not object_glbs and hy_dir.is_dir():
         for item in sorted(hy_dir.iterdir()):
             if item.is_dir():
-                for name in ["textured_mesh.glb", "mesh.glb", "model.glb"]:
+                # Support both legacy names and Hunyuan2.1 naming:
+                #   {name}.glb, {name}_shape.glb
+                hy_candidates = [
+                    f"{item.name}.glb",
+                    f"{item.name}_shape.glb",
+                    "textured_mesh.glb",
+                    "mesh.glb",
+                    "model.glb",
+                ]
+                for name in hy_candidates:
                     candidate = item / name
                     if candidate.is_file():
                         object_glbs[item.name] = candidate

@@ -77,6 +77,7 @@ def build_scene_assets(assets_prefix: str, object_ids: list[str], gcs_root: Path
                 "asset": {"path": f"regen3d/{obj_name}/obj_{obj_id}.glb"},
                 "physics": {"mass": 0.2},
                 "physics_hints": {"material_type": "ceramic"},
+                "articulation": {"type": "revolute"},
                 "semantics": {"affordances": ["Graspable", "Containable"]},
                 "relationships": [],
             }
@@ -94,6 +95,7 @@ def run_job(
     gcs_root: Path | None = None,
     particulate_mode: str = "mock",
     articulation_backend: str = "auto",
+    process_all: bool | None = None,
 ) -> None:
     monkeypatch.setenv("BUCKET", "test-bucket")
     monkeypatch.setenv("SCENE_ID", "interactive_scene")
@@ -111,6 +113,10 @@ def run_job(
     monkeypatch.delenv("PRODUCTION_MODE", raising=False)
     monkeypatch.delenv("LABS_MODE", raising=False)
     monkeypatch.delenv("MULTIVIEW_PREFIX", raising=False)
+    if process_all is None:
+        monkeypatch.delenv("INTERACTIVE_PROCESS_ALL", raising=False)
+    else:
+        monkeypatch.setenv("INTERACTIVE_PROCESS_ALL", str(process_all).lower())
 
     if gcs_root is not None:
         _real_path = Path
@@ -236,6 +242,57 @@ def test_required_articulation_object_fails_closed_on_non_articulated_output(tmp
 
     failed_payload = json.loads((assets_root / ".interactive_failed").read_text(encoding="utf-8"))
     assert failed_payload["reason"] == "required_articulation_unmet"
+
+
+def test_candidate_filter_skips_non_articulation_objects_without_override(tmp_path, monkeypatch) -> None:
+    assets_prefix = f"interactive-filter-{tmp_path.name}"
+    assets_root = build_scene_assets(assets_prefix, ["mug_0"], gcs_root=tmp_path)
+
+    manifest_path = assets_root / "scene_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["objects"][0].pop("articulation", None)
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    run_job(
+        monkeypatch,
+        assets_prefix,
+        disallow_placeholder=False,
+        mock_placeholder=False,
+        gcs_root=tmp_path,
+    )
+
+    complete_payload = json.loads((assets_root / ".interactive_complete").read_text(encoding="utf-8"))
+    assert complete_payload["summary"]["total_objects"] == 0
+
+    summary_payload = json.loads((assets_root / ".interactive_summary.json").read_text(encoding="utf-8"))
+    assert summary_payload["candidate_interactive_count"] == 0
+    assert summary_payload["interactive_objects_in_manifest"] == 1
+
+
+def test_candidate_filter_process_all_override(tmp_path, monkeypatch) -> None:
+    assets_prefix = f"interactive-filter-all-{tmp_path.name}"
+    assets_root = build_scene_assets(assets_prefix, ["mug_0"], gcs_root=tmp_path)
+
+    manifest_path = assets_root / "scene_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["objects"][0].pop("articulation", None)
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    run_job(
+        monkeypatch,
+        assets_prefix,
+        disallow_placeholder=False,
+        mock_placeholder=False,
+        gcs_root=tmp_path,
+        process_all=True,
+    )
+
+    complete_payload = json.loads((assets_root / ".interactive_complete").read_text(encoding="utf-8"))
+    assert complete_payload["summary"]["total_objects"] == 1
+
+    summary_payload = json.loads((assets_root / ".interactive_summary.json").read_text(encoding="utf-8"))
+    assert summary_payload["candidate_interactive_count"] == 1
+    assert summary_payload["process_all_interactive"] is True
 
 
 def test_generate_multiview_scaffold_writes_synthetic_views(tmp_path, monkeypatch) -> None:

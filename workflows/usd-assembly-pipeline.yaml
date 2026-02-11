@@ -4,8 +4,10 @@
 #   1. Triggers on completion marker file from regen3d-job
 #   2. Runs usd-assembly-job in CONVERT_ONLY mode to convert GLB->USDZ before simready
 #   3. Runs simready-job to prepare simulation-ready assets (now sees USD-compatible files)
-#   4. Runs usd-assembly-job to build scene.usda
-#   5. Runs replicator-job to generate Replicator bundle for Isaac Sim domain randomization
+#   4. Runs interactive-job when required articulated objects are present
+#   5. Runs usd-assembly-job to build scene.usda
+#   6. Runs replicator-job to generate Replicator bundle for Isaac Sim domain randomization
+#   7. Runs isaac-lab-job baseline task package generation
 #
 # Trigger: Cloud Storage object finalized event for .regen3d_complete
 #
@@ -56,17 +58,27 @@ main:
           - usdPrefix: '${"scenes/" + sceneId + "/usd"}'
           - replicatorPrefix: '${"scenes/" + sceneId + "/replicator"}'
           - isaacLabPrefix: '${"scenes/" + sceneId + "/isaac_lab"}'
+          - interactiveOutputPrefix: '${"scenes/" + sceneId + "/assets/interactive"}'
+          - interactiveCompleteObject: '${"scenes/" + sceneId + "/assets/.interactive_complete"}'
+          - interactiveSummaryObject: '${"scenes/" + sceneId + "/assets/.interactive_summary.json"}'
           - simreadyOutputPrefix: '${"scenes/" + sceneId + "/simready"}'
           - usdFailedMarker: '${"scenes/" + sceneId + "/usd/.failed"}'
+          - interactiveFailedMarker: '${"scenes/" + sceneId + "/assets/.interactive_failed"}'
           - simreadyFailedMarker: '${"scenes/" + sceneId + "/simready/.failed"}'
           - replicatorFailedMarker: '${"scenes/" + sceneId + "/replicator/.failed"}'
           - isaacLabFailedMarker: '${"scenes/" + sceneId + "/isaac_lab/.failed"}'
           - lockObject: '${"scenes/" + sceneId + "/locks/usd-assembly.lock"}'
           - usdJobName: "usd-assembly-job"
+          - interactiveJobName: "interactive-job"
+          - interactiveFailurePolicy: '${default(map.get(event, "interactive_failure_policy"), default(sys.get_env("INTERACTIVE_FAILURE_POLICY"), "hybrid_strict"))}'
+          - interactiveForceRun: '${default(map.get(event, "interactive_force_run"), default(sys.get_env("INTERACTIVE_FORCE_RUN"), "false")) == "true"}'
+          - requireReplicator: '${default(map.get(event, "require_replicator"), default(sys.get_env("REQUIRE_REPLICATOR"), "true")) == "true"}'
+          - requireIsaac: '${default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")) == "true"}'
           # Timeout defaults align with policy_configs/adaptive_timeouts.yaml unless overridden.
           - adaptiveTimeoutConfigPath: "policy_configs/adaptive_timeouts.yaml"
           - convertTimeoutSeconds: 1800
           - simreadyTimeoutSeconds: 3600
+          - interactiveTimeoutSeconds: 1800
           - usdAssemblyTimeoutSeconds: 3600
           - replicatorJobName: "replicator-job"
           - replicatorTimeoutSeconds: 1800
@@ -544,7 +556,325 @@ main:
     - log_simready_complete_message:
         call: sys.log
         args:
-          text: '${"Simready job completed for scene " + sceneId + " - proceeding with USD assembly"}'
+          text: '${"Simready job completed for scene " + sceneId + " - evaluating articulation requirements"}'
+          severity: "INFO"
+        next: read_scene_manifest_for_interactive_gate
+
+    - read_scene_manifest_for_interactive_gate:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${assetsPrefix + "/scene_manifest.json"}'
+            alt: "media"
+          result: sceneManifestRaw
+        except:
+          as: e
+          steps:
+            - set_scene_manifest_fallback:
+                assign:
+                  - sceneManifestRaw: '{"objects":[]}'
+            - log_scene_manifest_read_warning:
+                call: sys.log
+                args:
+                  text: '${"WARNING: Failed to read scene_manifest.json for interactive gate: " + e.message}'
+                  severity: "WARNING"
+        next: parse_scene_manifest_for_interactive_gate
+
+    - parse_scene_manifest_for_interactive_gate:
+        assign:
+          - sceneManifestForInteractive: ${json.decode(sceneManifestRaw)}
+          - requiredArticulationCount: 0
+        next: scan_required_articulation_objects
+
+    - scan_required_articulation_objects:
+        for:
+          value: manifestObject
+          in: ${default(map.get(sceneManifestForInteractive, "objects"), [])}
+          steps:
+            - detect_required_articulation_object:
+                switch:
+                  - condition: '${default(map.get(default(map.get(manifestObject, "articulation"), {}), "required"), false) == true or default(map.get(manifestObject, "sim_role"), "") == "articulated_furniture" or default(map.get(manifestObject, "sim_role"), "") == "articulated_appliance"}'
+                    next: increment_required_articulation_count
+                next: continue_required_articulation_scan
+            - increment_required_articulation_count:
+                assign:
+                  - requiredArticulationCount: ${requiredArticulationCount + 1}
+                next: continue_required_articulation_scan
+            - continue_required_articulation_scan:
+                assign:
+                  - requiredArticulationCount: ${requiredArticulationCount}
+        next: decide_interactive_phase
+
+    - decide_interactive_phase:
+        assign:
+          - runInteractivePhase: '${interactiveForceRun or requiredArticulationCount > 0}'
+        next: interactive_phase_switch
+
+    - interactive_phase_switch:
+        switch:
+          - condition: ${runInteractivePhase}
+            next: init_interactive_metrics
+        next: log_interactive_skipped
+
+    - log_interactive_skipped:
+        call: sys.log
+        args:
+          text: '${"Skipping interactive-job for scene " + sceneId + " (required articulated objects: " + string(requiredArticulationCount) + ")"}'
+          severity: "INFO"
+        next: init_usd_metrics
+
+    - init_interactive_metrics:
+        assign:
+          - interactiveStartTime: '${time.format(sys.now())}'
+        next: emit_interactive_metrics_start
+
+    - emit_interactive_metrics_start:
+        call: sys.log
+        args:
+          data:
+            bp_metric: "job_invocation"
+            event: "start"
+            workflow: "usd-assembly-pipeline"
+            job: ${interactiveJobName}
+            scene_id: ${sceneId}
+            timeout_seconds: ${interactiveTimeoutSeconds}
+            duration_seconds: 0
+            timeout_usage_ratio: 0
+            timed_out: false
+            status: "STARTED"
+            start_time: ${interactiveStartTime}
+            required_articulation_count: ${requiredArticulationCount}
+            policy: ${interactiveFailurePolicy}
+          severity: "INFO"
+        next: run_interactive_job
+
+    - run_interactive_job:
+        try:
+          call: googleapis.run.v2.projects.locations.jobs.run
+          args:
+            name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + interactiveJobName}'
+            body:
+              overrides:
+                containerOverrides:
+                  - env:
+                      - name: BUCKET
+                        value: ${bucket}
+                      - name: SCENE_ID
+                        value: ${sceneId}
+                      - name: ASSETS_PREFIX
+                        value: ${assetsPrefix}
+              timeout: '${string(interactiveTimeoutSeconds) + "s"}'
+          result: interactiveExec
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 5  # default per policy_configs/retry_policy.yaml
+          backoff:
+            initial_delay: 1
+            max_delay: 60
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_interactive_retry_exhausted:
+                call: sys.log
+                args:
+                  data:
+                    bp_metric: "job_retry_exhausted"
+                    workflow: "usd-assembly-pipeline"
+                    job: ${interactiveJobName}
+                    scene_id: ${sceneId}
+                    retry_max: 5
+                    error: ${e.message}
+                  severity: "ERROR"
+            - list_interactive_outputs_for_cleanup:
+                call: googleapis.storage.v1.objects.list
+                args:
+                  bucket: ${bucket}
+                  prefix: ${interactiveOutputPrefix + "/"}
+                  maxResults: 1000
+                result: interactiveCleanupList
+            - delete_interactive_outputs_for_cleanup:
+                for:
+                  value: interactiveCleanupItem
+                  in: ${default(interactiveCleanupList.items, [])}
+                  steps:
+                    - delete_interactive_output:
+                        call: googleapis.storage.v1.objects.delete
+                        args:
+                          bucket: ${bucket}
+                          object: ${interactiveCleanupItem.name}
+            - write_interactive_failure_marker:
+                call: googleapis.storage.v1.objects.insert
+                args:
+                  bucket: ${bucket}
+                  name: ${interactiveFailedMarker}
+                  uploadType: "media"
+                  body: ${json.encode({
+                    "scene_id": sceneId,
+                    "job_name": interactiveJobName,
+                    "status": "failed",
+                    "timestamp": time.format(sys.now()),
+                    "error": {
+                      "code": "interactive_start_failed",
+                      "message": e.message,
+                      "type": "workflow_failure",
+                      "stack_trace": null
+                    },
+                    "context": {
+                      "workflow_execution_id": sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID"),
+                      "attempt_number": 1,
+                      "config_context": {
+                        "assets_prefix": assetsPrefix
+                      }
+                    }
+                  })}
+            - set_interactive_failed_state_from_start_error:
+                assign:
+                  - interactiveState: "FAILED"
+                  - interactiveMarkerMissing: true
+                  - interactiveMarkerStatus: "failed"
+                  - interactiveSummaryMissing: true
+                  - interactiveRequiredFailureCount: ${requiredArticulationCount}
+                next: evaluate_interactive_policy
+        next: set_interactive_execution_name
+
+    - set_interactive_execution_name:
+        assign:
+          - interactiveExecutionName: '${if(interactiveExec.metadata != null and interactiveExec.metadata.name != null, interactiveExec.metadata.name, interactiveExec.name)}'
+        next: wait_for_interactive_job
+
+    - wait_for_interactive_job:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${interactiveExecutionName}
+        result: interactiveStatus
+        next: check_interactive_status
+
+    - check_interactive_status:
+        assign:
+          - interactiveState: '${if(interactiveStatus.state != null, interactiveStatus.state, if(interactiveStatus.status != null, interactiveStatus.status.state, null))}'
+          - interactiveFailedCount: '${if(interactiveStatus.failedCount != null, interactiveStatus.failedCount, if(interactiveStatus.status != null, interactiveStatus.status.failedCount, null))}'
+          - interactiveSucceededCount: '${if(interactiveStatus.succeededCount != null, interactiveStatus.succeededCount, if(interactiveStatus.status != null, interactiveStatus.status.succeededCount, null))}'
+        next: interactive_status_switch
+
+    - interactive_status_switch:
+        switch:
+          - condition: '${interactiveState == "FAILED" or (interactiveFailedCount != null and interactiveFailedCount > 0)}'
+            next: interactive_failed_from_status
+          - condition: '${interactiveState == "SUCCEEDED" or (interactiveSucceededCount != null and interactiveSucceededCount > 0)}'
+            next: verify_interactive_marker
+        next: wait_interactive_poll
+
+    - wait_interactive_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_interactive_job
+
+    - interactive_failed_from_status:
+        assign:
+          - interactiveMarkerMissing: true
+          - interactiveMarkerStatus: "failed"
+          - interactiveSummaryMissing: true
+          - interactiveRequiredFailureCount: ${requiredArticulationCount}
+        next: evaluate_interactive_policy
+
+    - verify_interactive_marker:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${interactiveCompleteObject}
+            alt: "media"
+          result: interactiveMarkerRaw
+        except:
+          as: e
+          steps:
+            - set_interactive_marker_missing:
+                assign:
+                  - interactiveMarkerRaw: '{}'
+                  - interactiveMarkerMissing: true
+            - log_interactive_marker_missing:
+                call: sys.log
+                args:
+                  text: '${"ERROR: interactive marker missing after interactive-job run for scene " + sceneId + ": " + e.message}'
+                  severity: "ERROR"
+        next: parse_interactive_marker_payload
+
+    - parse_interactive_marker_payload:
+        assign:
+          - interactiveMarkerMissing: '${default(interactiveMarkerMissing, false)}'
+          - interactiveMarkerPayload: ${json.decode(default(interactiveMarkerRaw, '{}'))}
+          - interactiveMarkerStatus: '${default(map.get(interactiveMarkerPayload, "status"), "unknown")}'
+          - interactiveRequiredFailureCount: '${len(default(map.get(default(map.get(interactiveMarkerPayload, "summary"), {}), "required_failures"), []))}'
+        next: read_interactive_summary
+
+    - read_interactive_summary:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: ${interactiveSummaryObject}
+            alt: "media"
+          result: interactiveSummaryRaw
+        except:
+          as: e
+          steps:
+            - set_interactive_summary_missing:
+                assign:
+                  - interactiveSummaryRaw: '{}'
+                  - interactiveSummaryMissing: true
+            - log_interactive_summary_missing:
+                call: sys.log
+                args:
+                  text: '${"WARNING: interactive summary missing for scene " + sceneId + ": " + e.message}'
+                  severity: "WARNING"
+        next: parse_interactive_summary_payload
+
+    - parse_interactive_summary_payload:
+        assign:
+          - interactiveSummaryMissing: '${default(interactiveSummaryMissing, false)}'
+          - interactiveSummaryPayload: ${json.decode(default(interactiveSummaryRaw, '{}'))}
+          - interactiveRequiredFailureCount: '${if(default(map.get(interactiveSummaryPayload, "required_failure_count"), null) != null, map.get(interactiveSummaryPayload, "required_failure_count"), interactiveRequiredFailureCount)}'
+        next: evaluate_interactive_policy
+
+    - evaluate_interactive_policy:
+        switch:
+          - condition: '${interactiveFailurePolicy == "warn"}'
+            next: log_interactive_warn_mode_continue
+          - condition: '${interactiveFailurePolicy == "strict" and (interactiveState == "FAILED" or interactiveMarkerMissing or interactiveMarkerStatus == "failure")}'
+            next: interactive_gate_failed
+          - condition: '${interactiveFailurePolicy == "hybrid_strict" and (interactiveMarkerMissing or (requiredArticulationCount > 0 and (interactiveState == "FAILED" or interactiveMarkerStatus == "failure" or interactiveRequiredFailureCount > 0)))}'
+            next: interactive_gate_failed
+        next: log_interactive_complete_message
+
+    - log_interactive_warn_mode_continue:
+        call: sys.log
+        args:
+          text: '${"Interactive policy is warn; continuing despite interactive issues for scene " + sceneId}'
+          severity: "WARNING"
+        next: log_interactive_complete_message
+
+    - interactive_gate_failed:
+        assign:
+          - errorMsg: '${"Interactive gate failed for scene " + sceneId + " (policy=" + interactiveFailurePolicy + ", required_articulation_count=" + string(requiredArticulationCount) + ", marker_status=" + interactiveMarkerStatus + ", required_failure_count=" + string(interactiveRequiredFailureCount) + ")"}'
+        next: release_lock_after_interactive_failure
+
+    - release_lock_after_interactive_failure:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
+        next: raise_interactive_error
+
+    - raise_interactive_error:
+        raise: ${errorMsg}
+
+    - log_interactive_complete_message:
+        call: sys.log
+        args:
+          text: '${"Interactive phase completed for scene " + sceneId + " (required_articulation_count=" + string(requiredArticulationCount) + ", marker_status=" + interactiveMarkerStatus + ", required_failure_count=" + string(interactiveRequiredFailureCount) + ") - proceeding with full USD assembly"}'
           severity: "INFO"
         next: init_usd_metrics
 
@@ -1022,7 +1352,6 @@ main:
         next: init_isaac_lab_metrics
 
     - replicator_failed:
-        # Replicator failure is non-fatal - scene is still usable without it
         assign:
           - replicatorEndTime: '${time.format(sys.now())}'
           - replicatorDurationSeconds: '${time.parse(replicatorEndTime) - time.parse(replicatorStartTime)}'
@@ -1052,8 +1381,14 @@ main:
     - log_replicator_failed_message:
         call: sys.log
         args:
-          text: '${"WARNING: Replicator job failed for scene " + sceneId + " - proceeding with Isaac Lab generation anyway"}'
+          text: '${"Replicator job failed for scene " + sceneId + " (require_replicator=" + string(requireReplicator) + ")"}'
           severity: "WARNING"
+        next: replicator_failure_policy_switch
+
+    - replicator_failure_policy_switch:
+        switch:
+          - condition: ${requireReplicator}
+            next: release_lock_after_required_replicator_failure
         next: init_isaac_lab_metrics
 
     - init_isaac_lab_metrics:
@@ -1281,9 +1616,19 @@ main:
     - log_isaac_lab_failed_message:
         call: sys.log
         args:
-          text: '${"WARNING: Isaac Lab task generation failed for scene " + sceneId + " - scene is still usable but without RL training packages"}'
+          text: '${"WARNING: Isaac Lab baseline generation failed for scene " + sceneId + " (require_isaac=" + string(requireIsaac) + ")"}'
           severity: "WARNING"
         next: release_lock_before_done_without_isaac_lab
+
+    - release_lock_after_required_replicator_failure:
+        call: googleapis.storage.v1.objects.delete
+        args:
+          bucket: ${bucket}
+          object: ${lockObject}
+        next: raise_required_replicator_error
+
+    - raise_required_replicator_error:
+        raise: '${"Replicator job failed and REQUIRE_REPLICATOR=true for scene " + sceneId}'
 
     - release_lock_before_done:
         call: googleapis.storage.v1.objects.delete

@@ -15,6 +15,7 @@ and synthetic data generation.
 import json
 import os
 import sys
+import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
@@ -901,7 +902,7 @@ def get_placement_surface(region_name: str):
     """Get a placement surface prim by region name."""
     path = PLACEMENT_REGIONS.get(region_name)
     if path:
-        return rep.get.prim_at_path(PLACEMENT_REGIONS_ROOT + "/" + region_name.replace("_region", "") + "/Surface")
+        return rep.get.prim_at_path(path)
     return None
 
 
@@ -2286,6 +2287,268 @@ def _enrich_asset_for_generation(asset_dict: dict, scene_type: str) -> dict:
 
 
 # ============================================================================
+# Affordance Graph Generation
+# ============================================================================
+
+def _tokenize_affordance_terms(values: List[Any]) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, list):
+            tokens.update(_tokenize_affordance_terms(value))
+            continue
+        text = str(value).strip().lower()
+        if not text:
+            continue
+        normalized = re.sub(r"[^a-z0-9]+", " ", text)
+        for token in normalized.split():
+            if len(token) >= 2:
+                tokens.add(token)
+    return tokens
+
+
+def _infer_region_affordances(region: PlacementRegion) -> List[str]:
+    affordances: set[str] = set()
+    surface_type = (region.surface_type or "").lower()
+
+    if surface_type == "horizontal":
+        affordances.update({"support_surface", "placeable"})
+    elif surface_type == "volume":
+        affordances.update({"containable", "insert_target"})
+    elif surface_type == "vertical":
+        affordances.update({"mountable"})
+
+    tokens = _tokenize_affordance_terms(
+        [
+            region.name,
+            region.description,
+            region.semantic_tags,
+            region.suitable_for,
+            region.parent_object_id,
+        ]
+    )
+    if {"sink", "washer", "wash", "basin"} & tokens:
+        affordances.add("wash_zone")
+    if {"dishwasher", "rack", "bin", "drawer", "cabinet", "hamper"} & tokens:
+        affordances.add("load_target")
+    if {"staging", "counter", "table", "shelf", "island", "surface"} & tokens:
+        affordances.add("staging_zone")
+    if {"door", "drawer", "knob", "handle", "panel", "switch"} & tokens:
+        affordances.add("articulation_control")
+
+    return sorted(affordances)
+
+
+def _asset_region_candidates(
+    asset: VariationAsset,
+    regions: List[PlacementRegion],
+) -> List[str]:
+    asset_tokens = _tokenize_affordance_terms(
+        [
+            asset.name,
+            asset.category,
+            asset.semantic_class,
+            asset.description,
+        ]
+    )
+    scored: List[Tuple[int, str]] = []
+
+    for region in regions:
+        region_tokens = _tokenize_affordance_terms(
+            [
+                region.name,
+                region.description,
+                region.semantic_tags,
+                region.suitable_for,
+                region.parent_object_id,
+                region.surface_type,
+            ]
+        )
+        suitable_tokens = _tokenize_affordance_terms([region.suitable_for])
+        overlap = asset_tokens & suitable_tokens
+        broad_overlap = asset_tokens & region_tokens
+
+        score = 0
+        if overlap:
+            score += 10 + len(overlap)
+        if broad_overlap:
+            score += 2 + len(broad_overlap)
+        if region.surface_type == "horizontal":
+            score += 1
+
+        if score > 0:
+            scored.append((score, region.name))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _, name in scored]
+
+
+def _articulation_required_from_object(obj: Dict[str, Any]) -> bool:
+    """Return True when this object is explicitly required to be articulated."""
+    articulation_required = bool(obj.get("articulation_required"))
+    articulation_payload = obj.get("articulation")
+    if isinstance(articulation_payload, dict):
+        articulation_required = articulation_required or bool(articulation_payload.get("required"))
+
+    sim_role = str(obj.get("sim_role", "")).strip().lower()
+    return articulation_required or sim_role in {"articulated_furniture", "articulated_appliance"}
+
+
+def _infer_articulation_control_tags(obj: Dict[str, Any]) -> List[str]:
+    """Infer articulation control affordance tags from object semantics."""
+    tokens = _tokenize_affordance_terms(
+        [
+            obj.get("id"),
+            obj.get("class_name"),
+            obj.get("category"),
+            obj.get("sim_role"),
+            obj.get("articulation_hint"),
+            (obj.get("articulation") or {}).get("type") if isinstance(obj.get("articulation"), dict) else None,
+        ]
+    )
+
+    tags: set[str] = {"articulation_control"}
+    if {"door", "cabinet", "fridge", "refrigerator", "dishwasher", "washer", "dryer"} & tokens:
+        tags.add("hinge_open_close")
+        tags.add("handle_pull")
+    if {"drawer"} & tokens:
+        tags.add("drawer_pull")
+    if {"knob", "dial"} & tokens:
+        tags.add("knob_turn")
+    if {"switch", "button", "panel"} & tokens:
+        tags.add("switch_toggle")
+    if {"lid"} & tokens:
+        tags.add("lid_open_close")
+    return sorted(tags)
+
+
+def _build_articulation_targets(scene_objects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build articulation target records for downstream task planners."""
+    targets: List[Dict[str, Any]] = []
+    for obj in scene_objects:
+        oid = str(obj.get("id", "")).strip()
+        if not oid:
+            continue
+
+        articulation_hint = str(
+            obj.get("articulation_hint")
+            or (obj.get("articulation") or {}).get("type")
+            or ""
+        ).strip()
+        required = _articulation_required_from_object(obj)
+        sim_role = str(obj.get("sim_role", "")).strip().lower()
+
+        if not required and not articulation_hint and sim_role not in {
+            "articulated_furniture",
+            "articulated_appliance",
+        }:
+            continue
+
+        label = (
+            obj.get("class_name")
+            or obj.get("category")
+            or obj.get("id")
+            or "unknown"
+        )
+        targets.append(
+            {
+                "object_id": oid,
+                "label": str(label),
+                "required": required,
+                "sim_role": sim_role or None,
+                "articulation_type_hint": articulation_hint or None,
+                "control_affordance_tags": _infer_articulation_control_tags(obj),
+            }
+        )
+    return targets
+
+
+def build_affordance_graph(bundle: ReplicatorBundle) -> Dict[str, Any]:
+    """Build an affordance graph artifact for region-aware task instantiation."""
+
+    regions_payload: List[Dict[str, Any]] = []
+    for region in bundle.global_placement_regions:
+        regions_payload.append(
+            {
+                "id": region.name,
+                "description": region.description,
+                "surface_type": region.surface_type,
+                "parent_object_id": region.parent_object_id,
+                "position": region.position,
+                "size": region.size,
+                "rotation": region.rotation,
+                "semantic_tags": region.semantic_tags,
+                "suitable_for": region.suitable_for,
+                "affordances": _infer_region_affordances(region),
+            }
+        )
+
+    assets_payload: List[Dict[str, Any]] = []
+    asset_to_regions: Dict[str, List[str]] = {}
+    category_to_regions: Dict[str, set[str]] = {}
+    region_to_assets: Dict[str, List[str]] = {
+        region.name: [] for region in bundle.global_placement_regions
+    }
+
+    for asset in bundle.global_variation_assets:
+        assets_payload.append(
+            {
+                "name": asset.name,
+                "category": asset.category,
+                "semantic_class": asset.semantic_class,
+                "priority": asset.priority,
+                "source_hint": asset.source_hint,
+            }
+        )
+
+        candidates = _asset_region_candidates(asset, bundle.global_placement_regions)
+        asset_to_regions[asset.name] = candidates
+
+        category = asset.category or "other"
+        category_to_regions.setdefault(category, set()).update(candidates)
+
+        for region_name in candidates:
+            region_to_assets.setdefault(region_name, []).append(asset.name)
+
+    policy_region_map: Dict[str, List[str]] = {}
+    policy_asset_map: Dict[str, List[str]] = {}
+    for policy in bundle.policies:
+        policy_region_map[policy.policy_id] = [
+            region.name for region in (policy.placement_regions or [])
+        ]
+        policy_asset_map[policy.policy_id] = [
+            asset.name for asset in (policy.variation_assets or [])
+        ]
+
+    scene_objects = bundle.metadata.get("scene_assets_objects", [])
+    if not isinstance(scene_objects, list):
+        scene_objects = []
+    articulation_targets = _build_articulation_targets(scene_objects)
+
+    return {
+        "scene_id": bundle.scene_id,
+        "scene_type": bundle.scene_type,
+        "environment_type": bundle.environment_type.value,
+        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "regions": regions_payload,
+        "variation_assets": assets_payload,
+        "policy_region_map": policy_region_map,
+        "policy_asset_map": policy_asset_map,
+        "asset_to_region_candidates": asset_to_regions,
+        "category_to_region_candidates": {
+            category: sorted(regions)
+            for category, regions in category_to_regions.items()
+        },
+        "region_to_asset_candidates": {
+            region_name: sorted(asset_names)
+            for region_name, asset_names in region_to_assets.items()
+        },
+        "articulation_targets": articulation_targets,
+    }
+
+
+# ============================================================================
 # Main Processing
 # ============================================================================
 
@@ -2430,6 +2693,7 @@ def process_scene(
             "analysis": analysis_result.get("analysis", {}),
             "source_inventory": str(inventory_path),
             "source_assets": str(assets_root),
+            "scene_assets_objects": scene_assets.get("objects", []),
         }
     )
 
@@ -2503,12 +2767,16 @@ def write_replicator_bundle(
         environment_type=bundle.environment_type,
         policies=[p.policy_id for p in bundle.policies]
     )
-    import datetime
     asset_manifest["generated_at"] = datetime.datetime.utcnow().isoformat() + "Z"
     save_json(output_dir / "variation_assets" / "manifest.json", asset_manifest)
     print(f"[REPLICATOR] Written: variation_assets/manifest.json ({len(bundle.global_variation_assets)} assets)")
 
-    # 6. Write bundle metadata
+    # 6. Write affordance graph for downstream region-aware task planning
+    affordance_graph = build_affordance_graph(bundle)
+    save_json(output_dir / "affordance_graph.json", affordance_graph)
+    print("[REPLICATOR] Written: affordance_graph.json")
+
+    # 7. Write bundle metadata
     bundle_meta = {
         "scene_id": bundle.scene_id,
         "environment_type": bundle.environment_type.value,
@@ -2516,13 +2784,15 @@ def write_replicator_bundle(
         "policies": [p.policy_id for p in bundle.policies],
         "placement_regions_count": len(bundle.global_placement_regions),
         "variation_assets_count": len(bundle.global_variation_assets),
+        "affordance_graph": "affordance_graph.json",
+        "affordance_graph_regions": len(affordance_graph.get("regions", [])),
         "analysis_summary": analysis_result.get("analysis", {}),
         "generated_at": datetime.datetime.utcnow().isoformat() + "Z"
     }
     save_json(output_dir / "bundle_metadata.json", bundle_meta)
     print(f"[REPLICATOR] Written: bundle_metadata.json")
 
-    # 7. Write README
+    # 8. Write README
     readme_content = generate_readme(bundle)
     (output_dir / "README.md").write_text(readme_content)
     print(f"[REPLICATOR] Written: README.md")
@@ -2666,6 +2936,15 @@ def generate_replicator_bundle_job(
     # GAP-REPLICATOR-001 FIX: Use correct function name write_replicator_bundle
     output_dir = root / replicator_prefix
     write_replicator_bundle(bundle, analysis_result, output_dir)
+    marker_payload = {
+        "status": "completed",
+        "scene_id": scene_id,
+        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "policies": [policy.policy_id for policy in bundle.policies],
+        "affordance_graph": f"{replicator_prefix}/affordance_graph.json",
+    }
+    save_json(output_dir / ".replicator_complete", marker_payload)
+    print("[REPLICATOR] Written: .replicator_complete")
     print("[REPLICATOR] Bundle generation complete")
     return 0
 

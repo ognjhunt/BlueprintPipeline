@@ -11,12 +11,13 @@ The script performs checks on:
 
 1. **USD assembly trigger** – confirms `workflows/usd-assembly-pipeline.yaml`
    filters on finalized `scenes/*/assets/.regen3d_complete` objects and invokes
-   the simready-job, followed by the final USD assembly run.
+   the strict Stage 2 order:
+   `convert-only USD` → `simready` → `interactive` → `full USD` → `replicator` → `isaac baseline`.
 2. **3D-RE-GEN trigger** – confirms the regen3d workflow listens for
    3D-RE-GEN outputs and writes the `.regen3d_complete` marker.
 3. **Dry run** – simulates a `.regen3d_complete` finalize event, showing the
-   expected sequence of actions (simready-job → USD assembly → replicator-job)
-   that should occur automatically after the completion marker appears.
+   expected sequence of actions that should occur automatically after the
+   completion marker appears.
 
 This lightweight validation replaces manual Eventarc trigger inspection when you
 just need to assert the wiring is present and the orchestration order is
@@ -31,8 +32,10 @@ workflows.
 The verification script does **not** validate these Eventarc storage triggers,
 so ensure they are configured when wiring up the pipeline:
 
-- **Interactive pipeline** – requires finalized
-  `scenes/*/assets/scene_assets.json` to trigger `interactive-pipeline`.
+- **Interactive pipeline** – optional manual/backfill workflow for articulation.
+  The orchestrator critical path now invokes `interactive-job` inside
+  `usd-assembly-pipeline`, so Eventarc trigger wiring for `interactive-pipeline`
+  is no longer required for production flow correctness.
 - **Objects pipeline** – requires finalized
   `scenes/*/layout/scene_layout.json` to trigger `objects-pipeline`.
 - **Scale pipeline** – requires finalized
