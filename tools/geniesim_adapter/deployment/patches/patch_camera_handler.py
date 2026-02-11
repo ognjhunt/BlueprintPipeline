@@ -668,38 +668,44 @@ def patch_file():
     patched = content.rstrip() + "\n\n" + indented_handler
 
     # 2. Add dispatch in on_command_step
-    # We inject our handler at the top of the dispatch chain.
-    # Detect the actual indentation used in the method body so we match it.
-    on_cmd_pattern = re.compile(
-        r"(def on_command_step\s*\(self.*?\):\s*\n(?:[ \t]*#[^\n]*\n|[ \t]*\"\"\"[\s\S]*?\"\"\"[ \t]*\n)?)",
+    # We inject our handler BEFORE the existing dispatch (with self._timing_context).
+    # This avoids indentation conflicts with other patches that inject at the
+    # top of on_command_step (e.g. patch_dynamic_grasp_toggle).
+    body_indent = method_indent + "    "
+    deeper = body_indent + "    "
+    dispatch = (
+        f"{body_indent}# BlueprintPipeline camera patch\n"
+        f"{body_indent}if self.Command == Command.GET_CAMERA_DATA:\n"
+        f"{deeper}self.handle_get_camera_data()\n"
+        f"{deeper}with self.condition:\n"
+        f"{deeper}    self.condition.notify_all()\n"
+        f"{deeper}return\n"
+    )
+
+    # Find the original dispatch code (with self._timing_context) and insert before it
+    timing_pattern = re.compile(
+        r"^([ \t]*)(with self\._timing_context\([\"']on_command_step[\"']\))",
         re.MULTILINE,
     )
-    match = on_cmd_pattern.search(patched)
-    if match:
-        insert_pos = match.end()
-        # Detect indentation of the next non-empty line (the method body)
-        rest = patched[insert_pos:]
-        body_indent = "        "  # fallback: 8 spaces (2-level)
-        for line in rest.split("\n"):
-            stripped = line.lstrip()
-            if stripped:
-                body_indent = line[: len(line) - len(stripped)]
-                break
-        deeper = body_indent + "    "
-        dispatch = (
-            f"{body_indent}# BlueprintPipeline camera patch\n"
-            f"{body_indent}if self.Command == Command.GET_CAMERA_DATA:\n"
-            f"{deeper}self.handle_get_camera_data()\n"
-            f"{deeper}with self.condition:\n"
-            f"{deeper}    self.condition.notify_all()\n"
-            f"{deeper}return\n"
-        )
+    timing_match = timing_pattern.search(patched)
+    if timing_match:
+        insert_pos = timing_match.start()
         patched = patched[:insert_pos] + dispatch + patched[insert_pos:]
-        print("[PATCH] Injected GET_CAMERA_DATA dispatch in on_command_step")
+        print("[PATCH] Injected GET_CAMERA_DATA dispatch before _timing_context in on_command_step")
     else:
-        # Fallback: just prepend a note that manual wiring is needed
-        print("[PATCH] WARNING: Could not find on_command_step — handler added but dispatch not wired")
-        print("[PATCH] You must manually add: if self.Command == Command.GET_CAMERA_DATA: self.handle_get_camera_data(); return")
+        # Fallback: try inserting after the def line
+        on_cmd_pattern = re.compile(
+            r"(def on_command_step\s*\(self.*?\):\s*\n(?:[ \t]*#[^\n]*\n|[ \t]*\"\"\"[\s\S]*?\"\"\"[ \t]*\n)?)",
+            re.MULTILINE,
+        )
+        match = on_cmd_pattern.search(patched)
+        if match:
+            insert_pos = match.end()
+            patched = patched[:insert_pos] + dispatch + patched[insert_pos:]
+            print("[PATCH] Injected GET_CAMERA_DATA dispatch after on_command_step def (fallback)")
+        else:
+            print("[PATCH] WARNING: Could not find on_command_step — handler added but dispatch not wired")
+            print("[PATCH] You must manually add: if self.Command == Command.GET_CAMERA_DATA: self.handle_get_camera_data(); return")
 
     with open(COMMAND_CONTROLLER, "w") as f:
         f.write(patched)

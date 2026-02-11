@@ -12346,7 +12346,8 @@ class GenieSimLocalFramework:
             # Inject synthetic scene_state when empty (mock/skip-server mode).
             # In production, empty scene_state is an error — real data is required.
             _scene_state_missing = not obs.get("scene_state")
-            if _scene_state_missing and _strict_realism and _requires_motion_task:
+            _require_obj_motion = os.environ.get("REQUIRE_OBJECT_MOTION", "true").lower() not in ("false", "0", "no")
+            if _scene_state_missing and _strict_realism and _requires_motion_task and _require_obj_motion:
                 self._raise_fatal_realism(
                     "STRICT_OBJECT_MOTION_SCENE_STATE_MISSING",
                     (

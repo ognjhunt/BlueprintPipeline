@@ -24,6 +24,7 @@ This patch must run AFTER patch_keep_objects_kinematic.py.
 """
 import sys
 import os
+import re
 
 CC_PATH = os.environ.get(
     "GENIESIM_CC_PATH",
@@ -36,6 +37,23 @@ GRPC_PATH = os.environ.get(
 )
 
 MARKER = "# BPv_dynamic_grasp_toggle"
+RSP_GUARD_MARKER = "# BPv_dynamic_grasp_toggle_rsp_guard"
+DISPATCH_MARKER = f"{MARKER} -- set_task_metric dispatch"
+LEGACY_DISPATCH_MARKER = f"{MARKER} — set_task_metric dispatch"
+
+
+def _inject_into_set_task_metric(src: str, injected: str, marker: str):
+    """Inject code at the top of set_task_metric() unless marker already exists."""
+    if marker in src:
+        return src, False
+    _stm_match = re.search(
+        r'(def set_task_metric\(self[^)]*\)[^:]*:)\s*\n',
+        src,
+    )
+    if not _stm_match:
+        return src, False
+    _inject_after = _stm_match.end()
+    return src[:_inject_after] + injected + src[_inject_after:], True
 
 
 def apply():
@@ -146,11 +164,10 @@ def apply():
     with open(GRPC_PATH) as f:
         grpc_src = f.read()
 
-    if MARKER in grpc_src:
-        print("[PATCH] dynamic_grasp_toggle: already applied to grpc_server.py")
-    else:
-        # Add a handler for the toggle command via the generic handler mechanism
-        toggle_rpc = f"""
+    grpc_changed = False
+
+    # Add a handler for the toggle command via the generic handler mechanism
+    toggle_rpc = f"""
     {MARKER}
     def _bp_handle_dynamic_toggle(self, prim_path, is_dynamic):
         \"\"\"Queue a dynamic/kinematic toggle for the sim thread.\"\"\"
@@ -173,24 +190,26 @@ def apply():
         print(f"[TOGGLE-RPC] Queued: {{prim_path}} -> {{'dynamic' if is_dynamic else 'kinematic'}}")
         return True
 """
+
+    if "def _bp_handle_dynamic_toggle(self, prim_path, is_dynamic):" not in grpc_src:
         # Find a good injection point in grpc_server.py
         if "class " in grpc_src:
-            # Find the last method definition to append our handler
-            import re
-            # Insert before the last closing of the class
+            # Insert before the last method definition in the class.
             last_def = list(re.finditer(r"\n    def ", grpc_src))
             if last_def:
                 insert_pos = last_def[-1].start()
                 grpc_src = grpc_src[:insert_pos] + toggle_rpc + grpc_src[insert_pos:]
+                grpc_changed = True
             else:
-                # Append to end of file
                 grpc_src += toggle_rpc
+                grpc_changed = True
+        print("[PATCH] dynamic_grasp_toggle: injected _bp_handle_dynamic_toggle")
 
-        # --- CRITICAL: Patch set_task_metric to dispatch bp::set_object_dynamic:: commands ---
-        # Without this, the client sends set_task_metric("bp::set_object_dynamic::...") but
-        # the server just returns "metric set" without processing the toggle command.
-        _stm_dispatch = f"""
-        {MARKER} — set_task_metric dispatch
+    # --- CRITICAL: Patch set_task_metric to dispatch bp::set_object_dynamic:: commands ---
+    # Without this, the client sends set_task_metric("bp::set_object_dynamic::...") but
+    # the server just returns "metric set" without processing the toggle command.
+    _stm_dispatch = f"""
+        {DISPATCH_MARKER}
         _metric_str = str(getattr(req, 'metric', '') or '')
         if _metric_str.startswith('bp::set_object_dynamic::'):
             try:
@@ -212,23 +231,51 @@ def apply():
                 print(f"[TOGGLE-RPC] set_task_metric dispatch error: {{_bp_err}}")
                 return SetTaskMetricRsp(msg=f"bp::dynamic_toggle::error::{{_bp_err}}")
 """
-        # Find the set_task_metric method body and inject dispatch at the start
-        import re as _re
-        _stm_match = _re.search(
-            r'(def set_task_metric\(self[^)]*\)[^:]*:)\s*\n',
+
+    if DISPATCH_MARKER not in grpc_src and LEGACY_DISPATCH_MARKER not in grpc_src:
+        grpc_src, _dispatch_added = _inject_into_set_task_metric(
             grpc_src,
+            _stm_dispatch,
+            DISPATCH_MARKER,
         )
-        if _stm_match:
-            _inject_after = _stm_match.end()
-            grpc_src = grpc_src[:_inject_after] + _stm_dispatch + grpc_src[_inject_after:]
+        if _dispatch_added:
             print("[PATCH] dynamic_grasp_toggle: injected set_task_metric dispatch")
+            grpc_changed = True
         else:
             print("[PATCH] WARNING: could not find set_task_metric method in grpc_server.py")
             print("[PATCH] The dynamic toggle will NOT work without manual set_task_metric patching!")
 
+    # Compatibility upgrade: older patch revisions used SetTaskMetricRsp directly
+    # but some runtime grpc_server.py variants do not import the symbol. Resolve
+    # the response class from the request module at method entry.
+    _stm_rsp_guard = f"""
+        {RSP_GUARD_MARKER}
+        SetTaskMetricRsp = globals().get('SetTaskMetricRsp')
+        if SetTaskMetricRsp is None:
+            try:
+                import importlib as _bp_importlib
+                _bp_pb2 = _bp_importlib.import_module(req.__class__.__module__)
+                SetTaskMetricRsp = getattr(_bp_pb2, 'SetTaskMetricRsp', None)
+            except Exception as _bp_rsp_err:
+                print(f"[TOGGLE-RPC] SetTaskMetricRsp resolution error: {{_bp_rsp_err}}")
+        if SetTaskMetricRsp is None:
+            raise RuntimeError('SetTaskMetricRsp unavailable for set_task_metric response')
+"""
+    grpc_src, _guard_added = _inject_into_set_task_metric(
+        grpc_src,
+        _stm_rsp_guard,
+        RSP_GUARD_MARKER,
+    )
+    if _guard_added:
+        print("[PATCH] dynamic_grasp_toggle: injected SetTaskMetricRsp compatibility guard")
+        grpc_changed = True
+
+    if grpc_changed:
         with open(GRPC_PATH, "w") as f:
             f.write(grpc_src)
         print("[PATCH] dynamic_grasp_toggle: APPLIED to grpc_server.py")
+    else:
+        print("[PATCH] dynamic_grasp_toggle: already up-to-date on grpc_server.py")
 
     return True
 

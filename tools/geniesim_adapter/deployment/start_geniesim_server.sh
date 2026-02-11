@@ -91,6 +91,18 @@ fi
 export PYTHONPATH="${REPO_ROOT}/tools/geniesim_adapter:${REPO_ROOT}:${PYTHONPATH:-}"
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 
+# IK fallback utilities import scipy (trajectory_solver/collision_aware_planner).
+# Pre-baked images skip bootstrap dependency install, so enforce scipy here.
+if ! "${ISAAC_SIM_PATH}/python.sh" - <<'PY' >/dev/null 2>&1; then
+import importlib.util
+raise SystemExit(0 if importlib.util.find_spec("scipy") else 1)
+PY
+  echo "[geniesim] scipy missing in Isaac Sim Python; installing scipy==1.11.4 for IK utilities"
+  if ! "${ISAAC_SIM_PATH}/python.sh" -m pip install --quiet scipy==1.11.4 2>&1 | tail -10; then
+    echo "[geniesim] WARNING: scipy install failed; IK fallback may remain unavailable" >&2
+  fi
+fi
+
 _missing_patches=()
 _critical_patch_failures=()
 _check_patch_marker() {

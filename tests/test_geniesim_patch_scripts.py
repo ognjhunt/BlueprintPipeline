@@ -52,10 +52,38 @@ def _write_command_controller(path: Path) -> None:
     def on_physics_step(self, dt):
         pass
 
+    def on_command_step(self):
+        pass
+
     def handle_init_robot(self, req):
             self.data_to_send = "success"
 """
     )
+
+
+def _write_grpc_server(path: Path, *, legacy_dispatch: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if legacy_dispatch:
+        path.write_text(
+            """class GrpcServer:
+    def _bp_handle_dynamic_toggle(self, prim_path, is_dynamic):
+        return True
+
+    def set_task_metric(self, req, context):
+        # BPv_dynamic_grasp_toggle — set_task_metric dispatch
+        _metric_str = str(getattr(req, 'metric', '') or '')
+        if _metric_str.startswith('bp::set_object_dynamic::'):
+            return SetTaskMetricRsp(msg='bp::dynamic_toggle::ok::dummy')
+        return SetTaskMetricRsp(msg='metric set')
+"""
+        )
+    else:
+        path.write_text(
+            """class GrpcServer:
+    def set_task_metric(self, req, context):
+        return SetTaskMetricRsp(msg='metric set')
+"""
+        )
 
 
 @pytest.mark.unit
@@ -121,3 +149,50 @@ def test_patch_scene_collision_validator_only_and_stable_order(
     restore_idx = patched.find("# Restore dynamic objects after articulation is stable")
     assert hook_idx != -1 and restore_idx != -1
     assert hook_idx < restore_idx
+
+
+@pytest.mark.unit
+def test_patch_dynamic_grasp_toggle_injects_rsp_guard_fresh(tmp_path: Path) -> None:
+    cc_path = tmp_path / "source/data_collection/server/command_controller.py"
+    grpc_path = tmp_path / "source/data_collection/server/grpc_server.py"
+    _write_command_controller(cc_path)
+    _write_grpc_server(grpc_path, legacy_dispatch=False)
+
+    patch_path = (
+        REPO_ROOT
+        / "tools/geniesim_adapter/deployment/patches/patch_dynamic_grasp_toggle.py"
+    )
+    mod = _load_module("patch_dynamic_grasp_toggle_fresh_test", patch_path)
+    mod.CC_PATH = str(cc_path)
+    mod.GRPC_PATH = str(grpc_path)
+
+    assert mod.apply() is True
+    assert mod.apply() is True
+
+    patched = grpc_path.read_text()
+    assert "# BPv_dynamic_grasp_toggle_rsp_guard" in patched
+    assert "SetTaskMetricRsp = globals().get('SetTaskMetricRsp')" in patched
+    assert patched.count("# BPv_dynamic_grasp_toggle_rsp_guard") == 1
+
+
+@pytest.mark.unit
+def test_patch_dynamic_grasp_toggle_upgrades_legacy_dispatch(tmp_path: Path) -> None:
+    cc_path = tmp_path / "source/data_collection/server/command_controller.py"
+    grpc_path = tmp_path / "source/data_collection/server/grpc_server.py"
+    _write_command_controller(cc_path)
+    _write_grpc_server(grpc_path, legacy_dispatch=True)
+
+    patch_path = (
+        REPO_ROOT
+        / "tools/geniesim_adapter/deployment/patches/patch_dynamic_grasp_toggle.py"
+    )
+    mod = _load_module("patch_dynamic_grasp_toggle_upgrade_test", patch_path)
+    mod.CC_PATH = str(cc_path)
+    mod.GRPC_PATH = str(grpc_path)
+
+    assert mod.apply() is True
+
+    patched = grpc_path.read_text()
+    assert "# BPv_dynamic_grasp_toggle_rsp_guard" in patched
+    assert "SetTaskMetricRsp = globals().get('SetTaskMetricRsp')" in patched
+    assert patched.count("# BPv_dynamic_grasp_toggle_rsp_guard") == 1
