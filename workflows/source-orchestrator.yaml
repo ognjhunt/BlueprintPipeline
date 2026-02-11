@@ -40,6 +40,51 @@ main:
           - textGenUseLlm: '${text.lower(default(sys.get_env("TEXT_GEN_USE_LLM"), "true"))}'
           - textGenLlmMaxAttempts: '${default(sys.get_env("TEXT_GEN_LLM_MAX_ATTEMPTS"), "3")}'
           - textGenLlmRetryBackoffSeconds: '${default(sys.get_env("TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS"), "2")}'
+          - textAssetRetrievalEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_RETRIEVAL_ENABLED"), "true"))}'
+          - textAssetLibraryPrefixes: '${default(sys.get_env("TEXT_ASSET_LIBRARY_PREFIXES"), "scenes")}'
+          - textAssetLibraryMaxFiles: '${default(sys.get_env("TEXT_ASSET_LIBRARY_MAX_FILES"), "2500")}'
+          - textAssetLibraryMinScore: '${default(sys.get_env("TEXT_ASSET_LIBRARY_MIN_SCORE"), "0.25")}'
+          - textAssetRetrievalMode: '${text.lower(default(sys.get_env("TEXT_ASSET_RETRIEVAL_MODE"), "ann_shadow"))}'
+          - textAssetAnnEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_ANN_ENABLED"), "true"))}'
+          - textAssetAnnTopK: '${default(sys.get_env("TEXT_ASSET_ANN_TOP_K"), "40")}'
+          - textAssetAnnMinScore: '${default(sys.get_env("TEXT_ASSET_ANN_MIN_SCORE"), "0.28")}'
+          - textAssetAnnMaxRerank: '${default(sys.get_env("TEXT_ASSET_ANN_MAX_RERANK"), "20")}'
+          - textAssetAnnNamespace: '${default(sys.get_env("TEXT_ASSET_ANN_NAMESPACE"), "assets-v1")}'
+          - textAssetLexicalFallbackEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_LEXICAL_FALLBACK_ENABLED"), "true"))}'
+          - textAssetRolloutStatePrefix: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_STATE_PREFIX"), "automation/asset_retrieval_rollout")}'
+          - textAssetRolloutMinDecisions: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_MIN_DECISIONS"), "500")}'
+          - textAssetRolloutMinHitRate: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_MIN_HIT_RATE"), "0.95")}'
+          - textAssetRolloutMaxErrorRate: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE"), "0.01")}'
+          - textAssetRolloutMaxP95Ms: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_MAX_P95_MS"), "400")}'
+          - textAssetEmbeddingQueuePrefix: '${default(sys.get_env("TEXT_ASSET_EMBEDDING_QUEUE_PREFIX"), "automation/asset_embedding/queue")}'
+          - textAssetEmbeddingProcessedPrefix: '${default(sys.get_env("TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX"), "automation/asset_embedding/processed")}'
+          - textAssetEmbeddingFailedPrefix: '${default(sys.get_env("TEXT_ASSET_EMBEDDING_FAILED_PREFIX"), "automation/asset_embedding/failed")}'
+          - textAssetEmbeddingModel: '${default(sys.get_env("TEXT_ASSET_EMBEDDING_MODEL"), "text-embedding-3-small")}'
+          - vectorStoreProvider: '${default(sys.get_env("VECTOR_STORE_PROVIDER"), "vertex")}'
+          - vectorStoreProjectId: '${default(sys.get_env("VECTOR_STORE_PROJECT_ID"), projectId)}'
+          - vectorStoreLocation: '${default(sys.get_env("VECTOR_STORE_LOCATION"), region)}'
+          - vectorStoreNamespace: '${default(sys.get_env("VECTOR_STORE_NAMESPACE"), "assets-v1")}'
+          - vectorStoreDimension: '${default(sys.get_env("VECTOR_STORE_DIMENSION"), "1536")}'
+          - vertexIndexEndpoint: '${default(sys.get_env("VERTEX_INDEX_ENDPOINT"), "")}'
+          - vertexDeployedIndexId: '${default(sys.get_env("VERTEX_DEPLOYED_INDEX_ID"), "")}'
+          - textAssetCatalogEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_CATALOG_ENABLED"), "true"))}'
+          - textAssetReplicationEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_REPLICATION_ENABLED"), "true"))}'
+          - textAssetReplicationQueuePrefix: '${default(sys.get_env("TEXT_ASSET_REPLICATION_QUEUE_PREFIX"), "automation/asset_replication/queue")}'
+          - textAssetReplicationTarget: '${default(sys.get_env("TEXT_ASSET_REPLICATION_TARGET"), "backblaze_b2")}'
+          - textAssetReplicationTargetPrefix: '${default(sys.get_env("TEXT_ASSET_REPLICATION_TARGET_PREFIX"), "assets")}'
+          - textAssetGenerationEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_GENERATION_ENABLED"), "true"))}'
+          - textAssetGenerationProvider: '${text.lower(default(sys.get_env("TEXT_ASSET_GENERATION_PROVIDER"), "sam3d"))}'
+          - textAssetGenerationProviderChain: '${text.lower(default(sys.get_env("TEXT_ASSET_GENERATION_PROVIDER_CHAIN"), "sam3d,hunyuan3d"))}'
+          - textAssetGeneratedCacheEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_GENERATED_CACHE_ENABLED"), "true"))}'
+          - textAssetGeneratedCachePrefix: '${default(sys.get_env("TEXT_ASSET_GENERATED_CACHE_PREFIX"), "asset-library/generated-text")}'
+          - textSam3dApiHost: '${default(sys.get_env("TEXT_SAM3D_API_HOST"), "")}'
+          - textSam3dTextEndpoints: '${default(sys.get_env("TEXT_SAM3D_TEXT_ENDPOINTS"), "/openapi/v1/text-to-3d,/v1/text-to-3d")}'
+          - textSam3dTimeoutSeconds: '${default(sys.get_env("TEXT_SAM3D_TIMEOUT_SECONDS"), "1800")}'
+          - textSam3dPollSeconds: '${default(sys.get_env("TEXT_SAM3D_POLL_SECONDS"), "10")}'
+          - textHunyuanApiHost: '${default(sys.get_env("TEXT_HUNYUAN_API_HOST"), "")}'
+          - textHunyuanTextEndpoints: '${default(sys.get_env("TEXT_HUNYUAN_TEXT_ENDPOINTS"), "/openapi/v1/text-to-3d,/v1/text-to-3d")}'
+          - textHunyuanTimeoutSeconds: '${default(sys.get_env("TEXT_HUNYUAN_TIMEOUT_SECONDS"), "1800")}'
+          - textHunyuanPollSeconds: '${default(sys.get_env("TEXT_HUNYUAN_POLL_SECONDS"), "10")}'
           - textGenMaxSeeds: '${int(default(sys.get_env("TEXT_GEN_MAX_SEEDS"), "16"))}'
           - textGenEnableImageFallback: '${text.lower(default(sys.get_env("TEXT_GEN_ENABLE_IMAGE_FALLBACK"), "true")) == "true"}'
           - arenaExportRequired: '${text.lower(default(sys.get_env("ARENA_EXPORT_REQUIRED"), "true")) == "true"}'
@@ -379,6 +424,51 @@ main:
                   textGenUseLlm: ${textGenUseLlm}
                   textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
                   textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+                  textAssetRetrievalEnabled: ${textAssetRetrievalEnabled}
+                  textAssetLibraryPrefixes: ${textAssetLibraryPrefixes}
+                  textAssetLibraryMaxFiles: ${textAssetLibraryMaxFiles}
+                  textAssetLibraryMinScore: ${textAssetLibraryMinScore}
+                  textAssetRetrievalMode: ${textAssetRetrievalMode}
+                  textAssetAnnEnabled: ${textAssetAnnEnabled}
+                  textAssetAnnTopK: ${textAssetAnnTopK}
+                  textAssetAnnMinScore: ${textAssetAnnMinScore}
+                  textAssetAnnMaxRerank: ${textAssetAnnMaxRerank}
+                  textAssetAnnNamespace: ${textAssetAnnNamespace}
+                  textAssetLexicalFallbackEnabled: ${textAssetLexicalFallbackEnabled}
+                  textAssetRolloutStatePrefix: ${textAssetRolloutStatePrefix}
+                  textAssetRolloutMinDecisions: ${textAssetRolloutMinDecisions}
+                  textAssetRolloutMinHitRate: ${textAssetRolloutMinHitRate}
+                  textAssetRolloutMaxErrorRate: ${textAssetRolloutMaxErrorRate}
+                  textAssetRolloutMaxP95Ms: ${textAssetRolloutMaxP95Ms}
+                  textAssetEmbeddingQueuePrefix: ${textAssetEmbeddingQueuePrefix}
+                  textAssetEmbeddingProcessedPrefix: ${textAssetEmbeddingProcessedPrefix}
+                  textAssetEmbeddingFailedPrefix: ${textAssetEmbeddingFailedPrefix}
+                  textAssetEmbeddingModel: ${textAssetEmbeddingModel}
+                  vectorStoreProvider: ${vectorStoreProvider}
+                  vectorStoreProjectId: ${vectorStoreProjectId}
+                  vectorStoreLocation: ${vectorStoreLocation}
+                  vectorStoreNamespace: ${vectorStoreNamespace}
+                  vectorStoreDimension: ${vectorStoreDimension}
+                  vertexIndexEndpoint: ${vertexIndexEndpoint}
+                  vertexDeployedIndexId: ${vertexDeployedIndexId}
+                  textAssetCatalogEnabled: ${textAssetCatalogEnabled}
+                  textAssetReplicationEnabled: ${textAssetReplicationEnabled}
+                  textAssetReplicationQueuePrefix: ${textAssetReplicationQueuePrefix}
+                  textAssetReplicationTarget: ${textAssetReplicationTarget}
+                  textAssetReplicationTargetPrefix: ${textAssetReplicationTargetPrefix}
+                  textAssetGenerationEnabled: ${textAssetGenerationEnabled}
+                  textAssetGenerationProvider: ${textAssetGenerationProvider}
+                  textAssetGenerationProviderChain: ${textAssetGenerationProviderChain}
+                  textAssetGeneratedCacheEnabled: ${textAssetGeneratedCacheEnabled}
+                  textAssetGeneratedCachePrefix: ${textAssetGeneratedCachePrefix}
+                  textSam3dApiHost: ${textSam3dApiHost}
+                  textSam3dTextEndpoints: ${textSam3dTextEndpoints}
+                  textSam3dTimeoutSeconds: ${textSam3dTimeoutSeconds}
+                  textSam3dPollSeconds: ${textSam3dPollSeconds}
+                  textHunyuanApiHost: ${textHunyuanApiHost}
+                  textHunyuanTextEndpoints: ${textHunyuanTextEndpoints}
+                  textHunyuanTimeoutSeconds: ${textHunyuanTimeoutSeconds}
+                  textHunyuanPollSeconds: ${textHunyuanPollSeconds}
                   textVmName: ${textVmName}
                   textVmZone: ${textVmZone}
                   textVmRepoDir: ${textVmRepoDir}
@@ -831,7 +921,7 @@ run_stage2_to_stage5:
 
 
 run_text_stage1_for_child:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenRuntime, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenRuntime, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
   steps:
     - runtime_switch:
         switch:
@@ -861,6 +951,51 @@ run_text_stage1_for_child:
             textGenUseLlm: ${textGenUseLlm}
             textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
             textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+            textAssetRetrievalEnabled: ${textAssetRetrievalEnabled}
+            textAssetLibraryPrefixes: ${textAssetLibraryPrefixes}
+            textAssetLibraryMaxFiles: ${textAssetLibraryMaxFiles}
+            textAssetLibraryMinScore: ${textAssetLibraryMinScore}
+            textAssetRetrievalMode: ${textAssetRetrievalMode}
+            textAssetAnnEnabled: ${textAssetAnnEnabled}
+            textAssetAnnTopK: ${textAssetAnnTopK}
+            textAssetAnnMinScore: ${textAssetAnnMinScore}
+            textAssetAnnMaxRerank: ${textAssetAnnMaxRerank}
+            textAssetAnnNamespace: ${textAssetAnnNamespace}
+            textAssetLexicalFallbackEnabled: ${textAssetLexicalFallbackEnabled}
+            textAssetRolloutStatePrefix: ${textAssetRolloutStatePrefix}
+            textAssetRolloutMinDecisions: ${textAssetRolloutMinDecisions}
+            textAssetRolloutMinHitRate: ${textAssetRolloutMinHitRate}
+            textAssetRolloutMaxErrorRate: ${textAssetRolloutMaxErrorRate}
+            textAssetRolloutMaxP95Ms: ${textAssetRolloutMaxP95Ms}
+            textAssetEmbeddingQueuePrefix: ${textAssetEmbeddingQueuePrefix}
+            textAssetEmbeddingProcessedPrefix: ${textAssetEmbeddingProcessedPrefix}
+            textAssetEmbeddingFailedPrefix: ${textAssetEmbeddingFailedPrefix}
+            textAssetEmbeddingModel: ${textAssetEmbeddingModel}
+            vectorStoreProvider: ${vectorStoreProvider}
+            vectorStoreProjectId: ${vectorStoreProjectId}
+            vectorStoreLocation: ${vectorStoreLocation}
+            vectorStoreNamespace: ${vectorStoreNamespace}
+            vectorStoreDimension: ${vectorStoreDimension}
+            vertexIndexEndpoint: ${vertexIndexEndpoint}
+            vertexDeployedIndexId: ${vertexDeployedIndexId}
+            textAssetCatalogEnabled: ${textAssetCatalogEnabled}
+            textAssetReplicationEnabled: ${textAssetReplicationEnabled}
+            textAssetReplicationQueuePrefix: ${textAssetReplicationQueuePrefix}
+            textAssetReplicationTarget: ${textAssetReplicationTarget}
+            textAssetReplicationTargetPrefix: ${textAssetReplicationTargetPrefix}
+            textAssetGenerationEnabled: ${textAssetGenerationEnabled}
+            textAssetGenerationProvider: ${textAssetGenerationProvider}
+            textAssetGenerationProviderChain: ${textAssetGenerationProviderChain}
+            textAssetGeneratedCacheEnabled: ${textAssetGeneratedCacheEnabled}
+            textAssetGeneratedCachePrefix: ${textAssetGeneratedCachePrefix}
+            textSam3dApiHost: ${textSam3dApiHost}
+            textSam3dTextEndpoints: ${textSam3dTextEndpoints}
+            textSam3dTimeoutSeconds: ${textSam3dTimeoutSeconds}
+            textSam3dPollSeconds: ${textSam3dPollSeconds}
+            textHunyuanApiHost: ${textHunyuanApiHost}
+            textHunyuanTextEndpoints: ${textHunyuanTextEndpoints}
+            textHunyuanTimeoutSeconds: ${textHunyuanTimeoutSeconds}
+            textHunyuanPollSeconds: ${textHunyuanPollSeconds}
             textVmName: ${textVmName}
             textVmZone: ${textVmZone}
             textVmRepoDir: ${textVmRepoDir}
@@ -900,6 +1035,51 @@ run_text_stage1_for_child:
           textGenUseLlm: ${textGenUseLlm}
           textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
           textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+          textAssetRetrievalEnabled: ${textAssetRetrievalEnabled}
+          textAssetLibraryPrefixes: ${textAssetLibraryPrefixes}
+          textAssetLibraryMaxFiles: ${textAssetLibraryMaxFiles}
+          textAssetLibraryMinScore: ${textAssetLibraryMinScore}
+          textAssetRetrievalMode: ${textAssetRetrievalMode}
+          textAssetAnnEnabled: ${textAssetAnnEnabled}
+          textAssetAnnTopK: ${textAssetAnnTopK}
+          textAssetAnnMinScore: ${textAssetAnnMinScore}
+          textAssetAnnMaxRerank: ${textAssetAnnMaxRerank}
+          textAssetAnnNamespace: ${textAssetAnnNamespace}
+          textAssetLexicalFallbackEnabled: ${textAssetLexicalFallbackEnabled}
+          textAssetRolloutStatePrefix: ${textAssetRolloutStatePrefix}
+          textAssetRolloutMinDecisions: ${textAssetRolloutMinDecisions}
+          textAssetRolloutMinHitRate: ${textAssetRolloutMinHitRate}
+          textAssetRolloutMaxErrorRate: ${textAssetRolloutMaxErrorRate}
+          textAssetRolloutMaxP95Ms: ${textAssetRolloutMaxP95Ms}
+          textAssetEmbeddingQueuePrefix: ${textAssetEmbeddingQueuePrefix}
+          textAssetEmbeddingProcessedPrefix: ${textAssetEmbeddingProcessedPrefix}
+          textAssetEmbeddingFailedPrefix: ${textAssetEmbeddingFailedPrefix}
+          textAssetEmbeddingModel: ${textAssetEmbeddingModel}
+          vectorStoreProvider: ${vectorStoreProvider}
+          vectorStoreProjectId: ${vectorStoreProjectId}
+          vectorStoreLocation: ${vectorStoreLocation}
+          vectorStoreNamespace: ${vectorStoreNamespace}
+          vectorStoreDimension: ${vectorStoreDimension}
+          vertexIndexEndpoint: ${vertexIndexEndpoint}
+          vertexDeployedIndexId: ${vertexDeployedIndexId}
+          textAssetCatalogEnabled: ${textAssetCatalogEnabled}
+          textAssetReplicationEnabled: ${textAssetReplicationEnabled}
+          textAssetReplicationQueuePrefix: ${textAssetReplicationQueuePrefix}
+          textAssetReplicationTarget: ${textAssetReplicationTarget}
+          textAssetReplicationTargetPrefix: ${textAssetReplicationTargetPrefix}
+          textAssetGenerationEnabled: ${textAssetGenerationEnabled}
+          textAssetGenerationProvider: ${textAssetGenerationProvider}
+          textAssetGenerationProviderChain: ${textAssetGenerationProviderChain}
+          textAssetGeneratedCacheEnabled: ${textAssetGeneratedCacheEnabled}
+          textAssetGeneratedCachePrefix: ${textAssetGeneratedCachePrefix}
+          textSam3dApiHost: ${textSam3dApiHost}
+          textSam3dTextEndpoints: ${textSam3dTextEndpoints}
+          textSam3dTimeoutSeconds: ${textSam3dTimeoutSeconds}
+          textSam3dPollSeconds: ${textSam3dPollSeconds}
+          textHunyuanApiHost: ${textHunyuanApiHost}
+          textHunyuanTextEndpoints: ${textHunyuanTextEndpoints}
+          textHunyuanTimeoutSeconds: ${textHunyuanTimeoutSeconds}
+          textHunyuanPollSeconds: ${textHunyuanPollSeconds}
         result: cloudrunFallbackResult
         next: return_cloudrun_fallback
 
@@ -933,6 +1113,51 @@ run_text_stage1_for_child:
           textGenUseLlm: ${textGenUseLlm}
           textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
           textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+          textAssetRetrievalEnabled: ${textAssetRetrievalEnabled}
+          textAssetLibraryPrefixes: ${textAssetLibraryPrefixes}
+          textAssetLibraryMaxFiles: ${textAssetLibraryMaxFiles}
+          textAssetLibraryMinScore: ${textAssetLibraryMinScore}
+          textAssetRetrievalMode: ${textAssetRetrievalMode}
+          textAssetAnnEnabled: ${textAssetAnnEnabled}
+          textAssetAnnTopK: ${textAssetAnnTopK}
+          textAssetAnnMinScore: ${textAssetAnnMinScore}
+          textAssetAnnMaxRerank: ${textAssetAnnMaxRerank}
+          textAssetAnnNamespace: ${textAssetAnnNamespace}
+          textAssetLexicalFallbackEnabled: ${textAssetLexicalFallbackEnabled}
+          textAssetRolloutStatePrefix: ${textAssetRolloutStatePrefix}
+          textAssetRolloutMinDecisions: ${textAssetRolloutMinDecisions}
+          textAssetRolloutMinHitRate: ${textAssetRolloutMinHitRate}
+          textAssetRolloutMaxErrorRate: ${textAssetRolloutMaxErrorRate}
+          textAssetRolloutMaxP95Ms: ${textAssetRolloutMaxP95Ms}
+          textAssetEmbeddingQueuePrefix: ${textAssetEmbeddingQueuePrefix}
+          textAssetEmbeddingProcessedPrefix: ${textAssetEmbeddingProcessedPrefix}
+          textAssetEmbeddingFailedPrefix: ${textAssetEmbeddingFailedPrefix}
+          textAssetEmbeddingModel: ${textAssetEmbeddingModel}
+          vectorStoreProvider: ${vectorStoreProvider}
+          vectorStoreProjectId: ${vectorStoreProjectId}
+          vectorStoreLocation: ${vectorStoreLocation}
+          vectorStoreNamespace: ${vectorStoreNamespace}
+          vectorStoreDimension: ${vectorStoreDimension}
+          vertexIndexEndpoint: ${vertexIndexEndpoint}
+          vertexDeployedIndexId: ${vertexDeployedIndexId}
+          textAssetCatalogEnabled: ${textAssetCatalogEnabled}
+          textAssetReplicationEnabled: ${textAssetReplicationEnabled}
+          textAssetReplicationQueuePrefix: ${textAssetReplicationQueuePrefix}
+          textAssetReplicationTarget: ${textAssetReplicationTarget}
+          textAssetReplicationTargetPrefix: ${textAssetReplicationTargetPrefix}
+          textAssetGenerationEnabled: ${textAssetGenerationEnabled}
+          textAssetGenerationProvider: ${textAssetGenerationProvider}
+          textAssetGenerationProviderChain: ${textAssetGenerationProviderChain}
+          textAssetGeneratedCacheEnabled: ${textAssetGeneratedCacheEnabled}
+          textAssetGeneratedCachePrefix: ${textAssetGeneratedCachePrefix}
+          textSam3dApiHost: ${textSam3dApiHost}
+          textSam3dTextEndpoints: ${textSam3dTextEndpoints}
+          textSam3dTimeoutSeconds: ${textSam3dTimeoutSeconds}
+          textSam3dPollSeconds: ${textSam3dPollSeconds}
+          textHunyuanApiHost: ${textHunyuanApiHost}
+          textHunyuanTextEndpoints: ${textHunyuanTextEndpoints}
+          textHunyuanTimeoutSeconds: ${textHunyuanTimeoutSeconds}
+          textHunyuanPollSeconds: ${textHunyuanPollSeconds}
         result: cloudrunResult
         next: return_cloudrun_direct
 
@@ -946,7 +1171,7 @@ run_text_stage1_for_child:
 
 
 run_text_jobs_on_cloudrun:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds]
   steps:
     - run_text_gen_job:
         call: run_cloud_run_job_and_wait
@@ -1007,6 +1232,96 @@ run_text_jobs_on_cloudrun:
               value: ${childLayoutPrefix}
             - name: SEG_PREFIX
               value: ${childSegPrefix}
+            - name: TEXT_ASSET_RETRIEVAL_ENABLED
+              value: ${textAssetRetrievalEnabled}
+            - name: TEXT_ASSET_LIBRARY_PREFIXES
+              value: ${textAssetLibraryPrefixes}
+            - name: TEXT_ASSET_LIBRARY_MAX_FILES
+              value: ${textAssetLibraryMaxFiles}
+            - name: TEXT_ASSET_LIBRARY_MIN_SCORE
+              value: ${textAssetLibraryMinScore}
+            - name: TEXT_ASSET_RETRIEVAL_MODE
+              value: ${textAssetRetrievalMode}
+            - name: TEXT_ASSET_ANN_ENABLED
+              value: ${textAssetAnnEnabled}
+            - name: TEXT_ASSET_ANN_TOP_K
+              value: ${textAssetAnnTopK}
+            - name: TEXT_ASSET_ANN_MIN_SCORE
+              value: ${textAssetAnnMinScore}
+            - name: TEXT_ASSET_ANN_MAX_RERANK
+              value: ${textAssetAnnMaxRerank}
+            - name: TEXT_ASSET_ANN_NAMESPACE
+              value: ${textAssetAnnNamespace}
+            - name: TEXT_ASSET_LEXICAL_FALLBACK_ENABLED
+              value: ${textAssetLexicalFallbackEnabled}
+            - name: TEXT_ASSET_ROLLOUT_STATE_PREFIX
+              value: ${textAssetRolloutStatePrefix}
+            - name: TEXT_ASSET_ROLLOUT_MIN_DECISIONS
+              value: ${textAssetRolloutMinDecisions}
+            - name: TEXT_ASSET_ROLLOUT_MIN_HIT_RATE
+              value: ${textAssetRolloutMinHitRate}
+            - name: TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE
+              value: ${textAssetRolloutMaxErrorRate}
+            - name: TEXT_ASSET_ROLLOUT_MAX_P95_MS
+              value: ${textAssetRolloutMaxP95Ms}
+            - name: TEXT_ASSET_EMBEDDING_QUEUE_PREFIX
+              value: ${textAssetEmbeddingQueuePrefix}
+            - name: TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX
+              value: ${textAssetEmbeddingProcessedPrefix}
+            - name: TEXT_ASSET_EMBEDDING_FAILED_PREFIX
+              value: ${textAssetEmbeddingFailedPrefix}
+            - name: TEXT_ASSET_EMBEDDING_MODEL
+              value: ${textAssetEmbeddingModel}
+            - name: VECTOR_STORE_PROVIDER
+              value: ${vectorStoreProvider}
+            - name: VECTOR_STORE_PROJECT_ID
+              value: ${vectorStoreProjectId}
+            - name: VECTOR_STORE_LOCATION
+              value: ${vectorStoreLocation}
+            - name: VECTOR_STORE_NAMESPACE
+              value: ${vectorStoreNamespace}
+            - name: VECTOR_STORE_DIMENSION
+              value: ${vectorStoreDimension}
+            - name: VERTEX_INDEX_ENDPOINT
+              value: ${vertexIndexEndpoint}
+            - name: VERTEX_DEPLOYED_INDEX_ID
+              value: ${vertexDeployedIndexId}
+            - name: TEXT_ASSET_CATALOG_ENABLED
+              value: ${textAssetCatalogEnabled}
+            - name: TEXT_ASSET_REPLICATION_ENABLED
+              value: ${textAssetReplicationEnabled}
+            - name: TEXT_ASSET_REPLICATION_QUEUE_PREFIX
+              value: ${textAssetReplicationQueuePrefix}
+            - name: TEXT_ASSET_REPLICATION_TARGET
+              value: ${textAssetReplicationTarget}
+            - name: TEXT_ASSET_REPLICATION_TARGET_PREFIX
+              value: ${textAssetReplicationTargetPrefix}
+            - name: TEXT_ASSET_GENERATION_ENABLED
+              value: ${textAssetGenerationEnabled}
+            - name: TEXT_ASSET_GENERATION_PROVIDER
+              value: ${textAssetGenerationProvider}
+            - name: TEXT_ASSET_GENERATION_PROVIDER_CHAIN
+              value: ${textAssetGenerationProviderChain}
+            - name: TEXT_ASSET_GENERATED_CACHE_ENABLED
+              value: ${textAssetGeneratedCacheEnabled}
+            - name: TEXT_ASSET_GENERATED_CACHE_PREFIX
+              value: ${textAssetGeneratedCachePrefix}
+            - name: TEXT_SAM3D_API_HOST
+              value: ${textSam3dApiHost}
+            - name: TEXT_SAM3D_TEXT_ENDPOINTS
+              value: ${textSam3dTextEndpoints}
+            - name: TEXT_SAM3D_TIMEOUT_SECONDS
+              value: ${textSam3dTimeoutSeconds}
+            - name: TEXT_SAM3D_POLL_SECONDS
+              value: ${textSam3dPollSeconds}
+            - name: TEXT_HUNYUAN_API_HOST
+              value: ${textHunyuanApiHost}
+            - name: TEXT_HUNYUAN_TEXT_ENDPOINTS
+              value: ${textHunyuanTextEndpoints}
+            - name: TEXT_HUNYUAN_TIMEOUT_SECONDS
+              value: ${textHunyuanTimeoutSeconds}
+            - name: TEXT_HUNYUAN_POLL_SECONDS
+              value: ${textHunyuanPollSeconds}
         result: textAdapterStatus
         next: return_result
 
@@ -1017,7 +1332,7 @@ run_text_jobs_on_cloudrun:
 
 
 run_text_jobs_on_vm:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
   steps:
     - run_text_jobs_via_cloud_build:
         try:
@@ -1044,6 +1359,51 @@ run_text_jobs_on_vm:
                     - '${"TEXT_GEN_USE_LLM=" + textGenUseLlm}'
                     - '${"TEXT_GEN_LLM_MAX_ATTEMPTS=" + textGenLlmMaxAttempts}'
                     - '${"TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=" + textGenLlmRetryBackoffSeconds}'
+                    - '${"TEXT_ASSET_RETRIEVAL_ENABLED=" + textAssetRetrievalEnabled}'
+                    - '${"TEXT_ASSET_LIBRARY_PREFIXES=" + textAssetLibraryPrefixes}'
+                    - '${"TEXT_ASSET_LIBRARY_MAX_FILES=" + textAssetLibraryMaxFiles}'
+                    - '${"TEXT_ASSET_LIBRARY_MIN_SCORE=" + textAssetLibraryMinScore}'
+                    - '${"TEXT_ASSET_RETRIEVAL_MODE=" + textAssetRetrievalMode}'
+                    - '${"TEXT_ASSET_ANN_ENABLED=" + textAssetAnnEnabled}'
+                    - '${"TEXT_ASSET_ANN_TOP_K=" + textAssetAnnTopK}'
+                    - '${"TEXT_ASSET_ANN_MIN_SCORE=" + textAssetAnnMinScore}'
+                    - '${"TEXT_ASSET_ANN_MAX_RERANK=" + textAssetAnnMaxRerank}'
+                    - '${"TEXT_ASSET_ANN_NAMESPACE=" + textAssetAnnNamespace}'
+                    - '${"TEXT_ASSET_LEXICAL_FALLBACK_ENABLED=" + textAssetLexicalFallbackEnabled}'
+                    - '${"TEXT_ASSET_ROLLOUT_STATE_PREFIX=" + textAssetRolloutStatePrefix}'
+                    - '${"TEXT_ASSET_ROLLOUT_MIN_DECISIONS=" + textAssetRolloutMinDecisions}'
+                    - '${"TEXT_ASSET_ROLLOUT_MIN_HIT_RATE=" + textAssetRolloutMinHitRate}'
+                    - '${"TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE=" + textAssetRolloutMaxErrorRate}'
+                    - '${"TEXT_ASSET_ROLLOUT_MAX_P95_MS=" + textAssetRolloutMaxP95Ms}'
+                    - '${"TEXT_ASSET_EMBEDDING_QUEUE_PREFIX=" + textAssetEmbeddingQueuePrefix}'
+                    - '${"TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX=" + textAssetEmbeddingProcessedPrefix}'
+                    - '${"TEXT_ASSET_EMBEDDING_FAILED_PREFIX=" + textAssetEmbeddingFailedPrefix}'
+                    - '${"TEXT_ASSET_EMBEDDING_MODEL=" + textAssetEmbeddingModel}'
+                    - '${"VECTOR_STORE_PROVIDER=" + vectorStoreProvider}'
+                    - '${"VECTOR_STORE_PROJECT_ID=" + vectorStoreProjectId}'
+                    - '${"VECTOR_STORE_LOCATION=" + vectorStoreLocation}'
+                    - '${"VECTOR_STORE_NAMESPACE=" + vectorStoreNamespace}'
+                    - '${"VECTOR_STORE_DIMENSION=" + vectorStoreDimension}'
+                    - '${"VERTEX_INDEX_ENDPOINT=" + vertexIndexEndpoint}'
+                    - '${"VERTEX_DEPLOYED_INDEX_ID=" + vertexDeployedIndexId}'
+                    - '${"TEXT_ASSET_CATALOG_ENABLED=" + textAssetCatalogEnabled}'
+                    - '${"TEXT_ASSET_REPLICATION_ENABLED=" + textAssetReplicationEnabled}'
+                    - '${"TEXT_ASSET_REPLICATION_QUEUE_PREFIX=" + textAssetReplicationQueuePrefix}'
+                    - '${"TEXT_ASSET_REPLICATION_TARGET=" + textAssetReplicationTarget}'
+                    - '${"TEXT_ASSET_REPLICATION_TARGET_PREFIX=" + textAssetReplicationTargetPrefix}'
+                    - '${"TEXT_ASSET_GENERATION_ENABLED=" + textAssetGenerationEnabled}'
+                    - '${"TEXT_ASSET_GENERATION_PROVIDER=" + textAssetGenerationProvider}'
+                    - '${"TEXT_ASSET_GENERATION_PROVIDER_CHAIN=" + textAssetGenerationProviderChain}'
+                    - '${"TEXT_ASSET_GENERATED_CACHE_ENABLED=" + textAssetGeneratedCacheEnabled}'
+                    - '${"TEXT_ASSET_GENERATED_CACHE_PREFIX=" + textAssetGeneratedCachePrefix}'
+                    - '${"TEXT_SAM3D_API_HOST=" + textSam3dApiHost}'
+                    - '${"TEXT_SAM3D_TEXT_ENDPOINTS=" + textSam3dTextEndpoints}'
+                    - '${"TEXT_SAM3D_TIMEOUT_SECONDS=" + textSam3dTimeoutSeconds}'
+                    - '${"TEXT_SAM3D_POLL_SECONDS=" + textSam3dPollSeconds}'
+                    - '${"TEXT_HUNYUAN_API_HOST=" + textHunyuanApiHost}'
+                    - '${"TEXT_HUNYUAN_TEXT_ENDPOINTS=" + textHunyuanTextEndpoints}'
+                    - '${"TEXT_HUNYUAN_TIMEOUT_SECONDS=" + textHunyuanTimeoutSeconds}'
+                    - '${"TEXT_HUNYUAN_POLL_SECONDS=" + textHunyuanPollSeconds}'
                     - '${"ASSETS_PREFIX=" + childAssetsPrefix}'
                     - '${"LAYOUT_PREFIX=" + childLayoutPrefix}'
                     - '${"SEG_PREFIX=" + childSegPrefix}'
@@ -1063,11 +1423,56 @@ run_text_jobs_on_vm:
                       TEXT_GEN_USE_LLM_Q=$(printf '%q' "${TEXT_GEN_USE_LLM}")
                       TEXT_GEN_LLM_MAX_ATTEMPTS_Q=$(printf '%q' "${TEXT_GEN_LLM_MAX_ATTEMPTS}")
                       TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q=$(printf '%q' "${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS}")
+                      TEXT_ASSET_RETRIEVAL_ENABLED_Q=$(printf '%q' "${TEXT_ASSET_RETRIEVAL_ENABLED}")
+                      TEXT_ASSET_LIBRARY_PREFIXES_Q=$(printf '%q' "${TEXT_ASSET_LIBRARY_PREFIXES}")
+                      TEXT_ASSET_LIBRARY_MAX_FILES_Q=$(printf '%q' "${TEXT_ASSET_LIBRARY_MAX_FILES}")
+                      TEXT_ASSET_LIBRARY_MIN_SCORE_Q=$(printf '%q' "${TEXT_ASSET_LIBRARY_MIN_SCORE}")
+                      TEXT_ASSET_RETRIEVAL_MODE_Q=$(printf '%q' "${TEXT_ASSET_RETRIEVAL_MODE}")
+                      TEXT_ASSET_ANN_ENABLED_Q=$(printf '%q' "${TEXT_ASSET_ANN_ENABLED}")
+                      TEXT_ASSET_ANN_TOP_K_Q=$(printf '%q' "${TEXT_ASSET_ANN_TOP_K}")
+                      TEXT_ASSET_ANN_MIN_SCORE_Q=$(printf '%q' "${TEXT_ASSET_ANN_MIN_SCORE}")
+                      TEXT_ASSET_ANN_MAX_RERANK_Q=$(printf '%q' "${TEXT_ASSET_ANN_MAX_RERANK}")
+                      TEXT_ASSET_ANN_NAMESPACE_Q=$(printf '%q' "${TEXT_ASSET_ANN_NAMESPACE}")
+                      TEXT_ASSET_LEXICAL_FALLBACK_ENABLED_Q=$(printf '%q' "${TEXT_ASSET_LEXICAL_FALLBACK_ENABLED}")
+                      TEXT_ASSET_ROLLOUT_STATE_PREFIX_Q=$(printf '%q' "${TEXT_ASSET_ROLLOUT_STATE_PREFIX}")
+                      TEXT_ASSET_ROLLOUT_MIN_DECISIONS_Q=$(printf '%q' "${TEXT_ASSET_ROLLOUT_MIN_DECISIONS}")
+                      TEXT_ASSET_ROLLOUT_MIN_HIT_RATE_Q=$(printf '%q' "${TEXT_ASSET_ROLLOUT_MIN_HIT_RATE}")
+                      TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE_Q=$(printf '%q' "${TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE}")
+                      TEXT_ASSET_ROLLOUT_MAX_P95_MS_Q=$(printf '%q' "${TEXT_ASSET_ROLLOUT_MAX_P95_MS}")
+                      TEXT_ASSET_EMBEDDING_QUEUE_PREFIX_Q=$(printf '%q' "${TEXT_ASSET_EMBEDDING_QUEUE_PREFIX}")
+                      TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX_Q=$(printf '%q' "${TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX}")
+                      TEXT_ASSET_EMBEDDING_FAILED_PREFIX_Q=$(printf '%q' "${TEXT_ASSET_EMBEDDING_FAILED_PREFIX}")
+                      TEXT_ASSET_EMBEDDING_MODEL_Q=$(printf '%q' "${TEXT_ASSET_EMBEDDING_MODEL}")
+                      VECTOR_STORE_PROVIDER_Q=$(printf '%q' "${VECTOR_STORE_PROVIDER}")
+                      VECTOR_STORE_PROJECT_ID_Q=$(printf '%q' "${VECTOR_STORE_PROJECT_ID}")
+                      VECTOR_STORE_LOCATION_Q=$(printf '%q' "${VECTOR_STORE_LOCATION}")
+                      VECTOR_STORE_NAMESPACE_Q=$(printf '%q' "${VECTOR_STORE_NAMESPACE}")
+                      VECTOR_STORE_DIMENSION_Q=$(printf '%q' "${VECTOR_STORE_DIMENSION}")
+                      VERTEX_INDEX_ENDPOINT_Q=$(printf '%q' "${VERTEX_INDEX_ENDPOINT}")
+                      VERTEX_DEPLOYED_INDEX_ID_Q=$(printf '%q' "${VERTEX_DEPLOYED_INDEX_ID}")
+                      TEXT_ASSET_CATALOG_ENABLED_Q=$(printf '%q' "${TEXT_ASSET_CATALOG_ENABLED}")
+                      TEXT_ASSET_REPLICATION_ENABLED_Q=$(printf '%q' "${TEXT_ASSET_REPLICATION_ENABLED}")
+                      TEXT_ASSET_REPLICATION_QUEUE_PREFIX_Q=$(printf '%q' "${TEXT_ASSET_REPLICATION_QUEUE_PREFIX}")
+                      TEXT_ASSET_REPLICATION_TARGET_Q=$(printf '%q' "${TEXT_ASSET_REPLICATION_TARGET}")
+                      TEXT_ASSET_REPLICATION_TARGET_PREFIX_Q=$(printf '%q' "${TEXT_ASSET_REPLICATION_TARGET_PREFIX}")
+                      TEXT_ASSET_GENERATION_ENABLED_Q=$(printf '%q' "${TEXT_ASSET_GENERATION_ENABLED}")
+                      TEXT_ASSET_GENERATION_PROVIDER_Q=$(printf '%q' "${TEXT_ASSET_GENERATION_PROVIDER}")
+                      TEXT_ASSET_GENERATION_PROVIDER_CHAIN_Q=$(printf '%q' "${TEXT_ASSET_GENERATION_PROVIDER_CHAIN}")
+                      TEXT_ASSET_GENERATED_CACHE_ENABLED_Q=$(printf '%q' "${TEXT_ASSET_GENERATED_CACHE_ENABLED}")
+                      TEXT_ASSET_GENERATED_CACHE_PREFIX_Q=$(printf '%q' "${TEXT_ASSET_GENERATED_CACHE_PREFIX}")
+                      TEXT_SAM3D_API_HOST_Q=$(printf '%q' "${TEXT_SAM3D_API_HOST}")
+                      TEXT_SAM3D_TEXT_ENDPOINTS_Q=$(printf '%q' "${TEXT_SAM3D_TEXT_ENDPOINTS}")
+                      TEXT_SAM3D_TIMEOUT_SECONDS_Q=$(printf '%q' "${TEXT_SAM3D_TIMEOUT_SECONDS}")
+                      TEXT_SAM3D_POLL_SECONDS_Q=$(printf '%q' "${TEXT_SAM3D_POLL_SECONDS}")
+                      TEXT_HUNYUAN_API_HOST_Q=$(printf '%q' "${TEXT_HUNYUAN_API_HOST}")
+                      TEXT_HUNYUAN_TEXT_ENDPOINTS_Q=$(printf '%q' "${TEXT_HUNYUAN_TEXT_ENDPOINTS}")
+                      TEXT_HUNYUAN_TIMEOUT_SECONDS_Q=$(printf '%q' "${TEXT_HUNYUAN_TIMEOUT_SECONDS}")
+                      TEXT_HUNYUAN_POLL_SECONDS_Q=$(printf '%q' "${TEXT_HUNYUAN_POLL_SECONDS}")
                       ASSETS_PREFIX_Q=$(printf '%q' "${ASSETS_PREFIX}")
                       LAYOUT_PREFIX_Q=$(printf '%q' "${LAYOUT_PREFIX}")
                       SEG_PREFIX_Q=$(printf '%q' "${SEG_PREFIX}")
 
-                      REMOTE_CMD="cd ${VM_REPO_DIR} && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} TEXT_SEED=${TEXT_SEED_Q} DEFAULT_SOURCE_MODE=text TEXT_GEN_MAX_SEEDS=${TEXT_GEN_MAX_SEEDS_Q} TEXT_GEN_STANDARD_PROFILE=${TEXT_GEN_STANDARD_PROFILE_Q} TEXT_GEN_PREMIUM_PROFILE=${TEXT_GEN_PREMIUM_PROFILE_Q} TEXT_GEN_USE_LLM=${TEXT_GEN_USE_LLM_Q} TEXT_GEN_LLM_MAX_ATTEMPTS=${TEXT_GEN_LLM_MAX_ATTEMPTS_Q} TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q} TEXT_GEN_RUNTIME=vm python text-scene-gen-job/generate_text_scene.py && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} ASSETS_PREFIX=${ASSETS_PREFIX_Q} LAYOUT_PREFIX=${LAYOUT_PREFIX_Q} SEG_PREFIX=${SEG_PREFIX_Q} python text-scene-adapter-job/adapt_text_scene.py"
+                      REMOTE_CMD="cd ${VM_REPO_DIR} && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} TEXT_SEED=${TEXT_SEED_Q} DEFAULT_SOURCE_MODE=text TEXT_GEN_MAX_SEEDS=${TEXT_GEN_MAX_SEEDS_Q} TEXT_GEN_STANDARD_PROFILE=${TEXT_GEN_STANDARD_PROFILE_Q} TEXT_GEN_PREMIUM_PROFILE=${TEXT_GEN_PREMIUM_PROFILE_Q} TEXT_GEN_USE_LLM=${TEXT_GEN_USE_LLM_Q} TEXT_GEN_LLM_MAX_ATTEMPTS=${TEXT_GEN_LLM_MAX_ATTEMPTS_Q} TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q} TEXT_GEN_RUNTIME=vm python text-scene-gen-job/generate_text_scene.py && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} ASSETS_PREFIX=${ASSETS_PREFIX_Q} LAYOUT_PREFIX=${LAYOUT_PREFIX_Q} SEG_PREFIX=${SEG_PREFIX_Q} TEXT_ASSET_RETRIEVAL_ENABLED=${TEXT_ASSET_RETRIEVAL_ENABLED_Q} TEXT_ASSET_LIBRARY_PREFIXES=${TEXT_ASSET_LIBRARY_PREFIXES_Q} TEXT_ASSET_LIBRARY_MAX_FILES=${TEXT_ASSET_LIBRARY_MAX_FILES_Q} TEXT_ASSET_LIBRARY_MIN_SCORE=${TEXT_ASSET_LIBRARY_MIN_SCORE_Q} TEXT_ASSET_RETRIEVAL_MODE=${TEXT_ASSET_RETRIEVAL_MODE_Q} TEXT_ASSET_ANN_ENABLED=${TEXT_ASSET_ANN_ENABLED_Q} TEXT_ASSET_ANN_TOP_K=${TEXT_ASSET_ANN_TOP_K_Q} TEXT_ASSET_ANN_MIN_SCORE=${TEXT_ASSET_ANN_MIN_SCORE_Q} TEXT_ASSET_ANN_MAX_RERANK=${TEXT_ASSET_ANN_MAX_RERANK_Q} TEXT_ASSET_ANN_NAMESPACE=${TEXT_ASSET_ANN_NAMESPACE_Q} TEXT_ASSET_LEXICAL_FALLBACK_ENABLED=${TEXT_ASSET_LEXICAL_FALLBACK_ENABLED_Q} TEXT_ASSET_ROLLOUT_STATE_PREFIX=${TEXT_ASSET_ROLLOUT_STATE_PREFIX_Q} TEXT_ASSET_ROLLOUT_MIN_DECISIONS=${TEXT_ASSET_ROLLOUT_MIN_DECISIONS_Q} TEXT_ASSET_ROLLOUT_MIN_HIT_RATE=${TEXT_ASSET_ROLLOUT_MIN_HIT_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE=${TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_P95_MS=${TEXT_ASSET_ROLLOUT_MAX_P95_MS_Q} TEXT_ASSET_EMBEDDING_QUEUE_PREFIX=${TEXT_ASSET_EMBEDDING_QUEUE_PREFIX_Q} TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX=${TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX_Q} TEXT_ASSET_EMBEDDING_FAILED_PREFIX=${TEXT_ASSET_EMBEDDING_FAILED_PREFIX_Q} TEXT_ASSET_EMBEDDING_MODEL=${TEXT_ASSET_EMBEDDING_MODEL_Q} VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER_Q} VECTOR_STORE_PROJECT_ID=${VECTOR_STORE_PROJECT_ID_Q} VECTOR_STORE_LOCATION=${VECTOR_STORE_LOCATION_Q} VECTOR_STORE_NAMESPACE=${VECTOR_STORE_NAMESPACE_Q} VECTOR_STORE_DIMENSION=${VECTOR_STORE_DIMENSION_Q} VERTEX_INDEX_ENDPOINT=${VERTEX_INDEX_ENDPOINT_Q} VERTEX_DEPLOYED_INDEX_ID=${VERTEX_DEPLOYED_INDEX_ID_Q} TEXT_ASSET_CATALOG_ENABLED=${TEXT_ASSET_CATALOG_ENABLED_Q} TEXT_ASSET_REPLICATION_ENABLED=${TEXT_ASSET_REPLICATION_ENABLED_Q} TEXT_ASSET_REPLICATION_QUEUE_PREFIX=${TEXT_ASSET_REPLICATION_QUEUE_PREFIX_Q} TEXT_ASSET_REPLICATION_TARGET=${TEXT_ASSET_REPLICATION_TARGET_Q} TEXT_ASSET_REPLICATION_TARGET_PREFIX=${TEXT_ASSET_REPLICATION_TARGET_PREFIX_Q} TEXT_ASSET_GENERATION_ENABLED=${TEXT_ASSET_GENERATION_ENABLED_Q} TEXT_ASSET_GENERATION_PROVIDER=${TEXT_ASSET_GENERATION_PROVIDER_Q} TEXT_ASSET_GENERATION_PROVIDER_CHAIN=${TEXT_ASSET_GENERATION_PROVIDER_CHAIN_Q} TEXT_ASSET_GENERATED_CACHE_ENABLED=${TEXT_ASSET_GENERATED_CACHE_ENABLED_Q} TEXT_ASSET_GENERATED_CACHE_PREFIX=${TEXT_ASSET_GENERATED_CACHE_PREFIX_Q} TEXT_SAM3D_API_HOST=${TEXT_SAM3D_API_HOST_Q} TEXT_SAM3D_TEXT_ENDPOINTS=${TEXT_SAM3D_TEXT_ENDPOINTS_Q} TEXT_SAM3D_TIMEOUT_SECONDS=${TEXT_SAM3D_TIMEOUT_SECONDS_Q} TEXT_SAM3D_POLL_SECONDS=${TEXT_SAM3D_POLL_SECONDS_Q} TEXT_HUNYUAN_API_HOST=${TEXT_HUNYUAN_API_HOST_Q} TEXT_HUNYUAN_TEXT_ENDPOINTS=${TEXT_HUNYUAN_TEXT_ENDPOINTS_Q} TEXT_HUNYUAN_TIMEOUT_SECONDS=${TEXT_HUNYUAN_TIMEOUT_SECONDS_Q} TEXT_HUNYUAN_POLL_SECONDS=${TEXT_HUNYUAN_POLL_SECONDS_Q} python text-scene-adapter-job/adapt_text_scene.py"
 
                       gcloud compute ssh "${VM_NAME}" \
                         --project="${PROJECT_ID}" \

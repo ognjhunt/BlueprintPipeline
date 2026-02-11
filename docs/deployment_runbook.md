@@ -263,6 +263,44 @@ Key source-orchestrator env vars to set at deploy time:
 - `TEXT_GEN_USE_LLM`
 - `TEXT_GEN_LLM_MAX_ATTEMPTS`
 - `TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS`
+- `TEXT_ASSET_RETRIEVAL_ENABLED`
+- `TEXT_ASSET_LIBRARY_PREFIXES`
+- `TEXT_ASSET_LIBRARY_MAX_FILES`
+- `TEXT_ASSET_LIBRARY_MIN_SCORE`
+- `TEXT_ASSET_RETRIEVAL_MODE`
+- `TEXT_ASSET_ANN_ENABLED`
+- `TEXT_ASSET_ANN_TOP_K`
+- `TEXT_ASSET_ANN_MIN_SCORE`
+- `TEXT_ASSET_ANN_MAX_RERANK`
+- `TEXT_ASSET_ANN_NAMESPACE`
+- `TEXT_ASSET_LEXICAL_FALLBACK_ENABLED`
+- `TEXT_ASSET_ROLLOUT_STATE_PREFIX`
+- `TEXT_ASSET_ROLLOUT_MIN_DECISIONS`
+- `TEXT_ASSET_ROLLOUT_MIN_HIT_RATE`
+- `TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE`
+- `TEXT_ASSET_ROLLOUT_MAX_P95_MS`
+- `TEXT_ASSET_CATALOG_ENABLED`
+- `TEXT_ASSET_EMBEDDING_QUEUE_PREFIX`
+- `TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX`
+- `TEXT_ASSET_EMBEDDING_FAILED_PREFIX`
+- `TEXT_ASSET_EMBEDDING_MODEL`
+- `TEXT_ASSET_REPLICATION_ENABLED`
+- `TEXT_ASSET_REPLICATION_QUEUE_PREFIX`
+- `TEXT_ASSET_REPLICATION_TARGET`
+- `TEXT_ASSET_REPLICATION_TARGET_PREFIX`
+- `TEXT_ASSET_GENERATION_ENABLED`
+- `TEXT_ASSET_GENERATION_PROVIDER`
+- `TEXT_ASSET_GENERATION_PROVIDER_CHAIN`
+- `TEXT_ASSET_GENERATED_CACHE_ENABLED`
+- `TEXT_ASSET_GENERATED_CACHE_PREFIX`
+- `TEXT_SAM3D_API_HOST`
+- `TEXT_SAM3D_TEXT_ENDPOINTS`
+- `TEXT_SAM3D_TIMEOUT_SECONDS`
+- `TEXT_SAM3D_POLL_SECONDS`
+- `TEXT_HUNYUAN_API_HOST`
+- `TEXT_HUNYUAN_TEXT_ENDPOINTS`
+- `TEXT_HUNYUAN_TIMEOUT_SECONDS`
+- `TEXT_HUNYUAN_POLL_SECONDS`
 - `TEXT_GEN_MAX_SEEDS`
 - `TEXT_GEN_ENABLE_IMAGE_FALLBACK`
 - `ARENA_EXPORT_REQUIRED`
@@ -274,6 +312,92 @@ Key source-orchestrator env vars to set at deploy time:
 - `TEXT_GEN_VM_ZONE`
 - `TEXT_GEN_VM_REPO_DIR`
 - `TEXT_GEN_VM_TIMEOUT_SECONDS`
+- `VECTOR_STORE_PROVIDER`
+- `VECTOR_STORE_PROJECT_ID`
+- `VECTOR_STORE_LOCATION`
+- `VECTOR_STORE_NAMESPACE`
+- `VECTOR_STORE_DIMENSION`
+- `VERTEX_INDEX_ENDPOINT`
+- `VERTEX_DEPLOYED_INDEX_ID`
+
+For async Backblaze replication, deploy the replication queue workflow trigger:
+
+```bash
+cd workflows
+bash setup-asset-replication-trigger.sh <project_id> <bucket> <region>
+```
+
+Replication workflow env vars:
+- `ASSET_REPLICATION_JOB_NAME`
+- `TEXT_ASSET_REPLICATION_QUEUE_PREFIX`
+- `B2_S3_ENDPOINT` (job-level env)
+- `B2_BUCKET` (job-level env)
+- `B2_REGION` (job-level env)
+- `B2_KEY_ID_SECRET` (secret name mapped to `B2_KEY_ID`)
+- `B2_APPLICATION_KEY_SECRET` (secret name mapped to `B2_APPLICATION_KEY`)
+
+For async embedding indexing, deploy the embedding queue workflow trigger:
+
+```bash
+cd workflows
+OPENAI_API_KEY_SECRET=<secret-name> \
+VECTOR_STORE_PROVIDER=vertex \
+VECTOR_STORE_PROJECT_ID=<project_id> \
+VECTOR_STORE_LOCATION=<region> \
+VERTEX_INDEX_ENDPOINT=<vertex-endpoint-resource> \
+VERTEX_DEPLOYED_INDEX_ID=<deployed-index-id> \
+bash setup-asset-embedding-trigger.sh <project_id> <bucket> <region>
+```
+
+Embedding workflow/job env vars:
+- `ASSET_EMBEDDING_JOB_NAME`
+- `TEXT_ASSET_EMBEDDING_QUEUE_PREFIX`
+- `TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX`
+- `TEXT_ASSET_EMBEDDING_FAILED_PREFIX`
+- `TEXT_ASSET_EMBEDDING_MODEL`
+- `VECTOR_STORE_PROVIDER`
+- `VECTOR_STORE_PROJECT_ID`
+- `VECTOR_STORE_LOCATION`
+- `VECTOR_STORE_NAMESPACE`
+- `VECTOR_STORE_DIMENSION`
+- `VERTEX_INDEX_ENDPOINT`
+- `VERTEX_DEPLOYED_INDEX_ID`
+
+Backfill existing catalog assets into the embedding queue:
+
+```bash
+BUCKET=<bucket> \
+TEXT_ASSET_EMBEDDING_QUEUE_PREFIX=automation/asset_embedding/queue \
+TEXT_ASSET_EMBEDDING_BACKFILL_STATE_PREFIX=automation/asset_embedding/backfill \
+python tools/asset_catalog/backfill_embeddings.py
+```
+
+Recommended secure setup (Secret Manager + job binding):
+
+```bash
+bash workflows/setup-backblaze-secrets.sh <project_id>
+
+JOB_SA=$(gcloud run jobs describe asset-replication-job \
+  --region=<region> \
+  --project=<project_id> \
+  --format='value(template.template.serviceAccount)')
+
+gcloud secrets add-iam-policy-binding b2-key-id \
+  --project=<project_id> \
+  --member="serviceAccount:${JOB_SA}" \
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding b2-application-key \
+  --project=<project_id> \
+  --member="serviceAccount:${JOB_SA}" \
+  --role="roles/secretmanager.secretAccessor"
+
+B2_S3_ENDPOINT=https://s3.us-west-000.backblazeb2.com \
+B2_BUCKET=<b2-bucket> \
+B2_KEY_ID_SECRET=b2-key-id \
+B2_APPLICATION_KEY_SECRET=b2-application-key \
+bash workflows/setup-asset-replication-trigger.sh <project_id> <bucket> <region>
+```
 
 For autonomous 1/day text mode, deploy scheduler + daily workflow:
 

@@ -111,6 +111,14 @@ def test_extract_room_type_from_constraints_overrides_prompt() -> None:
     assert result == "warehouse"
 
 
+def test_extract_room_type_uses_prompt_diversity_archetype_when_room_type_missing() -> None:
+    result = _extract_room_type(
+        "A manipulation scene",
+        {"prompt_diversity": {"dimensions": {"archetype": "lab"}}},
+    )
+    assert result == "lab"
+
+
 def test_placement_graph_has_on_relations_for_movable_objects() -> None:
     objects = [
         {"id": "obj_001", "sim_role": "static"},
@@ -158,7 +166,7 @@ def test_resolve_provider_chain_openai_primary() -> None:
 
 
 def test_room_template_returns_non_empty_for_known_types() -> None:
-    for room in ["kitchen", "living_room", "bedroom", "office"]:
+    for room in ["kitchen", "living_room", "bedroom", "office", "lab", "warehouse", "bathroom"]:
         template = _room_template(room)
         assert len(template) >= 5
         for name, category, sim_role in template:
@@ -251,6 +259,40 @@ def test_high_density_constraint_adds_objects() -> None:
         constraints={"object_density": "high"},
     )
     assert len(result["objects"]) == 18  # 12 + 6
+
+
+def test_prompt_diversity_complexity_can_raise_target_count() -> None:
+    result = generate_text_scene_package(
+        scene_id="scene_complexity",
+        prompt="A warehouse manipulation scene",
+        quality_tier=QualityTier.STANDARD,
+        seed=4,
+        provider_policy="openai_primary",
+        constraints={
+            "prompt_diversity": {
+                "dimensions": {
+                    "archetype": "warehouse",
+                    "complexity": "high_density_15_to_22_objects",
+                }
+            }
+        },
+    )
+    assert len(result["objects"]) >= 16
+
+
+def test_fallback_composition_varies_by_seed() -> None:
+    base_kwargs = dict(
+        scene_id="scene_seed_variation",
+        prompt="A lab scene with manipulable tools and containers",
+        quality_tier=QualityTier.STANDARD,
+        provider_policy="openai_primary",
+    )
+    run1 = generate_text_scene_package(seed=2, **base_kwargs)
+    run2 = generate_text_scene_package(seed=3, **base_kwargs)
+
+    names1 = [obj["name"] for obj in run1["objects"]]
+    names2 = [obj["name"] for obj in run2["objects"]]
+    assert names1 != names2
 
 
 def test_generate_text_scene_seed_is_stable_across_processes() -> None:

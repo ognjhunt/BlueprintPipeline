@@ -1,0 +1,115 @@
+# asset-embedding-pipeline.yaml
+#
+# Trigger:
+#   GCS object finalized events in PRIMARY_BUCKET.
+# Internal filter:
+#   automation/asset_embedding/queue/*.json
+#
+# Behavior:
+#   - Runs asset-embedding-job for each queue object.
+#   - Waits for completion and fails on job failure.
+
+main:
+  params: [event]
+  steps:
+    - init:
+        assign:
+          - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
+          - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+          - embeddingJobName: '${default(sys.get_env("ASSET_EMBEDDING_JOB_NAME"), "asset-embedding-job")}'
+          - queuePrefix: '${default(sys.get_env("TEXT_ASSET_EMBEDDING_QUEUE_PREFIX"), "automation/asset_embedding/queue")}'
+        next: filter_queue_objects
+
+    - filter_queue_objects:
+        switch:
+          - condition: '${text.match_regex(object, "^automation/asset_embedding/queue/.+\\.json$")}'
+            next: run_embedding_job
+        next: skip
+
+    - run_embedding_job:
+        call: run_cloud_run_job_and_wait
+        args:
+          projectId: ${projectId}
+          region: ${region}
+          jobName: ${embeddingJobName}
+          timeoutSeconds: 3600
+          envVars:
+            - name: BUCKET
+              value: ${bucket}
+            - name: QUEUE_OBJECT
+              value: ${object}
+            - name: TEXT_ASSET_EMBEDDING_QUEUE_PREFIX
+              value: ${queuePrefix}
+        result: embeddingResult
+        next: done
+
+    - done:
+        return:
+          status: "SUCCESS"
+          queue_object: ${object}
+          job_execution: ${embeddingResult.execution_name}
+
+    - skip:
+        return:
+          status: "SKIPPED"
+          reason: '${"Not an embedding queue object: " + object}'
+
+
+run_cloud_run_job_and_wait:
+  params: [projectId, region, jobName, timeoutSeconds, envVars]
+  steps:
+    - run_job:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: '${"projects/" + projectId + "/locations/" + region + "/jobs/" + jobName}'
+          body:
+            overrides:
+              containerOverrides:
+                - env: ${envVars}
+            timeout: '${string(timeoutSeconds) + "s"}'
+        result: jobExec
+        next: set_execution_name
+
+    - set_execution_name:
+        assign:
+          - executionName: '${if(jobExec.metadata != null and jobExec.metadata.name != null, jobExec.metadata.name, jobExec.name)}'
+        next: wait_for_job
+
+    - wait_for_job:
+        call: googleapis.run.v2.projects.locations.jobs.executions.get
+        args:
+          name: ${executionName}
+        result: jobStatus
+        next: check_job_status
+
+    - check_job_status:
+        assign:
+          - jobState: '${if(jobStatus.state != null, jobStatus.state, if(jobStatus.status != null, jobStatus.status.state, null))}'
+          - jobFailedCount: '${if(jobStatus.failedCount != null, jobStatus.failedCount, if(jobStatus.status != null, jobStatus.status.failedCount, null))}'
+          - jobSucceededCount: '${if(jobStatus.succeededCount != null, jobStatus.succeededCount, if(jobStatus.status != null, jobStatus.status.succeededCount, null))}'
+        next: job_status_switch
+
+    - job_status_switch:
+        switch:
+          - condition: '${jobState == "FAILED" or (jobFailedCount != null and jobFailedCount > 0)}'
+            next: raise_job_failed
+          - condition: '${jobState == "SUCCEEDED" or (jobSucceededCount != null and jobSucceededCount > 0)}'
+            next: return_job_success
+        next: wait_poll
+
+    - wait_poll:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: wait_for_job
+
+    - raise_job_failed:
+        raise: '${"Cloud Run job failed: " + jobName + " (" + executionName + ")"}'
+
+    - return_job_success:
+        return:
+          execution_name: ${executionName}
+          state: ${jobState}
+

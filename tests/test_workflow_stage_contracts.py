@@ -176,6 +176,24 @@ def test_source_orchestrator_runtime_branches_include_vm_and_cloudrun():
     assert "run_text_jobs_on_vm:" in workflow
     assert "run_text_jobs_on_cloudrun:" in workflow
     assert "[vm_transient]" in workflow
+    assert "TEXT_ASSET_RETRIEVAL_ENABLED" in workflow
+    assert "TEXT_ASSET_LIBRARY_PREFIXES" in workflow
+    assert "TEXT_ASSET_GENERATION_ENABLED" in workflow
+    assert "TEXT_ASSET_GENERATION_PROVIDER" in workflow
+    assert "TEXT_ASSET_GENERATION_PROVIDER_CHAIN" in workflow
+    assert "TEXT_ASSET_RETRIEVAL_MODE" in workflow
+    assert "TEXT_ASSET_ANN_ENABLED" in workflow
+    assert "TEXT_ASSET_ANN_TOP_K" in workflow
+    assert "TEXT_ASSET_ANN_MIN_SCORE" in workflow
+    assert "TEXT_ASSET_ANN_MAX_RERANK" in workflow
+    assert "TEXT_ASSET_ANN_NAMESPACE" in workflow
+    assert "TEXT_ASSET_LEXICAL_FALLBACK_ENABLED" in workflow
+    assert "TEXT_ASSET_ROLLOUT_STATE_PREFIX" in workflow
+    assert "TEXT_ASSET_EMBEDDING_QUEUE_PREFIX" in workflow
+    assert "VECTOR_STORE_PROVIDER" in workflow
+    assert "VERTEX_INDEX_ENDPOINT" in workflow
+    assert "TEXT_SAM3D_TEXT_ENDPOINTS" in workflow
+    assert "TEXT_HUNYUAN_TEXT_ENDPOINTS" in workflow
 
 
 def test_source_orchestrator_image_mode_branches_include_orchestrator_and_legacy_chain():
@@ -250,3 +268,90 @@ def test_setup_text_autonomy_scheduler_has_expected_schedule_defaults():
     assert 'TEXT_DAILY_QUOTA=${TEXT_DAILY_QUOTA:-"1"}' in script
     assert "TEXT_AUTONOMY_STATE_PREFIX" in script
     assert "setup-text-autonomy-scheduler.sh" in script
+
+
+def test_setup_source_orchestrator_trigger_includes_text_asset_retrieval_envs():
+    script = Path("workflows/setup-source-orchestrator-trigger.sh").read_text(encoding="utf-8")
+
+    assert "TEXT_ASSET_RETRIEVAL_ENABLED" in script
+    assert "TEXT_ASSET_LIBRARY_PREFIXES" in script
+    assert "TEXT_ASSET_LIBRARY_MAX_FILES" in script
+    assert "TEXT_ASSET_LIBRARY_MIN_SCORE" in script
+    assert "TEXT_ASSET_RETRIEVAL_MODE" in script
+    assert "TEXT_ASSET_ANN_ENABLED" in script
+    assert "TEXT_ASSET_ANN_TOP_K" in script
+    assert "TEXT_ASSET_ANN_MIN_SCORE" in script
+    assert "TEXT_ASSET_ANN_MAX_RERANK" in script
+    assert "TEXT_ASSET_ANN_NAMESPACE" in script
+    assert "TEXT_ASSET_LEXICAL_FALLBACK_ENABLED" in script
+    assert "TEXT_ASSET_ROLLOUT_STATE_PREFIX" in script
+    assert "TEXT_ASSET_EMBEDDING_QUEUE_PREFIX" in script
+    assert "TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX" in script
+    assert "TEXT_ASSET_EMBEDDING_FAILED_PREFIX" in script
+    assert "TEXT_ASSET_EMBEDDING_MODEL" in script
+    assert "VECTOR_STORE_PROVIDER" in script
+    assert "VECTOR_STORE_PROJECT_ID" in script
+    assert "VECTOR_STORE_LOCATION" in script
+    assert "VECTOR_STORE_NAMESPACE" in script
+    assert "VECTOR_STORE_DIMENSION" in script
+    assert "VERTEX_INDEX_ENDPOINT" in script
+    assert "VERTEX_DEPLOYED_INDEX_ID" in script
+    assert "TEXT_ASSET_CATALOG_ENABLED" in script
+    assert "TEXT_ASSET_REPLICATION_ENABLED" in script
+    assert "TEXT_ASSET_REPLICATION_QUEUE_PREFIX" in script
+    assert "TEXT_ASSET_REPLICATION_TARGET" in script
+    assert "TEXT_ASSET_REPLICATION_TARGET_PREFIX" in script
+    assert "TEXT_ASSET_GENERATION_ENABLED" in script
+    assert "TEXT_ASSET_GENERATION_PROVIDER" in script
+    assert "TEXT_ASSET_GENERATION_PROVIDER_CHAIN" in script
+    assert "TEXT_SAM3D_API_HOST" in script
+    assert "TEXT_SAM3D_TEXT_ENDPOINTS" in script
+    assert "TEXT_HUNYUAN_API_HOST" in script
+    assert "TEXT_HUNYUAN_TEXT_ENDPOINTS" in script
+
+
+def test_asset_replication_workflow_and_trigger_contract():
+    workflow = Path("workflows/asset-replication-pipeline.yaml").read_text(encoding="utf-8")
+    setup_script = Path("workflows/setup-asset-replication-trigger.sh").read_text(encoding="utf-8")
+    master_script = Path("workflows/setup-all-triggers.sh").read_text(encoding="utf-8")
+
+    assert "asset-replication-job" in workflow
+    assert "automation/asset_replication/queue" in workflow
+    assert "QUEUE_OBJECT" in workflow
+    assert "B2_S3_ENDPOINT" not in workflow
+    assert "B2_BUCKET" not in workflow
+    assert "B2_APPLICATION_KEY" not in workflow
+
+    assert "asset-replication-pipeline" in setup_script
+    assert "asset-replication-queue-trigger" in setup_script
+    assert "B2_S3_ENDPOINT" in setup_script
+    assert "B2_BUCKET" in setup_script
+    assert "B2_KEY_ID_SECRET" in setup_script
+    assert "B2_APPLICATION_KEY_SECRET" in setup_script
+    assert "--update-secrets" in setup_script
+
+    assert "ENABLE_ASSET_REPLICATION" in master_script
+    assert "setup-asset-replication-trigger.sh" in master_script
+
+
+def test_asset_embedding_workflow_and_trigger_contract():
+    workflow = Path("workflows/asset-embedding-pipeline.yaml").read_text(encoding="utf-8")
+    setup_script = Path("workflows/setup-asset-embedding-trigger.sh").read_text(encoding="utf-8")
+    master_script = Path("workflows/setup-all-triggers.sh").read_text(encoding="utf-8")
+
+    assert "asset-embedding-job" in workflow
+    assert "automation/asset_embedding/queue" in workflow
+    assert "QUEUE_OBJECT" in workflow
+    assert "TEXT_ASSET_EMBEDDING_QUEUE_PREFIX" in workflow
+
+    assert "asset-embedding-pipeline" in setup_script
+    assert "asset-embedding-queue-trigger" in setup_script
+    assert "ASSET_EMBEDDING_JOB_NAME" in setup_script
+    assert "VECTOR_STORE_PROVIDER" in setup_script
+    assert "VERTEX_INDEX_ENDPOINT" in setup_script
+    assert "VERTEX_DEPLOYED_INDEX_ID" in setup_script
+    assert "OPENAI_API_KEY_SECRET" in setup_script
+    assert "--update-secrets" in setup_script
+
+    assert "ENABLE_ASSET_EMBEDDING" in master_script
+    assert "setup-asset-embedding-trigger.sh" in master_script

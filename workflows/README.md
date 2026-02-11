@@ -12,6 +12,7 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 ## Workflow trigger map
 | Workflow | Trigger source | Marker file or scheduler |
 | --- | --- | --- |
+| `asset-embedding-pipeline.yaml` | Eventarc (GCS finalized) | `automation/asset_embedding/queue/*.json` |
 | `arena-export-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/usd/.usd_complete`, `scenes/*/isaac_lab/.isaac_lab_complete`, `scenes/*/geniesim/.geniesim_complete` |
 | `dream2flow-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` (disabled unless enabled) |
 | `dwm-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` (disabled unless enabled) |
@@ -131,6 +132,44 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `TEXT_GEN_USE_LLM`: enables LLM-first scene planning in Stage 1. Defaults to `true`.
 - `TEXT_GEN_LLM_MAX_ATTEMPTS`: max LLM planning retry rounds in Stage 1. Defaults to `3`.
 - `TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS`: Stage 1 LLM retry backoff base seconds. Defaults to `2`.
+- `TEXT_ASSET_RETRIEVAL_ENABLED`: text adapter retrieval toggle before placeholder fallback. Defaults to `true`.
+- `TEXT_ASSET_LIBRARY_PREFIXES`: comma-separated library prefixes under bucket mount for retrieval (e.g. `scenes,asset-library`). Defaults to `scenes`.
+- `TEXT_ASSET_LIBRARY_MAX_FILES`: scan cap for retrieval index build in text adapter. Defaults to `2500`.
+- `TEXT_ASSET_LIBRARY_MIN_SCORE`: minimum token-match score for selecting retrieved assets. Defaults to `0.25`.
+- `TEXT_ASSET_RETRIEVAL_MODE`: retrieval rollout mode (`lexical_primary`, `ann_shadow`, `ann_primary`). Defaults to `ann_shadow`.
+- `TEXT_ASSET_ANN_ENABLED`: enable ANN semantic retrieval path. Defaults to `true`.
+- `TEXT_ASSET_ANN_TOP_K`: ANN candidate query size before rerank. Defaults to `40`.
+- `TEXT_ASSET_ANN_MIN_SCORE`: minimum ANN semantic similarity accepted. Defaults to `0.28`.
+- `TEXT_ASSET_ANN_MAX_RERANK`: max ANN candidates reranked in adapter. Defaults to `20`.
+- `TEXT_ASSET_ANN_NAMESPACE`: vector namespace/collection for asset embeddings. Defaults to `assets-v1`.
+- `TEXT_ASSET_LEXICAL_FALLBACK_ENABLED`: allow lexical fallback when ANN misses/fails. Defaults to `true`.
+- `TEXT_ASSET_ROLLOUT_STATE_PREFIX`: rollout state object prefix. Defaults to `automation/asset_retrieval_rollout`.
+- `TEXT_ASSET_ROLLOUT_MIN_DECISIONS`: min ANN decisions in a rollout window. Defaults to `500`.
+- `TEXT_ASSET_ROLLOUT_MIN_HIT_RATE`: ANN hit-rate threshold for promotion. Defaults to `0.95`.
+- `TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE`: ANN error-rate threshold for promotion. Defaults to `0.01`.
+- `TEXT_ASSET_ROLLOUT_MAX_P95_MS`: ANN p95 latency threshold for promotion. Defaults to `400`.
+- `TEXT_ASSET_CATALOG_ENABLED`: publish text adapter asset/scene metadata to Firestore catalog. Defaults to `true`.
+- `TEXT_ASSET_EMBEDDING_QUEUE_PREFIX`: embedding queue prefix. Defaults to `automation/asset_embedding/queue`.
+- `TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX`: embedding success result prefix. Defaults to `automation/asset_embedding/processed`.
+- `TEXT_ASSET_EMBEDDING_FAILED_PREFIX`: embedding failure result prefix. Defaults to `automation/asset_embedding/failed`.
+- `TEXT_ASSET_EMBEDDING_MODEL`: embedding model used by retrieval/indexing. Defaults to `text-embedding-3-small`.
+- `TEXT_ASSET_REPLICATION_ENABLED`: enqueue async replication requests. Defaults to `true`.
+- `TEXT_ASSET_REPLICATION_QUEUE_PREFIX`: replication queue prefix. Defaults to `automation/asset_replication/queue`.
+- `TEXT_ASSET_REPLICATION_TARGET`: replication target label. Defaults to `backblaze_b2`.
+- `TEXT_ASSET_REPLICATION_TARGET_PREFIX`: replication object-key prefix. Defaults to `assets`.
+- `TEXT_ASSET_GENERATION_ENABLED`: enable generation provider fallback when retrieval misses. Defaults to `true`.
+- `TEXT_ASSET_GENERATION_PROVIDER`: text asset generation provider (`sam3d` default).
+- `TEXT_ASSET_GENERATION_PROVIDER_CHAIN`: ordered fallback providers (default `sam3d,hunyuan3d`).
+- `TEXT_ASSET_GENERATED_CACHE_ENABLED`: cache generated assets for future retrieval. Defaults to `true`.
+- `TEXT_ASSET_GENERATED_CACHE_PREFIX`: cache prefix for generated assets. Defaults to `asset-library/generated-text`.
+- `TEXT_SAM3D_API_HOST`: SAM3D provider base URL.
+- `TEXT_SAM3D_TEXT_ENDPOINTS`: endpoint candidates for SAM3D text-to-3D. Defaults to `/openapi/v1/text-to-3d,/v1/text-to-3d`.
+- `TEXT_SAM3D_TIMEOUT_SECONDS`: SAM3D task timeout seconds. Defaults to `1800`.
+- `TEXT_SAM3D_POLL_SECONDS`: SAM3D poll interval seconds. Defaults to `10`.
+- `TEXT_HUNYUAN_API_HOST`: Hunyuan fallback provider base URL.
+- `TEXT_HUNYUAN_TEXT_ENDPOINTS`: endpoint candidates for Hunyuan text-to-3D. Defaults to `/openapi/v1/text-to-3d,/v1/text-to-3d`.
+- `TEXT_HUNYUAN_TIMEOUT_SECONDS`: Hunyuan task timeout seconds. Defaults to `1800`.
+- `TEXT_HUNYUAN_POLL_SECONDS`: Hunyuan poll interval seconds. Defaults to `10`.
 - `TEXT_GEN_MAX_SEEDS`: max allowed `seed_count` for `scene_request.json`. Defaults to `16`.
 - `TEXT_GEN_ENABLE_IMAGE_FALLBACK`: allow `auto`/`text` fallback to image path when text source fails. Defaults to `true`.
 - `ARENA_EXPORT_REQUIRED`: enforce Stage 5 arena success before source completion. Defaults to `true`.
@@ -142,6 +181,18 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `TEXT_GEN_VM_ZONE`: VM zone used when `TEXT_GEN_RUNTIME=vm`. Defaults to `us-east1-c`.
 - `TEXT_GEN_VM_REPO_DIR`: repository directory on the VM for text Stage 1 scripts. Defaults to `~/BlueprintPipeline`.
 - `TEXT_GEN_VM_TIMEOUT_SECONDS`: VM text-stage Cloud Build polling timeout. Defaults to `2400`.
+- `VECTOR_STORE_PROVIDER`: vector database backend (`vertex` default).
+- `VECTOR_STORE_PROJECT_ID`: vector backend project.
+- `VECTOR_STORE_LOCATION`: vector backend location.
+- `VECTOR_STORE_NAMESPACE`: vector namespace/collection (`assets-v1` default).
+- `VECTOR_STORE_DIMENSION`: vector dimensionality (`1536` default).
+- `VERTEX_INDEX_ENDPOINT`: Vertex Matching Engine endpoint resource.
+- `VERTEX_DEPLOYED_INDEX_ID`: Vertex deployed index ID.
+- `B2_S3_ENDPOINT`: Backblaze B2 S3 endpoint for async replication worker (job-level env).
+- `B2_BUCKET`: Backblaze B2 target bucket (job-level env).
+- `B2_REGION`: Backblaze B2 region (default `us-west-000`, job-level env).
+- `B2_KEY_ID_SECRET`: Secret Manager secret name bound to `B2_KEY_ID` in replication job.
+- `B2_APPLICATION_KEY_SECRET`: Secret Manager secret name bound to `B2_APPLICATION_KEY` in replication job.
 - `TEXT_AUTONOMY_STATE_PREFIX`: daily text autonomy state root. Defaults to `automation/text_daily`.
 - `TEXT_AUTONOMY_TIMEZONE`: scheduler/workflow timezone hint for daily runs. Defaults to `America/New_York`.
 - `TEXT_DAILY_QUOTA`: number of scenes emitted per daily run. Defaults to `1`.
@@ -209,6 +260,69 @@ State objects:
 - `automation/text_daily/.paused`
 - `automation/text_daily/runs/<YYYY-MM-DD>/emitted_requests.json`
 - `automation/text_daily/runs/<YYYY-MM-DD>/run_summary.json`
+
+## Asset replication queue workflow usage
+`asset-replication-pipeline.yaml` processes async replication queue objects and
+invokes `asset-replication-job` to mirror assets from GCS to Backblaze B2.
+
+Setup:
+```bash
+cd workflows
+bash setup-asset-replication-trigger.sh <project_id> <bucket> <region>
+```
+
+Optional secure credential binding during setup:
+```bash
+cd workflows
+bash setup-backblaze-secrets.sh <project_id>
+
+B2_S3_ENDPOINT=https://s3.us-west-000.backblazeb2.com \
+B2_BUCKET=<b2-bucket> \
+B2_KEY_ID_SECRET=b2-key-id \
+B2_APPLICATION_KEY_SECRET=b2-application-key \
+bash setup-asset-replication-trigger.sh <project_id> <bucket> <region>
+```
+
+The setup script keeps credentials out of workflow env vars and binds secrets directly
+to the `asset-replication-job` Cloud Run job.
+
+Queue objects:
+- `automation/asset_replication/queue/*.json`
+
+Result objects:
+- `automation/asset_replication/processed/*.json`
+- `automation/asset_replication/failed/*.json`
+
+## Asset embedding queue workflow usage
+`asset-embedding-pipeline.yaml` processes async embedding queue objects and
+invokes `asset-embedding-job` to upsert ANN vectors used by Stage 1 retrieval.
+
+Setup:
+```bash
+cd workflows
+OPENAI_API_KEY_SECRET=<secret-name> \
+VECTOR_STORE_PROVIDER=vertex \
+VECTOR_STORE_PROJECT_ID=<project_id> \
+VECTOR_STORE_LOCATION=<region> \
+VERTEX_INDEX_ENDPOINT=<vertex-endpoint-resource> \
+VERTEX_DEPLOYED_INDEX_ID=<deployed-index-id> \
+bash setup-asset-embedding-trigger.sh <project_id> <bucket> <region>
+```
+
+Queue objects:
+- `automation/asset_embedding/queue/*.json`
+
+Result objects:
+- `automation/asset_embedding/processed/*.json`
+- `automation/asset_embedding/failed/*.json`
+
+Catalog backfill helper:
+```bash
+BUCKET=<bucket> \
+TEXT_ASSET_EMBEDDING_QUEUE_PREFIX=automation/asset_embedding/queue \
+TEXT_ASSET_EMBEDDING_BACKFILL_STATE_PREFIX=automation/asset_embedding/backfill \
+python tools/asset_catalog/backfill_embeddings.py
+```
 
 ## Scene batch workflow usage
 The `scene-batch.yaml` workflow runs the batch pipeline across a list of scene IDs

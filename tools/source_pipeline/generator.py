@@ -8,7 +8,7 @@ import re
 import time
 from hashlib import sha256
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .request import QualityTier
 
@@ -30,6 +30,31 @@ class LLMPlanResult:
     failure_reason: Optional[str]
 
 
+ROOM_TYPE_ALIASES: Dict[str, str] = {
+    "kitchen_dining_nook": "kitchen",
+    "dining_room": "living_room",
+    "livingroom": "living_room",
+    "living space": "living_room",
+    "laboratory": "lab",
+    "study": "office",
+    "workshop": "warehouse",
+    "garage": "warehouse",
+    "laundry": "bathroom",
+}
+
+
+OBJECT_SUBSTITUTIONS: Dict[str, List[str]] = {
+    "mug": ["cup", "bowl", "glass"],
+    "plate": ["dish", "tray"],
+    "bottle": ["canister", "thermos", "flask"],
+    "book": ["magazine", "manual"],
+    "keyboard": ["tablet", "laptop"],
+    "mouse": ["controller", "trackball"],
+    "container": ["bin", "basket", "crate"],
+    "tool": ["wrench", "screwdriver", "pliers"],
+}
+
+
 def resolve_provider_chain(policy: str) -> List[str]:
     """Resolve ordered provider chain for generation."""
 
@@ -38,10 +63,34 @@ def resolve_provider_chain(policy: str) -> List[str]:
     return ["openai", "gemini", "anthropic"]
 
 
+def _canonicalize_room_type(raw: str) -> str:
+    normalized = re.sub(r"[\s\-]+", "_", raw.strip().lower())
+    return ROOM_TYPE_ALIASES.get(normalized, normalized)
+
+
+def _prompt_diversity_dimensions(constraints: Mapping[str, Any]) -> Mapping[str, str]:
+    diversity = constraints.get("prompt_diversity")
+    if not isinstance(diversity, Mapping):
+        return {}
+    dimensions = diversity.get("dimensions")
+    if not isinstance(dimensions, Mapping):
+        return {}
+    output: Dict[str, str] = {}
+    for key, value in dimensions.items():
+        if isinstance(value, str):
+            output[key] = value
+    return output
+
+
 def _extract_room_type(prompt: str, constraints: Dict[str, Any]) -> str:
-    constraint_room = str(constraints.get("room_type", "")).strip().lower()
+    constraint_room = str(constraints.get("room_type", "")).strip()
     if constraint_room:
-        return constraint_room
+        return _canonicalize_room_type(constraint_room)
+
+    dimensions = _prompt_diversity_dimensions(constraints)
+    archetype = str(dimensions.get("archetype", "")).strip()
+    if archetype:
+        return _canonicalize_room_type(archetype)
 
     lowered = prompt.lower()
     for token in [
@@ -54,58 +103,134 @@ def _extract_room_type(prompt: str, constraints: Dict[str, Any]) -> str:
         "warehouse",
     ]:
         if token in lowered:
-            return token.replace(" ", "_")
+            return _canonicalize_room_type(token)
     return "generic_room"
 
 
 def _room_template(room_type: str) -> List[Tuple[str, str, str]]:
     """Return (name, category, sim_role) base template for room type."""
 
+    normalized_room = _canonicalize_room_type(room_type)
     templates: Dict[str, List[Tuple[str, str, str]]] = {
         "kitchen": [
             ("countertop", "counter", "static"),
             ("sink", "sink", "static"),
             ("fridge", "refrigerator", "articulated_appliance"),
             ("cabinet", "cabinet", "articulated_furniture"),
+            ("island", "counter", "static"),
+            ("pantry", "cabinet", "articulated_furniture"),
+            ("oven", "appliance", "articulated_appliance"),
             ("stool", "stool", "static"),
+            ("cutting_board", "board", "manipulable_object"),
+            ("knife_block", "tool", "manipulable_object"),
             ("mug", "mug", "manipulable_object"),
             ("plate", "plate", "manipulable_object"),
             ("bottle", "bottle", "manipulable_object"),
+            ("bowl", "bowl", "manipulable_object"),
+            ("utensil", "utensil", "manipulable_object"),
+            ("jar", "container", "manipulable_object"),
         ],
         "living_room": [
             ("sofa", "sofa", "static"),
             ("coffee_table", "table", "static"),
             ("bookshelf", "bookshelf", "static"),
             ("tv_stand", "tv_stand", "static"),
+            ("sideboard", "cabinet", "articulated_furniture"),
+            ("media_console", "cabinet", "articulated_furniture"),
             ("lamp", "lamp", "static"),
+            ("side_table", "table", "static"),
+            ("ottoman", "stool", "static"),
             ("book", "book", "manipulable_object"),
             ("remote", "remote", "manipulable_object"),
             ("mug", "mug", "manipulable_object"),
+            ("gamepad", "controller", "manipulable_object"),
+            ("coaster", "dish", "manipulable_object"),
+            ("throw_pillow", "cushion", "manipulable_object"),
+            ("blanket", "fabric", "manipulable_object"),
         ],
         "bedroom": [
             ("bed", "bed", "static"),
             ("nightstand", "nightstand", "static"),
             ("dresser", "dresser", "static"),
             ("closet", "closet", "articulated_furniture"),
+            ("wardrobe", "cabinet", "articulated_furniture"),
+            ("chest", "cabinet", "articulated_furniture"),
+            ("desk", "desk", "static"),
             ("lamp", "lamp", "static"),
             ("book", "book", "manipulable_object"),
+            ("alarm_clock", "device", "manipulable_object"),
+            ("water_bottle", "bottle", "manipulable_object"),
+            ("storage_box", "container", "manipulable_object"),
+            ("laundry_basket", "basket", "manipulable_object"),
+            ("tablet", "tablet", "manipulable_object"),
         ],
         "office": [
             ("desk", "desk", "static"),
             ("chair", "chair", "static"),
             ("monitor", "monitor", "static"),
             ("cabinet", "cabinet", "articulated_furniture"),
+            ("drawer_unit", "cabinet", "articulated_furniture"),
+            ("bookshelf", "bookshelf", "static"),
+            ("printer_table", "table", "static"),
             ("keyboard", "keyboard", "manipulable_object"),
             ("mouse", "mouse", "manipulable_object"),
             ("notebook", "notebook", "manipulable_object"),
+            ("pen_holder", "container", "manipulable_object"),
+            ("file_folder", "folder", "manipulable_object"),
+            ("headset", "device", "manipulable_object"),
+            ("laptop", "laptop", "manipulable_object"),
+        ],
+        "lab": [
+            ("workbench", "table", "static"),
+            ("storage_cabinet", "cabinet", "articulated_furniture"),
+            ("instrument_cart", "cart", "static"),
+            ("fume_hood", "hood", "articulated_appliance"),
+            ("sample_rack", "rack", "static"),
+            ("bin_station", "container", "manipulable_object"),
+            ("beaker", "container", "manipulable_object"),
+            ("flask", "bottle", "manipulable_object"),
+            ("pipette_case", "container", "manipulable_object"),
+            ("notepad", "notebook", "manipulable_object"),
+            ("small_toolkit", "tool", "manipulable_object"),
+            ("sealed_box", "container", "manipulable_object"),
+        ],
+        "warehouse": [
+            ("pallet_rack", "rack", "static"),
+            ("shelf_unit", "shelf", "static"),
+            ("rolling_cart", "cart", "static"),
+            ("tool_chest", "cabinet", "articulated_furniture"),
+            ("locker", "cabinet", "articulated_furniture"),
+            ("work_table", "table", "static"),
+            ("crate_stack", "crate", "manipulable_object"),
+            ("parcel_box", "container", "manipulable_object"),
+            ("tote_bin", "container", "manipulable_object"),
+            ("barcode_scanner", "device", "manipulable_object"),
+            ("tape_dispenser", "tool", "manipulable_object"),
+            ("safety_cone", "cone", "manipulable_object"),
+            ("battery_pack", "device", "manipulable_object"),
+        ],
+        "bathroom": [
+            ("vanity", "cabinet", "articulated_furniture"),
+            ("sink", "sink", "static"),
+            ("mirror_cabinet", "cabinet", "articulated_furniture"),
+            ("shower_shelf", "shelf", "static"),
+            ("hamper", "basket", "manipulable_object"),
+            ("soap_dispenser", "bottle", "manipulable_object"),
+            ("toothbrush_cup", "container", "manipulable_object"),
+            ("towel_stack", "fabric", "manipulable_object"),
+            ("spray_bottle", "bottle", "manipulable_object"),
+            ("storage_bin", "container", "manipulable_object"),
         ],
     }
-    return templates.get(room_type, [
+    return templates.get(normalized_room, [
         ("table", "table", "static"),
         ("shelf", "shelf", "static"),
         ("chair", "chair", "static"),
+        ("cabinet", "cabinet", "articulated_furniture"),
         ("container", "container", "manipulable_object"),
         ("tool", "tool", "manipulable_object"),
+        ("bottle", "bottle", "manipulable_object"),
+        ("book", "book", "manipulable_object"),
     ])
 
 
@@ -115,12 +240,38 @@ def _default_dims_for_category(category: str) -> Dict[str, float]:
         "sink": (0.6, 0.3, 0.5),
         "refrigerator": (0.9, 1.8, 0.8),
         "cabinet": (0.8, 1.8, 0.5),
+        "closet": (1.2, 2.0, 0.6),
+        "dresser": (1.0, 1.0, 0.5),
         "table": (1.2, 0.75, 0.7),
+        "desk": (1.4, 0.75, 0.7),
         "sofa": (2.0, 0.9, 0.9),
         "bed": (2.0, 0.6, 1.6),
         "chair": (0.5, 0.9, 0.5),
+        "stool": (0.45, 0.5, 0.45),
+        "shelf": (1.1, 1.8, 0.4),
+        "bookshelf": (1.0, 1.8, 0.35),
+        "tv_stand": (1.4, 0.5, 0.4),
+        "monitor": (0.55, 0.4, 0.2),
+        "notebook": (0.21, 0.02, 0.3),
+        "laptop": (0.34, 0.03, 0.24),
+        "container": (0.35, 0.25, 0.35),
+        "basket": (0.45, 0.35, 0.35),
+        "crate": (0.55, 0.45, 0.45),
+        "rack": (1.8, 2.1, 0.8),
+        "cart": (0.95, 1.0, 0.6),
+        "hood": (1.3, 2.2, 0.8),
+        "appliance": (0.75, 0.9, 0.7),
+        "board": (0.4, 0.03, 0.3),
+        "utensil": (0.24, 0.03, 0.03),
+        "device": (0.18, 0.08, 0.12),
+        "folder": (0.24, 0.03, 0.32),
+        "fabric": (0.45, 0.12, 0.3),
+        "cushion": (0.4, 0.12, 0.35),
+        "cone": (0.22, 0.4, 0.22),
+        "dish": (0.28, 0.05, 0.28),
         "mug": (0.08, 0.10, 0.08),
         "plate": (0.26, 0.03, 0.26),
+        "bowl": (0.18, 0.08, 0.18),
         "bottle": (0.09, 0.30, 0.09),
         "book": (0.18, 0.03, 0.24),
         "remote": (0.05, 0.02, 0.18),
@@ -132,10 +283,10 @@ def _default_dims_for_category(category: str) -> Dict[str, float]:
 
 
 def _sample_position(rng: random.Random, index: int) -> Dict[str, float]:
-    lane = index % 5
-    row = index // 5
-    x = -1.8 + lane * 0.9 + rng.uniform(-0.1, 0.1)
-    z = -1.6 + row * 0.9 + rng.uniform(-0.1, 0.1)
+    lane = (index - 1) % 4
+    row = (index - 1) // 4
+    x = -2.4 + lane * 1.6 + rng.uniform(-0.06, 0.06)
+    z = -2.6 + row * 1.2 + rng.uniform(-0.06, 0.06)
     y = max(0.0, rng.uniform(0.0, 0.02))
     return {"x": round(x, 4), "y": round(y, 4), "z": round(z, 4)}
 
@@ -273,6 +424,112 @@ def _build_placement_graph(objects: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "schema_version": "v1",
         "relations": relations,
     }
+
+
+def _target_object_count(*, quality_tier: QualityTier, constraints: Mapping[str, Any]) -> int:
+    target_count = 12 if quality_tier == QualityTier.STANDARD else 18
+    if constraints.get("object_density") == "high":
+        target_count += 6
+
+    dimensions = _prompt_diversity_dimensions(constraints)
+    complexity = str(dimensions.get("complexity", "")).lower()
+    if "high_density" in complexity:
+        target_count = max(target_count, 16 if quality_tier == QualityTier.STANDARD else 20)
+    elif "medium_density" in complexity and quality_tier == QualityTier.PREMIUM:
+        target_count = max(target_count, 16)
+    elif "articulation_heavy" in complexity:
+        target_count = max(target_count, 14 if quality_tier == QualityTier.STANDARD else 18)
+    return max(5, target_count)
+
+
+def _min_role_requirements(*, target_count: int, constraints: Mapping[str, Any]) -> Tuple[int, int]:
+    min_articulated = 1
+    min_manipulable = max(4, target_count // 3)
+
+    dimensions = _prompt_diversity_dimensions(constraints)
+    complexity = str(dimensions.get("complexity", "")).lower()
+    manipulation_focus = str(dimensions.get("manipulation_focus", "")).lower()
+    task_family = str(dimensions.get("task_family", "")).lower()
+
+    if "articulation_heavy" in complexity or "drawer" in manipulation_focus:
+        min_articulated = 2
+    if "small_items" in manipulation_focus or "sorting" in task_family:
+        min_manipulable = max(min_manipulable, target_count // 2)
+
+    return min_articulated, min_manipulable
+
+
+def _choose_without_replacement(
+    rng: random.Random,
+    pool: Sequence[Tuple[str, str, str]],
+    count: int,
+) -> List[Tuple[str, str, str]]:
+    if count <= 0 or not pool:
+        return []
+    if count >= len(pool):
+        picked = list(pool)
+        rng.shuffle(picked)
+        return picked
+    idxs = list(range(len(pool)))
+    rng.shuffle(idxs)
+    return [pool[i] for i in idxs[:count]]
+
+
+def _apply_substitution(
+    *,
+    name: str,
+    category: str,
+    sim_role: str,
+    rng: random.Random,
+) -> Tuple[str, str]:
+    if sim_role != "manipulable_object":
+        return name, category
+    candidates = OBJECT_SUBSTITUTIONS.get(category, [])
+    if not candidates or rng.random() > 0.35:
+        return name, category
+    substitute = candidates[rng.randrange(0, len(candidates))]
+    return substitute, substitute
+
+
+def _compose_fallback_template(
+    *,
+    room_type: str,
+    target_count: int,
+    constraints: Mapping[str, Any],
+    rng: random.Random,
+) -> List[Tuple[str, str, str]]:
+    template = _room_template(room_type)
+    articulated = [entry for entry in template if _is_articulated(entry[2])]
+    manipulable = [entry for entry in template if entry[2] == "manipulable_object"]
+    static = [entry for entry in template if entry[2] == "static"]
+
+    min_articulated, min_manipulable = _min_role_requirements(target_count=target_count, constraints=constraints)
+    chosen: List[Tuple[str, str, str]] = []
+    chosen.extend(_choose_without_replacement(rng, articulated, min_articulated))
+    chosen.extend(_choose_without_replacement(rng, manipulable, min_manipulable))
+
+    existing = {(name, category, sim_role) for name, category, sim_role in chosen}
+    pool = list(template)
+    rng.shuffle(pool)
+    for entry in pool:
+        if len(chosen) >= min(target_count, len(template)):
+            break
+        if entry in existing:
+            continue
+        chosen.append(entry)
+        existing.add(entry)
+
+    if len(chosen) < min(target_count, len(template)):
+        # Ensure we never return too small a template even when role quotas are impossible.
+        fallback_fill = _choose_without_replacement(rng, static + manipulable + articulated, target_count)
+        for entry in fallback_fill:
+            if entry in existing:
+                continue
+            chosen.append(entry)
+            existing.add(entry)
+
+    rng.shuffle(chosen)
+    return chosen
 
 
 def _llm_plan_enabled() -> bool:
@@ -416,6 +673,8 @@ def generate_text_scene_package(
     rng_seed = int.from_bytes(sha256(seed_material).digest()[:8], "big") % (2**32)
     rng = random.Random(rng_seed)
 
+    target_count = _target_object_count(quality_tier=quality_tier, constraints=constraints)
+
     if llm_payload is not None:
         room_type = str(llm_payload.get("room_type") or "generic_room").strip().lower().replace(" ", "_")
         template: List[Tuple[str, str, str]] = []
@@ -434,22 +693,34 @@ def generate_text_scene_package(
                 sim_role = "manipulable_object"
             template.append((name, category, sim_role))
         if not template:
-            template = _room_template(room_type)
+            template = _compose_fallback_template(
+                room_type=room_type,
+                target_count=target_count,
+                constraints=constraints,
+                rng=rng,
+            )
     else:
         room_type = _extract_room_type(prompt, constraints)
-        template = _room_template(room_type)
-
-    target_count = 12 if quality_tier == QualityTier.STANDARD else 18
-    if constraints.get("object_density") == "high":
-        target_count += 6
+        template = _compose_fallback_template(
+            room_type=room_type,
+            target_count=target_count,
+            constraints=constraints,
+            rng=rng,
+        )
 
     objects: List[Dict[str, Any]] = []
     while len(objects) < target_count:
-        for base_index, (name, category, sim_role) in enumerate(template):
+        for _, (base_name, base_category, sim_role) in enumerate(template):
             if len(objects) >= target_count:
                 break
             idx = len(objects) + 1
             oid = f"obj_{idx:03d}"
+            name, category = _apply_substitution(
+                name=base_name,
+                category=base_category,
+                sim_role=sim_role,
+                rng=rng,
+            )
             object_name = f"{name}_{idx:03d}" if idx > len(template) else name
             dims = _default_dims_for_category(category)
             objects.append(

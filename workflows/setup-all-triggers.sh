@@ -15,10 +15,14 @@
 #   - genie-sim-import-poller (fallback)
 #
 # Usage:
-#   ./setup-all-triggers.sh <project_id> [bucket_name] [region] [image_path_mode] [enable_text_autonomy_daily]
+#   ./setup-all-triggers.sh <project_id> [bucket_name] [region] [image_path_mode] [enable_text_autonomy_daily] [enable_asset_replication] [enable_asset_embedding]
 # image_path_mode:
 #   orchestrator (default) | legacy_chain
 # enable_text_autonomy_daily:
+#   true | false (default false)
+# enable_asset_replication:
+#   true | false (default false)
+# enable_asset_embedding:
 #   true | false (default false)
 #
 # Prerequisites:
@@ -43,6 +47,8 @@ BUCKET=${2:-"${PROJECT_ID}-blueprint-scenes"}
 REGION=${3:-"us-central1"}
 IMAGE_PATH_MODE=${4:-${IMAGE_PATH_MODE:-"orchestrator"}}
 ENABLE_TEXT_AUTONOMY_DAILY=${5:-${ENABLE_TEXT_AUTONOMY_DAILY:-"false"}}
+ENABLE_ASSET_REPLICATION=${6:-${ENABLE_ASSET_REPLICATION:-"false"}}
+ENABLE_ASSET_EMBEDDING=${7:-${ENABLE_ASSET_EMBEDDING:-"false"}}
 
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║     BlueprintPipeline EventArc Trigger Master Setup             ║${NC}"
@@ -54,6 +60,8 @@ echo "  Bucket: ${BUCKET}"
 echo "  Region: ${REGION}"
 echo "  Image Path Mode: ${IMAGE_PATH_MODE}"
 echo "  Enable Text Autonomy Daily: ${ENABLE_TEXT_AUTONOMY_DAILY}"
+echo "  Enable Asset Replication: ${ENABLE_ASSET_REPLICATION}"
+echo "  Enable Asset Embedding: ${ENABLE_ASSET_EMBEDDING}"
 echo ""
 
 # =============================================================================
@@ -113,6 +121,12 @@ run_setup_script "setup-genie-sim-import-poller.sh" "Genie Sim Import Poller (Fa
 if [ "${ENABLE_TEXT_AUTONOMY_DAILY}" = "true" ]; then
     run_setup_script "setup-text-autonomy-scheduler.sh" "Text Autonomy Daily Scheduler"
 fi
+if [ "${ENABLE_ASSET_REPLICATION}" = "true" ]; then
+    run_setup_script "setup-asset-replication-trigger.sh" "Asset Replication Queue Trigger"
+fi
+if [ "${ENABLE_ASSET_EMBEDDING}" = "true" ]; then
+    run_setup_script "setup-asset-embedding-trigger.sh" "Asset Embedding Queue Trigger"
+fi
 
 # =============================================================================
 # Summary
@@ -158,6 +172,12 @@ if [ ${fail_count} -eq 0 ]; then
         if [ "${ENABLE_TEXT_AUTONOMY_DAILY}" = "true" ]; then
             echo "  4. text-autonomy-daily      → Scheduled daily text autonomy workflow"
         fi
+        if [ "${ENABLE_ASSET_REPLICATION}" = "true" ]; then
+            echo "  5. asset-replication-trigger → Trigger on automation/asset_replication/queue/*.json"
+        fi
+        if [ "${ENABLE_ASSET_EMBEDDING}" = "true" ]; then
+            echo "  6. asset-embedding-trigger → Trigger on automation/asset_embedding/queue/*.json"
+        fi
         echo ""
         echo "Note: marker-chain triggers (usd/geniesim/arena) were intentionally skipped to avoid duplicate topology."
     else
@@ -170,6 +190,12 @@ if [ ${fail_count} -eq 0 ]; then
         echo "  6. genie-sim-import-poller  → Scheduled fallback poller"
         if [ "${ENABLE_TEXT_AUTONOMY_DAILY}" = "true" ]; then
             echo "  7. text-autonomy-daily      → Scheduled daily text autonomy workflow"
+        fi
+        if [ "${ENABLE_ASSET_REPLICATION}" = "true" ]; then
+            echo "  8. asset-replication-trigger → Trigger on automation/asset_replication/queue/*.json"
+        fi
+        if [ "${ENABLE_ASSET_EMBEDDING}" = "true" ]; then
+            echo "  9. asset-embedding-trigger → Trigger on automation/asset_embedding/queue/*.json"
         fi
     fi
     echo ""

@@ -25,6 +25,16 @@ from .prompt_engine import (
     generate_prompt,
     load_prompt_matrix,
 )
+from .asset_retrieval import (
+    AssetQuerySpec,
+    RetrievalCandidate,
+    RetrievalDecision,
+    AssetRetrievalService,
+)
+from .asset_retrieval_rollout import (
+    effective_retrieval_mode,
+    update_rollout_state,
+)
 
 __all__ = [
     "PipelineSourceMode",
@@ -46,4 +56,10 @@ __all__ = [
     "compute_novelty_score",
     "generate_prompt",
     "load_prompt_matrix",
+    "AssetQuerySpec",
+    "RetrievalCandidate",
+    "RetrievalDecision",
+    "AssetRetrievalService",
+    "effective_retrieval_mode",
+    "update_rollout_state",
 ]
