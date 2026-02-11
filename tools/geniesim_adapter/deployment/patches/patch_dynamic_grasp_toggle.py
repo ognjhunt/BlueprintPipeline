@@ -61,58 +61,58 @@ def apply():
 """
 
         toggle_handler = f"""
-            {MARKER}
-            # Process dynamic grasp toggle requests (runs on sim thread — safe for USD)
-            if hasattr(self, '_bp_dynamic_toggle_queue') and self._bp_dynamic_toggle_queue:
-                _toggles = list(self._bp_dynamic_toggle_queue)
-                self._bp_dynamic_toggle_queue.clear()
-                for _prim_path, _is_dynamic in _toggles:
-                    try:
-                        from pxr import UsdPhysics, Gf
-                        _stage = None
-                        if hasattr(self, 'sim_app') and self.sim_app:
-                            _ctx = self.sim_app.get_active_context()
-                            if _ctx:
-                                _stage = _ctx.get_stage()
-                        if _stage is None and hasattr(self, '_stage'):
-                            _stage = self._stage
-                        if _stage is None:
-                            import omni.usd
-                            _stage = omni.usd.get_context().get_stage()
-                        if _stage is None:
-                            print(f"[TOGGLE] FAILED: no USD stage for {{_prim_path}}")
-                            continue
-                        _prim = _stage.GetPrimAtPath(_prim_path)
-                        if not _prim or not _prim.IsValid():
-                            print(f"[TOGGLE] FAILED: invalid prim {{_prim_path}}")
-                            continue
-                        _rb_api = UsdPhysics.RigidBodyAPI(_prim)
-                        if _rb_api:
-                            _kin_attr = _rb_api.GetKinematicEnabledAttr()
-                            if _kin_attr:
-                                _kin_attr.Set(not _is_dynamic)
-                            # Zero velocity to prevent explosive forces on toggle
-                            if _is_dynamic:
-                                _vel_attr = _rb_api.GetVelocityAttr()
-                                if _vel_attr:
-                                    _vel_attr.Set(Gf.Vec3f(0, 0, 0))
-                                _ang_attr = _rb_api.GetAngularVelocityAttr()
-                                if _ang_attr:
-                                    _ang_attr.Set(Gf.Vec3f(0, 0, 0))
-                            # Physics settle: run 3 sim steps to let collision mesh stabilize
-                            # before grasp force is applied. Prevents initial-frame interpenetration.
-                            try:
-                                import omni.kit.app
-                                _app = omni.kit.app.get_app()
-                                if _app:
-                                    for _settle_i in range(3):
-                                        _app.update()
-                                    print(f"[TOGGLE] {{_prim_path}} settled (3 physics steps)")
-                            except Exception as _settle_err:
-                                print(f"[TOGGLE] WARNING: physics settle failed: {{_settle_err}}")
-                            print(f"[TOGGLE] {{_prim_path}} -> {{'dynamic' if _is_dynamic else 'kinematic'}}")
-                    except Exception as _e:
-                        print(f"[TOGGLE] ERROR for {{_prim_path}}: {{_e}}")
+        {MARKER}
+        # Process dynamic grasp toggle requests (runs on sim thread — safe for USD)
+        if hasattr(self, '_bp_dynamic_toggle_queue') and self._bp_dynamic_toggle_queue:
+            _toggles = list(self._bp_dynamic_toggle_queue)
+            self._bp_dynamic_toggle_queue.clear()
+            for _prim_path, _is_dynamic in _toggles:
+                try:
+                    from pxr import UsdPhysics, Gf
+                    _stage = None
+                    if hasattr(self, 'sim_app') and self.sim_app:
+                        _ctx = self.sim_app.get_active_context()
+                        if _ctx:
+                            _stage = _ctx.get_stage()
+                    if _stage is None and hasattr(self, '_stage'):
+                        _stage = self._stage
+                    if _stage is None:
+                        import omni.usd
+                        _stage = omni.usd.get_context().get_stage()
+                    if _stage is None:
+                        print(f"[TOGGLE] FAILED: no USD stage for {{_prim_path}}")
+                        continue
+                    _prim = _stage.GetPrimAtPath(_prim_path)
+                    if not _prim or not _prim.IsValid():
+                        print(f"[TOGGLE] FAILED: invalid prim {{_prim_path}}")
+                        continue
+                    _rb_api = UsdPhysics.RigidBodyAPI(_prim)
+                    if _rb_api:
+                        _kin_attr = _rb_api.GetKinematicEnabledAttr()
+                        if _kin_attr:
+                            _kin_attr.Set(not _is_dynamic)
+                        # Zero velocity to prevent explosive forces on toggle
+                        if _is_dynamic:
+                            _vel_attr = _rb_api.GetVelocityAttr()
+                            if _vel_attr:
+                                _vel_attr.Set(Gf.Vec3f(0, 0, 0))
+                            _ang_attr = _rb_api.GetAngularVelocityAttr()
+                            if _ang_attr:
+                                _ang_attr.Set(Gf.Vec3f(0, 0, 0))
+                        # Physics settle: run 3 sim steps to let collision mesh stabilize
+                        # before grasp force is applied. Prevents initial-frame interpenetration.
+                        try:
+                            import omni.kit.app
+                            _app = omni.kit.app.get_app()
+                            if _app:
+                                for _settle_i in range(3):
+                                    _app.update()
+                                print(f"[TOGGLE] {{_prim_path}} settled (3 physics steps)")
+                        except Exception as _settle_err:
+                            print(f"[TOGGLE] WARNING: physics settle failed: {{_settle_err}}")
+                        print(f"[TOGGLE] {{_prim_path}} -> {{'dynamic' if _is_dynamic else 'kinematic'}}")
+                except Exception as _e:
+                    print(f"[TOGGLE] ERROR for {{_prim_path}}: {{_e}}")
 """
 
         # Inject queue init after class __init__ or first method

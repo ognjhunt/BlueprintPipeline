@@ -122,12 +122,15 @@ RUN chmod +x /tmp/download_robot_assets.sh \
 RUN touch /opt/.geniesim-prebaked
 
 # Ensure torch packaging symlinks are replaced with real files.
-RUN TORCH_PKG="${ISAAC_SIM_PATH}/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging" \
-    && REAL_PKG="${ISAAC_SIM_PATH}/kit/python/lib/python3.11/site-packages/packaging" \
+# pip install can upgrade packaging to a version that removes _structures.py,
+# so install a known-good version (23.2) and copy the missing files.
+RUN ${ISAAC_SIM_PATH}/python.sh -m pip install --no-cache-dir "packaging==23.2" --target /tmp/pkg_fix \
+    && TORCH_PKG="${ISAAC_SIM_PATH}/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging" \
     && for f in _structures.py _manylinux.py _musllinux.py; do \
          rm -f "${TORCH_PKG}/${f}" 2>/dev/null || true; \
-         cp "${REAL_PKG}/${f}" "${TORCH_PKG}/${f}" 2>/dev/null || true; \
-       done
+         cp "/tmp/pkg_fix/packaging/${f}" "${TORCH_PKG}/${f}" 2>/dev/null || true; \
+       done \
+    && rm -rf /tmp/pkg_fix
 
 WORKDIR /workspace/BlueprintPipeline
 
