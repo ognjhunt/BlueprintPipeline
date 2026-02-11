@@ -92,10 +92,14 @@ def test_readiness_scorecard_marks_ci_reliability_when_signals_exist(tmp_path: P
     _write_json(
         tmp_path / "test_scenes/scenes/s1/episodes/run/import_manifest.json",
         {
+            "schema_version": "1.3",
             "scene_id": "s1",
+            "run_id": "run-1",
+            "status": "completed",
             "episodes": {"passed_validation": 2},
             "quality": {"average_score": 0.9},
             "recordings_format": "json",
+            "validation": {"episodes": {}},
             "robot_types": ["franka", "ur5e", "ur10"],
         },
     )

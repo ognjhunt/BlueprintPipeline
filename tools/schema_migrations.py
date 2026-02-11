@@ -122,6 +122,8 @@ def migrate_import_manifest_payload(payload: Mapping[str, Any]) -> MigrationResu
         )
         payload_copy.setdefault("run_id", payload_copy.get("job_id"))
         payload_copy.setdefault("scene_id", "unknown")
+        payload_copy.setdefault("status", payload_copy.get("import_status") or "unknown")
+        payload_copy.setdefault("import_status", payload_copy.get("status") or "unknown")
         payload_copy.setdefault("robot_types", [])
         payload_copy.setdefault("recordings_format", "unknown")
         payload_copy.setdefault("artifact_contract_version", "1.0")
@@ -151,6 +153,13 @@ def migrate_import_manifest_payload(payload: Mapping[str, Any]) -> MigrationResu
             or payload_copy.get("job_id")
             or "unknown"
         )
+        resolved_status = str(
+            payload_copy.get("status")
+            or payload_copy.get("import_status")
+            or "unknown"
+        ).strip()
+        payload_copy["status"] = resolved_status
+        payload_copy["import_status"] = resolved_status
         payload_copy["robot_types"] = _infer_manifest_robot_types(payload_copy)
         payload_copy["recordings_format"] = _infer_recordings_format(payload_copy)
         payload_copy["artifact_contract_version"] = str(

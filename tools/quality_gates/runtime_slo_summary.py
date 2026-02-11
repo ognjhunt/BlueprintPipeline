@@ -160,6 +160,7 @@ def build_summary(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         for stage_data in stage_payload.values()
     )
     return {
+        "schema_version": "1.0",
         "generated_at": _utc_now(),
         "stages": stage_payload,
         "stage_count": len(stage_payload),

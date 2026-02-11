@@ -4310,7 +4310,13 @@ def run_local_import_job(
         job_id=config.job_id,
     )
     result.output_dir = config.output_dir
-    scene_id = os.environ.get("SCENE_ID", "unknown")
+    scene_id = (os.environ.get("SCENE_ID") or "").strip()
+    if not scene_id and isinstance(job_metadata, dict):
+        scene_candidate = job_metadata.get("scene_id")
+        if isinstance(scene_candidate, str) and scene_candidate.strip():
+            scene_id = scene_candidate.strip()
+    if not scene_id:
+        scene_id = "unknown"
     log = logging.LoggerAdapter(logger, {"job_id": JOB_NAME, "scene_id": scene_id})
 
     idempotency = _resolve_job_idempotency(job_metadata)
@@ -5094,6 +5100,7 @@ def run_local_import_job(
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "scene_id": scene_id,
         "run_id": run_id,
+        "status": "in_progress",
         "robot_types": robot_types,
         "recordings_format": recordings_format,
         "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,

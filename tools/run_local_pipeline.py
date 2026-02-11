@@ -71,6 +71,8 @@ Environment overrides:
     - ADAPTIVE_TIMEOUT_BUNDLE_TIER: Bundle tier for adaptive default timeouts.
     - ADAPTIVE_TIMEOUT_SCENE_COMPLEXITY: Scene complexity for adaptive default timeouts.
     - REQUIRE_BALANCED_ROBOT_EPISODES: Fail validation when cross-robot episode counts mismatch.
+    - RELEASE_PATH_RUN: Enforce release-path contracts (requires production mode).
+    - REGEN3D_ALLOW_MATERIALLESS: Dev/test override to bypass Stage 1 material checks.
 
 References:
 - 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
@@ -675,6 +677,12 @@ class LocalPipelineRunner:
 
     def _is_production_mode(self) -> bool:
         return self.environment == "production" or resolve_production_mode()
+
+    def _is_release_path_run(self) -> bool:
+        return bool(
+            parse_bool_env(os.getenv("RELEASE_PATH_RUN"), default=False)
+            or parse_bool_env(os.getenv("BP_RELEASE_PATH_RUN"), default=False)
+        )
 
     def _parse_env_int(self, name: str, default: int) -> int:
         raw = os.getenv(name)
@@ -1592,14 +1600,21 @@ class LocalPipelineRunner:
 
     def _validate_production_startup(self) -> Dict[str, Any]:
         production_mode = resolve_production_mode()
+        release_path_run = self._is_release_path_run()
         report: Dict[str, Any] = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "production_mode": production_mode,
+            "release_path_run": release_path_run,
             "ok": True,
             "errors": [],
             "warnings": [],
             "checks": {},
         }
+
+        if release_path_run and not production_mode:
+            report["errors"].append(
+                "RELEASE_PATH_RUN requires production mode. Set PIPELINE_ENV=production."
+            )
 
         if production_mode:
             skip_quality_gates_requested = parse_bool_env(
@@ -2928,8 +2943,19 @@ class LocalPipelineRunner:
             os.getenv("REGEN3D_ALLOW_TEXTURELESS"),
             default=False,
         )
+        allow_materialless_requested = parse_bool_env(
+            os.getenv("REGEN3D_ALLOW_MATERIALLESS"),
+            default=False,
+        )
+        allow_materialless = bool(
+            allow_materialless_requested and not self._is_production_mode()
+        )
         details["quality_mode"] = quality_mode
         details["allow_textureless_override"] = allow_textureless
+        details["allow_materialless_requested"] = bool(allow_materialless_requested)
+        details["allow_materialless_override"] = allow_materialless
+        if allow_materialless_requested and self._is_production_mode():
+            issues.append("REGEN3D_ALLOW_MATERIALLESS is not allowed in production mode.")
 
         if foreground_count <= 0:
             issues.append("No reconstructed foreground objects were produced.")
@@ -2971,7 +2997,7 @@ class LocalPipelineRunner:
         details["mesh_stats"] = mesh_stats
         if mesh_stats["checked"] <= 0:
             issues.append("No readable object GLB assets were found.")
-        elif mesh_stats["with_materials"] <= 0:
+        elif mesh_stats["with_materials"] <= 0 and not allow_materialless:
             issues.append("Object GLBs contain no material definitions.")
         elif (
             quality_mode == "quality"
@@ -5818,6 +5844,35 @@ class LocalPipelineRunner:
                 duration_seconds=time.time() - start_time,
             )
 
+        strict_manifest_contract = self._is_production_mode() or self._is_release_path_run()
+        manifest_contract_errors: List[str] = []
+        if result.success and result.import_manifest_path:
+            manifest_ok, manifest_contract_errors = self._validate_import_manifest_contract(
+                Path(result.import_manifest_path),
+                strict_release=strict_manifest_contract,
+            )
+            if not manifest_ok:
+                message = (
+                    "Import manifest contract validation failed: "
+                    + "; ".join(manifest_contract_errors[:6])
+                )
+                if strict_manifest_contract:
+                    return StepResult(
+                        step=PipelineStep.GENIESIM_IMPORT,
+                        success=False,
+                        duration_seconds=time.time() - start_time,
+                        message=message,
+                        outputs={
+                            "job_id": job_id,
+                            "run_id": str(job_payload.get("run_id") or self.run_id),
+                            "job_status": job_status,
+                            "import_manifest": str(result.import_manifest_path),
+                            "import_manifest_contract_errors": manifest_contract_errors,
+                            "strict_release_contract": True,
+                        },
+                    )
+                self.log(message, "WARNING")
+
         marker_path = None
         if result.success:
             marker_path = self.geniesim_dir / ".geniesim_import_complete"
@@ -5859,8 +5914,59 @@ class LocalPipelineRunner:
                 "lerobot_path": str(lerobot_dir),
                 "lerobot_dataset_info": str(dataset_info_path),
                 "completion_marker": str(marker_path) if result.success else None,
+                "strict_release_contract": strict_manifest_contract,
+                "import_manifest_contract_errors": manifest_contract_errors,
             },
         )
+
+    def _validate_import_manifest_contract(
+        self,
+        manifest_path: Path,
+        *,
+        strict_release: bool,
+    ) -> Tuple[bool, List[str]]:
+        errors: List[str] = []
+        try:
+            manifest_payload = _load_json(manifest_path, "import manifest")
+        except NonRetryableError as exc:
+            return False, [str(exc)]
+
+        utils_path = REPO_ROOT / "genie-sim-import-job" / "import_manifest_utils.py"
+        if not utils_path.is_file():
+            errors.append(f"import_manifest_utils.py not found at {utils_path}")
+            return False, errors
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "import_manifest_utils_runtime",
+                utils_path,
+            )
+            if spec is None or spec.loader is None:
+                raise ImportError(f"unable to load spec from {utils_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            errors.append(
+                "failed to load import manifest validator: "
+                f"{self._summarize_exception(exc)}"
+            )
+            return False, errors
+
+        validator = getattr(module, "validate_import_manifest_contract", None)
+        if not callable(validator):
+            return False, ["validate_import_manifest_contract is unavailable"]
+
+        try:
+            validation_errors = validator(
+                manifest_payload,
+                strict_release=strict_release,
+            )
+        except Exception as exc:
+            return False, [f"manifest contract validator failed: {self._summarize_exception(exc)}"]
+
+        if not isinstance(validation_errors, list):
+            return False, ["manifest contract validator returned invalid result"]
+        normalized_errors = [str(item) for item in validation_errors if str(item).strip()]
+        return len(normalized_errors) == 0, normalized_errors
 
     def _run_dataset_delivery(self) -> StepResult:
         """Invoke the dataset delivery job using the current Genie Sim context."""

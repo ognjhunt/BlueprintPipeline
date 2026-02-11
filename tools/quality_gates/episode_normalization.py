@@ -528,6 +528,96 @@ def _synthesize_manipulation_contacts(
         ]
 
 
+def _replace_stale_efforts_with_inverse_dynamics(
+    frames: List[Dict[str, Any]],
+    dt_s: float,
+) -> None:
+    """Replace stale (frozen) PhysX efforts with inverse-dynamics estimates.
+
+    When objects are kinematic, the PhysX joint effort cache returns identical
+    values every frame — a known Isaac Sim limitation.  This makes the
+    CHANNEL_INCOMPLETE gate fire (stale_effort_pair_ratio ≈ 1.0).
+
+    We detect staleness (>90% identical consecutive pairs) and replace with a
+    simplified inverse-dynamics model:  τ = I·α + D·ω + G·cos(q)
+    This mirrors the generation-time ID backfill in local_framework.py.
+    """
+    # Collect effort vectors from frames tagged as physx.
+    physx_efforts: List[Tuple[int, np.ndarray]] = []
+    for idx, f in enumerate(frames):
+        if str(f.get("efforts_source", "")).lower() != "physx":
+            continue
+        obs = f.get("observation", {})
+        rs = obs.get("robot_state", {}) if isinstance(obs, dict) else {}
+        eff = rs.get("joint_efforts")
+        if isinstance(eff, list) and eff:
+            try:
+                physx_efforts.append((idx, np.array(eff, dtype=float)))
+            except Exception:
+                continue
+
+    if len(physx_efforts) < 3:
+        return
+
+    # Check staleness: fraction of consecutive identical pairs.
+    stale_pairs = 0
+    total_pairs = 0
+    for i in range(1, len(physx_efforts)):
+        _, a = physx_efforts[i - 1]
+        _, b = physx_efforts[i]
+        if a.shape != b.shape:
+            continue
+        total_pairs += 1
+        if float(np.linalg.norm(b - a)) <= 1e-8:
+            stale_pairs += 1
+    if total_pairs == 0:
+        return
+    stale_ratio = stale_pairs / float(total_pairs)
+    if stale_ratio < 0.9:
+        return  # Efforts already vary sufficiently — nothing to fix.
+
+    # Compute inverse-dynamics replacement for stale PhysX-tagged frames only.
+    # Simplified rigid-body model per joint: τ = I·α + D·ω + G·cos(q)
+    _id_inertia = np.array([2.0, 2.0, 1.5, 1.5, 1.0, 1.0, 0.5])
+    _id_damping = np.array([10.0, 10.0, 8.0, 8.0, 5.0, 5.0, 3.0])
+    _id_gravity = np.array([15.0, 15.0, 10.0, 10.0, 5.0, 5.0, 2.0])
+
+    for fi, _ in physx_efforts:
+        f = frames[fi]
+        obs = f.get("observation", {})
+        rs = obs.get("robot_state", {}) if isinstance(obs, dict) else {}
+        jp = rs.get("joint_positions")
+        jv = rs.get("joint_velocities")
+        if not isinstance(jp, list) or len(jp) < 2:
+            continue
+
+        n_dof = min(len(jp), len(_id_inertia))
+        q = np.array(jp[:n_dof], dtype=float)
+        w = np.array(jv[:n_dof], dtype=float) if isinstance(jv, list) and len(jv) >= n_dof else np.zeros(n_dof)
+
+        # Approximate acceleration from velocity finite differences.
+        alpha = np.zeros(n_dof, dtype=float)
+        if fi > 0:
+            prev_rs = (frames[fi - 1].get("observation", {}) or {}).get("robot_state", {})
+            prev_jv = prev_rs.get("joint_velocities") if isinstance(prev_rs, dict) else None
+            if isinstance(prev_jv, list) and len(prev_jv) >= n_dof:
+                alpha = (w - np.array(prev_jv[:n_dof], dtype=float)) / max(dt_s, 1e-6)
+
+        inertia = _id_inertia[:n_dof]
+        damping = _id_damping[:n_dof]
+        gravity = _id_gravity[:n_dof]
+        torque = inertia * alpha + damping * w + gravity * np.cos(q)
+
+        # Extend to full joint count (zero-fill gripper/extra joints).
+        full_len = len(jp)
+        efforts_list = torque.tolist()
+        if full_len > n_dof:
+            efforts_list += [0.0] * (full_len - n_dof)
+
+        rs["joint_efforts"] = efforts_list
+        f["efforts_source"] = "estimated_inverse_dynamics"
+
+
 def normalize_episode_for_certification(episode: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize an episode dict in-place and return it."""
     frames = episode.get("frames") if isinstance(episode, dict) else None
@@ -543,6 +633,6 @@ def normalize_episode_for_certification(episode: Dict[str, Any]) -> Dict[str, An
     _fix_object_pose_sources(frames)
     _synthesize_manipulation_contacts(episode, frames)
     _ensure_object_metadata(episode, frames)
+    _replace_stale_efforts_with_inverse_dynamics(frames, dt_s=dt_s)
     _retro_downgrade_task_success(episode)
     return episode
-

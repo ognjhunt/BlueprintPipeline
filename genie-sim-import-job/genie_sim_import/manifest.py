@@ -212,6 +212,9 @@ def _load_existing_import_manifest(
 
 
 def _resolve_manifest_import_status(import_manifest: Dict[str, Any]) -> str:
+    status = import_manifest.get("status")
+    if isinstance(status, str):
+        return status.strip().lower()
     status = import_manifest.get("import_status")
     if isinstance(status, str):
         return status.strip().lower()
@@ -240,6 +243,7 @@ def _update_import_manifest_status(
         return
     with open(manifest_path, "r") as handle:
         import_manifest = json.load(handle)
+    import_manifest["status"] = status
     import_manifest["import_status"] = status
     if success is not None:
         import_manifest["success"] = success

@@ -141,6 +141,68 @@ def test_stage1_quality_gate_allows_textureless_with_override(
     assert details["allow_textureless_override"] is True
 
 
+def test_stage1_quality_gate_allows_materialless_with_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REGEN3D_ALLOW_MATERIALLESS", "true")
+    runner = LocalPipelineRunner(scene_dir=tmp_path / "scene", verbose=False, skip_interactive=True)
+    regen3d_output = Regen3DOutput(
+        scene_id="s1",
+        objects=[_make_object("obj_0", str(tmp_path / "obj.glb"))],
+        background=_make_object("scene_background", str(tmp_path / "bg.glb"), sim_role="background"),
+    )
+    manifest = {"objects": [{"id": "obj_0"}, {"id": "scene_background"}]}
+    layout = {"objects": [{"id": "obj_0"}, {"id": "scene_background"}]}
+
+    runner._inspect_glb_metadata = lambda _path: {  # type: ignore[method-assign]
+        "exists": True,
+        "meshes": 1,
+        "materials": 0,
+        "textures": 1,
+        "parse_error": None,
+    }
+    ok, message, details = runner._validate_stage1_quality(
+        regen3d_output=regen3d_output,
+        manifest=manifest,
+        layout=layout,
+    )
+    assert ok
+    assert message == "Stage 1 quality gate passed"
+    assert details["allow_materialless_override"] is True
+
+
+def test_stage1_quality_gate_rejects_materialless_override_in_production(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REGEN3D_ALLOW_MATERIALLESS", "true")
+    runner = LocalPipelineRunner(scene_dir=tmp_path / "scene", verbose=False, skip_interactive=True)
+    runner._is_production_mode = lambda: True  # type: ignore[method-assign]
+    regen3d_output = Regen3DOutput(
+        scene_id="s1",
+        objects=[_make_object("obj_0", str(tmp_path / "obj.glb"))],
+        background=_make_object("scene_background", str(tmp_path / "bg.glb"), sim_role="background"),
+    )
+    manifest = {"objects": [{"id": "obj_0"}, {"id": "scene_background"}]}
+    layout = {"objects": [{"id": "obj_0"}, {"id": "scene_background"}]}
+
+    runner._inspect_glb_metadata = lambda _path: {  # type: ignore[method-assign]
+        "exists": True,
+        "meshes": 1,
+        "materials": 0,
+        "textures": 1,
+        "parse_error": None,
+    }
+    ok, message, _ = runner._validate_stage1_quality(
+        regen3d_output=regen3d_output,
+        manifest=manifest,
+        layout=layout,
+    )
+    assert not ok
+    assert "REGEN3D_ALLOW_MATERIALLESS is not allowed in production mode." in message
+
+
 def test_stage1_quality_report_written(tmp_path: Path) -> None:
     runner = LocalPipelineRunner(scene_dir=tmp_path / "scene", verbose=False, skip_interactive=True)
     report_path = runner._write_stage1_quality_report(

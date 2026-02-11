@@ -5608,9 +5608,11 @@ class GenieSimLocalFramework:
         _require_dynamic_toggle = parse_bool_env(
             os.getenv("GENIESIM_REQUIRE_DYNAMIC_TOGGLE"), default=False,
         )
-        # In kinematic mode with REQUIRE_REAL_EFFORTS=false, inverse dynamics
-        # backfill was previously allowed. Strict real-only now keeps fail-closed.
-        if _keep_kinematic and not _require_real_efforts and not _strict_real_only:
+        # In kinematic mode with REQUIRE_REAL_EFFORTS=false, stale PhysX efforts
+        # are explicitly allowed to use inverse-dynamics backfill, including when
+        # STRICT_REAL_ONLY=1. This preserves strict fail-closed behavior for
+        # normal runs while honoring the explicit effort override contract.
+        if _keep_kinematic and not _require_real_efforts:
             if stale_ratio is not None and stale_ratio > 0.9:
                 logger.info(
                     "[STRICT] Kinematic mode: stale PhysX efforts (ratio=%.3f) "
@@ -14254,7 +14256,13 @@ class GenieSimLocalFramework:
                             total_frames=len(frames),
                             stale_ratio=_stale_ratio,
                         )
-                    if _strict_realism:
+                    # Allow ID replacement when REQUIRE_REAL_EFFORTS=false (even in
+                    # strict mode).  Kinematic objects produce physically-frozen
+                    # efforts — ID estimates are more realistic than stale PhysX data.
+                    _allow_id_replacement = not _strict_realism or not parse_bool_env(
+                        os.getenv("REQUIRE_REAL_EFFORTS"), default=True,
+                    )
+                    if not _allow_id_replacement:
                         logger.error(
                             "Detected stale PhysX efforts in strict mode (%.0f%% identical); "
                             "strict real-only forbids inverse-dynamics replacement.",

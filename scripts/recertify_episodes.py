@@ -58,7 +58,7 @@ def _extract_task(episode: Dict[str, Any]) -> Dict[str, Any]:
         "target_object_id": target,
         "goal_region": None,  # Not stored in episode; milestones computed from frames
         "requires_object_motion": episode.get("task_type", "").lower()
-        in ("pick_place", "pick", "place", "stack", "organize", "grasp"),
+        in ("pick_place", "pick", "place", "stack", "organize", "grasp", "interact", "lift", "transport"),
     }
 
 

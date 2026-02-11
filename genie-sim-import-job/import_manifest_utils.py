@@ -81,6 +81,88 @@ UPSTREAM_VERSION_KEYS = {
     "regen3d": ["REGEN3D_VERSION", "THREED_REGEN_VERSION", "REGEN_VERSION"],
 }
 
+_NULL_TOKENS = {"", "unknown", "none", "null", "n/a", "na"}
+_RELEASE_RECORDING_FORMATS = {"json", "parquet", "mixed"}
+
+
+def _normalized_string(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _is_null_token(value: Any) -> bool:
+    normalized = _normalized_string(value).lower()
+    return normalized in _NULL_TOKENS
+
+
+def validate_import_manifest_contract(
+    manifest: Dict[str, Any],
+    *,
+    strict_release: bool = False,
+) -> List[str]:
+    """Validate required import-manifest contract fields.
+
+    strict_release=True enforces release-grade constraints:
+    - schema_version must match the current manifest schema.
+    - scene_id/run_id/status/recordings_format must be non-null, non-unknown values.
+    - recordings_format must be one of json/parquet/mixed.
+    """
+    errors: List[str] = []
+    if not isinstance(manifest, dict):
+        return ["manifest payload is not an object"]
+
+    schema_version = _normalized_string(manifest.get("schema_version"))
+    if not schema_version:
+        errors.append("schema_version is required")
+    elif strict_release and schema_version != MANIFEST_SCHEMA_VERSION:
+        errors.append(
+            f"schema_version {schema_version} is not release-compatible "
+            f"(expected {MANIFEST_SCHEMA_VERSION})"
+        )
+
+    scene_id = _normalized_string(manifest.get("scene_id"))
+    if not scene_id:
+        errors.append("scene_id is required")
+    elif strict_release and _is_null_token(scene_id):
+        errors.append("scene_id cannot be null/unknown for release")
+
+    run_id = _normalized_string(manifest.get("run_id"))
+    if not run_id:
+        errors.append("run_id is required")
+    elif strict_release and _is_null_token(run_id):
+        errors.append("run_id cannot be null/unknown for release")
+
+    status_value = _normalized_string(manifest.get("status") or manifest.get("import_status"))
+    if not status_value:
+        errors.append("status is required")
+    elif strict_release and _is_null_token(status_value):
+        errors.append("status cannot be null/unknown for release")
+
+    recordings_format = _normalized_string(manifest.get("recordings_format")).lower()
+    if not recordings_format:
+        errors.append("recordings_format is required")
+    elif strict_release and recordings_format not in _RELEASE_RECORDING_FORMATS:
+        errors.append(
+            "recordings_format must be one of json/parquet/mixed for release"
+        )
+
+    quality = manifest.get("quality")
+    if not isinstance(quality, dict):
+        errors.append("quality is required and must be an object")
+    else:
+        average_score = quality.get("average_score")
+        if average_score is None:
+            errors.append("quality.average_score is required")
+
+    validation = manifest.get("validation")
+    if not isinstance(validation, dict):
+        errors.append("validation is required and must be an object")
+    elif not isinstance(validation.get("episodes"), dict):
+        errors.append("validation.episodes is required and must be an object")
+
+    return errors
+
 
 def compute_sha256(path: Path) -> str:
     hasher = hashlib.sha256()

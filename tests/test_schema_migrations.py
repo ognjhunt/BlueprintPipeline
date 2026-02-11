@@ -38,6 +38,8 @@ def test_migrate_legacy_import_manifest_payload(add_repo_to_path) -> None:
     assert "migrate-import-manifest-0.1.0-to-1.3" in result.applied_steps
     assert result.payload["scene_id"] == "unknown"
     assert result.payload["run_id"] == result.payload.get("job_id")
+    assert result.payload["status"] == "unknown"
+    assert result.payload["import_status"] == "unknown"
     assert result.payload["robot_types"] == []
 
 
@@ -58,6 +60,8 @@ def test_migrate_import_manifest_1_2_to_1_3(add_repo_to_path) -> None:
     assert "migrate-import-manifest-1.2-to-1.3" in result.applied_steps
     assert result.payload["scene_id"] == "scene-abc"
     assert result.payload["run_id"] == "job-123"
+    assert result.payload["status"] == "unknown"
+    assert result.payload["import_status"] == "unknown"
     assert result.payload["robot_types"] == ["franka", "ur5e"]
     assert result.payload["recordings_format"] == "json"
     assert result.payload["artifact_contract_version"] == "1.0"

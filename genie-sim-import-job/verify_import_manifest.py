@@ -9,6 +9,7 @@ from import_manifest_utils import (
     MANIFEST_SCHEMA_VERSION,
     compute_manifest_checksum,
     compute_sha256,
+    validate_import_manifest_contract,
 )
 
 
@@ -70,6 +71,9 @@ def verify_manifest(manifest_path: Path) -> int:
         manifest = json.load(f)
 
     errors: List[str] = []
+    errors.extend(
+        validate_import_manifest_contract(manifest, strict_release=True)
+    )
     output_dir = Path(manifest.get("output_dir", ""))
     if not output_dir.exists():
         errors.append(f"Output directory does not exist: {output_dir}")

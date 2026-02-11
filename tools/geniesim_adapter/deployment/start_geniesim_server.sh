@@ -175,8 +175,9 @@ content = content.replace(
     '\"headless\": args.headless',
     '\"headless\": False if os.environ.get(\"DISPLAY\") else args.headless')
 
-# 3. Switch renderer
-content = content.replace('\"RealTimePathTracing\"', '\"RayTracedLighting\"')
+# 3. Switch renderer (respect BP_RENDERER_MODE env var, default RayTracedLighting)
+_renderer_mode = _os.environ.get('BP_RENDERER_MODE', 'RayTracedLighting')
+content = content.replace('\"RealTimePathTracing\"', '\"' + _renderer_mode + '\"')
 
 # 4. Remove rt2 flag from extra_args
 import re
@@ -352,12 +353,13 @@ _resolve_server_args() {
 
 # ── Headless rendering setup ──
 # Camera RGB rendering requires a display with NVIDIA GLX support.
-# The preferred approach: docker-compose maps the host's Xorg X11 socket
-# (/tmp/.X11-unix) into the container and sets DISPLAY=:99.  The host
-# runs a headless Xorg on :99 using the nvidia driver.
+# The L4 GPU has 60 RT cores (Ada Lovelace AD104) and fully supports Isaac Sim
+# ray tracing.  The previous black-frame issue was a headless config bug.
 #
-# Fallback: if no DISPLAY is available, start Xvfb (software-only,
-# no GLX — camera RGB will be black but depth/normals still work).
+# Priority order:
+#   1. Host Xorg on :99 with nvidia driver (docker-compose maps X11 socket)
+#   2. Auto-start Xorg with nvidia driver inside container (requires root)
+#   3. Xvfb fallback (software-only, no GLX — RGB will be black)
 if [ "${GENIESIM_HEADLESS}" = "1" ]; then
   export ENABLE_CAMERAS="${ENABLE_CAMERAS:-1}"
   export SKIP_RGB_CAPTURE="${SKIP_RGB_CAPTURE:-}"
@@ -374,20 +376,69 @@ if [ "${GENIESIM_HEADLESS}" = "1" ]; then
   if [ -n "${_display_socket}" ] && [ -S "${_display_socket}" ]; then
     echo "[geniesim] Using X display ${DISPLAY} (${_display_socket}) for camera rendering"
   else
-    if [ "${ENABLE_CAMERAS}" = "1" ] && [ "${GENIESIM_CAMERA_REQUIRE_DISPLAY}" = "1" ]; then
-      echo "[geniesim] ERROR: Camera rendering requires a valid X display socket." >&2
-      echo "[geniesim] ERROR: DISPLAY='${DISPLAY:-<unset>}' socket='${_display_socket:-<none>}'" >&2
-      echo "[geniesim] ERROR: Start host Xorg (:99) or set GENIESIM_CAMERA_REQUIRE_DISPLAY=0 for degraded Xvfb fallback." >&2
-      exit 1
+    # Attempt to start headless Xorg with NVIDIA driver (requires root + nvidia-xconfig).
+    _xorg_started=0
+    if [ "$(id -u)" = "0" ] && command -v Xorg >/dev/null 2>&1; then
+      # Generate minimal xorg.conf for NVIDIA GPU headless rendering
+      _xorg_conf="/tmp/xorg-geniesim.conf"
+      if [ ! -f "${_xorg_conf}" ]; then
+        if command -v nvidia-xconfig >/dev/null 2>&1; then
+          nvidia-xconfig --no-xinerama --use-display-device=None \
+            --virtual=1280x720 -o "${_xorg_conf}" 2>/dev/null || true
+        fi
+        # Fallback: write minimal config directly
+        if [ ! -f "${_xorg_conf}" ]; then
+          cat > "${_xorg_conf}" <<'XCONF'
+Section "Device"
+    Identifier     "Device0"
+    Driver         "nvidia"
+    VendorName     "NVIDIA Corporation"
+    Option         "AllowEmptyInitialConfiguration" "True"
+EndSection
+
+Section "Screen"
+    Identifier     "Screen0"
+    Device         "Device0"
+    DefaultDepth    24
+    SubSection     "Display"
+        Depth       24
+        Virtual     1280 720
+    EndSubSection
+EndSection
+XCONF
+        fi
+      fi
+      if [ -f "${_xorg_conf}" ]; then
+        echo "[geniesim] Starting headless Xorg on :99 with NVIDIA driver..."
+        Xorg :99 -config "${_xorg_conf}" -noreset +extension GLX &>/dev/null &
+        _xorg_pid=$!
+        sleep 2
+        if kill -0 ${_xorg_pid} 2>/dev/null && [ -S /tmp/.X11-unix/X99 ]; then
+          export DISPLAY=:99
+          _xorg_started=1
+          echo "[geniesim] Xorg started on :99 (pid ${_xorg_pid}) with NVIDIA GLX support"
+        else
+          echo "[geniesim] WARNING: Xorg failed to start — falling back to Xvfb"
+        fi
+      fi
     fi
 
-    if command -v Xvfb >/dev/null 2>&1; then
-      echo "[geniesim] WARNING: No host X display found — using degraded Xvfb fallback (camera RGB may be black)"
-      Xvfb :99 -screen 0 1280x720x24 +extension GLX +render -noreset &>/dev/null &
-      export DISPLAY=:99
-      sleep 1
-    else
-      echo "[geniesim] WARNING: No display available and Xvfb not installed — camera RGB may be black"
+    if [ "${_xorg_started}" = "0" ]; then
+      if [ "${ENABLE_CAMERAS}" = "1" ] && [ "${GENIESIM_CAMERA_REQUIRE_DISPLAY}" = "1" ]; then
+        echo "[geniesim] ERROR: Camera rendering requires a valid X display socket." >&2
+        echo "[geniesim] ERROR: DISPLAY='${DISPLAY:-<unset>}' socket='${_display_socket:-<none>}'" >&2
+        echo "[geniesim] ERROR: Start host Xorg (:99) or set GENIESIM_CAMERA_REQUIRE_DISPLAY=0 for degraded Xvfb fallback." >&2
+        exit 1
+      fi
+
+      if command -v Xvfb >/dev/null 2>&1; then
+        echo "[geniesim] WARNING: No host X display found — using degraded Xvfb fallback (camera RGB may be black)"
+        Xvfb :99 -screen 0 1280x720x24 +extension GLX +render -noreset &>/dev/null &
+        export DISPLAY=:99
+        sleep 1
+      else
+        echo "[geniesim] WARNING: No display available and Xvfb not installed — camera RGB may be black"
+      fi
     fi
   fi
 fi

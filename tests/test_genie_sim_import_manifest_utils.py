@@ -22,6 +22,12 @@ def _build_manifest(utils_module):
     return {
         "schema_version": utils_module.MANIFEST_SCHEMA_VERSION,
         "output_dir": ".",
+        "scene_id": "scene-1",
+        "run_id": "run-1",
+        "status": "completed",
+        "recordings_format": "json",
+        "quality": {"average_score": 0.9},
+        "validation": {"episodes": {}},
         "checksums": {
             "metadata": {},
             "episodes": {},
@@ -74,3 +80,26 @@ def test_verify_import_manifest_checksum_missing_entry(tmp_path):
     assert result["success"] is False
     assert result["expected"] is None
     assert result["errors"]
+
+
+def test_validate_import_manifest_contract_passes_for_release_fields(tmp_path):
+    utils_module = _load_utils_module()
+    manifest = _build_manifest(utils_module)
+
+    errors = utils_module.validate_import_manifest_contract(
+        manifest,
+        strict_release=True,
+    )
+    assert errors == []
+
+
+def test_validate_import_manifest_contract_rejects_unknown_scene_for_release(tmp_path):
+    utils_module = _load_utils_module()
+    manifest = _build_manifest(utils_module)
+    manifest["scene_id"] = "unknown"
+
+    errors = utils_module.validate_import_manifest_contract(
+        manifest,
+        strict_release=True,
+    )
+    assert any("scene_id cannot be null/unknown for release" in err for err in errors)

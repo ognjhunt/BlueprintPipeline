@@ -73,3 +73,19 @@ def test_skip_quality_gates_rejected_in_production(tmp_path, monkeypatch):
 
     with pytest.raises(NonRetryableError, match="not allowed in production"):
         runner._should_skip_quality_gates()
+
+
+def test_release_path_requires_production_mode(tmp_path, monkeypatch):
+    runner = LocalPipelineRunner(
+        scene_dir=tmp_path,
+        verbose=False,
+        skip_interactive=True,
+        environment_type="kitchen",
+        enable_dwm=False,
+        enable_dream2flow=False,
+    )
+    monkeypatch.setenv("RELEASE_PATH_RUN", "true")
+    monkeypatch.setenv("PIPELINE_ENV", "development")
+
+    with pytest.raises(NonRetryableError, match="RELEASE_PATH_RUN requires production mode"):
+        runner._validate_production_startup()

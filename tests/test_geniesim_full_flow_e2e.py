@@ -150,7 +150,19 @@ def test_geniesim_full_flow_e2e(tmp_path, monkeypatch):
     def fake_run_local_import_job(config, job_metadata):
         import_manifest_path = Path(config.output_dir) / "import_manifest.json"
         import_manifest_path.write_text(
-            json.dumps({"job_id": config.job_id, "scene_id": job_metadata.get("scene_id")})
+            json.dumps(
+                {
+                    "schema_version": "1.3",
+                    "scene_id": job_metadata.get("scene_id"),
+                    "run_id": job_metadata.get("run_id", config.job_id),
+                    "status": "completed",
+                    "recordings_format": "json",
+                    "quality": {"average_score": 0.95, "threshold": config.min_quality_score},
+                    "validation": {"episodes": {"enabled": True, "episode_results": []}},
+                    "job_id": config.job_id,
+                    "episodes": {"passed_validation": 1},
+                }
+            )
         )
         return SimpleNamespace(success=True, import_manifest_path=import_manifest_path)
 

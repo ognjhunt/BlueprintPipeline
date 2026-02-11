@@ -144,6 +144,7 @@ def _write_combined_import_manifest(
         if isinstance(entry.get("robot_type"), str) and entry.get("robot_type", "").strip()
     )
     robot_types = list(dict.fromkeys(robot_types))
+    scene_id = scene_id or "unknown"
     recording_format_counts: Dict[str, int] = {"json": 0, "parquet": 0, "unknown": 0}
     for entry in robot_entries:
         episodes_payload = entry.get("episodes", {})
@@ -305,12 +306,15 @@ def _write_combined_import_manifest(
     provenance.update(base_provenance)
     provenance["robots"] = robot_provenance
 
+    manifest_status = "completed" if all(entry["success"] for entry in normalized_robot_entries) else "failed"
     import_manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "schema_definition": MANIFEST_SCHEMA_DEFINITION,
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "scene_id": scene_id,
         "run_id": run_id,
+        "status": manifest_status,
+        "import_status": manifest_status,
         "robot_types": robot_types,
         "recordings_format": recordings_format,
         "artifact_contract_version": ARTIFACT_CONTRACT_VERSION,
@@ -363,6 +367,22 @@ def _write_combined_import_manifest(
                 "filter_low_quality": quality_settings.config.default_filter_low_quality,
             },
             "source_path": quality_settings.config.source_path,
+        },
+        "validation": {
+            "episodes": {
+                "enabled": any(
+                    entry["quality"]["validation_enabled"] for entry in normalized_robot_entries
+                ),
+                "min_required": min(
+                    (
+                        entry["episodes"].get("min_required", MIN_EPISODES_REQUIRED)
+                        for entry in robot_entries
+                    ),
+                    default=MIN_EPISODES_REQUIRED,
+                ),
+                "total_downloaded": total_downloaded,
+                "total_passed_validation": total_passed,
+            },
         },
         "robots": normalized_robot_entries,
         "job_metadata": job_metadata or {},

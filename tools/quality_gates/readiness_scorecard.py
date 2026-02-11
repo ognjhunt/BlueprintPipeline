@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ET
 
+from tools.schema_migrations import MANIFEST_SCHEMA_VERSION
 
 REQUIRED_ROBOTS = ("franka", "ur5e", "ur10")
 SCENE_ID_NULL_TOKENS = {"", "unknown", "none", "null", "n/a", "na"}
@@ -159,10 +160,55 @@ def _extract_manifest_robot_types(manifest: Dict[str, Any]) -> List[str]:
     return []
 
 
+def _is_non_null_string(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() not in SCENE_ID_NULL_TOKENS
+
+
+def _manifest_contract_errors(payload: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+    schema_version = str(payload.get("schema_version") or "").strip()
+    if not schema_version:
+        errors.append("schema_version is required")
+    if schema_version and schema_version != MANIFEST_SCHEMA_VERSION:
+        errors.append(
+            f"schema_version {schema_version} is legacy (expected {MANIFEST_SCHEMA_VERSION})"
+        )
+
+    if not _is_non_null_string(payload.get("scene_id")):
+        errors.append("scene_id must be non-null and non-unknown")
+    if not _is_non_null_string(payload.get("run_id")):
+        errors.append("run_id must be non-null and non-unknown")
+
+    status_value = payload.get("status") or payload.get("import_status")
+    if not _is_non_null_string(status_value):
+        errors.append("status must be non-null and non-unknown")
+
+    recording_format = str(payload.get("recordings_format") or "").strip().lower()
+    if recording_format not in {"json", "parquet", "mixed"}:
+        errors.append("recordings_format must be json/parquet/mixed")
+
+    quality_payload = payload.get("quality")
+    if not isinstance(quality_payload, dict):
+        errors.append("quality must be an object")
+    elif quality_payload.get("average_score") is None:
+        errors.append("quality.average_score is required")
+
+    validation_payload = payload.get("validation")
+    if not isinstance(validation_payload, dict):
+        errors.append("validation must be an object")
+    elif not isinstance(validation_payload.get("episodes"), dict):
+        errors.append("validation.episodes must be an object")
+    return errors
+
+
 def collect_import_summary(repo_root: Path) -> Dict[str, Any]:
     manifests = _find_manifest_paths(repo_root)
     null_scene_paths: List[str] = []
     json_with_parquet_missing_errors: List[str] = []
+    legacy_schema_paths: List[str] = []
+    contract_violation_entries: List[Dict[str, Any]] = []
     per_scene_passed: Dict[str, int] = defaultdict(int)
     robot_types: set[str] = set()
 
@@ -174,8 +220,18 @@ def collect_import_summary(repo_root: Path) -> Dict[str, Any]:
         payload = _load_json(path)
         if not payload:
             continue
+        contract_errors = _manifest_contract_errors(payload)
+        if contract_errors:
+            contract_violation_entries.append(
+                {
+                    "path": str(path),
+                    "errors": contract_errors,
+                }
+            )
+        if str(payload.get("schema_version") or "").strip() != MANIFEST_SCHEMA_VERSION:
+            legacy_schema_paths.append(str(path))
         scene_id = _extract_manifest_scene_id(payload)
-        if not _is_scene_id_valid(scene_id):
+        if not _is_scene_id_valid(payload.get("scene_id")):
             null_scene_paths.append(str(path))
 
         episodes = payload.get("episodes") or {}
@@ -219,6 +275,10 @@ def collect_import_summary(repo_root: Path) -> Dict[str, Any]:
         "non_null_scene_count": non_null_scene_count,
         "null_scene_count": len(null_scene_paths),
         "null_scene_paths": sorted(null_scene_paths)[:50],
+        "legacy_schema_count": len(legacy_schema_paths),
+        "legacy_schema_paths": sorted(legacy_schema_paths)[:50],
+        "manifests_missing_required_fields": len(contract_violation_entries),
+        "manifest_contract_violations": contract_violation_entries[:50],
         "total_passed_validation": total_passed_validation,
         "mean_quality_score": mean_quality,
         "successful_manifest_count": successful_manifest_count,
@@ -558,6 +618,14 @@ def _gate_import_viability(imports: Dict[str, Any]) -> GateResult:
         blockers.append("no import manifests found")
     if _safe_int(imports.get("null_scene_count"), 0) > 0:
         blockers.append(f"{imports['null_scene_count']} manifests have null/unknown scene_id")
+    if _safe_int(imports.get("legacy_schema_count"), 0) > 0:
+        blockers.append(
+            f"{imports['legacy_schema_count']} manifests still use legacy schema versions"
+        )
+    if _safe_int(imports.get("manifests_missing_required_fields"), 0) > 0:
+        blockers.append(
+            f"{imports['manifests_missing_required_fields']} manifests violate required field contract"
+        )
     if _safe_int(imports.get("total_passed_validation"), 0) <= 0:
         blockers.append("episodes.passed_validation is 0")
     if _safe_float(imports.get("mean_quality_score"), 0.0) < RELEASE_THRESHOLDS["import_quality_average_min"]:
@@ -574,6 +642,10 @@ def _gate_import_viability(imports: Dict[str, Any]) -> GateResult:
         details={
             "manifest_count": _safe_int(imports.get("manifest_count"), 0),
             "null_scene_count": _safe_int(imports.get("null_scene_count"), 0),
+            "legacy_schema_count": _safe_int(imports.get("legacy_schema_count"), 0),
+            "manifests_missing_required_fields": _safe_int(
+                imports.get("manifests_missing_required_fields"), 0
+            ),
             "total_passed_validation": _safe_int(imports.get("total_passed_validation"), 0),
             "mean_quality_score": _safe_float(imports.get("mean_quality_score"), 0.0),
             "successful_manifest_count": _safe_int(imports.get("successful_manifest_count"), 0),
@@ -715,6 +787,10 @@ def _phase_statuses(
     phase1_blockers = []
     if _safe_int(imports.get("null_scene_count"), 0) > 0:
         phase1_blockers.append("null/unknown scene_id still present in manifests")
+    if _safe_int(imports.get("legacy_schema_count"), 0) > 0:
+        phase1_blockers.append("legacy import_manifest schema versions still present")
+    if _safe_int(imports.get("manifests_missing_required_fields"), 0) > 0:
+        phase1_blockers.append("required import manifest fields missing/invalid")
     if _safe_int(imports.get("total_passed_validation"), 0) <= 0:
         phase1_blockers.append("no run evidence with episodes.passed_validation > 0")
     if imports.get("json_with_parquet_missing_errors"):

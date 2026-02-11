@@ -115,6 +115,89 @@ def test_normalize_episode_for_certification_fills_sparse_fields_but_does_not_fa
     assert "EE_TARGET_GEOMETRY_IMPLAUSIBLE" in report["critical_failures"]
 
 
+def test_normalize_stale_effort_replacement_preserves_non_physx_frames() -> None:
+    episode = {
+        "episode_id": "task_0_ep0001",
+        "task_name": "task_0",
+        "task_type": "pick_place",
+        "target_object": "lightwheel_kitchen_obj_Toaster003",
+        "frames": [
+            {
+                "dt": 0.1,
+                "timestamp": 0.0,
+                "ee_pos": [0.0, 0.0, 0.0],
+                "efforts_source": "physx",
+                "observation": {
+                    "data_source": "server",
+                    "robot_state": {
+                        "ee_pose": {"rotation": {"rx": 0.0, "ry": 0.0, "rz": 0.0, "rw": 1.0}},
+                        "joint_positions": [0.1] * 7,
+                        "joint_velocities": [0.0] * 7,
+                        "joint_efforts": [0.1] * 7,
+                    },
+                },
+            },
+            {
+                "dt": 0.1,
+                "timestamp": 0.1,
+                "ee_pos": [0.1, 0.0, 0.0],
+                "efforts_source": "physx",
+                "observation": {
+                    "data_source": "server",
+                    "robot_state": {
+                        "ee_pose": {"rotation": {"rx": 0.0, "ry": 0.0, "rz": 0.0, "rw": 1.0}},
+                        "joint_positions": [0.2] * 7,
+                        "joint_velocities": [0.1] * 7,
+                        "joint_efforts": [0.1] * 7,
+                    },
+                },
+            },
+            {
+                "dt": 0.1,
+                "timestamp": 0.2,
+                "ee_pos": [0.2, 0.0, 0.0],
+                "efforts_source": "physx",
+                "observation": {
+                    "data_source": "server",
+                    "robot_state": {
+                        "ee_pose": {"rotation": {"rx": 0.0, "ry": 0.0, "rz": 0.0, "rw": 1.0}},
+                        "joint_positions": [0.3] * 7,
+                        "joint_velocities": [0.2] * 7,
+                        "joint_efforts": [0.1] * 7,
+                    },
+                },
+            },
+            {
+                "dt": 0.1,
+                "timestamp": 0.3,
+                "ee_pos": [0.3, 0.0, 0.0],
+                "efforts_source": "real_sensor",
+                "observation": {
+                    "data_source": "server",
+                    "robot_state": {
+                        "ee_pose": {"rotation": {"rx": 0.0, "ry": 0.0, "rz": 0.0, "rw": 1.0}},
+                        "joint_positions": [0.4] * 7,
+                        "joint_velocities": [0.3] * 7,
+                        "joint_efforts": [9.0] * 7,
+                    },
+                },
+            },
+        ],
+    }
+
+    normalize_episode_for_certification(episode)
+
+    for idx in (0, 1, 2):
+        frame = episode["frames"][idx]
+        assert frame.get("efforts_source") == "estimated_inverse_dynamics"
+        efforts = frame["observation"]["robot_state"]["joint_efforts"]
+        assert any(abs(float(e) - 0.1) > 1e-6 for e in efforts)
+
+    preserved_frame = episode["frames"][3]
+    assert preserved_frame.get("efforts_source") == "real_sensor"
+    assert preserved_frame["observation"]["robot_state"]["joint_efforts"] == [9.0] * 7
+
+
 def test_retro_downgrade_overrides_success_when_zero_displacement() -> None:
     """When goal_region_verification shows zero displacement for a motion task,
     _retro_downgrade_task_success should override task_success to False."""
