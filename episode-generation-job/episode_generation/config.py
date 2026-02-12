@@ -50,7 +50,7 @@ def parse_env_config(*, allow_mock_capture: bool) -> EpisodeGenerationEnvConfig:
     )
     firebase_upload_prefix = os.getenv("FIREBASE_UPLOAD_PREFIX", "datasets")
 
-    robot_type = os.getenv("ROBOT_TYPE", "g1")
+    robot_type = os.getenv("ROBOT_TYPE", "franka")
 
     try:
         episodes_per_variation = int(os.getenv("EPISODES_PER_VARIATION", "10"))

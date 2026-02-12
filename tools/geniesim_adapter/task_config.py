@@ -127,7 +127,7 @@ def _derive_curriculum_split(task_complexity: str) -> str:
 class RobotConfig:
     """Robot configuration for Genie Sim."""
 
-    robot_type: str = "g1"  # g1, g2, ur10, custom
+    robot_type: str = "franka"  # franka, g2, ur10, custom
     urdf_path: Optional[str] = None
     base_position: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     workspace_bounds: List[List[float]] = field(
@@ -337,7 +337,7 @@ class TaskConfigGenerator:
 
     Usage:
         generator = TaskConfigGenerator()
-        config = generator.generate(manifest_dict, robot_type="g1")
+        config = generator.generate(manifest_dict, robot_type="franka")
         config.save(Path("output/task_config.json"))
     """
 
@@ -362,7 +362,7 @@ class TaskConfigGenerator:
     def generate(
         self,
         manifest: Dict[str, Any],
-        robot_type: str = "g1",
+        robot_type: str = "franka",
         urdf_path: Optional[str] = None,
         max_tasks: int = 50,
         strict_reachability: bool = False,
@@ -1415,7 +1415,7 @@ Return JSON with this exact structure:
 def generate_task_config(
     manifest_path: Path,
     output_path: Optional[Path] = None,
-    robot_type: str = "g1",
+    robot_type: str = "franka",
     verbose: bool = True,
     strict_reachability: bool = False,
 ) -> GenieSimTaskConfig:

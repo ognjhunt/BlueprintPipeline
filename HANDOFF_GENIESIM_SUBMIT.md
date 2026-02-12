@@ -3,8 +3,8 @@
 ## What We're Doing
 Testing the BlueprintPipeline end-to-end using a Lightwheel KitchenRoom SimReady scene, bypassing Phase 1 (3D-RE-GEN). The pipeline runs robot data collection via a Genie Sim gRPC server on a GCP VM.
 
-## Current Status (2026-02-01)
-Pipeline achieved **task_success=True** using the G1 robot config (`G1_omnipicker_fixed.json`). Pipeline advances through multiple tasks with IK fallback trajectories, server auto-restart, and task checkpointing. Franka robot config crashes the server during init (see Known Issues #6 in `docs/VM_CONTAINER_GUIDE.md`). See that guide for the full operational runbook.
+## Current Status (2026-02-12)
+The pipeline is **Franka Panda first** (`franka_panda.json`) with automatic fallback to G1 (`G1_omnipicker_fixed.json`) if initialization fails. See `docs/VM_CONTAINER_GUIDE.md` for the full operational runbook and current known issues.
 
 ## Infrastructure
 - **Client**: VM (SSH in), runs `tools/run_local_pipeline.py`
@@ -20,18 +20,14 @@ Pipeline achieved **task_success=True** using the G1 robot config (`G1_omnipicke
 The following issues were resolved:
 1. **`SIM_ASSETS` env var** — Set in `docker-compose.geniesim-server.yaml`
 2. **Robot USD assets** — Pre-baked into Docker image via `download_robot_assets.sh`
-3. **Robot configs** — G1 config works; Franka crashes server (open issue)
+3. **Robot configs** — Franka Panda is primary; G1 is an automatic fallback
 
 ### Code Changes Already Made
 
 **`tools/geniesim_adapter/local_framework.py`:**
 - `ping()` (~line 1042): Changed from `get_observation()` RPC to TCP socket check (server crashes if robot not loaded)
 - `check_simulation_ready()` (~line 3242): Changed from `reset()+get_observation()` to socket+channel check
-- `run_data_collection()` (~line 3391): Added `init_robot()` call before episode loop with robot config mapping:
-  ```python
-  _ROBOT_CFG_MAP = {"franka": "G1_omnipicker_fixed.json", "g1": "G1_omnipicker_fixed.json", ...}
-  ```
-  This mapping needs updating once a Franka config is deployed to the server.
+- `run_data_collection()` (~line 3391): Added robot init before the episode loop using a **Franka-first** robot config candidate list with automatic fallback to G1.
 
 **`tools/run_local_pipeline.py`:**
 - `_steps_require_geniesim_preflight()` (~line 1836): Removed `GENIESIM_EXPORT` from preflight check
@@ -49,11 +45,11 @@ The following issues were resolved:
 ### Assets Status
 - GenieSimAssets cloned to VM at `/home/ohstnhunt/GenieSimAssets` (14.25 GB, CC BY-NC-SA 4.0)
 - User wants to keep only `robot/` subdir (delete objects/scenes/materials/background)
-- For commercial use: need a custom Franka config (draft at `tools/geniesim_adapter/robot_configs/franka_panda.json`)
+- For commercial use: need a custom Franka config (`tools/geniesim_adapter/robot_configs/franka_panda.json`)
 
 ## Steps to Complete
 
-### Immediate (unblock testing with G1 robot)
+### Primary Path (Franka Panda)
 1. On the VM, clean up GenieSimAssets: `cd ~/GenieSimAssets && rm -rf objects scenes materials background`
 2. Set up SIM_ASSETS for the container. Either:
    - `sudo docker stop geniesim-server && sudo docker rm geniesim-server`
@@ -61,14 +57,12 @@ The following issues were resolved:
    - OR just set env on existing: stop container, re-create with `-v /home/ohstnhunt/GenieSimAssets:/sim-assets:ro -e SIM_ASSETS=/sim-assets`
 3. Wait ~90s for server startup ("simulation paused" in logs = ready)
 4. Copy `franka_panda.json` to server's robot_cfg dir: `sudo docker cp tools/geniesim_adapter/robot_configs/franka_panda.json geniesim-server:/opt/geniesim/source/data_collection/config/robot_cfg/franka_panda.json`
-5. Update `_ROBOT_CFG_MAP` in `local_framework.py` line ~3405: change `"franka": "G1_omnipicker_fixed.json"` to `"franka": "franka_panda.json"`
-6. **BUT**: The `franka_panda.json` references `"robot_usd": "robot/franka/franka.usd"` which must exist under `SIM_ASSETS`. The Franka USD is in Isaac Sim at `/isaac-sim/exts/isaacsim.asset.browser/data/Isaac/Robots/FrankaEmika/` — you may need to symlink or copy it into the SIM_ASSETS dir, or use a G1 robot for testing first.
+5. Ensure the Franka USD exists under `SIM_ASSETS`: `franka_panda.json` references `"robot_usd": "robot/franka/franka.usd"`. If it is missing, the server will fail init and the client may fail over to G1.
 
-### Fastest path to test (use G1 robot)
+### Fallback Path (Force G1)
+If you need to force G1 explicitly (instead of relying on automatic failover):
 1. Do steps 1-3 above
-2. Keep `_ROBOT_CFG_MAP` as `"franka": "G1_omnipicker_fixed.json"`
-3. The G1 robot will be spawned instead of Franka — mismatch with task config but will validate the pipeline flow
-4. Run: `GENIESIM_HOST=34.138.160.175 GENIESIM_PORT=50051 GENIESIM_WORKSPACE_BOUNDS_JSON='[[-0.5,-0.5,-2.8],[1.5,1.5,-1.8]]' ALLOW_GENIESIM_MOCK=1 GENIESIM_ROOT=/tmp/geniesim-stub ISAAC_SIM_PATH=/tmp/isaac-sim-stub python -m tools.run_local_pipeline --scene-dir test_scenes/scenes/lightwheel_kitchen --steps genie-sim-submit --mock-geniesim --reset-breaker`
+2. Run with `GENIESIM_ROBOT_TYPE=g1` (or set `GENIESIM_ROBOT_CFG_FILE=G1_omnipicker_fixed.json`)
 
 ### For production Franka support
 1. Create proper Franka robot_description YAML with joint limits, collision spheres (see G1 yaml as template)

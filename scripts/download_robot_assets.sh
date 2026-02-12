@@ -90,7 +90,7 @@ done < "${MANIFEST}"
 if [ "$FAIL_COUNT" -gt 0 ]; then
     echo "[WARN] ${FAIL_COUNT} robot asset(s) failed to download (non-fatal)." >&2
     # Non-fatal: some CDN assets may not be available for all Isaac Sim versions.
-    # Critical robots (Franka, G1, UR10) are validated at runtime.
+    # Critical robots (e.g., Franka, UR10, and any configured fallbacks) are validated at runtime.
 fi
 
 echo "All robot assets downloaded to ${DEST_DIR}"

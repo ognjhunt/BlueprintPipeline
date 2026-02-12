@@ -1617,7 +1617,7 @@ def main():
     # Optional configuration
     environment_type = os.getenv("ENVIRONMENT_TYPE", "generic")
     policy_id = os.getenv("POLICY_ID", None)
-    robot_type = os.getenv("ROBOT_TYPE", "g1")
+    robot_type = os.getenv("ROBOT_TYPE", "franka")
     num_envs = int(os.getenv("NUM_ENVS", "1024"))
     isaac_refresh_only = parse_bool_env(os.getenv("ISAAC_REFRESH_ONLY"), default=False)
 

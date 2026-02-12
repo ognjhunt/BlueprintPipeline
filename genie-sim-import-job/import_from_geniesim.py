@@ -4619,7 +4619,7 @@ def run_local_import_job(
                 })
 
             if cosmos_episodes:
-                robot_type = os.getenv("ROBOT_TYPE", "g1")
+                robot_type = os.getenv("ROBOT_TYPE", "franka")
                 cosmos_exporter.export_episodes(
                     episodes=cosmos_episodes,
                     robot_type=robot_type,

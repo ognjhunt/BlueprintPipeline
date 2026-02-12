@@ -2065,7 +2065,7 @@ def main(input_params: Optional[Dict[str, Any]] = None):
 
     # Configuration
     production_mode = resolve_production_mode()
-    robot_type = os.getenv("ROBOT_TYPE", "g1")
+    robot_type = os.getenv("ROBOT_TYPE", "franka")
     urdf_path = os.getenv("URDF_PATH")  # Optional custom URDF
     max_tasks = int(os.getenv("MAX_TASKS", "50"))
     generate_embeddings = parse_bool_env(

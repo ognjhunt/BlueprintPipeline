@@ -1,13 +1,13 @@
 {
   "schema_version": "1.0.0",
   "geniesim_version": "3.0.0",
-  "updated_at": "2025-01-15",
+  "updated_at": "2026-02-12",
   "robots": [
     {
       "name": "g1",
       "category": "humanoid",
       "vendor": "Unitree",
-      "notes": "Unitree G1 humanoid with omnipicker gripper. Default robot for Genie Sim server."
+      "notes": "Unitree G1 humanoid with omnipicker gripper."
     },
     {
       "name": "g2",
@@ -37,7 +37,7 @@
       "name": "franka",
       "category": "arm",
       "vendor": "Franka Emika",
-      "notes": "Franka Panda arm."
+      "notes": "Franka Panda arm. Default robot for Genie Sim server."
     },
     {
       "name": "ur10",

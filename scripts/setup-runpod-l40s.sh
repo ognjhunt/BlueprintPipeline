@@ -193,7 +193,7 @@ fi
 echo "You need NGC credentials for Isaac Sim:"
 echo "  docker login nvcr.io -u '\$oauthtoken' -p '<your-ngc-api-key>'"
 
-# 6. Build Docker image (use nocurobo for speed — G1 robot doesn't need it)
+# 6. Build Docker image (use nocurobo for speed when running with cuRobo disabled)
 docker build -f Dockerfile.geniesim-server-nocurobo -t geniesim-server:latest . 2>&1 | tail -10
 
 # 7. Start Xorg + container

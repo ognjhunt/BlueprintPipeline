@@ -337,7 +337,7 @@ def run_arena_export(
 
     # Export ALL additional premium features (DEFAULT: ENABLED - NO LONGER UPSELL!)
     # Same pattern as genie-sim-export-job
-    robot_type = os.getenv("ROBOT_TYPE", "g1")
+    robot_type = os.getenv("ROBOT_TYPE", "franka")
     if SIM2REAL_AVAILABLE:
         try:
             sim2real_dir = output_dir / "arena" / "sim2real_fidelity"

@@ -2,8 +2,10 @@
 # Pre-baked Genie Sim Server Image (NO cuRobo — faster build)
 # =============================================================================
 # Same as Dockerfile.geniesim-server but skips cuRobo compilation entirely.
-# Use when GENIESIM_SERVER_CUROBO_MODE=off (e.g., G1 robot which has no
-# cuRobo config). Saves ~30 min of CUDA kernel compilation time.
+# Use when GENIESIM_SERVER_CUROBO_MODE=off (skip cuRobo entirely). This is
+# useful when relying on non-cuRobo IK / joint-space fallback, or when a robot
+# config does not provide a working cuRobo setup. Saves ~30 min of CUDA kernel
+# compilation time.
 #
 # Build:
 #   docker build -f Dockerfile.geniesim-server-nocurobo -t geniesim-server:latest .
@@ -58,7 +60,7 @@ RUN TORCH_PKG="${ISAAC_SIM_PATH}/exts/omni.isaac.ml_archive/pip_prebundle/torch/
        done
 
 # ----- cuRobo SKIPPED -----
-# cuRobo is not needed when GENIESIM_SERVER_CUROBO_MODE=off (e.g., G1 robot).
+# cuRobo is not needed when GENIESIM_SERVER_CUROBO_MODE=off.
 # This saves ~30 min of CUDA kernel compilation time.
 ENV GENIESIM_SERVER_CUROBO_MODE=off
 

@@ -573,7 +573,7 @@ class LeRobotDatasetConfig:
 
     # Dataset identification
     dataset_name: str
-    robot_type: str = "g1"
+    robot_type: str = "franka"
 
     # Data configuration
     fps: float = 30.0
@@ -648,7 +648,7 @@ class LeRobotDatasetConfig:
         cls,
         dataset_name: str,
         data_pack_tier: str,
-        robot_type: str = "g1",
+        robot_type: str = "franka",
         num_cameras: int = 1,
         resolution: Tuple[int, int] = (640, 480),
         fps: float = 30.0,
@@ -4418,7 +4418,7 @@ def export_trajectories_to_lerobot(
     trajectories: List[Tuple[JointTrajectory, str]],
     dataset_name: str,
     output_dir: Path,
-    robot_type: str = "g1",
+    robot_type: str = "franka",
     fps: float = 30.0,
 ) -> Path:
     """
