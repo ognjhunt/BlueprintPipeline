@@ -150,7 +150,7 @@ def patch_file():
 
                         # Common robot paths as fallback
                         if not _robot_paths:
-                            _robot_paths = ["/World/Robot", "/World/G1", "/G1", "/Robot", "/World/Franka", "/Franka"]
+                            _robot_paths = ["/World/Robot", "/World/Franka", "/Franka", "/Robot", "/World/G1", "/G1"]
 
                         for _rp in _robot_paths:
                             prim = stage.GetPrimAtPath(_rp)
@@ -179,7 +179,7 @@ def patch_file():
                         _scene = getattr(_world, "scene", None)
                         if _scene is not None:
                             # Try common robot names
-                            for _name in ("robot", "g1", "franka", "ur5", "panda"):
+                            for _name in ("robot", "franka", "panda", "ur5", "g1"):
                                 _robot_obj = _scene.get_object(_name)
                                 if _robot_obj is not None:
                                     _articulation = getattr(_robot_obj, "articulation", None) or _robot_obj

@@ -360,7 +360,7 @@ def test_normalize_and_validate_tasks_applies_defaults_in_non_enforced_mode(
 
 
 @pytest.mark.unit
-def test_initialize_runtime_robot_with_fallback_to_g1(
+def test_initialize_runtime_robot_fails_without_failover(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -383,17 +383,18 @@ def test_initialize_runtime_robot_with_fallback_to_g1(
         ),
     )
 
-    runtime_robot, robot_cfg_file, fallback_reason = framework._initialize_runtime_robot_with_fallback(
-        requested_robot="franka",
-        base_pose={"position": {"x": 0, "y": 0, "z": 0}, "orientation": {"rw": 1, "rx": 0, "ry": 0, "rz": 0}},
-        scene_usd="scenes/empty_scene.usda",
-    )
+    with pytest.raises(RuntimeError) as excinfo:
+        framework._initialize_runtime_robot_with_fallback(
+            requested_robot="franka",
+            base_pose={
+                "position": {"x": 0, "y": 0, "z": 0},
+                "orientation": {"rw": 1, "rx": 0, "ry": 0, "rz": 0},
+            },
+            scene_usd="scenes/empty_scene.usda",
+        )
 
-    assert init_calls[0] == "franka_panda.json"
-    assert runtime_robot == "g1"
-    assert robot_cfg_file == "G1_omnipicker_fixed.json"
-    assert fallback_reason is not None
-    assert "franka_panda.json" in fallback_reason
+    assert init_calls == ["franka_panda.json"]
+    assert "franka_panda.json" in str(excinfo.value)
 
 
 @pytest.mark.unit

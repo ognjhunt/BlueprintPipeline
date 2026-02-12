@@ -5185,7 +5185,7 @@ class GenieSimGRPCClient:
             phase = waypoint.get("phase")
             _prev_gripper = getattr(self, "_last_gripper_aperture", None)
             if gripper_aperture is not None and gripper_aperture != _prev_gripper:
-                _gripper_width = gripper_aperture * 0.08  # G1 max gripper width
+                _gripper_width = gripper_aperture * 0.08  # Panda max gripper width (~0.08m)
                 try:
                     self.set_gripper_state(width=_gripper_width, force=10.0)
                 except Exception as _g_err:
@@ -7921,10 +7921,10 @@ class GenieSimLocalFramework:
             else:
                 _raw_camera_map: Dict[str, str] = {}
                 _robot_cfg_dir = Path(__file__).resolve().parent / "robot_configs"
-                # Look for robot config files - prioritize the actual server config name
-                # (G1_omnipicker_fixed) over legacy names (franka_panda)
+                # Look for robot config files - prefer the actual server config name
+                # (robot_cfg_file sans ".json") over request aliases.
                 _robot_cfg_names = [
-                    robot_cfg_file.replace(".json", ""),  # Server config name first (e.g., G1_omnipicker_fixed)
+                    robot_cfg_file.replace(".json", ""),  # Server config name first (e.g., franka_panda)
                     requested_robot,
                     requested_robot.replace("-", "_"),
                     f"{requested_robot}_panda" if requested_robot == "franka" else requested_robot,
@@ -7959,11 +7959,7 @@ class GenieSimLocalFramework:
                 _cam_map = self._normalize_camera_prim_map(_raw_camera_map)
                 if not _cam_map:
                     _cam_map = self._normalize_camera_prim_map(
-                        {
-                        "wrist": "/G1/gripper_r_base_link/Right_Camera",
-                        "right": "/G1/head_link2/Head_Camera",
-                        "left": "/G1/gripper_l_base_link/Left_Camera",
-                        }
+                        {"wrist": "/Franka/panda_hand/hand_camera"}
                     )
                     self.log(f"Camera prim map (fallback defaults): {_cam_map}")
             _cam_map = self._provision_missing_cameras(_cam_map)
@@ -12994,7 +12990,7 @@ class GenieSimLocalFramework:
             # (trajectory planner sets this per-phase), fall back to inferring
             # from gripper joint positions when available.
             _gripper_cmd = "open" if gripper_openness > 0.5 else "closed"
-            _gripper_width = gripper_openness * 0.08  # G1 max aperture ~0.08m
+            _gripper_width = gripper_openness * 0.08  # Panda max aperture ~0.08m
             frame_data["gripper_command"] = _gripper_cmd
             frame_data["gripper_openness"] = round(gripper_openness, 3)
             frame_data["gripper_openness_source"] = _gripper_openness_source
@@ -15351,9 +15347,10 @@ class GenieSimLocalFramework:
         if override:
             return [override]
         candidate_map: Dict[str, List[str]] = {
-            "franka": ["franka_panda.json", "G1_omnipicker_fixed.json"],
-            "franka_panda": ["franka_panda.json", "G1_omnipicker_fixed.json"],
-            "panda": ["franka_panda.json", "G1_omnipicker_fixed.json"],
+            # Default robot: Franka Panda. Do not silently fail over to a different embodiment.
+            "franka": ["franka_panda.json"],
+            "franka_panda": ["franka_panda.json"],
+            "panda": ["franka_panda.json"],
             "g1": ["G1_omnipicker_fixed.json"],
             "g1_dual": ["G1_omnipicker_fixed_dual.json"],
             "g2": ["G2_omnipicker_fixed_dual.json"],

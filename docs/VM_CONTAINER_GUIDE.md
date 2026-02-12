@@ -265,12 +265,12 @@ All pipeline env vars are in `configs/realism_strict.env` (sourced by `run_pipel
 
 ## Robot Configuration
 
-Runtime is **Franka-first** (`franka_panda.json`) with automatic fallback to G1 (`G1_omnipicker_fixed.json`) if initialization fails.
+Runtime is **Franka Panda** (`franka_panda.json`). No automatic robot failover is performed.
 
 Runtime robot provenance is recorded in dataset metadata:
 - `requested_robot=franka`
-- `runtime_robot=franka` (or `g1` if failover happens)
-- `fallback_reason=<error>` (present only when failover happens)
+- `runtime_robot=franka`
+- `fallback_reason=<error>` (present only when multiple init candidates are attempted)
 
 ## Syncing Code Changes
 

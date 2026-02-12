@@ -5,7 +5,7 @@ in handle_get_observation.
 
 The server crashes with KeyError when a camera prim path (e.g.
 '/Franka/panda_hand/hand_camera') is not in self.cameras dict (populated
-only from the G1 robot config at init time).
+from the active robot config at init time).
 
 This patch wraps self.cameras[camera] lookups with .get() and a default
 resolution, so unknown cameras don't crash the server.

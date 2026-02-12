@@ -58,7 +58,7 @@ if [ "${GENIESIM_PRIMARY_ROBOT}" = "franka" ] && [ "${GENIESIM_CHECK_FRANKA_ASSE
       echo "[geniesim] ERROR: strict runtime readiness enabled; aborting startup." >&2
       exit 1
     fi
-    echo "[geniesim] WARNING: continuing startup; collector may fall back to G1 at runtime." >&2
+    echo "[geniesim] WARNING: continuing startup; collector may fail to initialize Franka at runtime." >&2
   fi
 fi
 

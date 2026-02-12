@@ -86,7 +86,7 @@ def test_init_robot_returns_watchdog_abort_error_when_aborted(monkeypatch):
     abort_event.set()
 
     result = client.init_robot(
-        robot_type="G1_omnipicker_fixed.json",
+        robot_type="franka_panda.json",
         scene_usd_path="/workspace/scene.usda",
         abort_event=abort_event,
     )
@@ -111,6 +111,7 @@ def test_init_watchdog_triggers_restart_and_retries(monkeypatch):
             self.init_attempts = 0
             self.restart_attempts = 0
             self.restart_count_toward_budget_args = []
+            self.restart_force_curobo_off_args = []
 
         def connect(self):
             return True
@@ -133,9 +134,10 @@ def test_init_watchdog_triggers_restart_and_retries(monkeypatch):
                 payload={"msg": "ok"},
             )
 
-        def _attempt_server_restart(self, count_toward_budget=True):
+        def _attempt_server_restart(self, count_toward_budget=True, force_curobo_off=False):
             self.restart_attempts += 1
             self.restart_count_toward_budget_args.append(count_toward_budget)
+            self.restart_force_curobo_off_args.append(force_curobo_off)
             return True
 
         def set_gripper_state(self, width):
@@ -164,4 +166,8 @@ def test_init_watchdog_triggers_restart_and_retries(monkeypatch):
     assert framework._client.restart_attempts >= 1
     assert framework._client.restart_count_toward_budget_args[0] is False
     assert any("timed out" in msg.lower() for _, msg in logs)
-    assert any("server restarted after init timeout" in msg.lower() for _, msg in logs)
+    assert any(
+        "server restarted after init timeout" in msg.lower()
+        or "server restarted in curobo failover mode" in msg.lower()
+        for _, msg in logs
+    )
