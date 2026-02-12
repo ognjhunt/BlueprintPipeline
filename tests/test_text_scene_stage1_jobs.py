@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+import pytest
 
 
 def _load_module(module_name: str, path: Path):
@@ -110,3 +111,112 @@ def test_text_stage1_jobs_integration_writes_canonical_artifacts(
     assert (gcs_root / layout_prefix / "scene_layout_scaled.json").is_file()
     assert (gcs_root / seg_prefix / "inventory.json").is_file()
     assert (gcs_root / assets_prefix / ".regen3d_complete").is_file()
+
+
+@pytest.mark.parametrize("text_backend", ["sage", "scenesmith", "hybrid_serial"])
+def test_text_stage1_jobs_support_multiple_backends(
+    tmp_path: Path,
+    monkeypatch,
+    text_backend: str,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    gen_module = _load_module(
+        f"text_scene_gen_job_backend_{text_backend}",
+        repo_root / "text-scene-gen-job" / "generate_text_scene.py",
+    )
+
+    gcs_root = tmp_path / "gcs"
+    scene_id = f"scene_backend_{text_backend}"
+    request_object = f"scenes/{scene_id}/prompts/scene_request.json"
+    textgen_prefix = f"scenes/{scene_id}/textgen"
+
+    request_path = gcs_root / request_object
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v1",
+                "scene_id": scene_id,
+                "source_mode": "text",
+                "text_backend": text_backend,
+                "prompt": "A kitchen with task-relevant objects",
+                "quality_tier": "standard",
+                "seed_count": 1,
+                "provider_policy": "openai_primary",
+                "fallback": {"allow_image_fallback": True},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(gen_module, "GCS_ROOT", gcs_root)
+    monkeypatch.setenv("BUCKET", "test-bucket")
+    monkeypatch.setenv("SCENE_ID", scene_id)
+    monkeypatch.setenv("REQUEST_OBJECT", request_object)
+    monkeypatch.setenv("TEXTGEN_PREFIX", textgen_prefix)
+    monkeypatch.setenv("TEXT_SEED", "1")
+    monkeypatch.setenv("DEFAULT_SOURCE_MODE", "text")
+    monkeypatch.setenv("TEXT_GEN_MAX_SEEDS", "16")
+    monkeypatch.setenv("TEXT_GEN_STANDARD_PROFILE", "standard_v1")
+    monkeypatch.setenv("TEXT_GEN_PREMIUM_PROFILE", "premium_v1")
+    monkeypatch.setenv("TEXT_GEN_USE_LLM", "false")
+    monkeypatch.setenv("TEXT_SAGE_ACTION_DEMO_ENABLED", "true")
+
+    assert gen_module.main() == 0
+    package = json.loads((gcs_root / textgen_prefix / "package.json").read_text(encoding="utf-8"))
+    assert package["text_backend"] == text_backend
+    if text_backend in {"sage", "hybrid_serial"}:
+        assert (gcs_root / textgen_prefix / "sage_actions" / "action_demo.json").is_file()
+
+
+def test_text_stage1_jobs_cli_backend_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    gen_module = _load_module(
+        "text_scene_gen_job_backend_override",
+        repo_root / "text-scene-gen-job" / "generate_text_scene.py",
+    )
+
+    gcs_root = tmp_path / "gcs"
+    scene_id = "scene_backend_override"
+    request_object = f"scenes/{scene_id}/prompts/scene_request.json"
+    textgen_prefix = f"scenes/{scene_id}/textgen"
+
+    request_path = gcs_root / request_object
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "v1",
+                "scene_id": scene_id,
+                "source_mode": "text",
+                "text_backend": "internal",
+                "prompt": "A compact office desk scene",
+                "quality_tier": "standard",
+                "seed_count": 1,
+                "provider_policy": "openai_primary",
+                "fallback": {"allow_image_fallback": True},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(gen_module, "GCS_ROOT", gcs_root)
+    monkeypatch.setenv("BUCKET", "test-bucket")
+    monkeypatch.setenv("SCENE_ID", scene_id)
+    monkeypatch.setenv("REQUEST_OBJECT", request_object)
+    monkeypatch.setenv("TEXTGEN_PREFIX", textgen_prefix)
+    monkeypatch.setenv("TEXT_SEED", "1")
+    monkeypatch.setenv("DEFAULT_SOURCE_MODE", "text")
+    monkeypatch.setenv("TEXT_GEN_MAX_SEEDS", "16")
+    monkeypatch.setenv("TEXT_GEN_STANDARD_PROFILE", "standard_v1")
+    monkeypatch.setenv("TEXT_GEN_PREMIUM_PROFILE", "premium_v1")
+    monkeypatch.setenv("TEXT_GEN_USE_LLM", "false")
+
+    assert gen_module.main(["--backend", "scenesmith"]) == 0
+    package = json.loads((gcs_root / textgen_prefix / "package.json").read_text(encoding="utf-8"))
+    assert package["text_backend"] == "scenesmith"

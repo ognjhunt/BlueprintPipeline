@@ -199,6 +199,13 @@ def test_source_orchestrator_runtime_branches_include_vm_and_cloudrun():
     assert "TEXT_HUNYUAN_TEXT_ENDPOINTS" in workflow
     assert "TEXT_SCENE_GEN_JOB_NAME" in workflow
     assert "TEXT_SCENE_ADAPTER_JOB_NAME" in workflow
+    assert "TEXT_BACKEND_DEFAULT" in workflow
+    assert "TEXT_BACKEND_ALLOWLIST" in workflow
+    assert "SAGE_RUNTIME_MODE" in workflow
+    assert "SCENESMITH_RUNTIME_MODE" in workflow
+    assert "SCENESMITH_SERVER_URL" in workflow
+    assert "SCENESMITH_TIMEOUT_SECONDS" in workflow
+    assert "TEXT_SAGE_ACTION_DEMO_ENABLED" in workflow
     assert 'jobName: \'${default(sys.get_env("TEXT_SCENE_GEN_JOB_NAME"), "text-scene-gen-job")}\'' in workflow
     assert 'jobName: \'${default(sys.get_env("TEXT_SCENE_ADAPTER_JOB_NAME"), "text-scene-adapter-job")}\'' in workflow
 
@@ -218,6 +225,7 @@ def test_source_orchestrator_request_sanity_checks_and_lock_dedupe_present():
 
     assert "requestSchemaVersion" in workflow
     assert "requestSceneId" in workflow
+    assert "requestTextBackend" in workflow
     assert "seedCount" in workflow
     assert "qualityTier" in workflow
     assert "- acquire_lock:" in workflow
@@ -343,6 +351,13 @@ def test_setup_source_orchestrator_trigger_includes_text_asset_retrieval_envs():
     assert "TEXT_ASSET_GENERATION_PROVIDER_CHAIN" in script
     assert "TEXT_SCENE_GEN_JOB_NAME" in script
     assert "TEXT_SCENE_ADAPTER_JOB_NAME" in script
+    assert "TEXT_BACKEND_DEFAULT" in script
+    assert "TEXT_BACKEND_ALLOWLIST" in script
+    assert "SAGE_RUNTIME_MODE" in script
+    assert "SCENESMITH_RUNTIME_MODE" in script
+    assert "SCENESMITH_SERVER_URL" in script
+    assert "SCENESMITH_TIMEOUT_SECONDS" in script
+    assert "TEXT_SAGE_ACTION_DEMO_ENABLED" in script
     assert "TEXT_SAM3D_API_HOST" in script
     assert "TEXT_SAM3D_TEXT_ENDPOINTS" in script
     assert "TEXT_HUNYUAN_API_HOST" in script

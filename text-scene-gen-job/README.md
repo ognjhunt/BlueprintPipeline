@@ -26,3 +26,16 @@ which converts it into canonical Blueprint artifacts for Stage 2+.
 - `TEXT_GEN_STANDARD_PROFILE` (default: `standard_v1`)
 - `TEXT_GEN_PREMIUM_PROFILE` (default: `premium_v1`)
 - `TEXT_GEN_QUALITY_TIER` (optional override)
+- `TEXT_BACKEND_DEFAULT` (default: `sage`)
+- `TEXT_BACKEND_ALLOWLIST` (default: `internal,scenesmith,sage,hybrid_serial`)
+- `TEXT_BACKEND` (optional per-run override)
+- `SCENESMITH_RUNTIME_MODE` (default: `cloudrun`)
+- `SCENESMITH_SERVER_URL` (optional)
+- `SCENESMITH_TIMEOUT_SECONDS` (default: `1800`)
+- `SAGE_RUNTIME_MODE` (default: `cloudrun`)
+- `SAGE_SERVER_URL` (optional)
+- `SAGE_TIMEOUT_SECONDS` (default: `900`)
+- `TEXT_SAGE_ACTION_DEMO_ENABLED` (default: `false`, emits `textgen/sage_actions/*` side artifacts)
+
+## CLI options
+- `--backend {internal,scenesmith,sage,hybrid_serial}` optional one-shot backend override (takes precedence over request payload backend)

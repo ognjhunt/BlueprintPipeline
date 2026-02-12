@@ -11,6 +11,7 @@ def test_scene_request_schema_accepts_valid_text_request() -> None:
         "schema_version": "v1",
         "scene_id": "scene_123",
         "source_mode": "text",
+        "text_backend": "sage",
         "prompt": "A modern kitchen for robot pick-and-place tasks",
         "quality_tier": "standard",
         "seed_count": 2,
@@ -28,7 +29,7 @@ def test_scene_request_schema_rejects_unknown_source_mode() -> None:
         "source_mode": "video",
         "prompt": "invalid mode",
     }
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, Exception)):
         validate_json_schema(payload, schema)
 
 
@@ -51,6 +52,7 @@ def test_scene_request_schema_accepts_auto_mode() -> None:
         "schema_version": "v1",
         "scene_id": "scene_auto_001",
         "source_mode": "auto",
+        "text_backend": "hybrid_serial",
         "prompt": "A warehouse for robotic bin picking",
         "image": {
             "gcs_uri": "gs://bucket/scenes/scene_auto_001/images/scan.jpg",
@@ -80,5 +82,18 @@ def test_scene_request_schema_rejects_missing_scene_id() -> None:
         "source_mode": "text",
         "prompt": "A room",
     }
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, Exception)):
+        validate_json_schema(payload, schema)
+
+
+def test_scene_request_schema_rejects_unknown_text_backend() -> None:
+    schema = load_schema("scene_request_v1.schema.json")
+    payload = {
+        "schema_version": "v1",
+        "scene_id": "scene_backend_001",
+        "source_mode": "text",
+        "text_backend": "unknown_backend",
+        "prompt": "A room",
+    }
+    with pytest.raises((ValueError, Exception)):
         validate_json_schema(payload, schema)

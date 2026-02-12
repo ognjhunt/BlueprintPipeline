@@ -18,6 +18,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import random
 import sys
 import threading
 import time
@@ -29,6 +30,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
+USD_JOB_ROOT = Path(__file__).resolve().parent
+if str(USD_JOB_ROOT) not in sys.path:
+    sys.path.append(str(USD_JOB_ROOT))
 
 from tools.config.production_mode import resolve_production_mode
 from tools.scene_manifest.loader import load_manifest_or_scene_assets
@@ -38,6 +42,14 @@ import numpy as np
 from tools.asset_catalog import AssetCatalogClient
 
 logger = logging.getLogger(__name__)
+
+try:
+    from postprocess_physics import run_postprocess, write_settled_transforms
+    HAVE_POSTPROCESS_PHYSICS = True
+except Exception:
+    run_postprocess = None  # type: ignore[assignment]
+    write_settled_transforms = None  # type: ignore[assignment]
+    HAVE_POSTPROCESS_PHYSICS = False
 
 try:
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
@@ -137,6 +149,33 @@ def _parse_float_env(var_name: str, default: float) -> float:
     except ValueError:
         logger.warning("[USD] Invalid %s=%s; using %s", var_name, value, default)
         return default
+
+
+def _env_truthy(var_name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _postprocess_settle_enabled() -> bool:
+    if _env_truthy("USD_POSTPROCESS_SETTLE_ENABLED", default=False):
+        return True
+    return _env_truthy("TEXT_PIPELINE_V2_ENABLED", default=False)
+
+
+def _collision_piece_budget() -> Dict[str, int]:
+    return {
+        "furniture": _parse_int_env("USD_COLLISION_BUDGET_FURNITURE", 128),
+        "wall_manipulands": _parse_int_env("USD_COLLISION_BUDGET_WALL_MANIPULANDS", 64),
+        "ceiling": _parse_int_env("USD_COLLISION_BUDGET_CEILING", 16),
+    }
+
+
+def _lighting_randomization_enabled() -> bool:
+    if _env_truthy("USD_LIGHTING_RANDOMIZATION_ENABLED", default=False):
+        return True
+    return _env_truthy("TEXT_PIPELINE_V2_ENABLED", default=False)
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -850,6 +889,34 @@ class SceneBuilder:
         try:
             intensity = float(os.environ.get("USD_DOME_LIGHT_INTENSITY", "3000.0"))
             color_temp = float(os.environ.get("USD_DOME_LIGHT_COLOR_TEMP", "6500.0"))
+            randomization_applied = False
+            if _lighting_randomization_enabled():
+                scene_seed = (
+                    f"{os.getenv('SCENE_ID', '')}|"
+                    f"{os.getenv('TEXT_SEED', '')}|"
+                    f"{os.getenv('PIPELINE_RUN_ID', '')}"
+                )
+                seed_int = int.from_bytes(scene_seed.encode("utf-8"), "little", signed=False) % (2**32)
+                rng = random.Random(seed_int)
+                min_intensity = _parse_float_env(
+                    "USD_DOME_LIGHT_INTENSITY_MIN",
+                    max(100.0, intensity * 0.7),
+                )
+                max_intensity = _parse_float_env(
+                    "USD_DOME_LIGHT_INTENSITY_MAX",
+                    max(min_intensity + 1.0, intensity * 1.3),
+                )
+                min_color_temp = _parse_float_env(
+                    "USD_DOME_LIGHT_COLOR_TEMP_MIN",
+                    max(2500.0, color_temp - 900.0),
+                )
+                max_color_temp = _parse_float_env(
+                    "USD_DOME_LIGHT_COLOR_TEMP_MAX",
+                    max(min_color_temp + 50.0, color_temp + 900.0),
+                )
+                intensity = rng.uniform(min_intensity, max_intensity)
+                color_temp = rng.uniform(min_color_temp, max_color_temp)
+                randomization_applied = True
 
             # Create dome light at /World/DefaultDomeLight
             dome_light = UsdLux.DomeLight.Define(self.stage, "/World/DefaultDomeLight")
@@ -858,10 +925,23 @@ class SceneBuilder:
             # Enable color temperature mode
             dome_light.CreateEnableColorTemperatureAttr(True)
 
+            root_layer = self.stage.GetRootLayer()
+            custom_data = dict(root_layer.customLayerData or {})
+            custom_data["lighting"] = {
+                "dome": {
+                    "enabled": True,
+                    "intensity": round(float(intensity), 4),
+                    "color_temp_k": round(float(color_temp), 2),
+                    "randomized": randomization_applied,
+                }
+            }
+            root_layer.customLayerData = custom_data
+
             logger.info(
-                "[USD] Added default dome light: intensity=%.1f, color_temp=%.0fK",
+                "[USD] Added default dome light: intensity=%.1f, color_temp=%.0fK randomized=%s",
                 intensity,
                 color_temp,
+                randomization_applied,
             )
         except Exception as e:
             logger.warning("[USD] Failed to add default dome light: %s", e)
@@ -1361,6 +1441,26 @@ class SceneBuilder:
         prim.CreateAttribute(
             "physics:approximation", Sdf.ValueTypeNames.Token
         ).Set(approx)
+
+        # V-HACD convex decomposition piece limits per object type.
+        # Furniture gets 128 (complex shapes), manipulables/clutter 64,
+        # scene shell 16.  Aligns with SceneSmith collision fidelity tiers.
+        if approx == "convexDecomposition" and PHYSX_SCHEMA:
+            _VHACD_PIECE_LIMITS = {
+                "static": 128,
+                "articulated_furniture": 128,
+                "articulated_appliance": 128,
+                "manipulable_object": 64,
+                "clutter": 64,
+                "interactive": 64,
+            }
+            max_hulls = _VHACD_PIECE_LIMITS.get(sim_role or "", 64)
+            try:
+                physx_collision_api = PHYSX_SCHEMA.PhysxCollisionAPI.Apply(prim)
+                physx_collision_api.CreateMaxConvexHullsAttr().Set(max_hulls)
+            except Exception:
+                # PhysxCollisionAPI may not be available in all USD builds
+                pass
 
         if (
             static_friction is not None
@@ -2143,6 +2243,41 @@ def build_scene(
 
     with timed_phase("post-reference physics fixups"):
         physics_conflicts_fixed = builder.fix_internal_physics_conflicts()
+        postprocess_summary: Dict[str, Any] = {
+            "enabled": False,
+            "penetration_resolve": {"enabled": False, "status": "disabled"},
+            "gravity_settle": {"enabled": False, "status": "disabled"},
+        }
+        settled_transforms_path: Optional[Path] = None
+        if _postprocess_settle_enabled():
+            if HAVE_POSTPROCESS_PHYSICS and run_postprocess is not None:
+                try:
+                    postprocess_summary = dict(run_postprocess(stage) or {})
+                    settled_transforms = postprocess_summary.get("settled_transforms")
+                    if isinstance(settled_transforms, dict):
+                        settled_transforms_path = output_path.parent / "settled_transforms.json"
+                        if write_settled_transforms is not None:
+                            write_settled_transforms(settled_transforms_path, settled_transforms)
+                            postprocess_summary["settled_transforms_path"] = str(settled_transforms_path)
+                    postprocess_summary["enabled"] = True
+                    postprocess_summary.setdefault("status", "completed")
+                except Exception as exc:
+                    logger.warning("[USD] Postprocess settle failed: %s", exc, exc_info=True)
+                    postprocess_summary = {
+                        "enabled": True,
+                        "status": "failed",
+                        "error": str(exc),
+                        "penetration_resolve": {"enabled": True, "status": "error"},
+                        "gravity_settle": {"enabled": True, "status": "error"},
+                    }
+            else:
+                postprocess_summary = {
+                    "enabled": True,
+                    "status": "unavailable",
+                    "reason": "postprocess_module_missing",
+                    "penetration_resolve": {"enabled": True, "status": "unavailable"},
+                    "gravity_settle": {"enabled": True, "status": "unavailable"},
+                }
         collision_report = _bake_scene_collision_validity(stage)
 
     root_layer = stage.GetRootLayer()
@@ -2155,6 +2290,15 @@ def build_scene(
     custom_data["collision_report"] = collision_report
     custom_data["physics_coverage_report"] = physics_report
     custom_data["physics_coverage_report_path"] = str(physics_report_path)
+    custom_data["collision_piece_budget"] = _collision_piece_budget()
+    custom_data["postprocess"] = {
+        "enabled": bool(postprocess_summary.get("enabled", False)),
+        "status": str(postprocess_summary.get("status", "disabled")),
+        "penetration_resolve": postprocess_summary.get("penetration_resolve", {"enabled": False, "status": "disabled"}),
+        "gravity_settle": postprocess_summary.get("gravity_settle", {"enabled": False, "status": "disabled"}),
+    }
+    if settled_transforms_path is not None:
+        custom_data["postprocess"]["settled_transforms_path"] = str(settled_transforms_path)
     root_layer.customLayerData = custom_data
 
     # Save stage

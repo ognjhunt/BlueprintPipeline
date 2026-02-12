@@ -107,3 +107,55 @@ def test_simready_main_failure_marker(load_job_module, tmp_path: Path, monkeypat
         module.main()
 
     assert calls.get("called") is True
+
+
+def test_simready_physics_v2_fields(load_job_module) -> None:
+    _ensure_asset_catalog_client()
+    module = load_job_module("simready", "prepare_simready_assets.py")
+
+    fields = module._physics_v2_fields(
+        {
+            "mass_kg": 2.0,
+            "material_name": "aluminum",
+        },
+        default_confidence="medium",
+    )
+    assert fields["material_category_19"] == "metal"
+    assert fields["mass_kg_range"] == [1.6, 2.4]
+    assert fields["canonical_orientation_quat"] == [1.0, 0.0, 0.0, 0.0]
+    assert fields["confidence"] == "medium"
+
+
+def test_simready_build_physics_config_includes_v2_and_link_physics(load_job_module) -> None:
+    _ensure_asset_catalog_client()
+    module = load_job_module("simready", "prepare_simready_assets.py")
+
+    obj = {
+        "id": "obj_001",
+        "name": "cabinet",
+        "category": "cabinet",
+        "sim_role": "articulated_furniture",
+        "articulation": {"required": True},
+    }
+    bounds = {"size_m": [0.9, 1.8, 0.5], "center_m": [0.0, 0.9, 0.0], "volume_m3": 0.81}
+
+    physics_cfg = module.build_physics_config(
+        obj=obj,
+        bounds=bounds,
+        deterministic_physics=True,
+    )
+
+    assert "material_category_19" in physics_cfg
+    assert "mass_kg_range" in physics_cfg
+    assert "canonical_orientation_quat" in physics_cfg
+    assert "confidence" in physics_cfg
+    assert "link_physics" in physics_cfg
+    assert isinstance(physics_cfg["link_physics"], list)
+
+
+def test_simready_multiview_default_is_six(load_job_module) -> None:
+    _ensure_asset_catalog_client()
+    module = load_job_module("simready", "prepare_simready_assets.py")
+    defaults = module.load_multiview_images_for_gemini.__defaults__
+    assert defaults is not None
+    assert defaults[0] == 6

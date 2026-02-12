@@ -135,6 +135,8 @@ class RetrievalCandidate:
     dimension_score: float
     total_score: float
     metadata: Dict[str, Any]
+    clip_score: float = 0.0
+    bbox_l1_score: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
@@ -142,6 +144,8 @@ class RetrievalCandidate:
         payload["lexical_score"] = round(float(self.lexical_score), 6)
         payload["class_role_score"] = round(float(self.class_role_score), 6)
         payload["dimension_score"] = round(float(self.dimension_score), 6)
+        payload["clip_score"] = round(float(self.clip_score), 6)
+        payload["bbox_l1_score"] = round(float(self.bbox_l1_score), 6)
         payload["total_score"] = round(float(self.total_score), 6)
         return payload
 
@@ -217,6 +221,8 @@ class AssetRetrievalService:
         self.allow_duplicate_paths = _is_truthy(os.getenv("TEXT_ASSET_ALLOW_DUPLICATE_PATHS"), default=False)
         self.embedding_model = (os.getenv("TEXT_ASSET_EMBEDDING_MODEL") or "text-embedding-3-small").strip()
         self.embedding_backend = (os.getenv("TEXT_ASSET_EMBEDDING_BACKEND") or "openai").strip().lower()
+        self.clip_rerank_enabled = _is_truthy(os.getenv("TEXT_ASSET_CLIP_RERANK_ENABLED"), default=False)
+        self.articulated_priority_enabled = _is_truthy(os.getenv("TEXT_ASSET_ARTICULATED_PRIORITY_ENABLED"), default=True)
 
         self._vector_client: Optional[VectorStoreClient] = None
         self._embedder: Optional[AssetEmbeddings] = None
@@ -382,6 +388,28 @@ class AssetRetrievalService:
         mean_delta = sum(deltas) / len(deltas)
         return max(0.0, min(1.0, 1.0 - mean_delta))
 
+    def _bbox_l1_score(self, spec: AssetQuerySpec, metadata: Mapping[str, Any]) -> float:
+        dims_raw = metadata.get("dimensions")
+        if not isinstance(dims_raw, Mapping):
+            dims_raw = metadata.get("dimensions_est")
+        if not isinstance(dims_raw, Mapping):
+            return 0.5
+        width = _safe_float(dims_raw.get("width"), _safe_float(dims_raw.get("width_m"), 0.0))
+        height = _safe_float(dims_raw.get("height"), _safe_float(dims_raw.get("height_m"), 0.0))
+        depth = _safe_float(dims_raw.get("depth"), _safe_float(dims_raw.get("depth_m"), 0.0))
+        if width <= 0.0 or height <= 0.0 or depth <= 0.0:
+            return 0.5
+        l1 = abs(width - spec.dimensions["width"]) + abs(height - spec.dimensions["height"]) + abs(depth - spec.dimensions["depth"])
+        norm = max(0.1, spec.dimensions["width"] + spec.dimensions["height"] + spec.dimensions["depth"])
+        return max(0.0, min(1.0, 1.0 - (l1 / norm)))
+
+    def _clip_proxy_score(self, spec: AssetQuerySpec, metadata: Mapping[str, Any]) -> float:
+        if not self.clip_rerank_enabled:
+            return 0.0
+        query_tokens = _tokenize(spec.query_text)
+        candidate_tokens = self._candidate_tokens(metadata)
+        return _jaccard(query_tokens, candidate_tokens)
+
     def _ann_candidates(self, *, spec: AssetQuerySpec, used_paths: set[str]) -> tuple[list[RetrievalCandidate], Optional[str], float]:
         if not self.ann_enabled:
             return [], None, 0.0
@@ -429,7 +457,27 @@ class AssetRetrievalService:
             lexical_score = _jaccard(query_tokens, candidate_tokens)
             class_role_score = self._class_role_score(spec, metadata, lexical_score)
             dimension_score = self._dimension_score(spec, metadata)
-            total_score = (0.7 * semantic_score) + (0.2 * class_role_score) + (0.1 * dimension_score)
+            clip_score = self._clip_proxy_score(spec, metadata)
+            bbox_l1_score = self._bbox_l1_score(spec, metadata)
+            articulated_bonus = 0.0
+            if self.articulated_priority_enabled and spec.articulation_required:
+                sim_roles = metadata.get("sim_roles")
+                roles = [str(item).strip().lower() for item in sim_roles] if isinstance(sim_roles, list) else []
+                if any(role in {"articulated_furniture", "articulated_appliance", "interactive"} for role in roles):
+                    articulated_bonus = 0.08
+                else:
+                    articulated_bonus = -0.04
+            if self.clip_rerank_enabled:
+                total_score = (
+                    (0.45 * semantic_score)
+                    + (0.20 * class_role_score)
+                    + (0.10 * dimension_score)
+                    + (0.20 * clip_score)
+                    + (0.05 * bbox_l1_score)
+                    + articulated_bonus
+                )
+            else:
+                total_score = (0.7 * semantic_score) + (0.2 * class_role_score) + (0.1 * dimension_score) + articulated_bonus
             ranked.append(
                 RetrievalCandidate(
                     asset_id=asset_id,
@@ -440,6 +488,8 @@ class AssetRetrievalService:
                     dimension_score=dimension_score,
                     total_score=total_score,
                     metadata=metadata,
+                    clip_score=clip_score,
+                    bbox_l1_score=bbox_l1_score,
                 )
             )
 

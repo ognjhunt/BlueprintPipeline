@@ -20,6 +20,15 @@ class QualityTier(str, Enum):
     PREMIUM = "premium"
 
 
+class TextBackend(str, Enum):
+    """Stage 1 text backend selector."""
+
+    INTERNAL = "internal"
+    SCENESMITH = "scenesmith"
+    SAGE = "sage"
+    HYBRID_SERIAL = "hybrid_serial"
+
+
 @dataclass(frozen=True)
 class SceneRequestImage:
     """Optional image fallback payload."""
@@ -42,6 +51,7 @@ class SceneRequestV1:
     schema_version: str
     scene_id: str
     source_mode: PipelineSourceMode = PipelineSourceMode.TEXT
+    text_backend: TextBackend = TextBackend.SAGE
     prompt: Optional[str] = None
     quality_tier: QualityTier = QualityTier.STANDARD
     seed_count: int = 1
@@ -93,6 +103,27 @@ def _parse_quality_tier(raw: Any) -> QualityTier:
         ) from exc
 
 
+def _parse_text_backend(
+    raw: Any,
+    *,
+    default_text_backend: TextBackend,
+    strict: bool,
+) -> TextBackend:
+    if raw is None:
+        return default_text_backend
+    text_backend_raw = str(raw).strip().lower()
+    if text_backend_raw == "":
+        return default_text_backend
+    try:
+        return TextBackend(text_backend_raw)
+    except ValueError as exc:
+        if not strict:
+            return default_text_backend
+        raise ValueError(
+            f"text_backend must be one of {[t.value for t in TextBackend]}, got {raw!r}"
+        ) from exc
+
+
 def _parse_seed_count(raw: Any, max_seeds: int) -> int:
     if raw is None:
         return 1
@@ -126,6 +157,7 @@ def normalize_scene_request(
     payload: Mapping[str, Any],
     *,
     default_source_mode: PipelineSourceMode = PipelineSourceMode.TEXT,
+    default_text_backend: TextBackend = TextBackend.SAGE,
     max_seeds: int = 16,
 ) -> SceneRequestV1:
     """Validate and normalize scene_request.json payload into SceneRequestV1."""
@@ -141,6 +173,11 @@ def normalize_scene_request(
         raise ValueError("scene_id is required")
 
     source_mode = _parse_source_mode(payload.get("source_mode"), default_source_mode)
+    text_backend = _parse_text_backend(
+        payload.get("text_backend"),
+        default_text_backend=default_text_backend,
+        strict=source_mode != PipelineSourceMode.IMAGE,
+    )
     quality_tier = _parse_quality_tier(payload.get("quality_tier"))
     seed_count = _parse_seed_count(payload.get("seed_count"), max_seeds)
     image = _parse_image(payload.get("image"))
@@ -181,6 +218,7 @@ def normalize_scene_request(
         schema_version=schema_version,
         scene_id=scene_id,
         source_mode=source_mode,
+        text_backend=text_backend,
         prompt=prompt,
         quality_tier=quality_tier,
         seed_count=seed_count,
@@ -240,6 +278,7 @@ def build_variants_index(
         "schema_version": "v1",
         "scene_id": parent_scene_id,
         "source_mode": request.source_mode.value,
+        "text_backend": request.text_backend.value,
         "quality_tier": request.quality_tier.value,
         "provider_policy": request.provider_policy,
         "seed_count": len(child_scene_ids),
@@ -267,6 +306,7 @@ def scene_request_to_dict(request: SceneRequestV1) -> Dict[str, Any]:
         "schema_version": request.schema_version,
         "scene_id": request.scene_id,
         "source_mode": request.source_mode.value,
+        "text_backend": request.text_backend.value,
         "prompt": request.prompt,
         "quality_tier": request.quality_tier.value,
         "seed_count": request.seed_count,

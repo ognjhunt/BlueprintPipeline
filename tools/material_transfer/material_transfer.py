@@ -37,8 +37,16 @@ class MaterialType(str, Enum):
     RUBBER = "rubber"
     LEATHER = "leather"
     PAPER = "paper"
+    CARDBOARD = "cardboard"
     STONE = "stone"
     CONCRETE = "concrete"
+    FOAM = "foam"
+    LIQUID = "liquid"
+    FOOD = "food"
+    ELECTRONICS = "electronics"
+    COMPOSITE = "composite"
+    TILE = "tile"
+    ORGANIC = "organic"
     UNKNOWN = "unknown"
 
 
@@ -141,8 +149,16 @@ MATERIAL_KEYWORDS = {
     MaterialType.RUBBER: ["rubber", "silicone", "latex", "foam"],
     MaterialType.LEATHER: ["leather", "suede", "hide"],
     MaterialType.PAPER: ["paper", "cardboard", "carton"],
+    MaterialType.CARDBOARD: ["cardboard", "carton", "corrugated"],
     MaterialType.STONE: ["stone", "marble", "granite", "slate", "rock"],
     MaterialType.CONCRETE: ["concrete", "cement", "morite"],
+    MaterialType.FOAM: ["foam", "sponge", "expanded"],
+    MaterialType.LIQUID: ["water", "juice", "liquid", "oil"],
+    MaterialType.FOOD: ["fruit", "vegetable", "bread", "meat", "food"],
+    MaterialType.ELECTRONICS: ["electronic", "circuit", "pcb", "phone", "laptop"],
+    MaterialType.COMPOSITE: ["composite", "laminate", "fiber"],
+    MaterialType.TILE: ["tile", "ceramic_tile"],
+    MaterialType.ORGANIC: ["organic", "plant", "wood_pulp", "biomass"],
 }
 
 # Default physics properties by material type
@@ -156,8 +172,16 @@ MATERIAL_PHYSICS = {
     MaterialType.RUBBER: {"density": 1100.0, "friction_static": 0.9, "friction_dynamic": 0.8, "restitution": 0.7},
     MaterialType.LEATHER: {"density": 900.0, "friction_static": 0.6, "friction_dynamic": 0.5, "restitution": 0.2},
     MaterialType.PAPER: {"density": 700.0, "friction_static": 0.4, "friction_dynamic": 0.3, "restitution": 0.1},
+    MaterialType.CARDBOARD: {"density": 650.0, "friction_static": 0.45, "friction_dynamic": 0.35, "restitution": 0.12},
     MaterialType.STONE: {"density": 2700.0, "friction_static": 0.6, "friction_dynamic": 0.5, "restitution": 0.2},
     MaterialType.CONCRETE: {"density": 2400.0, "friction_static": 0.7, "friction_dynamic": 0.6, "restitution": 0.1},
+    MaterialType.FOAM: {"density": 120.0, "friction_static": 0.6, "friction_dynamic": 0.5, "restitution": 0.05},
+    MaterialType.LIQUID: {"density": 1000.0, "friction_static": 0.05, "friction_dynamic": 0.03, "restitution": 0.0},
+    MaterialType.FOOD: {"density": 850.0, "friction_static": 0.55, "friction_dynamic": 0.45, "restitution": 0.08},
+    MaterialType.ELECTRONICS: {"density": 1800.0, "friction_static": 0.45, "friction_dynamic": 0.35, "restitution": 0.1},
+    MaterialType.COMPOSITE: {"density": 1400.0, "friction_static": 0.5, "friction_dynamic": 0.4, "restitution": 0.12},
+    MaterialType.TILE: {"density": 2200.0, "friction_static": 0.65, "friction_dynamic": 0.55, "restitution": 0.06},
+    MaterialType.ORGANIC: {"density": 700.0, "friction_static": 0.52, "friction_dynamic": 0.42, "restitution": 0.1},
     MaterialType.UNKNOWN: {"density": 1000.0, "friction_static": 0.5, "friction_dynamic": 0.4, "restitution": 0.3},
 }
 

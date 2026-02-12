@@ -18,6 +18,11 @@
       "enum": ["text", "image", "auto"],
       "default": "text"
     },
+    "text_backend": {
+      "type": "string",
+      "enum": ["internal", "scenesmith", "sage", "hybrid_serial"],
+      "default": "sage"
+    },
     "prompt": {
       "type": "string"
     },

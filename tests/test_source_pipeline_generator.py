@@ -97,6 +97,35 @@ def test_generate_text_scene_package_standard_vs_premium_object_count() -> None:
     assert len(premium["objects"]) == 18
 
 
+def test_generate_text_scene_package_v2_emits_staged_fields(monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_PIPELINE_V2_ENABLED", "true")
+    monkeypatch.setenv("TEXT_PLACEMENT_STAGED_ENABLED", "true")
+
+    result = generate_text_scene_package(
+        scene_id="scene_v2_staged",
+        prompt="A cluttered kitchen with mugs, bowls, and tools",
+        quality_tier=QualityTier.STANDARD,
+        seed=7,
+        provider_policy="openai_primary",
+    )
+
+    assert len(result["objects"]) >= 30
+    assert isinstance(result.get("layout_plan"), dict)
+    assert isinstance(result["layout_plan"].get("room_box"), dict)
+    assert isinstance(result.get("placement_stages"), list)
+    assert [stage.get("stage") for stage in result["placement_stages"]] == ["furniture", "manipulands"]
+    assert isinstance(result.get("critic_scores"), list)
+    assert len(result["critic_scores"]) == 2
+    assert isinstance(result.get("support_surfaces"), list)
+    assert isinstance(result.get("faithfulness_report"), dict)
+    assert 0.0 <= float(result["faithfulness_report"].get("score", 0.0)) <= 1.0
+
+    for obj in result["objects"]:
+        assert obj.get("placement_stage") in {"furniture", "manipulands"}
+        if obj.get("sim_role") == "manipulable_object":
+            assert obj.get("parent_support_id") is not None
+            assert isinstance(obj.get("surface_local_se2"), dict)
+
 def test_extract_room_type_from_prompt_keywords() -> None:
     assert _extract_room_type("A modern kitchen with steel appliances", {}) == "kitchen"
     assert _extract_room_type("cozy bedroom with a queen bed", {}) == "bedroom"
@@ -349,3 +378,238 @@ def test_generate_text_scene_package_records_llm_fallback_metadata(monkeypatch) 
     report = result["quality_gate_report"]
     assert report["generation_mode"] == "deterministic_fallback"
     assert report["llm_attempts"] == 4
+
+
+def test_generate_text_scene_package_supports_sage_backend(monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_SAGE_ACTION_DEMO_ENABLED", "true")
+    result = generate_text_scene_package(
+        scene_id="scene_sage",
+        prompt="A tabletop pick and place scene",
+        quality_tier=QualityTier.STANDARD,
+        seed=2,
+        provider_policy="openai_primary",
+        text_backend="sage",
+    )
+    assert result["text_backend"] == "sage"
+    assert result["provider_used"] == "sage"
+    assert result["backend"]["selected"] == "sage"
+    assert any(entry.get("name") == "sage" for entry in result["backend"]["backends"])
+    assert isinstance(result.get("sage_action_demo"), dict)
+
+
+def test_generate_text_scene_package_sage_backend_uses_live_server_when_available(monkeypatch) -> None:
+    monkeypatch.setenv("SAGE_SERVER_URL", "https://sage.example/v1/refine")
+    monkeypatch.setenv("SAGE_TIMEOUT_SECONDS", "30")
+
+    live_base = generate_text_scene_package(
+        scene_id="scene_sage_live_base",
+        prompt="A compact kitchen workspace",
+        quality_tier=QualityTier.STANDARD,
+        seed=9,
+        provider_policy="openai_primary",
+        text_backend="internal",
+    )
+    live_package = json.loads(json.dumps(live_base))
+    live_package["scene_id"] = "scene_sage_live"
+    response_payload = {"request_id": "req-123", "package": live_package}
+
+    class _FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def _fake_urlopen(req, timeout=0):  # type: ignore[no-untyped-def]
+        assert req.full_url == "https://sage.example/v1/refine"
+        assert timeout == 30.0
+        request_payload = json.loads(req.data.decode("utf-8"))
+        assert request_payload["scene_id"] == "scene_sage_live"
+        return _FakeResponse(response_payload)
+
+    monkeypatch.setattr(generator_mod.url_request, "urlopen", _fake_urlopen)
+
+    result = generate_text_scene_package(
+        scene_id="scene_sage_live",
+        prompt="A pick-place scene with a bowl and tray",
+        quality_tier=QualityTier.STANDARD,
+        seed=9,
+        provider_policy="openai_primary",
+        text_backend="sage",
+    )
+
+    assert result["text_backend"] == "sage"
+    assert result["quality_gate_report"]["generation_mode"] == "sage_live"
+    assert result["sage"]["live_requested"] is True
+    assert result["sage"]["live_used"] is True
+    assert result["sage"]["live_invocation"]["enabled"] is True
+    assert result["sage"]["live_invocation"]["request_id"] == "req-123"
+
+
+def test_generate_text_scene_package_sage_backend_falls_back_when_live_unavailable(monkeypatch) -> None:
+    monkeypatch.setenv("SAGE_SERVER_URL", "https://sage.example/v1/refine")
+    monkeypatch.setenv("SAGE_TIMEOUT_SECONDS", "15")
+
+    def _raise_url_error(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise generator_mod.url_error.URLError("connection refused")
+
+    monkeypatch.setattr(generator_mod.url_request, "urlopen", _raise_url_error)
+
+    result = generate_text_scene_package(
+        scene_id="scene_sage_live_fallback",
+        prompt="A pick-place scene with a mug and shelf",
+        quality_tier=QualityTier.STANDARD,
+        seed=10,
+        provider_policy="openai_primary",
+        text_backend="sage",
+    )
+
+    assert result["text_backend"] == "sage"
+    assert result["quality_gate_report"]["generation_mode"] == "sage_refined"
+    assert result["sage"]["live_requested"] is True
+    assert result["sage"]["live_used"] is False
+
+
+def test_generate_text_scene_package_supports_scenesmith_backend() -> None:
+    result = generate_text_scene_package(
+        scene_id="scene_scenesmith",
+        prompt="A cluttered kitchen with many manipulable items",
+        quality_tier=QualityTier.STANDARD,
+        seed=5,
+        provider_policy="openai_primary",
+        text_backend="scenesmith",
+    )
+    assert result["text_backend"] == "scenesmith"
+    assert result["backend"]["selected"] == "scenesmith"
+    assert any(entry.get("name") == "scenesmith" for entry in result["backend"]["backends"])
+    assert len(result["objects"]) >= 18
+
+
+def test_generate_text_scene_package_scenesmith_backend_uses_live_server_when_available(monkeypatch) -> None:
+    monkeypatch.setenv("SCENESMITH_SERVER_URL", "https://scenesmith.example/v1/generate")
+    monkeypatch.setenv("SCENESMITH_TIMEOUT_SECONDS", "45")
+
+    response_payload = {
+        "request_id": "ss-req-1",
+        "room_type": "kitchen",
+        "objects": [
+            {
+                "id": "base_counter",
+                "name": "countertop",
+                "category": "counter",
+                "sim_role": "static",
+                "transform": {"position": {"x": 0.0, "y": 0.0, "z": 0.0}},
+            },
+            {
+                "id": "obj_mug",
+                "name": "mug",
+                "category": "mug",
+                "sim_role": "manipulable_object",
+                "transform": {"position": {"x": 0.2, "y": 0.9, "z": 0.1}},
+            },
+        ],
+    }
+
+    class _FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def _fake_urlopen(req, timeout=0):  # type: ignore[no-untyped-def]
+        assert req.full_url == "https://scenesmith.example/v1/generate"
+        assert timeout == 45.0
+        request_payload = json.loads(req.data.decode("utf-8"))
+        assert request_payload["scene_id"] == "scene_scenesmith_live"
+        assert request_payload["pipeline_stages"] == [
+            "floor_plan",
+            "furniture",
+            "wall_mounted",
+            "ceiling_mounted",
+            "manipuland",
+        ]
+        return _FakeResponse(response_payload)
+
+    monkeypatch.setattr(generator_mod.url_request, "urlopen", _fake_urlopen)
+
+    result = generate_text_scene_package(
+        scene_id="scene_scenesmith_live",
+        prompt="A kitchen with dense clutter and task objects",
+        quality_tier=QualityTier.STANDARD,
+        seed=6,
+        provider_policy="openai_primary",
+        text_backend="scenesmith",
+    )
+
+    assert result["text_backend"] == "scenesmith"
+    assert result["provider_used"] == "scenesmith"
+    assert result["scenesmith"]["live_requested"] is True
+    assert result["scenesmith"]["live_used"] is True
+    assert result["scenesmith"]["live_invocation"]["enabled"] is True
+    assert result["scenesmith"]["live_invocation"]["request_id"] == "ss-req-1"
+    assert result["quality_gate_report"]["generation_mode"] == "scenesmith_live"
+
+
+def test_generate_text_scene_package_scenesmith_backend_falls_back_when_live_unavailable(monkeypatch) -> None:
+    monkeypatch.setenv("SCENESMITH_SERVER_URL", "https://scenesmith.example/v1/generate")
+    monkeypatch.setenv("SCENESMITH_TIMEOUT_SECONDS", "30")
+
+    def _raise_url_error(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise generator_mod.url_error.URLError("connection refused")
+
+    monkeypatch.setattr(generator_mod.url_request, "urlopen", _raise_url_error)
+
+    result = generate_text_scene_package(
+        scene_id="scene_scenesmith_live_fallback",
+        prompt="A kitchen with dense clutter and task objects",
+        quality_tier=QualityTier.STANDARD,
+        seed=6,
+        provider_policy="openai_primary",
+        text_backend="scenesmith",
+    )
+
+    assert result["text_backend"] == "scenesmith"
+    assert result["scenesmith"]["live_requested"] is True
+    assert result["scenesmith"]["live_used"] is False
+
+
+def test_generate_text_scene_package_supports_hybrid_serial_backend() -> None:
+    result = generate_text_scene_package(
+        scene_id="scene_hybrid",
+        prompt="A dense kitchen where a robot should move a bowl onto a shelf",
+        quality_tier=QualityTier.PREMIUM,
+        seed=7,
+        provider_policy="openai_primary",
+        text_backend="hybrid_serial",
+    )
+    assert result["text_backend"] == "hybrid_serial"
+    backend_names = [entry.get("name") for entry in result["backend"]["backends"]]
+    assert "scenesmith" in backend_names
+    assert "sage" in backend_names
+    assert "hybrid_serial" in backend_names
+
+
+def test_generate_text_scene_package_respects_backend_allowlist(monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_BACKEND_ALLOWLIST", "internal")
+    result = generate_text_scene_package(
+        scene_id="scene_backend_allowlist",
+        prompt="A room",
+        quality_tier=QualityTier.STANDARD,
+        seed=1,
+        provider_policy="openai_primary",
+        text_backend="sage",
+    )
+    assert result["text_backend"] == "internal"

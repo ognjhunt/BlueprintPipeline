@@ -34,6 +34,8 @@ main:
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - defaultSourceMode: '${text.lower(default(sys.get_env("DEFAULT_SOURCE_MODE"), "text"))}'
+          - textBackendDefault: '${text.lower(default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage"))}'
+          - textBackendAllowlist: '${text.lower(default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial"))}'
           - textGenRuntime: '${text.lower(default(sys.get_env("TEXT_GEN_RUNTIME"), "vm"))}'
           - textSceneGenJobName: '${default(sys.get_env("TEXT_SCENE_GEN_JOB_NAME"), "text-scene-gen-job")}'
           - textSceneAdapterJobName: '${default(sys.get_env("TEXT_SCENE_ADAPTER_JOB_NAME"), "text-scene-adapter-job")}'
@@ -98,6 +100,13 @@ main:
           - textVmZone: '${default(sys.get_env("TEXT_GEN_VM_ZONE"), "us-east1-c")}'
           - textVmRepoDir: '${default(sys.get_env("TEXT_GEN_VM_REPO_DIR"), "~/BlueprintPipeline")}'
           - textVmTimeoutSeconds: '${int(default(sys.get_env("TEXT_GEN_VM_TIMEOUT_SECONDS"), "2400"))}'
+          - sageRuntimeMode: '${text.lower(default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun"))}'
+          - sageServerUrl: '${default(sys.get_env("SAGE_SERVER_URL"), "")}'
+          - sageTimeoutSeconds: '${default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
+          - scenesmithRuntimeMode: '${text.lower(default(sys.get_env("SCENESMITH_RUNTIME_MODE"), "cloudrun"))}'
+          - scenesmithServerUrl: '${default(sys.get_env("SCENESMITH_SERVER_URL"), "")}'
+          - scenesmithTimeoutSeconds: '${default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
+          - textSageActionDemoEnabled: '${text.lower(default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false"))}'
           - workflowName: "source-orchestrator"
           - startTime: '${time.format(sys.now())}'
           - fallbackUsed: false
@@ -105,6 +114,7 @@ main:
           - cloudrunFallbackCount: 0
           - lockAcquired: false
           - requestSourceMode: "unknown"
+          - requestTextBackend: "sage"
           - qualityTier: "standard"
           - providerPolicy: "openai_primary"
           - errorCode: ""
@@ -223,6 +233,8 @@ main:
             - requestSchemaVersion: '${string(default(map.get(sceneRequest, "schema_version"), ""))}'
             - requestSceneId: '${string(default(map.get(sceneRequest, "scene_id"), ""))}'
             - requestSourceMode: '${text.lower(string(default(map.get(sceneRequest, "source_mode"), defaultSourceMode)))}'
+            - requestTextBackendRaw: '${text.lower(string(default(map.get(sceneRequest, "text_backend"), textBackendDefault)))}'
+            - requestTextBackend: '${if(requestTextBackendRaw == "", textBackendDefault, requestTextBackendRaw)}'
             - primarySourceMode: '${if(requestSourceMode == "auto", "text", requestSourceMode)}'
             - qualityTier: '${text.lower(string(default(map.get(sceneRequest, "quality_tier"), "standard")))}'
             - providerPolicy: '${string(default(map.get(sceneRequest, "provider_policy"), "openai_primary"))}'
@@ -256,6 +268,10 @@ main:
           - condition: '${requestSceneId == "" or requestSceneId != sceneId}'
             next: invalid_request
           - condition: '${requestSourceMode != "text" and requestSourceMode != "image" and requestSourceMode != "auto"}'
+            next: invalid_request
+          - condition: '${requestSourceMode != "image" and (requestTextBackend != "internal" and requestTextBackend != "scenesmith" and requestTextBackend != "sage" and requestTextBackend != "hybrid_serial")}'
+            next: invalid_request
+          - condition: '${requestSourceMode != "image" and not(text.match_regex("," + textBackendAllowlist + ",", ".*," + requestTextBackend + ",.*"))}'
             next: invalid_request
           - condition: '${qualityTier != "standard" and qualityTier != "premium"}'
             next: invalid_request
@@ -324,6 +340,7 @@ main:
             "status": "completed",
             "source_type": "image",
             "requested_source_mode": requestSourceMode,
+            "requested_text_backend": requestTextBackend,
             "seed_count": seedCount,
             "fallback_used": false,
             "text_gen_runtime": textGenRuntime,
@@ -398,6 +415,7 @@ main:
                     "schema_version": "v1",
                     "scene_id": childSceneId,
                     "source_mode": "text",
+                    "text_backend": requestTextBackend,
                     "prompt": prompt,
                     "quality_tier": qualityTier,
                     "seed_count": 1,
@@ -559,6 +577,7 @@ main:
             "status": "completed",
             "source_type": "image_fallback",
             "requested_source_mode": requestSourceMode,
+            "requested_text_backend": requestTextBackend,
             "seed_count": seedCount,
             "completed_variants": completedVariants,
             "fallback_used": true,
@@ -597,7 +616,7 @@ main:
 
     - write_variants_index_object:
         assign:
-          - variantsIndexJson: '${"{\"schema_version\":\"v1\",\"scene_id\":\"" + sceneId + "\",\"source_mode\":\"" + requestSourceMode + "\",\"quality_tier\":\"" + qualityTier + "\",\"provider_policy\":\"" + providerPolicy + "\",\"seed_count\":" + string(seedCount) + ",\"variants\":[" + variantsEntriesJson + "]}"}'
+          - variantsIndexJson: '${"{\"schema_version\":\"v1\",\"scene_id\":\"" + sceneId + "\",\"source_mode\":\"" + requestSourceMode + "\",\"text_backend\":\"" + requestTextBackend + "\",\"quality_tier\":\"" + qualityTier + "\",\"provider_policy\":\"" + providerPolicy + "\",\"seed_count\":" + string(seedCount) + ",\"variants\":[" + variantsEntriesJson + "]}"}'
         next: upload_variants_index
 
     - upload_variants_index:
@@ -620,6 +639,7 @@ main:
             "status": "completed",
             "source_type": "text",
             "requested_source_mode": requestSourceMode,
+            "requested_text_backend": requestTextBackend,
             "quality_tier": qualityTier,
             "provider_policy": providerPolicy,
             "seed_count": seedCount,
@@ -658,6 +678,7 @@ main:
               input_object: ${object}
               input_generation: ${objectGeneration}
               source_mode: ${requestSourceMode}
+              text_backend: ${requestTextBackend}
               failed_stage: ${failedStage}
               error:
                 code: ${errorCode}
@@ -1298,6 +1319,24 @@ run_text_jobs_on_cloudrun:
               value: ${textGenLlmRetryBackoffSeconds}
             - name: TEXT_GEN_RUNTIME
               value: "cloudrun"
+            - name: TEXT_BACKEND_DEFAULT
+              value: '${default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage")}'
+            - name: TEXT_BACKEND_ALLOWLIST
+              value: '${default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
+            - name: SAGE_RUNTIME_MODE
+              value: '${default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun")}'
+            - name: SAGE_SERVER_URL
+              value: '${default(sys.get_env("SAGE_SERVER_URL"), "")}'
+            - name: SAGE_TIMEOUT_SECONDS
+              value: '${default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
+            - name: SCENESMITH_RUNTIME_MODE
+              value: '${default(sys.get_env("SCENESMITH_RUNTIME_MODE"), "cloudrun")}'
+            - name: SCENESMITH_SERVER_URL
+              value: '${default(sys.get_env("SCENESMITH_SERVER_URL"), "")}'
+            - name: SCENESMITH_TIMEOUT_SECONDS
+              value: '${default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
+            - name: TEXT_SAGE_ACTION_DEMO_ENABLED
+              value: '${default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false")}'
         result: textGenStatus
         next: run_text_adapter_job
 
@@ -1450,6 +1489,15 @@ run_text_jobs_on_vm:
                     - '${"TEXT_GEN_USE_LLM=" + textGenUseLlm}'
                     - '${"TEXT_GEN_LLM_MAX_ATTEMPTS=" + textGenLlmMaxAttempts}'
                     - '${"TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=" + textGenLlmRetryBackoffSeconds}'
+                    - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage")}'
+                    - '${"TEXT_BACKEND_ALLOWLIST=" + default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
+                    - '${"SAGE_RUNTIME_MODE=" + default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun")}'
+                    - '${"SAGE_SERVER_URL=" + default(sys.get_env("SAGE_SERVER_URL"), "")}'
+                    - '${"SAGE_TIMEOUT_SECONDS=" + default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
+                    - '${"SCENESMITH_RUNTIME_MODE=" + default(sys.get_env("SCENESMITH_RUNTIME_MODE"), "cloudrun")}'
+                    - '${"SCENESMITH_SERVER_URL=" + default(sys.get_env("SCENESMITH_SERVER_URL"), "")}'
+                    - '${"SCENESMITH_TIMEOUT_SECONDS=" + default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
+                    - '${"TEXT_SAGE_ACTION_DEMO_ENABLED=" + default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false")}'
                     - '${"TEXT_ASSET_RETRIEVAL_ENABLED=" + textAssetRetrievalEnabled}'
                     - '${"TEXT_ASSET_LIBRARY_PREFIXES=" + textAssetLibraryPrefixes}'
                     - '${"TEXT_ASSET_LIBRARY_MAX_FILES=" + textAssetLibraryMaxFiles}'
@@ -1514,6 +1562,15 @@ run_text_jobs_on_vm:
                       TEXT_GEN_USE_LLM_Q=$(printf '%q' "${TEXT_GEN_USE_LLM}")
                       TEXT_GEN_LLM_MAX_ATTEMPTS_Q=$(printf '%q' "${TEXT_GEN_LLM_MAX_ATTEMPTS}")
                       TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q=$(printf '%q' "${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS}")
+                      TEXT_BACKEND_DEFAULT_Q=$(printf '%q' "${TEXT_BACKEND_DEFAULT}")
+                      TEXT_BACKEND_ALLOWLIST_Q=$(printf '%q' "${TEXT_BACKEND_ALLOWLIST}")
+                      SAGE_RUNTIME_MODE_Q=$(printf '%q' "${SAGE_RUNTIME_MODE}")
+                      SAGE_SERVER_URL_Q=$(printf '%q' "${SAGE_SERVER_URL}")
+                      SAGE_TIMEOUT_SECONDS_Q=$(printf '%q' "${SAGE_TIMEOUT_SECONDS}")
+                      SCENESMITH_RUNTIME_MODE_Q=$(printf '%q' "${SCENESMITH_RUNTIME_MODE}")
+                      SCENESMITH_SERVER_URL_Q=$(printf '%q' "${SCENESMITH_SERVER_URL}")
+                      SCENESMITH_TIMEOUT_SECONDS_Q=$(printf '%q' "${SCENESMITH_TIMEOUT_SECONDS}")
+                      TEXT_SAGE_ACTION_DEMO_ENABLED_Q=$(printf '%q' "${TEXT_SAGE_ACTION_DEMO_ENABLED}")
                       TEXT_ASSET_RETRIEVAL_ENABLED_Q=$(printf '%q' "${TEXT_ASSET_RETRIEVAL_ENABLED}")
                       TEXT_ASSET_LIBRARY_PREFIXES_Q=$(printf '%q' "${TEXT_ASSET_LIBRARY_PREFIXES}")
                       TEXT_ASSET_LIBRARY_MAX_FILES_Q=$(printf '%q' "${TEXT_ASSET_LIBRARY_MAX_FILES}")
@@ -1563,7 +1620,7 @@ run_text_jobs_on_vm:
                       LAYOUT_PREFIX_Q=$(printf '%q' "${LAYOUT_PREFIX}")
                       SEG_PREFIX_Q=$(printf '%q' "${SEG_PREFIX}")
 
-                      REMOTE_CMD="cd ${VM_REPO_DIR} && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} TEXT_SEED=${TEXT_SEED_Q} DEFAULT_SOURCE_MODE=text TEXT_GEN_MAX_SEEDS=${TEXT_GEN_MAX_SEEDS_Q} TEXT_GEN_STANDARD_PROFILE=${TEXT_GEN_STANDARD_PROFILE_Q} TEXT_GEN_PREMIUM_PROFILE=${TEXT_GEN_PREMIUM_PROFILE_Q} TEXT_GEN_USE_LLM=${TEXT_GEN_USE_LLM_Q} TEXT_GEN_LLM_MAX_ATTEMPTS=${TEXT_GEN_LLM_MAX_ATTEMPTS_Q} TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q} TEXT_GEN_RUNTIME=vm python text-scene-gen-job/generate_text_scene.py && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} ASSETS_PREFIX=${ASSETS_PREFIX_Q} LAYOUT_PREFIX=${LAYOUT_PREFIX_Q} SEG_PREFIX=${SEG_PREFIX_Q} TEXT_ASSET_RETRIEVAL_ENABLED=${TEXT_ASSET_RETRIEVAL_ENABLED_Q} TEXT_ASSET_LIBRARY_PREFIXES=${TEXT_ASSET_LIBRARY_PREFIXES_Q} TEXT_ASSET_LIBRARY_MAX_FILES=${TEXT_ASSET_LIBRARY_MAX_FILES_Q} TEXT_ASSET_LIBRARY_MIN_SCORE=${TEXT_ASSET_LIBRARY_MIN_SCORE_Q} TEXT_ASSET_RETRIEVAL_MODE=${TEXT_ASSET_RETRIEVAL_MODE_Q} TEXT_ASSET_ANN_ENABLED=${TEXT_ASSET_ANN_ENABLED_Q} TEXT_ASSET_ANN_TOP_K=${TEXT_ASSET_ANN_TOP_K_Q} TEXT_ASSET_ANN_MIN_SCORE=${TEXT_ASSET_ANN_MIN_SCORE_Q} TEXT_ASSET_ANN_MAX_RERANK=${TEXT_ASSET_ANN_MAX_RERANK_Q} TEXT_ASSET_ANN_NAMESPACE=${TEXT_ASSET_ANN_NAMESPACE_Q} TEXT_ASSET_LEXICAL_FALLBACK_ENABLED=${TEXT_ASSET_LEXICAL_FALLBACK_ENABLED_Q} TEXT_ASSET_ROLLOUT_STATE_PREFIX=${TEXT_ASSET_ROLLOUT_STATE_PREFIX_Q} TEXT_ASSET_ROLLOUT_MIN_DECISIONS=${TEXT_ASSET_ROLLOUT_MIN_DECISIONS_Q} TEXT_ASSET_ROLLOUT_MIN_HIT_RATE=${TEXT_ASSET_ROLLOUT_MIN_HIT_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE=${TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_P95_MS=${TEXT_ASSET_ROLLOUT_MAX_P95_MS_Q} TEXT_ASSET_EMBEDDING_QUEUE_PREFIX=${TEXT_ASSET_EMBEDDING_QUEUE_PREFIX_Q} TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX=${TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX_Q} TEXT_ASSET_EMBEDDING_FAILED_PREFIX=${TEXT_ASSET_EMBEDDING_FAILED_PREFIX_Q} TEXT_ASSET_EMBEDDING_MODEL=${TEXT_ASSET_EMBEDDING_MODEL_Q} VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER_Q} VECTOR_STORE_PROJECT_ID=${VECTOR_STORE_PROJECT_ID_Q} VECTOR_STORE_LOCATION=${VECTOR_STORE_LOCATION_Q} VECTOR_STORE_NAMESPACE=${VECTOR_STORE_NAMESPACE_Q} VECTOR_STORE_DIMENSION=${VECTOR_STORE_DIMENSION_Q} VERTEX_INDEX_ENDPOINT=${VERTEX_INDEX_ENDPOINT_Q} VERTEX_DEPLOYED_INDEX_ID=${VERTEX_DEPLOYED_INDEX_ID_Q} TEXT_ASSET_CATALOG_ENABLED=${TEXT_ASSET_CATALOG_ENABLED_Q} TEXT_ASSET_REPLICATION_ENABLED=${TEXT_ASSET_REPLICATION_ENABLED_Q} TEXT_ASSET_REPLICATION_QUEUE_PREFIX=${TEXT_ASSET_REPLICATION_QUEUE_PREFIX_Q} TEXT_ASSET_REPLICATION_TARGET=${TEXT_ASSET_REPLICATION_TARGET_Q} TEXT_ASSET_REPLICATION_TARGET_PREFIX=${TEXT_ASSET_REPLICATION_TARGET_PREFIX_Q} TEXT_ASSET_GENERATION_ENABLED=${TEXT_ASSET_GENERATION_ENABLED_Q} TEXT_ASSET_GENERATION_PROVIDER=${TEXT_ASSET_GENERATION_PROVIDER_Q} TEXT_ASSET_GENERATION_PROVIDER_CHAIN=${TEXT_ASSET_GENERATION_PROVIDER_CHAIN_Q} TEXT_ASSET_GENERATED_CACHE_ENABLED=${TEXT_ASSET_GENERATED_CACHE_ENABLED_Q} TEXT_ASSET_GENERATED_CACHE_PREFIX=${TEXT_ASSET_GENERATED_CACHE_PREFIX_Q} TEXT_SAM3D_API_HOST=${TEXT_SAM3D_API_HOST_Q} TEXT_SAM3D_TEXT_ENDPOINTS=${TEXT_SAM3D_TEXT_ENDPOINTS_Q} TEXT_SAM3D_TIMEOUT_SECONDS=${TEXT_SAM3D_TIMEOUT_SECONDS_Q} TEXT_SAM3D_POLL_SECONDS=${TEXT_SAM3D_POLL_SECONDS_Q} TEXT_HUNYUAN_API_HOST=${TEXT_HUNYUAN_API_HOST_Q} TEXT_HUNYUAN_TEXT_ENDPOINTS=${TEXT_HUNYUAN_TEXT_ENDPOINTS_Q} TEXT_HUNYUAN_TIMEOUT_SECONDS=${TEXT_HUNYUAN_TIMEOUT_SECONDS_Q} TEXT_HUNYUAN_POLL_SECONDS=${TEXT_HUNYUAN_POLL_SECONDS_Q} python text-scene-adapter-job/adapt_text_scene.py"
+                      REMOTE_CMD="cd ${VM_REPO_DIR} && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} TEXT_SEED=${TEXT_SEED_Q} DEFAULT_SOURCE_MODE=text TEXT_GEN_MAX_SEEDS=${TEXT_GEN_MAX_SEEDS_Q} TEXT_GEN_STANDARD_PROFILE=${TEXT_GEN_STANDARD_PROFILE_Q} TEXT_GEN_PREMIUM_PROFILE=${TEXT_GEN_PREMIUM_PROFILE_Q} TEXT_GEN_USE_LLM=${TEXT_GEN_USE_LLM_Q} TEXT_GEN_LLM_MAX_ATTEMPTS=${TEXT_GEN_LLM_MAX_ATTEMPTS_Q} TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q} TEXT_BACKEND_DEFAULT=${TEXT_BACKEND_DEFAULT_Q} TEXT_BACKEND_ALLOWLIST=${TEXT_BACKEND_ALLOWLIST_Q} SAGE_RUNTIME_MODE=${SAGE_RUNTIME_MODE_Q} SAGE_SERVER_URL=${SAGE_SERVER_URL_Q} SAGE_TIMEOUT_SECONDS=${SAGE_TIMEOUT_SECONDS_Q} SCENESMITH_RUNTIME_MODE=${SCENESMITH_RUNTIME_MODE_Q} SCENESMITH_SERVER_URL=${SCENESMITH_SERVER_URL_Q} SCENESMITH_TIMEOUT_SECONDS=${SCENESMITH_TIMEOUT_SECONDS_Q} TEXT_SAGE_ACTION_DEMO_ENABLED=${TEXT_SAGE_ACTION_DEMO_ENABLED_Q} TEXT_GEN_RUNTIME=vm python text-scene-gen-job/generate_text_scene.py && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} ASSETS_PREFIX=${ASSETS_PREFIX_Q} LAYOUT_PREFIX=${LAYOUT_PREFIX_Q} SEG_PREFIX=${SEG_PREFIX_Q} TEXT_ASSET_RETRIEVAL_ENABLED=${TEXT_ASSET_RETRIEVAL_ENABLED_Q} TEXT_ASSET_LIBRARY_PREFIXES=${TEXT_ASSET_LIBRARY_PREFIXES_Q} TEXT_ASSET_LIBRARY_MAX_FILES=${TEXT_ASSET_LIBRARY_MAX_FILES_Q} TEXT_ASSET_LIBRARY_MIN_SCORE=${TEXT_ASSET_LIBRARY_MIN_SCORE_Q} TEXT_ASSET_RETRIEVAL_MODE=${TEXT_ASSET_RETRIEVAL_MODE_Q} TEXT_ASSET_ANN_ENABLED=${TEXT_ASSET_ANN_ENABLED_Q} TEXT_ASSET_ANN_TOP_K=${TEXT_ASSET_ANN_TOP_K_Q} TEXT_ASSET_ANN_MIN_SCORE=${TEXT_ASSET_ANN_MIN_SCORE_Q} TEXT_ASSET_ANN_MAX_RERANK=${TEXT_ASSET_ANN_MAX_RERANK_Q} TEXT_ASSET_ANN_NAMESPACE=${TEXT_ASSET_ANN_NAMESPACE_Q} TEXT_ASSET_LEXICAL_FALLBACK_ENABLED=${TEXT_ASSET_LEXICAL_FALLBACK_ENABLED_Q} TEXT_ASSET_ROLLOUT_STATE_PREFIX=${TEXT_ASSET_ROLLOUT_STATE_PREFIX_Q} TEXT_ASSET_ROLLOUT_MIN_DECISIONS=${TEXT_ASSET_ROLLOUT_MIN_DECISIONS_Q} TEXT_ASSET_ROLLOUT_MIN_HIT_RATE=${TEXT_ASSET_ROLLOUT_MIN_HIT_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE=${TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_P95_MS=${TEXT_ASSET_ROLLOUT_MAX_P95_MS_Q} TEXT_ASSET_EMBEDDING_QUEUE_PREFIX=${TEXT_ASSET_EMBEDDING_QUEUE_PREFIX_Q} TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX=${TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX_Q} TEXT_ASSET_EMBEDDING_FAILED_PREFIX=${TEXT_ASSET_EMBEDDING_FAILED_PREFIX_Q} TEXT_ASSET_EMBEDDING_MODEL=${TEXT_ASSET_EMBEDDING_MODEL_Q} VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER_Q} VECTOR_STORE_PROJECT_ID=${VECTOR_STORE_PROJECT_ID_Q} VECTOR_STORE_LOCATION=${VECTOR_STORE_LOCATION_Q} VECTOR_STORE_NAMESPACE=${VECTOR_STORE_NAMESPACE_Q} VECTOR_STORE_DIMENSION=${VECTOR_STORE_DIMENSION_Q} VERTEX_INDEX_ENDPOINT=${VERTEX_INDEX_ENDPOINT_Q} VERTEX_DEPLOYED_INDEX_ID=${VERTEX_DEPLOYED_INDEX_ID_Q} TEXT_ASSET_CATALOG_ENABLED=${TEXT_ASSET_CATALOG_ENABLED_Q} TEXT_ASSET_REPLICATION_ENABLED=${TEXT_ASSET_REPLICATION_ENABLED_Q} TEXT_ASSET_REPLICATION_QUEUE_PREFIX=${TEXT_ASSET_REPLICATION_QUEUE_PREFIX_Q} TEXT_ASSET_REPLICATION_TARGET=${TEXT_ASSET_REPLICATION_TARGET_Q} TEXT_ASSET_REPLICATION_TARGET_PREFIX=${TEXT_ASSET_REPLICATION_TARGET_PREFIX_Q} TEXT_ASSET_GENERATION_ENABLED=${TEXT_ASSET_GENERATION_ENABLED_Q} TEXT_ASSET_GENERATION_PROVIDER=${TEXT_ASSET_GENERATION_PROVIDER_Q} TEXT_ASSET_GENERATION_PROVIDER_CHAIN=${TEXT_ASSET_GENERATION_PROVIDER_CHAIN_Q} TEXT_ASSET_GENERATED_CACHE_ENABLED=${TEXT_ASSET_GENERATED_CACHE_ENABLED_Q} TEXT_ASSET_GENERATED_CACHE_PREFIX=${TEXT_ASSET_GENERATED_CACHE_PREFIX_Q} TEXT_SAM3D_API_HOST=${TEXT_SAM3D_API_HOST_Q} TEXT_SAM3D_TEXT_ENDPOINTS=${TEXT_SAM3D_TEXT_ENDPOINTS_Q} TEXT_SAM3D_TIMEOUT_SECONDS=${TEXT_SAM3D_TIMEOUT_SECONDS_Q} TEXT_SAM3D_POLL_SECONDS=${TEXT_SAM3D_POLL_SECONDS_Q} TEXT_HUNYUAN_API_HOST=${TEXT_HUNYUAN_API_HOST_Q} TEXT_HUNYUAN_TEXT_ENDPOINTS=${TEXT_HUNYUAN_TEXT_ENDPOINTS_Q} TEXT_HUNYUAN_TIMEOUT_SECONDS=${TEXT_HUNYUAN_TIMEOUT_SECONDS_Q} TEXT_HUNYUAN_POLL_SECONDS=${TEXT_HUNYUAN_POLL_SECONDS_Q} python text-scene-adapter-job/adapt_text_scene.py"
 
                       gcloud compute ssh "${VM_NAME}" \
                         --project="${PROJECT_ID}" \

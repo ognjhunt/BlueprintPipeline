@@ -131,6 +131,13 @@ def _get_env_value(name: str, default: Optional[str] = None) -> Optional[str]:
     return value
 
 
+def _safe_int(raw: Any, default: int) -> int:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 @lru_cache(maxsize=8)
 def _load_secret_value(
     secret_id: str,
@@ -440,6 +447,66 @@ def padded_size(size_m: List[float]) -> List[float]:
 
 # ---------- Generic fallback (used only when Gemini fails) ----------
 
+MATERIAL_CATEGORY_19 = {
+    "metal",
+    "wood",
+    "plastic",
+    "glass",
+    "ceramic",
+    "rubber",
+    "fabric",
+    "paper",
+    "cardboard",
+    "leather",
+    "stone",
+    "concrete",
+    "foam",
+    "liquid",
+    "food",
+    "electronics",
+    "composite",
+    "tile",
+    "organic",
+}
+
+
+def _normalize_material_category_19(raw: Any) -> str:
+    value = str(raw or "").strip().lower().replace(" ", "_")
+    alias_map = {
+        "aluminum": "metal",
+        "steel": "metal",
+        "glassware": "glass",
+        "porcelain": "ceramic",
+        "cloth": "fabric",
+        "textile": "fabric",
+        "wooden": "wood",
+        "plasticity": "plastic",
+        "unknown": "composite",
+        "generic": "composite",
+    }
+    value = alias_map.get(value, value)
+    if value in MATERIAL_CATEGORY_19:
+        return value
+    return "composite"
+
+
+def _physics_v2_fields(physics_cfg: Dict[str, Any], *, default_confidence: str = "low") -> Dict[str, Any]:
+    mass = float(physics_cfg.get("mass_kg", 1.0))
+    material = _normalize_material_category_19(physics_cfg.get("material_name"))
+    confidence = str(physics_cfg.get("confidence", default_confidence)).strip().lower()
+    if confidence not in {"low", "medium", "high"}:
+        confidence = default_confidence
+    return {
+        "material_category_19": material,
+        "mass_kg_range": [
+            round(max(0.001, mass * 0.8), 6),
+            round(max(0.001, mass * 1.2), 6),
+        ],
+        "canonical_orientation_quat": list(physics_cfg.get("canonical_orientation_quat") or [1.0, 0.0, 0.0, 0.0]),
+        "confidence": confidence,
+    }
+
+
 GENERIC_FALLBACK: Dict[str, Any] = {
     # Effective bulk density (includes air gaps); "generic solid-ish household thing"
     "bulk_density_kg_per_m3": 600.0,
@@ -679,6 +746,10 @@ def estimate_default_physics(obj: Dict[str, Any], bounds: Dict[str, Any]) -> Dic
         "rest_offset_m": float(GENERIC_FALLBACK["rest_offset_m"]),
         "surface_roughness": float(GENERIC_FALLBACK["surface_roughness"]),
         "estimation_source": "heuristic_default",
+        "material_category_19": "composite",
+        "mass_kg_range": [round(max(0.001, mass * 0.8), 6), round(max(0.001, mass * 1.2), 6)],
+        "canonical_orientation_quat": [1.0, 0.0, 0.0, 0.0],
+        "confidence": "low",
     }
 
 
@@ -811,6 +882,7 @@ def estimate_deterministic_physics(
 
     notes.append(f"volume={volume:.6f} m^3")
     base["notes"] = " | ".join([note for note in notes if note])
+    base.update(_physics_v2_fields(base, default_confidence="medium"))
 
     return base
 
@@ -1077,7 +1149,7 @@ def get_llm_provider() -> Optional[str]:
 
 
 def load_multiview_images_for_gemini(
-    root: Path, obj: Dict[str, Any], max_views: int = 4
+    root: Path, obj: Dict[str, Any], max_views: int = 6
 ) -> List["Image.Image"]:
     """
     Load multiple view images from the multiview directory for better dimension estimation.
@@ -1653,6 +1725,9 @@ def build_physics_config(
                 )
                 physics_cfg["estimation_source"] = "gemini"
                 physics_cfg["estimation_attempts"] = _attempt + 1
+                physics_cfg.update(_physics_v2_fields(physics_cfg, default_confidence="high"))
+                if bool((obj.get("articulation") or {}).get("required")) and "link_physics" not in physics_cfg:
+                    physics_cfg["link_physics"] = []
                 # Store mesh bounds info for catalog
                 if mesh_bounds:
                     physics_cfg["mesh_bounds"] = {
@@ -1694,6 +1769,9 @@ def build_physics_config(
             "size": mesh_bounds,
             "center": mesh_center or [0.0, 0.0, 0.0],
         }
+    physics_cfg.update(_physics_v2_fields(physics_cfg, default_confidence="medium"))
+    if bool((obj.get("articulation") or {}).get("required")) and "link_physics" not in physics_cfg:
+        physics_cfg["link_physics"] = []
 
     return physics_cfg
 
@@ -2378,6 +2456,15 @@ def prepare_simready_assets_job(
                     gemini_estimated_size = estimate_scale_gemini(
                         client, obj, ref_img, obj_metadata.get("class_name")
                     )
+            multiview_images = load_multiview_images_for_gemini(
+                root,
+                obj,
+                max_views=max(1, _safe_int(_get_env_value("SIMREADY_GEMINI_MAX_VIEWS", "6"), 6)),
+            )
+            if ref_img is None and multiview_images:
+                ref_img = multiview_images[0]
+            if client and multiview_images and gemini_estimated_size is None:
+                gemini_estimated_size = call_gemini_for_dimensions(client, obj, multiview_images)
 
             # Compute bounds using metadata and Gemini estimates
             bounds = compute_bounds(

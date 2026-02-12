@@ -75,6 +75,7 @@ Core fields:
 - `schema_version` (`v1`)
 - `scene_id`
 - `source_mode` (`text` | `image` | `auto`)
+- `text_backend` (`internal` | `scenesmith` | `sage` | `hybrid_serial`) optional; defaults to workflow/backend config
 - `prompt` (required for `text`/`auto`)
 - `quality_tier` (`standard` | `premium`)
 - `seed_count` (>= 1)
@@ -132,6 +133,8 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `WORKFLOW_REGION`: legacy override for workflows that do not yet use primary/secondary routing.
 - `PRIMARY_BUCKET`: default bucket for manual or scheduler-driven workflows (replaces hardcoded bucket names).
 - `DEFAULT_SOURCE_MODE`: source-orchestrator default request mode (`text`, `image`, `auto`). Defaults to `text`.
+- `TEXT_BACKEND_DEFAULT`: default Stage 1 text backend when request omits `text_backend`. Defaults to `sage`.
+- `TEXT_BACKEND_ALLOWLIST`: allowed Stage 1 text backends. Defaults to `internal,scenesmith,sage,hybrid_serial`.
 - `TEXT_GEN_RUNTIME`: source-orchestrator runtime profile hint for text Stage 1 (`vm`, `cloudrun`, etc.). Defaults to `vm`.
 - `TEXT_SCENE_GEN_JOB_NAME`: Stage 1 Cloud Run job name override for text scene generation. Defaults to `text-scene-gen-job`.
 - `TEXT_SCENE_ADAPTER_JOB_NAME`: Stage 1 Cloud Run job name override for text scene adaptation. Defaults to `text-scene-adapter-job`.
@@ -189,6 +192,13 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `TEXT_GEN_VM_ZONE`: VM zone used when `TEXT_GEN_RUNTIME=vm`. Defaults to `us-east1-c`.
 - `TEXT_GEN_VM_REPO_DIR`: repository directory on the VM for text Stage 1 scripts. Defaults to `~/BlueprintPipeline`.
 - `TEXT_GEN_VM_TIMEOUT_SECONDS`: VM text-stage Cloud Build polling timeout. Defaults to `2400`.
+- `SCENESMITH_RUNTIME_MODE`: runtime selector for SceneSmith backend execution metadata (`cloudrun` default).
+- `SCENESMITH_SERVER_URL`: optional SceneSmith server URL used by Stage 1 generation.
+- `SCENESMITH_TIMEOUT_SECONDS`: timeout hint for SceneSmith backend calls (`1800` default).
+- `SAGE_RUNTIME_MODE`: runtime selector for SAGE backend execution metadata (`cloudrun` default).
+- `SAGE_SERVER_URL`: optional SAGE server URL used by Stage 1 generation.
+- `SAGE_TIMEOUT_SECONDS`: timeout hint for SAGE backend calls (`900` default).
+- `TEXT_SAGE_ACTION_DEMO_ENABLED`: emit non-blocking Franka action-demo artifacts under `textgen/sage_actions` (`false` default).
 - `VECTOR_STORE_PROVIDER`: vector database backend (`vertex` default).
 - `VECTOR_STORE_PROJECT_ID`: vector backend project.
 - `VECTOR_STORE_LOCATION`: vector backend location.

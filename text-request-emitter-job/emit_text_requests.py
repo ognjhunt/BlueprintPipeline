@@ -136,6 +136,12 @@ def main() -> int:
         raise ValueError("BUCKET is required")
     state_prefix = os.getenv("TEXT_AUTONOMY_STATE_PREFIX", "automation/text_daily").strip("/")
     provider_policy = os.getenv("TEXT_AUTONOMY_PROVIDER_POLICY", "openai_primary").strip() or "openai_primary"
+    text_backend = os.getenv("TEXT_AUTONOMY_TEXT_BACKEND", "sage").strip().lower() or "sage"
+    if text_backend not in {"internal", "scenesmith", "sage", "hybrid_serial"}:
+        raise ValueError(
+            "TEXT_AUTONOMY_TEXT_BACKEND must be internal|scenesmith|sage|hybrid_serial, "
+            f"got {text_backend!r}"
+        )
     quality_tier = os.getenv("TEXT_AUTONOMY_QUALITY_TIER", "premium").strip().lower() or "premium"
     if quality_tier not in {"standard", "premium"}:
         raise ValueError(f"TEXT_AUTONOMY_QUALITY_TIER must be standard|premium, got {quality_tier!r}")
@@ -227,6 +233,7 @@ def main() -> int:
             "schema_version": "v1",
             "scene_id": scene_id,
             "source_mode": "text",
+            "text_backend": text_backend,
             "prompt": prompt_result.prompt,
             "quality_tier": quality_tier,
             "seed_count": seed_count,
@@ -294,6 +301,7 @@ def main() -> int:
         "run_date": run_date,
         "quota": quota,
         "quality_tier": quality_tier,
+        "text_backend": text_backend,
         "provider_policy": provider_policy,
         "state_object": state_object,
         "emitted_index_object": emitted_index_object,
@@ -305,11 +313,12 @@ def main() -> int:
     _write_json(GCS_ROOT / emit_manifest_object, emit_manifest_payload)
 
     logger.info(
-        "[TEXT-AUTONOMY] emitted_count=%s run_date=%s quota=%s quality_tier=%s provider_policy=%s index=%s",
+        "[TEXT-AUTONOMY] emitted_count=%s run_date=%s quota=%s quality_tier=%s text_backend=%s provider_policy=%s index=%s",
         len(emitted_entries),
         run_date,
         quota,
         quality_tier,
+        text_backend,
         provider_policy,
         emitted_index_object,
     )

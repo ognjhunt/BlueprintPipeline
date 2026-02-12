@@ -3,6 +3,7 @@
 from .request import (
     PipelineSourceMode,
     QualityTier,
+    TextBackend,
     SceneRequestV1,
     SceneRequestImage,
     SceneRequestFallback,
@@ -39,6 +40,7 @@ from .asset_retrieval_rollout import (
 __all__ = [
     "PipelineSourceMode",
     "QualityTier",
+    "TextBackend",
     "SceneRequestV1",
     "SceneRequestImage",
     "SceneRequestFallback",

@@ -93,6 +93,57 @@ def test_text_adapter_builds_canonical_artifacts_and_marker(tmp_path: Path) -> N
     assert marker["marker_type"] == "stage1_complete"
 
 
+def test_text_adapter_maps_backend_source_and_provenance(tmp_path: Path) -> None:
+    scene_id = "scene_text_backend"
+    assets_prefix = f"scenes/{scene_id}/assets"
+    layout_prefix = f"scenes/{scene_id}/layout"
+    seg_prefix = f"scenes/{scene_id}/seg"
+    textgen_payload = {
+        "schema_version": "v1",
+        "scene_id": scene_id,
+        "seed": 1,
+        "quality_tier": "standard",
+        "provider_used": "sage",
+        "text_backend": "hybrid_serial",
+        "backend": {
+            "selected": "hybrid_serial",
+            "backends": [
+                {"name": "scenesmith", "status": "completed"},
+                {"name": "sage", "status": "completed"},
+            ],
+        },
+        "objects": [
+            {
+                "id": "obj_001",
+                "sim_role": "manipulable_object",
+                "transform": {"position": {"x": 0.0, "y": 0.0, "z": 0.0}},
+                "dimensions_est": {"width": 0.1, "height": 0.1, "depth": 0.1},
+                "physics_hints": {"dynamic": True},
+                "articulation": {"required": False},
+            }
+        ],
+    }
+    source_request = {
+        "schema_version": "v1",
+        "scene_id": scene_id,
+        "source_mode": "text",
+        "prompt": "A room",
+    }
+    result = build_manifest_layout_inventory(
+        root=tmp_path,
+        scene_id=scene_id,
+        assets_prefix=assets_prefix,
+        layout_prefix=layout_prefix,
+        seg_prefix=seg_prefix,
+        textgen_payload=textgen_payload,
+        source_request=source_request,
+    )
+    manifest = _load(Path(result["manifest_path"]))
+    assert manifest["metadata"]["source"]["type"] == "text_hybrid_serial"
+    assert manifest["metadata"]["source"]["text_backend"] == "hybrid_serial"
+    assert len(manifest["metadata"]["provenance"]["backends"]) == 2
+
+
 def _base_source_request(scene_id: str = "scene_adapter") -> dict:
     return {
         "schema_version": "v1",
@@ -590,3 +641,125 @@ def test_adapter_enqueues_embedding_queue_after_catalog_publish(tmp_path: Path, 
     assert payload["schema_version"] == "v1"
     assert payload["scene_id"] == scene_id
     assert payload["assets"][0]["asset_id"] == f"text::{scene_id}::obj_001"
+
+
+def test_adapter_propagates_layout_and_stage_fields(tmp_path: Path, monkeypatch) -> None:
+    scene_id = "scene_layout_stage"
+    monkeypatch.setenv("TEXT_ASSET_VALIDATION_ENABLED", "false")
+
+    textgen_payload = {
+        "schema_version": "v1",
+        "scene_id": scene_id,
+        "seed": 3,
+        "quality_tier": "standard",
+        "provider_used": "openai",
+        "text_backend": "internal",
+        "layout_plan": {
+            "room_box": {"min": [-3.5, 0.0, -2.9], "max": [3.5, 3.1, 2.9]},
+            "wall_thickness_m": 0.14,
+            "openings": [
+                {
+                    "id": "opening_door_main",
+                    "type": "door",
+                    "wall": "south",
+                    "center": [0.0, 0.0, -2.9],
+                    "width_m": 0.9,
+                    "height_m": 2.05,
+                }
+            ],
+        },
+        "objects": [
+            {
+                "id": "obj_001",
+                "name": "counter",
+                "category": "counter",
+                "sim_role": "static",
+                "placement_stage": "furniture",
+                "transform": {"position": {"x": 0.0, "y": 0.0, "z": 0.0}},
+            },
+            {
+                "id": "obj_002",
+                "name": "mug",
+                "category": "mug",
+                "sim_role": "manipulable_object",
+                "placement_stage": "manipulands",
+                "parent_support_id": "obj_001",
+                "surface_local_se2": {"x": 0.02, "z": -0.01, "yaw_rad": 0.0},
+                "transform": {"position": {"x": 0.02, "y": 0.9, "z": -0.01}},
+            },
+        ],
+    }
+
+    result = build_manifest_layout_inventory(
+        root=tmp_path,
+        scene_id=scene_id,
+        assets_prefix=f"scenes/{scene_id}/assets",
+        layout_prefix=f"scenes/{scene_id}/layout",
+        seg_prefix=f"scenes/{scene_id}/seg",
+        textgen_payload=textgen_payload,
+        source_request=_base_source_request(scene_id),
+    )
+
+    layout = _load(Path(result["layout_path"]))
+    manifest = _load(Path(result["manifest_path"]))
+    inventory = _load(Path(result["inventory_path"]))
+
+    assert layout["room_box"]["min"] == [-3.5, 0.0, -2.9]
+    assert layout["room_box"]["max"] == [3.5, 3.1, 2.9]
+    assert layout["wall_thickness_m"] == 0.14
+    assert isinstance(layout["openings"], list) and len(layout["openings"]) == 1
+
+    manifest_obj = [o for o in manifest["objects"] if o["id"] == "obj_002"][0]
+    assert manifest_obj["placement_stage"] == "manipulands"
+    assert manifest_obj["parent_support_id"] == "obj_001"
+    assert manifest_obj["surface_local_se2"]["x"] == 0.02
+    assert isinstance(manifest_obj["asset_validation"], dict)
+
+    inventory_obj = [o for o in inventory["objects"] if o["id"] == "obj_002"][0]
+    assert inventory_obj["placement_stage"] == "manipulands"
+    assert inventory_obj["parent_support_id"] == "obj_001"
+
+
+def test_adapter_asset_validation_soft_repair_falls_back_to_placeholder(tmp_path: Path, monkeypatch) -> None:
+    scene_id = "scene_validation_repair"
+    monkeypatch.setenv("TEXT_ASSET_RETRIEVAL_ENABLED", "false")
+    monkeypatch.setenv("TEXT_ASSET_GENERATION_ENABLED", "true")
+    monkeypatch.setenv("TEXT_ASSET_VALIDATION_ENABLED", "true")
+
+    def _fake_generate_asset_with_provider(*, root: Path, obj: dict, obj_dir: Path):
+        bundle = obj_dir / "generated_asset"
+        bundle.mkdir(parents=True, exist_ok=True)
+        (bundle / "model.glb").write_bytes(b"fake-glb")
+        return {
+            "reference_rel": "generated_asset/model.glb",
+            "source_path": "asset-library/generated-text/unmatched+bundle/model.glb",
+            "source_kind": "generated_sam3d",
+            "model_or_library": "sam3d_text_to_3d",
+        }
+
+    monkeypatch.setattr(adapter_mod, "_generate_asset_with_provider", _fake_generate_asset_with_provider)
+
+    result = _run_adapter(
+        tmp_path,
+        scene_id,
+        [
+            {
+                "id": "obj_001",
+                "name": "mug",
+                "category": "mug",
+                "sim_role": "manipulable_object",
+                "asset_strategy": "generated",
+                "dimensions_est": {"width": 1.2, "height": 0.05, "depth": 0.06},
+            }
+        ],
+    )
+
+    manifest = _load(Path(result["manifest_path"]))
+    obj = manifest["objects"][0]
+    assert obj["asset_validation"]["soft_repair_applied"] is True
+    assert obj["asset_validation"]["status"] == "pass"
+    assert obj["asset_validation"]["passed"] is True
+
+    provenance = manifest["metadata"]["provenance"]["assets"][0]
+    assert provenance["materialization"] == "placeholder_usd"
+    assert provenance["fallback_reason"] == "asset_validation_soft_repair"

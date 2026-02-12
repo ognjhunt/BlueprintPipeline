@@ -197,3 +197,136 @@ def test_rollout_promotes_to_ann_primary_after_passing_windows(tmp_path: Path, m
         update_rollout_state(root=tmp_path, decisions=list(window))
 
     assert effective_retrieval_mode(tmp_path) == "ann_primary"
+
+
+def test_ann_clip_rerank_populates_clip_scores(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_ASSET_ANN_ENABLED", "true")
+    monkeypatch.setenv("TEXT_ASSET_ANN_MIN_SCORE", "0.1")
+    monkeypatch.setenv("TEXT_ASSET_CLIP_RERANK_ENABLED", "true")
+
+    plain_path = tmp_path / "asset-library" / "kitchen" / "mug_plain.usd"
+    ceramic_path = tmp_path / "asset-library" / "kitchen" / "mug_ceramic.usd"
+    _write_usd(plain_path)
+    _write_usd(ceramic_path)
+
+    vector_client = VectorStoreClient(VectorStoreConfig(provider="in-memory", collection="assets-v1"))
+    vector_client.upsert(
+        [
+            VectorRecord(
+                id="asset-plain:text",
+                embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+                metadata={
+                    "asset_id": "asset-plain",
+                    "usd_path": "asset-library/kitchen/mug_plain.usd",
+                    "class_name": "mug",
+                    "description": "plain travel mug",
+                    "sim_roles": ["manipulable_object"],
+                    "dimensions": {"width": 0.08, "height": 0.1, "depth": 0.08},
+                },
+            ),
+            VectorRecord(
+                id="asset-ceramic:text",
+                embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+                metadata={
+                    "asset_id": "asset-ceramic",
+                    "usd_path": "asset-library/kitchen/mug_ceramic.usd",
+                    "class_name": "ceramic_mug",
+                    "description": "ceramic stoneware mug",
+                    "sim_roles": ["manipulable_object"],
+                    "dimensions": {"width": 0.08, "height": 0.1, "depth": 0.08},
+                },
+            ),
+        ],
+        namespace="assets-v1",
+    )
+
+    service = AssetRetrievalService(root=tmp_path, retrieval_mode="ann_primary")
+    monkeypatch.setattr(service, "_vector_store", lambda: vector_client)
+    monkeypatch.setattr(service, "_embed_query", lambda _: np.array([1.0, 0.0, 0.0], dtype=np.float32))
+
+    decision = service.select_asset(
+        scene_id="scene_clip",
+        room_type="kitchen",
+        obj={
+            "id": "obj_clip",
+            "name": "mug",
+            "category": "mug",
+            "description": "ceramic stoneware mug next to sink",
+            "sim_role": "manipulable_object",
+            "dimensions_est": {"width": 0.08, "height": 0.1, "depth": 0.08},
+        },
+        library_entries=[],
+        used_paths=set(),
+        lexical_selector=_lexical_none,
+    )
+
+    assert decision.method == "ann"
+    assert decision.selected is not None
+    assert decision.selected.clip_score >= 0.1
+    assert decision.ann_candidate_count == 2
+    assert decision.ann_top_candidate is not None
+    assert decision.ann_top_candidate.clip_score > 0.0
+
+
+def test_ann_articulated_priority_prefers_articulated_candidate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_ASSET_ANN_ENABLED", "true")
+    monkeypatch.setenv("TEXT_ASSET_ANN_MIN_SCORE", "0.1")
+    monkeypatch.setenv("TEXT_ASSET_CLIP_RERANK_ENABLED", "true")
+    monkeypatch.setenv("TEXT_ASSET_ARTICULATED_PRIORITY_ENABLED", "true")
+
+    articulated_path = tmp_path / "asset-library" / "kitchen" / "cabinet_articulated.usd"
+    static_path = tmp_path / "asset-library" / "kitchen" / "cabinet_static.usd"
+    _write_usd(articulated_path)
+    _write_usd(static_path)
+
+    vector_client = VectorStoreClient(VectorStoreConfig(provider="in-memory", collection="assets-v1"))
+    vector_client.upsert(
+        [
+            VectorRecord(
+                id="asset-art:text",
+                embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+                metadata={
+                    "asset_id": "asset-art",
+                    "usd_path": "asset-library/kitchen/cabinet_articulated.usd",
+                    "class_name": "cabinet",
+                    "sim_roles": ["articulated_furniture"],
+                    "dimensions": {"width": 0.9, "height": 1.8, "depth": 0.5},
+                },
+            ),
+            VectorRecord(
+                id="asset-static:text",
+                embedding=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+                metadata={
+                    "asset_id": "asset-static",
+                    "usd_path": "asset-library/kitchen/cabinet_static.usd",
+                    "class_name": "cabinet",
+                    "sim_roles": ["static"],
+                    "dimensions": {"width": 0.9, "height": 1.8, "depth": 0.5},
+                },
+            ),
+        ],
+        namespace="assets-v1",
+    )
+
+    service = AssetRetrievalService(root=tmp_path, retrieval_mode="ann_primary")
+    monkeypatch.setattr(service, "_vector_store", lambda: vector_client)
+    monkeypatch.setattr(service, "_embed_query", lambda _: np.array([1.0, 0.0, 0.0], dtype=np.float32))
+
+    decision = service.select_asset(
+        scene_id="scene_art_priority",
+        room_type="kitchen",
+        obj={
+            "id": "obj_cabinet",
+            "name": "cabinet",
+            "category": "cabinet",
+            "sim_role": "articulated_furniture",
+            "dimensions_est": {"width": 0.9, "height": 1.8, "depth": 0.5},
+        },
+        library_entries=[],
+        used_paths=set(),
+        lexical_selector=_lexical_none,
+    )
+
+    assert decision.method == "ann"
+    assert decision.selected is not None
+    assert decision.selected.path_rel == "asset-library/kitchen/cabinet_articulated.usd"

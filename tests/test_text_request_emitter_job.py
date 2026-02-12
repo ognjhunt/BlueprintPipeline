@@ -33,6 +33,7 @@ def test_text_request_emitter_emits_scene_request_and_updates_state(tmp_path: Pa
     monkeypatch.setenv("TEXT_AUTONOMY_RUN_DATE", "2026-02-11")
     monkeypatch.setenv("TEXT_DAILY_QUOTA", "1")
     monkeypatch.setenv("TEXT_AUTONOMY_PROVIDER_POLICY", "openai_primary")
+    monkeypatch.setenv("TEXT_AUTONOMY_TEXT_BACKEND", "sage")
     monkeypatch.setenv("TEXT_AUTONOMY_QUALITY_TIER", "premium")
     monkeypatch.setenv("TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK", "false")
     monkeypatch.setenv("TEXT_AUTONOMY_SEED_COUNT", "1")
@@ -53,6 +54,7 @@ def test_text_request_emitter_emits_scene_request_and_updates_state(tmp_path: Pa
     assert request["schema_version"] == "v1"
     assert request["scene_id"] == scene_id
     assert request["source_mode"] == "text"
+    assert request["text_backend"] == "sage"
     assert request["quality_tier"] == "premium"
     assert request["provider_policy"] == "openai_primary"
     assert request["seed_count"] == 1

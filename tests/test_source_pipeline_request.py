@@ -5,6 +5,7 @@ import pytest
 from tools.source_pipeline.request import (
     PipelineSourceMode,
     QualityTier,
+    TextBackend,
     build_seed_scene_ids,
     build_variants_index,
     choose_primary_source_mode,
@@ -24,6 +25,7 @@ def test_normalize_scene_request_defaults_to_text_standard() -> None:
     )
 
     assert request.source_mode == PipelineSourceMode.TEXT
+    assert request.text_backend == TextBackend.SAGE
     assert request.quality_tier == QualityTier.STANDARD
     assert request.seed_count == 1
     assert request.provider_policy == "openai_primary"
@@ -59,6 +61,32 @@ def test_normalize_scene_request_rejects_missing_image_for_image_mode() -> None:
                 "source_mode": "image",
             }
         )
+
+
+def test_normalize_scene_request_accepts_text_backend() -> None:
+    request = normalize_scene_request(
+        {
+            "schema_version": "v1",
+            "scene_id": "scene_123",
+            "source_mode": "text",
+            "text_backend": "hybrid_serial",
+            "prompt": "A warehouse aisle",
+        }
+    )
+    assert request.text_backend == TextBackend.HYBRID_SERIAL
+
+
+def test_normalize_scene_request_image_mode_ignores_invalid_text_backend() -> None:
+    request = normalize_scene_request(
+        {
+            "schema_version": "v1",
+            "scene_id": "scene_img",
+            "source_mode": "image",
+            "text_backend": "invalid_backend",
+            "image": {"gcs_uri": "gs://bucket/scenes/scene_img/images/input.png"},
+        }
+    )
+    assert request.text_backend == TextBackend.SAGE
 
 
 def test_build_seed_scene_ids_uses_stable_suffixes() -> None:
@@ -137,6 +165,7 @@ def test_build_variants_index_structure() -> None:
     assert index["schema_version"] == "v1"
     assert index["scene_id"] == "scene_v"
     assert index["source_mode"] == "text"
+    assert index["text_backend"] == "sage"
     assert index["seed_count"] == 3
     assert len(index["variants"]) == 3
     assert index["variants"][0] == {"scene_id": "scene_v-s001", "seed": 1}
@@ -161,6 +190,7 @@ def test_scene_request_to_dict_roundtrip() -> None:
     assert serialized["schema_version"] == "v1"
     assert serialized["scene_id"] == "scene_rt"
     assert serialized["source_mode"] == "text"
+    assert serialized["text_backend"] == "sage"
     assert serialized["prompt"] == "A lab bench"
     assert serialized["quality_tier"] == "premium"
     assert serialized["seed_count"] == 2

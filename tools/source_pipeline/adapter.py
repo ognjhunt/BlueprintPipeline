@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -12,6 +13,9 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
+logger = logging.getLogger(__name__)
+
+from .asset_validation import is_validation_enabled, should_soft_repair, validate_asset_candidate
 from .asset_retrieval import AssetRetrievalService
 from .asset_retrieval_rollout import effective_retrieval_mode, update_rollout_state
 
@@ -91,6 +95,48 @@ def Xform "Root" (
     prepend references = @{ref}@
 )
 {{
+}}
+'''
+    path.write_text(payload, encoding="utf-8")
+
+
+_THIN_COVERING_CATEGORIES = frozenset({
+    "rug", "mat", "poster", "painting", "curtain", "tablecloth",
+    "placemat", "coaster", "doormat", "bathmat", "tapestry",
+    "wall_art", "floor_mat", "mousepad",
+})
+
+
+def _is_thin_covering(obj: Mapping[str, Any]) -> bool:
+    """Return True if *obj* should be materialised as a flat textured quad."""
+    cat = str(obj.get("category") or "").lower().replace(" ", "_")
+    name = str(obj.get("name") or "").lower().replace(" ", "_")
+    return cat in _THIN_COVERING_CATEGORIES or name in _THIN_COVERING_CATEGORIES
+
+
+def _write_thin_covering_usd(path: Path, *, dims: Mapping[str, float]) -> None:
+    """Write a flat quad USD — thin covering for rugs, posters, mats, etc."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    hw = round(float(dims.get("width", 1.0)) / 2, 6)
+    hd = round(float(dims.get("depth", 1.0)) / 2, 6)
+    thickness = 0.005  # 5 mm
+    payload = f'''#usda 1.0
+(
+    defaultPrim = "Root"
+)
+
+def Xform "Root"
+{{
+    def Mesh "Geom"
+    {{
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [({-hw}, 0, {-hd}), ({hw}, 0, {-hd}), ({hw}, {thickness}, {hd}), ({-hw}, {thickness}, {hd})]
+        normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+    }}
 }}
 '''
     path.write_text(payload, encoding="utf-8")
@@ -739,6 +785,15 @@ def _object_transform_to_layout(obj: Mapping[str, Any]) -> Dict[str, Any]:
         "center3d": center3d,
     }
 
+    if obj.get("placement_stage") is not None:
+        layout_obj["placement_stage"] = str(obj.get("placement_stage"))
+    if obj.get("parent_support_id") is not None:
+        layout_obj["parent_support_id"] = str(obj.get("parent_support_id"))
+    if isinstance(obj.get("surface_local_se2"), Mapping):
+        layout_obj["surface_local_se2"] = dict(obj.get("surface_local_se2") or {})
+    if isinstance(obj.get("asset_validation"), Mapping):
+        layout_obj["asset_validation"] = dict(obj.get("asset_validation") or {})
+
     if "rotation_quaternion" in transform and isinstance(transform["rotation_quaternion"], Mapping):
         quat = transform["rotation_quaternion"]
         layout_obj["rotation_quaternion"] = {
@@ -780,6 +835,7 @@ def materialize_placeholder_assets(
     ann_attempted = 0
     ann_errors = 0
     ann_candidates = 0
+    validation_enabled = is_validation_enabled()
 
     for obj in objects:
         oid = str(obj.get("id") or "")
@@ -791,6 +847,31 @@ def materialize_placeholder_assets(
         dims = _dims_for_object(obj)
         model_path = obj_dir / "model.usd"
         metadata_path = obj_dir / "metadata.json"
+
+        # Fast-path: thin coverings (rugs, posters, mats) get a flat quad
+        # instead of a full 3D retrieval/generation round-trip.
+        if _is_thin_covering(obj):
+            _write_thin_covering_usd(model_path, dims=dims)
+            _materialize_metadata(
+                metadata_path,
+                obj=obj,
+                dims=dims,
+                source_kind="thin_covering_usd",
+            )
+            provenance_assets.append({
+                "object_id": oid,
+                "strategy": "generated",
+                "source_type": "generated",
+                "model_or_library": "thin_covering",
+                "materialization": "thin_covering_usd",
+                "source_path": "",
+                "retrieval_method": "thin_covering",
+                "semantic_score": None,
+                "lexical_score": None,
+                "fallback_reason": None,
+                "validation": {"passed": True, "status": "pass", "source_kind": "thin_covering_usd"},
+            })
+            continue
 
         decision = retrieval_service.select_asset(
             scene_id=scene_id,
@@ -867,6 +948,40 @@ def materialize_placeholder_assets(
                 lexical_score = decision.lexical_score
                 fallback_reason = decision.fallback_reason or "retrieval_miss_placeholder"
 
+        validation = validate_asset_candidate(
+            obj=obj,
+            source_kind=materialization,
+            source_path=source_path_hint,
+            room_type=room_type,
+        )
+        if validation_enabled and should_soft_repair(validation) and materialization != "placeholder_usd":
+            _write_placeholder_model_usd(model_path, dims=dims)
+            _materialize_metadata(
+                metadata_path,
+                obj=obj,
+                dims=dims,
+                source_kind="placeholder_usd",
+            )
+            source_type = "generated"
+            model_or_library = "textgen_placeholder"
+            materialization = "placeholder_usd"
+            source_path_hint = ""
+            fallback_reason = "asset_validation_soft_repair"
+            validation = dict(validation)
+            validation["soft_repair_applied"] = True
+            validation["passed"] = True
+            validation["status"] = "pass"
+
+        obj["asset_validation"] = validation
+        if obj.get("placement_stage") is None:
+            obj["placement_stage"] = (
+                "manipulands" if str(obj.get("sim_role") or "").strip().lower() == "manipulable_object" else "furniture"
+            )
+        if obj.get("parent_support_id") is None and str(obj.get("sim_role") or "").strip().lower() == "manipulable_object":
+            obj["parent_support_id"] = "room_floor"
+        if obj.get("surface_local_se2") is None and str(obj.get("sim_role") or "").strip().lower() == "manipulable_object":
+            obj["surface_local_se2"] = {"x": 0.0, "z": 0.0, "yaw_rad": 0.0}
+
         object_files = [
             file_path.relative_to(root).as_posix()
             for file_path in sorted(obj_dir.rglob("*"))
@@ -888,6 +1003,8 @@ def materialize_placeholder_assets(
                 "semantic_score": semantic_score,
                 "lexical_score": lexical_score,
                 "fallback_reason": fallback_reason,
+                "asset_validation_score": validation.get("score"),
+                "asset_validation_passed": bool(validation.get("passed")),
                 "files": object_files,
             }
         )
@@ -1306,7 +1423,16 @@ def _build_manifest(
     quality_tier: str,
     seed: int,
     provenance_assets: List[Dict[str, Any]],
+    text_backend: str,
+    backend_runs: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    source_type_map = {
+        "internal": "text",
+        "sage": "text_sage",
+        "scenesmith": "text_scenesmith",
+        "hybrid_serial": "text_hybrid_serial",
+    }
+    source_type = source_type_map.get(text_backend, "text")
     manifest_objects: List[Dict[str, Any]] = []
 
     for obj in objects:
@@ -1348,10 +1474,11 @@ def _build_manifest(
                 "backend_hint": str((obj.get("articulation") or {}).get("backend_hint", "none")),
             },
             "source": {
-                "type": "text",
+                "type": source_type,
                 "generation_tier": quality_tier,
                 "provider": provider_used,
                 "seed": seed,
+                "text_backend": text_backend,
             },
         }
 
@@ -1368,6 +1495,15 @@ def _build_manifest(
         if isinstance(relationships, list):
             manifest_obj["relationships"] = relationships
 
+        if obj.get("placement_stage") is not None:
+            manifest_obj["placement_stage"] = str(obj.get("placement_stage"))
+        if obj.get("parent_support_id") is not None:
+            manifest_obj["parent_support_id"] = str(obj.get("parent_support_id"))
+        if isinstance(obj.get("surface_local_se2"), Mapping):
+            manifest_obj["surface_local_se2"] = dict(obj.get("surface_local_se2") or {})
+        if isinstance(obj.get("asset_validation"), Mapping):
+            manifest_obj["asset_validation"] = dict(obj.get("asset_validation") or {})
+
         manifest_objects.append(manifest_obj)
 
     return {
@@ -1381,15 +1517,17 @@ def _build_manifest(
         "objects": manifest_objects,
         "metadata": {
             "source": {
-                "type": "text",
+                "type": source_type,
                 "request_id": scene_id,
                 "seed": seed,
                 "provider": provider_used,
                 "generation_tier": quality_tier,
+                "text_backend": text_backend,
             },
             "provenance": {
                 "assets": provenance_assets,
                 "request": source_request,
+                "backends": backend_runs,
             },
             "source_pipeline": "text-scene-adapter-job",
         },
@@ -1400,9 +1538,34 @@ def _build_layout(
     *,
     scene_id: str,
     objects: List[Dict[str, Any]],
+    layout_plan: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     room_min = [-3.0, 0.0, -3.0]
     room_max = [3.0, 3.0, 3.0]
+    wall_thickness_m = 0.12
+    openings: List[Dict[str, Any]] = []
+
+    if isinstance(layout_plan, Mapping):
+        room_box = layout_plan.get("room_box")
+        if isinstance(room_box, Mapping):
+            candidate_min = room_box.get("min")
+            candidate_max = room_box.get("max")
+            if isinstance(candidate_min, list) and len(candidate_min) == 3:
+                room_min = [
+                    _safe_float(candidate_min[0], room_min[0]),
+                    _safe_float(candidate_min[1], room_min[1]),
+                    _safe_float(candidate_min[2], room_min[2]),
+                ]
+            if isinstance(candidate_max, list) and len(candidate_max) == 3:
+                room_max = [
+                    _safe_float(candidate_max[0], room_max[0]),
+                    _safe_float(candidate_max[1], room_max[1]),
+                    _safe_float(candidate_max[2], room_max[2]),
+                ]
+        wall_thickness_m = max(0.06, _safe_float(layout_plan.get("wall_thickness_m"), wall_thickness_m))
+        raw_openings = layout_plan.get("openings")
+        if isinstance(raw_openings, list):
+            openings = [entry for entry in raw_openings if isinstance(entry, Mapping)]
 
     layout_objects = [_object_transform_to_layout(obj) for obj in objects if obj.get("id")]
 
@@ -1413,6 +1576,8 @@ def _build_layout(
             "min": room_min,
             "max": room_max,
         },
+        "wall_thickness_m": round(wall_thickness_m, 4),
+        "openings": openings,
     }
 
 
@@ -1433,6 +1598,9 @@ def _build_inventory(
                 "description": str(obj.get("description") or ""),
                 "asset_strategy": str(obj.get("asset_strategy") or "generated"),
                 "articulation_required": bool((obj.get("articulation") or {}).get("required", False)),
+                "placement_stage": str(obj.get("placement_stage") or ""),
+                "parent_support_id": str(obj.get("parent_support_id") or ""),
+                "asset_validation": dict(obj.get("asset_validation") or {}) if isinstance(obj.get("asset_validation"), Mapping) else {},
             }
             for obj in objects
             if obj.get("id") is not None
@@ -1452,7 +1620,7 @@ def build_manifest_layout_inventory(
 ) -> Dict[str, Any]:
     """Materialize canonical artifacts and compatibility markers from textgen payload."""
 
-    objects = [obj for obj in (textgen_payload.get("objects") or []) if isinstance(obj, Mapping)]
+    objects = [dict(obj) for obj in (textgen_payload.get("objects") or []) if isinstance(obj, Mapping)]
     constraints = source_request.get("constraints") if isinstance(source_request.get("constraints"), Mapping) else {}
     room_type = str(constraints.get("room_type") or "generic").strip()
     retrieval_report: Dict[str, Any] = {}
@@ -1461,7 +1629,7 @@ def build_manifest_layout_inventory(
         root=root,
         scene_id=scene_id,
         assets_prefix=assets_prefix,
-        objects=[dict(obj) for obj in objects],
+        objects=objects,
         room_type=room_type,
         retrieval_report=retrieval_report,
     )
@@ -1469,19 +1637,33 @@ def build_manifest_layout_inventory(
     quality_tier = str(textgen_payload.get("quality_tier") or "standard")
     provider_used = str(textgen_payload.get("provider_used") or "openai")
     seed = int(textgen_payload.get("seed") or 1)
+    text_backend = str(textgen_payload.get("text_backend") or "internal").strip().lower() or "internal"
+    backend_payload = textgen_payload.get("backend")
+    backend_runs_raw = backend_payload.get("backends") if isinstance(backend_payload, Mapping) else None
+    backend_runs = (
+        [dict(item) for item in backend_runs_raw if isinstance(item, Mapping)]
+        if isinstance(backend_runs_raw, list)
+        else []
+    )
 
     manifest = _build_manifest(
         scene_id=scene_id,
-        objects=[dict(obj) for obj in objects],
+        objects=objects,
         assets_prefix=assets_prefix,
         source_request=source_request,
         provider_used=provider_used,
         quality_tier=quality_tier,
         seed=seed,
         provenance_assets=provenance_assets,
+        text_backend=text_backend,
+        backend_runs=backend_runs,
     )
-    layout = _build_layout(scene_id=scene_id, objects=[dict(obj) for obj in objects])
-    inventory = _build_inventory(scene_id=scene_id, objects=[dict(obj) for obj in objects])
+    layout = _build_layout(
+        scene_id=scene_id,
+        objects=objects,
+        layout_plan=textgen_payload.get("layout_plan") if isinstance(textgen_payload.get("layout_plan"), Mapping) else None,
+    )
+    inventory = _build_inventory(scene_id=scene_id, objects=objects)
 
     assets_root = root / assets_prefix
     layout_root = root / layout_prefix
@@ -1542,7 +1724,7 @@ def build_manifest_layout_inventory(
     catalog_status = _publish_assets_to_catalog(
         scene_id=scene_id,
         assets_prefix=assets_prefix,
-        objects=[dict(obj) for obj in objects],
+        objects=objects,
         provenance_assets=provenance_assets,
         source_request=source_request,
         quality_tier=quality_tier,
