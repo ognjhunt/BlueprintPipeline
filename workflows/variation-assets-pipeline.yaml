@@ -59,8 +59,8 @@ main:
           - simreadyTimeoutSeconds: '${int(default(sys.get_env("SIMREADY_TIMEOUT_SECONDS"), "3600"))}'
           - isaacLabJobName: "isaac-lab-job"
           - isaacLabTimeoutSeconds: '${int(default(sys.get_env("ISAAC_LAB_TIMEOUT_SECONDS"), "1800"))}'
-          - enableStage3IsaacRefresh: '${default(map.get(event, "enable_stage3_isaac_refresh"), default(sys.get_env("ENABLE_STAGE3_ISAAC_REFRESH"), "true")) == "true"}'
-          - requireIsaac: '${default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")) == "true"}'
+          - enableStage3IsaacRefresh: '${text.lower(string(default(map.get(event, "enable_stage3_isaac_refresh"), default(sys.get_env("ENABLE_STAGE3_ISAAC_REFRESH"), "true")))) == "true"}'
+          - requireIsaac: '${text.lower(string(default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")))) == "true"}'
         next: log_start
 
     - log_start:

@@ -71,9 +71,9 @@ main:
           - usdJobName: "usd-assembly-job"
           - interactiveJobName: "interactive-job"
           - interactiveFailurePolicy: '${default(map.get(event, "interactive_failure_policy"), default(sys.get_env("INTERACTIVE_FAILURE_POLICY"), "hybrid_strict"))}'
-          - interactiveForceRun: '${default(map.get(event, "interactive_force_run"), default(sys.get_env("INTERACTIVE_FORCE_RUN"), "false")) == "true"}'
-          - requireReplicator: '${default(map.get(event, "require_replicator"), default(sys.get_env("REQUIRE_REPLICATOR"), "true")) == "true"}'
-          - requireIsaac: '${default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")) == "true"}'
+          - interactiveForceRun: '${text.lower(string(default(map.get(event, "interactive_force_run"), default(sys.get_env("INTERACTIVE_FORCE_RUN"), "false")))) == "true"}'
+          - requireReplicator: '${text.lower(string(default(map.get(event, "require_replicator"), default(sys.get_env("REQUIRE_REPLICATOR"), "true")))) == "true"}'
+          - requireIsaac: '${text.lower(string(default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")))) == "true"}'
           # Timeout defaults align with policy_configs/adaptive_timeouts.yaml unless overridden.
           - adaptiveTimeoutConfigPath: "policy_configs/adaptive_timeouts.yaml"
           - convertTimeoutSeconds: 1800

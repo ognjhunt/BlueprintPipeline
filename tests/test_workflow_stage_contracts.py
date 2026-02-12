@@ -28,8 +28,8 @@ def test_usd_assembly_enforces_strict_defaults_and_failure_paths():
     workflow = Path("workflows/usd-assembly-pipeline.yaml").read_text(encoding="utf-8")
 
     assert 'interactiveFailurePolicy: \'${default(map.get(event, "interactive_failure_policy"), default(sys.get_env("INTERACTIVE_FAILURE_POLICY"), "hybrid_strict"))}\'' in workflow
-    assert 'requireReplicator: \'${default(map.get(event, "require_replicator"), default(sys.get_env("REQUIRE_REPLICATOR"), "true")) == "true"}\'' in workflow
-    assert 'requireIsaac: \'${default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")) == "true"}\'' in workflow
+    assert 'requireReplicator: \'${text.lower(string(default(map.get(event, "require_replicator"), default(sys.get_env("REQUIRE_REPLICATOR"), "true")))) == "true"}\'' in workflow
+    assert 'requireIsaac: \'${text.lower(string(default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")))) == "true"}\'' in workflow
     assert "- replicator_failure_policy_switch:" in workflow
     assert "- release_lock_after_required_replicator_failure:" in workflow
     assert "- raise_required_replicator_error:" in workflow
@@ -67,8 +67,8 @@ def test_variation_pipeline_stage3_order_includes_isaac_refresh():
 def test_variation_pipeline_refresh_env_and_markers_contract():
     workflow = Path("workflows/variation-assets-pipeline.yaml").read_text(encoding="utf-8")
 
-    assert 'enableStage3IsaacRefresh: \'${default(map.get(event, "enable_stage3_isaac_refresh"), default(sys.get_env("ENABLE_STAGE3_ISAAC_REFRESH"), "true")) == "true"}\'' in workflow
-    assert 'requireIsaac: \'${default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")) == "true"}\'' in workflow
+    assert 'enableStage3IsaacRefresh: \'${text.lower(string(default(map.get(event, "enable_stage3_isaac_refresh"), default(sys.get_env("ENABLE_STAGE3_ISAAC_REFRESH"), "true")))) == "true"}\'' in workflow
+    assert 'requireIsaac: \'${text.lower(string(default(map.get(event, "require_isaac"), default(sys.get_env("REQUIRE_ISAAC"), "true")))) == "true"}\'' in workflow
     assert "- name: ISAAC_REFRESH_ONLY" in workflow
     assert "- name: VARIATION_ASSETS_PREFIX" in workflow
     assert "- verify_isaac_refresh_marker:" in workflow
@@ -259,6 +259,26 @@ def test_source_orchestrator_stage5_required_enforces_success_status():
     assert 'arenaRequiredStatus == "SUCCESS"' in workflow
     assert "- raise_required_stage5_non_success:" in workflow
     assert "Arena export returned non-success status" in workflow
+
+
+def test_source_orchestrator_legacy_chain_delegates_stage4_stage5():
+    workflow = Path("workflows/source-orchestrator.yaml").read_text(encoding="utf-8")
+
+    assert "- downstream_execution_mode_switch:" in workflow
+    assert '${imagePathMode == "legacy_chain"}' in workflow
+    assert "- delegate_stage4_stage5_to_eventarc:" in workflow
+    assert 'geniesimState: "DELEGATED_TO_EVENTARC"' in workflow
+    assert 'arenaState: "DELEGATED_TO_EVENTARC"' in workflow
+
+
+def test_source_orchestrator_non_blocking_stage5_interprets_result_status():
+    workflow = Path("workflows/source-orchestrator.yaml").read_text(encoding="utf-8")
+
+    assert "- set_non_blocking_arena_status:" in workflow
+    assert "- non_blocking_stage5_status_switch:" in workflow
+    assert 'arenaStatus == "SUCCESS"' in workflow
+    assert 'arenaStatus == "SKIPPED"' in workflow
+    assert "- log_non_blocking_arena_non_success:" in workflow
 
 
 def test_text_autonomy_daily_workflow_contract_has_lock_pause_emit_wait_state():

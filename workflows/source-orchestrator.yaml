@@ -494,6 +494,7 @@ main:
                   bucket: ${bucket}
                   sceneId: ${childSceneId}
                   arenaExportRequired: ${arenaExportRequired}
+                  imagePathMode: ${imagePathMode}
                 result: downstreamStatus
                 next: append_variant_entry
             - append_variant_entry:
@@ -806,11 +807,12 @@ run_workflow_and_wait:
 
 
 run_stage2_to_stage5:
-  params: [projectId, region, bucket, sceneId, arenaExportRequired]
+  params: [projectId, region, bucket, sceneId, arenaExportRequired, imagePathMode]
   steps:
     - derive:
         assign:
           - scenePrefix: '${"scenes/" + sceneId}'
+          - geniesimState: "SKIPPED"
           - arenaState: "SKIPPED"
         next: validate_stage1_outputs
 
@@ -865,7 +867,19 @@ run_stage2_to_stage5:
             enable_stage3_isaac_refresh: true
             require_isaac: true
         result: variationResult
+        next: downstream_execution_mode_switch
+
+    - downstream_execution_mode_switch:
+        switch:
+          - condition: '${imagePathMode == "legacy_chain"}'
+            next: delegate_stage4_stage5_to_eventarc
         next: run_stage4
+
+    - delegate_stage4_stage5_to_eventarc:
+        assign:
+          - geniesimState: "DELEGATED_TO_EVENTARC"
+          - arenaState: "DELEGATED_TO_EVENTARC"
+        next: return_summary
 
     - run_stage4:
         call: run_workflow_and_wait
@@ -879,6 +893,11 @@ run_stage2_to_stage5:
               bucket: ${bucket}
               name: '${scenePrefix + "/variation_assets/.variation_pipeline_complete"}'
         result: geniesimResult
+        next: set_stage4_success
+
+    - set_stage4_success:
+        assign:
+          - geniesimState: "SUCCEEDED"
         next: run_stage5_requirement_switch
 
     - run_stage5_requirement_switch:
@@ -945,11 +964,41 @@ run_stage2_to_stage5:
                 assign:
                   - arenaState: "FAILED"
                 next: return_summary
-        next: set_non_blocking_arena_success
+        next: set_non_blocking_arena_status
+
+    - set_non_blocking_arena_status:
+        assign:
+          - arenaStatus: '${default(map.get(default(arenaResult.result, {}), "status"), "UNKNOWN")}'
+        next: non_blocking_stage5_status_switch
+
+    - non_blocking_stage5_status_switch:
+        switch:
+          - condition: '${arenaStatus == "SUCCESS"}'
+            next: set_non_blocking_arena_success
+          - condition: '${arenaStatus == "SKIPPED"}'
+            next: set_non_blocking_arena_skipped
+        next: log_non_blocking_arena_non_success
 
     - set_non_blocking_arena_success:
         assign:
           - arenaState: "SUCCEEDED"
+        next: return_summary
+
+    - set_non_blocking_arena_skipped:
+        assign:
+          - arenaState: "SKIPPED"
+        next: return_summary
+
+    - log_non_blocking_arena_non_success:
+        call: sys.log
+        args:
+          text: '${"[source-orchestrator] arena export non-blocking returned non-success status for " + sceneId + ": " + arenaStatus}'
+          severity: "WARNING"
+        next: set_non_blocking_arena_failed
+
+    - set_non_blocking_arena_failed:
+        assign:
+          - arenaState: "FAILED"
         next: return_summary
 
     - return_summary:
@@ -957,7 +1006,7 @@ run_stage2_to_stage5:
           scene_id: ${sceneId}
           usd_assembly: "SUCCEEDED"
           variation_assets: "SUCCEEDED"
-          geniesim_export: "SUCCEEDED"
+          geniesim_export: ${geniesimState}
           arena_export: ${arenaState}
           arena_required: ${arenaExportRequired}
 
