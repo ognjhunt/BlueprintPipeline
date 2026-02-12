@@ -33,33 +33,37 @@ main:
           - objectGeneration: '${if(event.data.generation != null, string(event.data.generation), "0")}'
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
-          - defaultSourceMode: '${text.lower(default(sys.get_env("DEFAULT_SOURCE_MODE"), "text"))}'
-          - textBackendDefault: '${text.lower(default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage"))}'
-          - textBackendAllowlist: '${text.lower(default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial"))}'
-          - textGenRuntime: '${text.lower(default(sys.get_env("TEXT_GEN_RUNTIME"), "vm"))}'
+          - defaultSourceMode: '${text.to_lower(default(sys.get_env("DEFAULT_SOURCE_MODE"), "text"))}'
+          - textBackendDefault: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage"))}'
+          - textBackendAllowlist: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial"))}'
+          - textGenRuntime: '${text.to_lower(default(sys.get_env("TEXT_GEN_RUNTIME"), "vm"))}'
           - textSceneGenJobName: '${default(sys.get_env("TEXT_SCENE_GEN_JOB_NAME"), "text-scene-gen-job")}'
           - textSceneAdapterJobName: '${default(sys.get_env("TEXT_SCENE_ADAPTER_JOB_NAME"), "text-scene-adapter-job")}'
           - textGenStandardProfile: '${default(sys.get_env("TEXT_GEN_STANDARD_PROFILE"), "standard_v1")}'
           - textGenPremiumProfile: '${default(sys.get_env("TEXT_GEN_PREMIUM_PROFILE"), "premium_v1")}'
-          - textGenUseLlm: '${text.lower(default(sys.get_env("TEXT_GEN_USE_LLM"), "true"))}'
+          - textGenUseLlm: '${text.to_lower(default(sys.get_env("TEXT_GEN_USE_LLM"), "true"))}'
           - textGenLlmMaxAttempts: '${default(sys.get_env("TEXT_GEN_LLM_MAX_ATTEMPTS"), "3")}'
           - textGenLlmRetryBackoffSeconds: '${default(sys.get_env("TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS"), "2")}'
-          - textAssetRetrievalEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_RETRIEVAL_ENABLED"), "true"))}'
+          - textAssetRetrievalEnabled: '${text.to_lower(default(sys.get_env("TEXT_ASSET_RETRIEVAL_ENABLED"), "true"))}'
           - textAssetLibraryPrefixes: '${default(sys.get_env("TEXT_ASSET_LIBRARY_PREFIXES"), "scenes")}'
           - textAssetLibraryMaxFiles: '${default(sys.get_env("TEXT_ASSET_LIBRARY_MAX_FILES"), "2500")}'
           - textAssetLibraryMinScore: '${default(sys.get_env("TEXT_ASSET_LIBRARY_MIN_SCORE"), "0.25")}'
-          - textAssetRetrievalMode: '${text.lower(default(sys.get_env("TEXT_ASSET_RETRIEVAL_MODE"), "ann_shadow"))}'
-          - textAssetAnnEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_ANN_ENABLED"), "true"))}'
+          - textAssetRetrievalMode: '${text.to_lower(default(sys.get_env("TEXT_ASSET_RETRIEVAL_MODE"), "ann_shadow"))}'
+          - textAssetAnnEnabled: '${text.to_lower(default(sys.get_env("TEXT_ASSET_ANN_ENABLED"), "true"))}'
           - textAssetAnnTopK: '${default(sys.get_env("TEXT_ASSET_ANN_TOP_K"), "40")}'
           - textAssetAnnMinScore: '${default(sys.get_env("TEXT_ASSET_ANN_MIN_SCORE"), "0.28")}'
           - textAssetAnnMaxRerank: '${default(sys.get_env("TEXT_ASSET_ANN_MAX_RERANK"), "20")}'
           - textAssetAnnNamespace: '${default(sys.get_env("TEXT_ASSET_ANN_NAMESPACE"), "assets-v1")}'
-          - textAssetLexicalFallbackEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_LEXICAL_FALLBACK_ENABLED"), "true"))}'
+          - textAssetLexicalFallbackEnabled: '${text.to_lower(default(sys.get_env("TEXT_ASSET_LEXICAL_FALLBACK_ENABLED"), "true"))}'
           - textAssetRolloutStatePrefix: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_STATE_PREFIX"), "automation/asset_retrieval_rollout")}'
           - textAssetRolloutMinDecisions: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_MIN_DECISIONS"), "500")}'
           - textAssetRolloutMinHitRate: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_MIN_HIT_RATE"), "0.95")}'
           - textAssetRolloutMaxErrorRate: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE"), "0.01")}'
           - textAssetRolloutMaxP95Ms: '${default(sys.get_env("TEXT_ASSET_ROLLOUT_MAX_P95_MS"), "400")}'
+        next: extract_env_more1
+
+    - extract_env_more1:
+        assign:
           - textAssetEmbeddingQueuePrefix: '${default(sys.get_env("TEXT_ASSET_EMBEDDING_QUEUE_PREFIX"), "automation/asset_embedding/queue")}'
           - textAssetEmbeddingProcessedPrefix: '${default(sys.get_env("TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX"), "automation/asset_embedding/processed")}'
           - textAssetEmbeddingFailedPrefix: '${default(sys.get_env("TEXT_ASSET_EMBEDDING_FAILED_PREFIX"), "automation/asset_embedding/failed")}'
@@ -71,15 +75,15 @@ main:
           - vectorStoreDimension: '${default(sys.get_env("VECTOR_STORE_DIMENSION"), "1536")}'
           - vertexIndexEndpoint: '${default(sys.get_env("VERTEX_INDEX_ENDPOINT"), "")}'
           - vertexDeployedIndexId: '${default(sys.get_env("VERTEX_DEPLOYED_INDEX_ID"), "")}'
-          - textAssetCatalogEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_CATALOG_ENABLED"), "true"))}'
-          - textAssetReplicationEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_REPLICATION_ENABLED"), "true"))}'
+          - textAssetCatalogEnabled: '${text.to_lower(default(sys.get_env("TEXT_ASSET_CATALOG_ENABLED"), "true"))}'
+          - textAssetReplicationEnabled: '${text.to_lower(default(sys.get_env("TEXT_ASSET_REPLICATION_ENABLED"), "true"))}'
           - textAssetReplicationQueuePrefix: '${default(sys.get_env("TEXT_ASSET_REPLICATION_QUEUE_PREFIX"), "automation/asset_replication/queue")}'
           - textAssetReplicationTarget: '${default(sys.get_env("TEXT_ASSET_REPLICATION_TARGET"), "backblaze_b2")}'
           - textAssetReplicationTargetPrefix: '${default(sys.get_env("TEXT_ASSET_REPLICATION_TARGET_PREFIX"), "assets")}'
-          - textAssetGenerationEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_GENERATION_ENABLED"), "true"))}'
-          - textAssetGenerationProvider: '${text.lower(default(sys.get_env("TEXT_ASSET_GENERATION_PROVIDER"), "sam3d"))}'
-          - textAssetGenerationProviderChain: '${text.lower(default(sys.get_env("TEXT_ASSET_GENERATION_PROVIDER_CHAIN"), "sam3d,hunyuan3d"))}'
-          - textAssetGeneratedCacheEnabled: '${text.lower(default(sys.get_env("TEXT_ASSET_GENERATED_CACHE_ENABLED"), "true"))}'
+          - textAssetGenerationEnabled: '${text.to_lower(default(sys.get_env("TEXT_ASSET_GENERATION_ENABLED"), "true"))}'
+          - textAssetGenerationProvider: '${text.to_lower(default(sys.get_env("TEXT_ASSET_GENERATION_PROVIDER"), "sam3d"))}'
+          - textAssetGenerationProviderChain: '${text.to_lower(default(sys.get_env("TEXT_ASSET_GENERATION_PROVIDER_CHAIN"), "sam3d,hunyuan3d"))}'
+          - textAssetGeneratedCacheEnabled: '${text.to_lower(default(sys.get_env("TEXT_ASSET_GENERATED_CACHE_ENABLED"), "true"))}'
           - textAssetGeneratedCachePrefix: '${default(sys.get_env("TEXT_ASSET_GENERATED_CACHE_PREFIX"), "asset-library/generated-text")}'
           - textSam3dApiHost: '${default(sys.get_env("TEXT_SAM3D_API_HOST"), "")}'
           - textSam3dTextEndpoints: '${default(sys.get_env("TEXT_SAM3D_TEXT_ENDPOINTS"), "/openapi/v1/text-to-3d,/v1/text-to-3d")}'
@@ -90,9 +94,9 @@ main:
           - textHunyuanTimeoutSeconds: '${default(sys.get_env("TEXT_HUNYUAN_TIMEOUT_SECONDS"), "1800")}'
           - textHunyuanPollSeconds: '${default(sys.get_env("TEXT_HUNYUAN_POLL_SECONDS"), "10")}'
           - textGenMaxSeeds: '${int(default(sys.get_env("TEXT_GEN_MAX_SEEDS"), "16"))}'
-          - textGenEnableImageFallback: '${text.lower(default(sys.get_env("TEXT_GEN_ENABLE_IMAGE_FALLBACK"), "true")) == "true"}'
-          - arenaExportRequired: '${text.lower(default(sys.get_env("ARENA_EXPORT_REQUIRED"), "true")) == "true"}'
-          - imagePathMode: '${text.lower(default(sys.get_env("IMAGE_PATH_MODE"), "orchestrator"))}'
+          - textGenEnableImageFallback: '${text.to_lower(default(sys.get_env("TEXT_GEN_ENABLE_IMAGE_FALLBACK"), "true")) == "true"}'
+          - arenaExportRequired: '${text.to_lower(default(sys.get_env("ARENA_EXPORT_REQUIRED"), "true")) == "true"}'
+          - imagePathMode: '${text.to_lower(default(sys.get_env("IMAGE_PATH_MODE"), "orchestrator"))}'
           - imageOrchestratorWorkflow: '${default(sys.get_env("IMAGE_ORCHESTRATOR_WORKFLOW_NAME"), "image-to-scene-orchestrator")}'
           - imageLegacyWorkflow: '${default(sys.get_env("IMAGE_LEGACY_WORKFLOW_NAME"), "image-to-scene-pipeline")}'
           - imageLegacyWaitSeconds: '${int(default(sys.get_env("IMAGE_LEGACY_CHAIN_WAIT_SECONDS"), "7200"))}'
@@ -100,13 +104,17 @@ main:
           - textVmZone: '${default(sys.get_env("TEXT_GEN_VM_ZONE"), "us-east1-c")}'
           - textVmRepoDir: '${default(sys.get_env("TEXT_GEN_VM_REPO_DIR"), "~/BlueprintPipeline")}'
           - textVmTimeoutSeconds: '${int(default(sys.get_env("TEXT_GEN_VM_TIMEOUT_SECONDS"), "2400"))}'
-          - sageRuntimeMode: '${text.lower(default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun"))}'
+        next: extract_env_more2
+
+    - extract_env_more2:
+        assign:
+          - sageRuntimeMode: '${text.to_lower(default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun"))}'
           - sageServerUrl: '${default(sys.get_env("SAGE_SERVER_URL"), "")}'
           - sageTimeoutSeconds: '${default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
-          - scenesmithRuntimeMode: '${text.lower(default(sys.get_env("SCENESMITH_RUNTIME_MODE"), "cloudrun"))}'
+          - scenesmithRuntimeMode: '${text.to_lower(default(sys.get_env("SCENESMITH_RUNTIME_MODE"), "cloudrun"))}'
           - scenesmithServerUrl: '${default(sys.get_env("SCENESMITH_SERVER_URL"), "")}'
           - scenesmithTimeoutSeconds: '${default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
-          - textSageActionDemoEnabled: '${text.lower(default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false"))}'
+          - textSageActionDemoEnabled: '${text.to_lower(default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false"))}'
           - workflowName: "source-orchestrator"
           - startTime: '${time.format(sys.now())}'
           - fallbackUsed: false
@@ -117,6 +125,7 @@ main:
           - requestTextBackend: "sage"
           - qualityTier: "standard"
           - providerPolicy: "openai_primary"
+          - vmErrMessage: ""
           - errorCode: ""
           - errorMsg: ""
           - failedStage: ""
@@ -148,13 +157,7 @@ main:
             name: ${lockObject}
             uploadType: "media"
             ifGenerationMatch: 0
-            body: '${json.encode({
-              "scene_id": sceneId,
-              "workflow": workflowName,
-              "input_object": object,
-              "input_generation": objectGeneration,
-              "timestamp": time.format(sys.now())
-            })}'
+            body: '${"{\"scene_id\":\"" + sceneId + "\",\"workflow\":\"" + workflowName + "\",\"input_object\":\"" + object + "\",\"input_generation\":\"" + objectGeneration + "\",\"timestamp\":\"" + time.format(sys.now()) + "\"}"}'
           result: lockInsertResult
         except:
           as: lockErr
@@ -232,21 +235,21 @@ main:
           assign:
             - requestSchemaVersion: '${string(default(map.get(sceneRequest, "schema_version"), ""))}'
             - requestSceneId: '${string(default(map.get(sceneRequest, "scene_id"), ""))}'
-            - requestSourceMode: '${text.lower(string(default(map.get(sceneRequest, "source_mode"), defaultSourceMode)))}'
-            - requestTextBackendRaw: '${text.lower(string(default(map.get(sceneRequest, "text_backend"), textBackendDefault)))}'
+            - requestSourceMode: '${text.to_lower(string(default(map.get(sceneRequest, "source_mode"), defaultSourceMode)))}'
+            - requestTextBackendRaw: '${text.to_lower(string(default(map.get(sceneRequest, "text_backend"), textBackendDefault)))}'
             - requestTextBackend: '${if(requestTextBackendRaw == "", textBackendDefault, requestTextBackendRaw)}'
             - primarySourceMode: '${if(requestSourceMode == "auto", "text", requestSourceMode)}'
-            - qualityTier: '${text.lower(string(default(map.get(sceneRequest, "quality_tier"), "standard")))}'
+            - qualityTier: '${text.to_lower(string(default(map.get(sceneRequest, "quality_tier"), "standard")))}'
             - providerPolicy: '${string(default(map.get(sceneRequest, "provider_policy"), "openai_primary"))}'
             - seedCount: '${int(default(map.get(sceneRequest, "seed_count"), 1))}'
             - prompt: '${string(default(map.get(sceneRequest, "prompt"), ""))}'
-            - constraints: '${default(map.get(sceneRequest, "constraints"), {})}'
-            - fallbackConfig: '${default(map.get(sceneRequest, "fallback"), {})}'
+            - constraints: '${default(map.get(sceneRequest, "constraints"), json.decode("{}"))}'
+            - fallbackConfig: '${default(map.get(sceneRequest, "fallback"), json.decode("{}"))}'
             - allowImageFallbackRaw: '${default(map.get(fallbackConfig, "allow_image_fallback"), true)}'
-            - allowImageFallbackString: '${text.lower(string(allowImageFallbackRaw))}'
+            - allowImageFallbackString: '${text.to_lower(string(allowImageFallbackRaw))}'
             - allowImageFallbackRequest: '${allowImageFallbackString != "false" and allowImageFallbackString != "0" and allowImageFallbackString != "no" and allowImageFallbackString != "off"}'
             - allowImageFallback: '${allowImageFallbackRequest and textGenEnableImageFallback}'
-            - imagePayload: '${default(map.get(sceneRequest, "image"), {})}'
+            - imagePayload: '${default(map.get(sceneRequest, "image"), json.decode("{}"))}'
             - imageGcsUri: '${string(default(map.get(imagePayload, "gcs_uri"), ""))}'
             - imageGeneration: '${if(map.get(imagePayload, "generation") != null, string(map.get(imagePayload, "generation")), objectGeneration)}'
             - imageObjectCandidate: '${if(imageGcsUri == "", "", if(text.match_regex(imageGcsUri, "^gs://"), if(text.match_regex(imageGcsUri, "^gs://" + bucket + "/"), text.replace_all(imageGcsUri, "gs://" + bucket + "/", ""), ""), imageGcsUri))}'
@@ -335,19 +338,7 @@ main:
           bucket: ${bucket}
           name: ${completionMarker}
           uploadType: "media"
-          body: '${json.encode({
-            "scene_id": sceneId,
-            "status": "completed",
-            "source_type": "image",
-            "requested_source_mode": requestSourceMode,
-            "requested_text_backend": requestTextBackend,
-            "seed_count": seedCount,
-            "fallback_used": false,
-            "text_gen_runtime": textGenRuntime,
-            "image_path_mode": imageResult.mode,
-            "image_workflow": imageResult.workflow_name,
-            "timestamp": time.format(sys.now())
-          })}'
+          body: '${"{\"scene_id\":\"" + sceneId + "\",\"status\":\"completed\",\"source_type\":\"image\",\"timestamp\":\"" + time.format(sys.now()) + "\"}"}'
         next: release_lock_before_done_image
 
     - release_lock_before_done_image:
@@ -411,18 +402,7 @@ main:
                   bucket: ${bucket}
                   name: ${childRequestObject}
                   uploadType: "media"
-                  body: '${json.encode({
-                    "schema_version": "v1",
-                    "scene_id": childSceneId,
-                    "source_mode": "text",
-                    "text_backend": requestTextBackend,
-                    "prompt": prompt,
-                    "quality_tier": qualityTier,
-                    "seed_count": 1,
-                    "constraints": constraints,
-                    "provider_policy": providerPolicy,
-                    "fallback": {"allow_image_fallback": allowImageFallback}
-                  })}'
+                  body: '${"{\"schema_version\":\"v1\",\"scene_id\":\"" + childSceneId + "\",\"source_mode\":\"text\",\"text_backend\":\"" + requestTextBackend + "\",\"prompt\":" + json.encode(prompt) + ",\"quality_tier\":\"" + qualityTier + "\",\"seed_count\":1,\"provider_policy\":\"" + providerPolicy + "\"}"}'
                 next: run_text_stage1_for_child
             - run_text_stage1_for_child:
                 call: run_text_stage1_for_child
@@ -572,21 +552,7 @@ main:
           bucket: ${bucket}
           name: ${completionMarker}
           uploadType: "media"
-          body: '${json.encode({
-            "scene_id": sceneId,
-            "status": "completed",
-            "source_type": "image_fallback",
-            "requested_source_mode": requestSourceMode,
-            "requested_text_backend": requestTextBackend,
-            "seed_count": seedCount,
-            "completed_variants": completedVariants,
-            "fallback_used": true,
-            "fallback_image_object": imageObjectCandidate,
-            "text_gen_runtime": textGenRuntime,
-            "image_path_mode": imageFallbackResult.mode,
-            "image_workflow": imageFallbackResult.workflow_name,
-            "timestamp": time.format(sys.now())
-          })}'
+          body: '${"{\"scene_id\":\"" + sceneId + "\",\"status\":\"completed\",\"source_type\":\"image_fallback\",\"timestamp\":\"" + time.format(sys.now()) + "\"}"}'
         next: release_lock_before_done_fallback
 
     - release_lock_before_done_fallback:
@@ -634,21 +600,7 @@ main:
           bucket: ${bucket}
           name: ${completionMarker}
           uploadType: "media"
-          body: '${json.encode({
-            "scene_id": sceneId,
-            "status": "completed",
-            "source_type": "text",
-            "requested_source_mode": requestSourceMode,
-            "requested_text_backend": requestTextBackend,
-            "quality_tier": qualityTier,
-            "provider_policy": providerPolicy,
-            "seed_count": seedCount,
-            "completed_variants": completedVariants,
-            "fallback_used": false,
-            "text_gen_runtime": textGenRuntime,
-            "cloudrun_fallback_count": cloudrunFallbackCount,
-            "timestamp": time.format(sys.now())
-          })}'
+          body: '${"{\"scene_id\":\"" + sceneId + "\",\"status\":\"completed\",\"source_type\":\"text\",\"timestamp\":\"" + time.format(sys.now()) + "\"}"}'
         next: release_lock_before_done_text
 
     - release_lock_before_done_text:
@@ -824,7 +776,7 @@ run_workflow_and_wait:
         return:
           name: ${workflowExecution.name}
           state: ${workflowStatus.state}
-          result: '${if(default(workflowStatus.result, "") == "", {}, json.decode(workflowStatus.result))}'
+          result: '${if(default(workflowStatus.result, "") == "", null, json.decode(workflowStatus.result))}'
 
 
 run_stage2_to_stage5:
@@ -943,7 +895,7 @@ run_stage2_to_stage5:
 
     - set_required_arena_status:
         assign:
-          - arenaRequiredStatus: '${default(map.get(default(arenaRequiredResult.result, {}), "status"), "UNKNOWN")}'
+          - arenaRequiredStatus: '${if(arenaRequiredResult.result == null, "UNKNOWN", default(map.get(arenaRequiredResult.result, "status"), "UNKNOWN"))}'
         next: required_stage5_status_switch
 
     - required_stage5_status_switch:
@@ -989,7 +941,7 @@ run_stage2_to_stage5:
 
     - set_non_blocking_arena_status:
         assign:
-          - arenaStatus: '${default(map.get(default(arenaResult.result, {}), "status"), "UNKNOWN")}'
+          - arenaStatus: '${if(arenaResult.result == null, "UNKNOWN", default(map.get(arenaResult.result, "status"), "UNKNOWN"))}'
         next: non_blocking_stage5_status_switch
 
     - non_blocking_stage5_status_switch:
@@ -1035,6 +987,11 @@ run_stage2_to_stage5:
 run_text_stage1_for_child:
   params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenRuntime, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
   steps:
+    - init_runtime_defaults:
+        assign:
+          - vmErrMessage: ""
+        next: runtime_switch
+
     - runtime_switch:
         switch:
           - condition: '${textGenRuntime == "vm"}'

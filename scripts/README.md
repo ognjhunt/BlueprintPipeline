@@ -10,6 +10,9 @@ Operational scripts for deploying and running pipeline components.
 - `deploy-genie-sim-submit-job.sh`
 - `deploy-genie-sim-local-job.sh`
 - `deploy-genie-sim-import-webhook.sh`
+- `start_text_backend_services.sh`
+- `deploy_text_backend_services.sh`
+- `setup_text_backend_services.sh`
 - `enable_pipeline.sh`
 - `run-isaacsim-local.sh`
 - `run_production_e2e_validation.py`
@@ -23,6 +26,22 @@ Operational scripts for deploying and running pipeline components.
 
 ## How to run locally
 - Run scripts directly, for example: `./deploy-episode-generation.sh` or `python run_production_e2e_validation.py`.
+
+## Text backend services
+These scripts support live SceneSmith/SAGE endpoints for Stage 1 text generation.
+
+- `start_text_backend_services.sh`
+  - Starts/stops/status/logs local `scenesmith-service` and `sage-service` wrappers.
+  - Example: `./start_text_backend_services.sh start`
+- `setup_text_backend_services.sh`
+  - Creates a local virtualenv and installs service dependencies (Flask/Gunicorn).
+  - Example: `./setup_text_backend_services.sh`
+- `deploy_text_backend_services.sh`
+  - Builds and deploys both wrappers to Cloud Run.
+  - Example: `./deploy_text_backend_services.sh <project_id> <region> <artifact_repo>`
+
+Full setup details:
+- `/Users/nijelhunt_1/workspace/BlueprintPipeline/docs/text_backend_services.md`
 
 ## Genie Sim deployment scripts
 All Genie Sim deploy scripts expect GKE access (`gcloud`, `kubectl`) and use `envsubst` to apply manifests.

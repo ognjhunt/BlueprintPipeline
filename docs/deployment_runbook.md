@@ -329,6 +329,27 @@ Key source-orchestrator env vars to set at deploy time:
 - `VERTEX_INDEX_ENDPOINT`
 - `VERTEX_DEPLOYED_INDEX_ID`
 
+Optional live text backend service setup (SceneSmith/SAGE):
+
+```bash
+cd /Users/nijelhunt_1/workspace/BlueprintPipeline
+
+# Local VM wrappers
+./scripts/setup_text_backend_services.sh
+export PYTHON_BIN=/Users/nijelhunt_1/workspace/BlueprintPipeline/.venv-text-backends/bin/python
+./scripts/start_text_backend_services.sh start
+
+# Or deploy wrappers to Cloud Run
+./scripts/deploy_text_backend_services.sh <project_id> <region> <artifact_repo>
+```
+
+Then set:
+- `SCENESMITH_SERVER_URL` to `/v1/generate`
+- `SAGE_SERVER_URL` to `/v1/refine`
+
+Full guide:
+- `/Users/nijelhunt_1/workspace/BlueprintPipeline/docs/text_backend_services.md`
+
 For async Backblaze replication, deploy the replication queue workflow trigger:
 
 ```bash

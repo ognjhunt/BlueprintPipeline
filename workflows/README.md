@@ -47,6 +47,7 @@ then feeds the result into the same Stage 2-5 pipeline used by the image path.
 - **Stage 1 Cloud Run overrides**: `TEXT_SCENE_GEN_JOB_NAME` and `TEXT_SCENE_ADAPTER_JOB_NAME` allow non-default job names
 - **LLM-first Stage 1**: `TEXT_GEN_USE_LLM=true` default with deterministic fallback metadata and retry controls
 - **Stage 5 strictness**: `ARENA_EXPORT_REQUIRED=true` default (text completion requires Arena success)
+- **Live backend services**: optional SceneSmith/SAGE endpoints via `SCENESMITH_SERVER_URL` and `SAGE_SERVER_URL`
 - **Image path (compat mode)**:
   - `IMAGE_PATH_MODE=orchestrator` delegates to `image-to-scene-orchestrator`
   - `IMAGE_PATH_MODE=legacy_chain` delegates to `image-to-scene-pipeline` and waits for `.geniesim_complete`
@@ -55,6 +56,9 @@ then feeds the result into the same Stage 2-5 pipeline used by the image path.
 - **Child request path**: fanout requests are written to `scenes/<child_scene_id>/internal/scene_request.generated.json` (non-trigger path)
 - **Dedupe lock**: per-generation lock at `scenes/<scene_id>/locks/source-orchestrator-<generation>.lock` prevents concurrent duplicate executions
 - **Fallback**: fail-fast — if any seed fails, the entire request falls back to image (does not retry remaining seeds)
+
+Service setup guide:
+- `/Users/nijelhunt_1/workspace/BlueprintPipeline/docs/text_backend_services.md`
 
 ## Stage 4 Runtime Contract
 - Required Cloud Run job: `genie-sim-export-job`.

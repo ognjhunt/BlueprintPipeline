@@ -39,3 +39,6 @@ which converts it into canonical Blueprint artifacts for Stage 2+.
 
 ## CLI options
 - `--backend {internal,scenesmith,sage,hybrid_serial}` optional one-shot backend override (takes precedence over request payload backend)
+
+## Live backend service setup
+- `/Users/nijelhunt_1/workspace/BlueprintPipeline/docs/text_backend_services.md`

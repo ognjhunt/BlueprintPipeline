@@ -7,34 +7,125 @@ Quick reference for getting the BlueprintPipeline running on the GCP VM with Gen
 | Field | Value |
 |-------|-------|
 | Instance | `isaac-sim-ubuntu` |
-| Zone | `us-east1-b` |
+| Zone | `us-east1-c` |
 | Machine | `g2-standard-32` (NVIDIA L4 24GB VRAM, 128GB RAM) |
 | Docker | Requires `sudo` |
 | User home | `/home/nijelhunt1` |
 | Repo path | `~/BlueprintPipeline` |
 
+## Text Backend Services (SceneSmith + SAGE)
+
+This VM now runs local text-backend endpoints used by Stage 1 text generation:
+
+| Service | URL | Purpose |
+|---------|-----|---------|
+| SceneSmith wrapper | `http://127.0.0.1:8081/v1/generate` | Base scene generation |
+| SAGE wrapper | `http://127.0.0.1:8082/v1/refine` | Task-aware scene refinement |
+
+Current workflow routing (deployed):
+- Workflow: `source-orchestrator` (region `us-central1`)
+- Trigger: `scene-request-source-orchestrator-trigger`
+- Bucket: `blueprint-8c1ca.appspot.com`
+- Default backend: `hybrid_serial` (SceneSmith -> SAGE)
+- Runtime: `vm`
+
+### How it works
+
+1. Upload `scenes/<scene_id>/prompts/scene_request.json`.
+2. Eventarc triggers `source-orchestrator`.
+3. Stage 1 text generation runs on VM (`TEXT_GEN_RUNTIME=vm`).
+4. Generator backend `hybrid_serial` runs:
+   - SceneSmith endpoint first (`/v1/generate`)
+   - SAGE endpoint second (`/v1/refine`)
+5. Adapter and Stage 2-5 continue as normal (`scene_manifest.json` contract unchanged).
+
+### Start/restart text backend services on VM
+
+```bash
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command='
+  cd ~/BlueprintPipeline
+  ./scripts/setup_text_backend_services.sh
+  export PYTHON_BIN=~/BlueprintPipeline/.venv-text-backends/bin/python
+  ./scripts/start_text_backend_services.sh restart
+  ./scripts/start_text_backend_services.sh status
+'
+```
+
+### Verify health
+
+```bash
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command='
+  curl -s http://127.0.0.1:8081/healthz && echo
+  curl -s http://127.0.0.1:8082/healthz && echo
+'
+```
+
+### Service persistence (auto-start after reboot)
+
+Systemd unit is installed and enabled:
+
+```bash
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command='
+  sudo systemctl status blueprint-text-backends.service --no-pager
+'
+```
+
+### Run a text request through orchestrator
+
+```bash
+cat > /tmp/scene_request.json <<'JSON'
+{
+  "schema_version": "v1",
+  "scene_id": "scene_demo_001",
+  "source_mode": "text",
+  "text_backend": "hybrid_serial",
+  "prompt": "A cluttered kitchen where a robot moves a bowl to a shelf",
+  "quality_tier": "standard",
+  "seed_count": 1,
+  "provider_policy": "openai_primary"
+}
+JSON
+
+gsutil cp /tmp/scene_request.json \
+  gs://blueprint-8c1ca.appspot.com/scenes/scene_demo_001/prompts/scene_request.json
+```
+
+### Check workflow/trigger configuration
+
+```bash
+gcloud workflows describe source-orchestrator --location=us-central1 \
+  --format='yaml(name,state,userEnvVars)'
+
+gcloud eventarc triggers describe scene-request-source-orchestrator-trigger \
+  --location=us --format='yaml(name,destination,eventFilters)'
+```
+
+### Billing state note
+
+Current project billing is disabled (`blueprint-8c1ca`). If you need to run GCP API operations (start VM, deploy workflow, trigger runs), re-enable billing first.
+
 ## One-Shot Cold Start (from local machine)
 
 ```bash
 # 1. Start VM and wait for SSH
-gcloud compute instances start isaac-sim-ubuntu --zone=us-east1-b
+gcloud compute instances start isaac-sim-ubuntu --zone=us-east1-c
 sleep 35
 
 # 2. Sync code
-gcloud compute scp --recurse --compress --zone=us-east1-b \
+gcloud compute scp --recurse --compress --zone=us-east1-c \
   tools/ "isaac-sim-ubuntu:~/BlueprintPipeline/tools/"
 for dir in policy_configs scripts episode-generation-job configs; do
-  gcloud compute scp --recurse --compress --zone=us-east1-b \
+  gcloud compute scp --recurse --compress --zone=us-east1-c \
     "$dir/" "isaac-sim-ubuntu:~/BlueprintPipeline/$dir/"
 done
 for f in Dockerfile.geniesim-server docker-compose.geniesim-server.yaml \
          genie-sim-local-job/requirements.txt .env run_pipeline.sh; do
-  gcloud compute scp --zone=us-east1-b \
+  gcloud compute scp --zone=us-east1-c \
     "$f" "isaac-sim-ubuntu:~/BlueprintPipeline/$f" 2>/dev/null
 done
 
 # 3. CRITICAL: Remove nested dirs created by scp --recurse
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command="
   rm -rf ~/BlueprintPipeline/tools/tools/
   rm -rf ~/BlueprintPipeline/policy_configs/policy_configs/
   rm -rf ~/BlueprintPipeline/scripts/scripts/
@@ -43,23 +134,23 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
 "
 
 # 4. Start Xorg + restart container + wait for gRPC
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command="
   cd ~/BlueprintPipeline && bash scripts/vm-start-xorg.sh
 "
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command="
   sudo docker restart geniesim-server >/dev/null 2>&1
 "
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command="
   cd ~/BlueprintPipeline && bash scripts/vm-start.sh
 "
 
 # 5. Run pipeline (uses checked-in run_pipeline.sh which sources configs/realism_strict.env)
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command="
   cd ~/BlueprintPipeline && bash run_pipeline.sh
 "
 
 # 6. Monitor
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="tail -f /tmp/pipeline_strict.log"
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command="tail -f /tmp/pipeline_strict.log"
 ```
 
 ## Quick Start
@@ -67,7 +158,7 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="tail -f /tmp/pi
 ### If the VM is already running
 
 ```bash
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c
 cd ~/BlueprintPipeline
 bash scripts/vm-start.sh   # checks container is up, polls gRPC until ready
 bash run_pipeline.sh        # sources configs/realism_strict.env, runs pipeline
@@ -78,10 +169,10 @@ bash run_pipeline.sh        # sources configs/realism_strict.env, runs pipeline
 
 ```bash
 # 1. Start VM
-gcloud compute instances start isaac-sim-ubuntu --zone=us-east1-b
+gcloud compute instances start isaac-sim-ubuntu --zone=us-east1-c
 
 # 2. Wait ~30s for SSH, then connect
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c
 
 # 3. Container auto-starts with the VM (restart: unless-stopped).
 cd ~/BlueprintPipeline
@@ -154,15 +245,15 @@ Fallback provenance is recorded in dataset metadata:
 
 ```bash
 # Full sync (recommended)
-gcloud compute scp --recurse --compress --zone=us-east1-b \
+gcloud compute scp --recurse --compress --zone=us-east1-c \
   tools/ "isaac-sim-ubuntu:~/BlueprintPipeline/tools/"
 for dir in policy_configs scripts episode-generation-job configs; do
-  gcloud compute scp --recurse --compress --zone=us-east1-b \
+  gcloud compute scp --recurse --compress --zone=us-east1-c \
     "$dir/" "isaac-sim-ubuntu:~/BlueprintPipeline/$dir/"
 done
 
 # CRITICAL: Remove nested dirs created by scp --recurse
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b --command="
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command="
   rm -rf ~/BlueprintPipeline/tools/tools/
   rm -rf ~/BlueprintPipeline/policy_configs/policy_configs/
   rm -rf ~/BlueprintPipeline/scripts/scripts/
@@ -241,7 +332,7 @@ bash run_pipeline.sh
 
 ### Stop VM (saves ~$1.17/hr)
 ```bash
-gcloud compute instances stop isaac-sim-ubuntu --zone=us-east1-b
+gcloud compute instances stop isaac-sim-ubuntu --zone=us-east1-c
 ```
 The g2-standard-32 with L4 GPU costs **$1.17/hr on-demand** ($0.47/hr spot) in us-east1. When status is `TERMINATED`, CPU/GPU billing stops. Disk and static IP charges still apply.
 
@@ -255,11 +346,11 @@ Camera RGB requires valid X display: host Xorg on `:99`, container `DISPLAY=:99`
 
 ```bash
 # Find latest run directory
-gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-b -- \
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c -- \
   'ls -lt ~/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/ | head -5'
 
 # Download
-gcloud compute scp --recurse --compress --zone=us-east1-b \
+gcloud compute scp --recurse --compress --zone=us-east1-c \
   "isaac-sim-ubuntu:~/BlueprintPipeline/test_scenes/scenes/lightwheel_kitchen/episodes/<session-id>/" \
   ~/Downloads/BlueprintPipeline_episodes/
 ```
