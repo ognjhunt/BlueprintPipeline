@@ -584,17 +584,31 @@ main:
     - parse_scene_manifest_for_interactive_gate:
         assign:
           - sceneManifestForInteractive: ${json.decode(sceneManifestRaw)}
+          - candidateArticulationCount: 0
           - requiredArticulationCount: 0
-        next: scan_required_articulation_objects
+        next: scan_articulation_candidates_and_required
 
-    - scan_required_articulation_objects:
+    - scan_articulation_candidates_and_required:
         for:
           value: manifestObject
           in: ${default(map.get(sceneManifestForInteractive, "objects"), [])}
           steps:
+            - detect_candidate_articulation_object:
+                switch:
+                  - condition: '${default(map.get(default(map.get(manifestObject, "articulation"), {}), "candidate"), false) == true or default(map.get(manifestObject, "sim_role"), "") == "articulated_furniture" or default(map.get(manifestObject, "sim_role"), "") == "articulated_appliance"}'
+                    next: increment_candidate_articulation_count
+                next: continue_candidate_articulation_scan
+            - increment_candidate_articulation_count:
+                assign:
+                  - candidateArticulationCount: ${candidateArticulationCount + 1}
+                next: continue_candidate_articulation_scan
+            - continue_candidate_articulation_scan:
+                assign:
+                  - candidateArticulationCount: ${candidateArticulationCount}
+                next: detect_required_articulation_object
             - detect_required_articulation_object:
                 switch:
-                  - condition: '${default(map.get(default(map.get(manifestObject, "articulation"), {}), "required"), false) == true or default(map.get(manifestObject, "sim_role"), "") == "articulated_furniture" or default(map.get(manifestObject, "sim_role"), "") == "articulated_appliance"}'
+                  - condition: '${default(map.get(default(map.get(manifestObject, "articulation"), {}), "required"), false) == true}'
                     next: increment_required_articulation_count
                 next: continue_required_articulation_scan
             - increment_required_articulation_count:
@@ -608,7 +622,7 @@ main:
 
     - decide_interactive_phase:
         assign:
-          - runInteractivePhase: '${interactiveForceRun or requiredArticulationCount > 0}'
+          - runInteractivePhase: '${interactiveForceRun or candidateArticulationCount > 0}'
         next: interactive_phase_switch
 
     - interactive_phase_switch:
@@ -620,7 +634,7 @@ main:
     - log_interactive_skipped:
         call: sys.log
         args:
-          text: '${"Skipping interactive-job for scene " + sceneId + " (required articulated objects: " + string(requiredArticulationCount) + ")"}'
+          text: '${"Skipping interactive-job for scene " + sceneId + " (candidate articulated objects: " + string(candidateArticulationCount) + ", required articulated objects: " + string(requiredArticulationCount) + ")"}'
           severity: "INFO"
         next: init_usd_metrics
 
@@ -644,6 +658,7 @@ main:
             timed_out: false
             status: "STARTED"
             start_time: ${interactiveStartTime}
+            candidate_articulation_count: ${candidateArticulationCount}
             required_articulation_count: ${requiredArticulationCount}
             policy: ${interactiveFailurePolicy}
           severity: "INFO"
@@ -870,7 +885,7 @@ main:
 
     - interactive_gate_failed:
         assign:
-          - errorMsg: '${"Interactive gate failed for scene " + sceneId + " (policy=" + interactiveFailurePolicy + ", required_articulation_count=" + string(requiredArticulationCount) + ", marker_status=" + interactiveMarkerStatus + ", required_failure_count=" + string(interactiveRequiredFailureCount) + ")"}'
+          - errorMsg: '${"Interactive gate failed for scene " + sceneId + " (policy=" + interactiveFailurePolicy + ", candidate_articulation_count=" + string(candidateArticulationCount) + ", required_articulation_count=" + string(requiredArticulationCount) + ", marker_status=" + interactiveMarkerStatus + ", required_failure_count=" + string(interactiveRequiredFailureCount) + ")"}'
         next: release_lock_after_interactive_failure
 
     - release_lock_after_interactive_failure:
@@ -886,7 +901,7 @@ main:
     - log_interactive_complete_message:
         call: sys.log
         args:
-          text: '${"Interactive phase completed for scene " + sceneId + " (required_articulation_count=" + string(requiredArticulationCount) + ", marker_status=" + interactiveMarkerStatus + ", required_failure_count=" + string(interactiveRequiredFailureCount) + ") - proceeding with full USD assembly"}'
+          text: '${"Interactive phase completed for scene " + sceneId + " (candidate_articulation_count=" + string(candidateArticulationCount) + ", required_articulation_count=" + string(requiredArticulationCount) + ", marker_status=" + interactiveMarkerStatus + ", required_failure_count=" + string(interactiveRequiredFailureCount) + ") - proceeding with full USD assembly"}'
           severity: "INFO"
         next: init_usd_metrics
 

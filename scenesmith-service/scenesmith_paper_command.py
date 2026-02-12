@@ -50,6 +50,18 @@ _ARTICULATED_CLASSES = {
     "washer",
 }
 
+_ARTICULATION_KEYWORDS = {
+    "cabinet",
+    "dishwasher",
+    "drawer",
+    "door",
+    "fridge",
+    "hinge",
+    "microwave",
+    "oven",
+    "washer",
+}
+
 _PLACEMENT_AGENT_CONFIG_PREFIXES = (
     "furniture_agent",
     "wall_agent",
@@ -96,6 +108,20 @@ def _slug(value: str, *, default: str) -> str:
     if not normalized:
         return default
     return normalized[:96]
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "y"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "n"}:
+            return False
+    return None
 
 
 def _run_root(scene_id: str) -> Path:
@@ -146,7 +172,80 @@ def _classify_role(semantic_class: str, raw_obj: Mapping[str, Any]) -> str:
     return "manipulable_object"
 
 
-def _object_from_house_state(raw_obj: Mapping[str, Any], index: int) -> Dict[str, Any]:
+def _infer_articulation_candidate(semantic_class: str, raw_obj: Mapping[str, Any]) -> tuple[bool, str]:
+    category = semantic_class.strip().lower().replace(" ", "_")
+    articulation = raw_obj.get("articulation")
+    if isinstance(articulation, Mapping):
+        explicit_candidate = _coerce_optional_bool(articulation.get("candidate"))
+        if explicit_candidate is not None:
+            return explicit_candidate, "input.articulation.candidate"
+
+    explicit_requires = _coerce_optional_bool(raw_obj.get("requires_articulation"))
+    if explicit_requires is True:
+        return True, "input.requires_articulation"
+
+    joint_type = str(raw_obj.get("joint_type") or "").strip().lower()
+    if joint_type and joint_type not in {"none", "fixed"}:
+        return True, "joint_type"
+
+    if category in _ARTICULATED_CLASSES:
+        return True, "category_default"
+
+    text_parts = []
+    for key in ("semantic_class", "class_name", "name", "id", "description"):
+        value = raw_obj.get(key)
+        if value is not None:
+            text_parts.append(str(value).lower())
+    if text_parts:
+        text_blob = " ".join(text_parts)
+        if any(keyword in text_blob for keyword in _ARTICULATION_KEYWORDS):
+            return True, "semantic_keyword"
+
+    return False, "none"
+
+
+def _infer_articulation_required(
+    *,
+    raw_obj: Mapping[str, Any],
+    sim_role: str,
+    articulation_candidate: bool,
+    force_generated_assets: bool,
+) -> tuple[bool, str]:
+    articulation = raw_obj.get("articulation")
+    if isinstance(articulation, Mapping):
+        explicit_required = _coerce_optional_bool(articulation.get("required"))
+        if explicit_required is not None:
+            return explicit_required, "input.articulation.required"
+
+    explicit_requires = _coerce_optional_bool(raw_obj.get("requires_articulation"))
+    if explicit_requires is not None:
+        return explicit_requires, "input.requires_articulation"
+
+    joint_type = str(raw_obj.get("joint_type") or "").strip().lower()
+    if joint_type and joint_type not in {"none", "fixed"}:
+        return True, "joint_type"
+
+    if force_generated_assets:
+        return False, "force_generated_assets"
+
+    require_class_defaults = _is_truthy(
+        os.getenv("SCENESMITH_PAPER_REQUIRE_ARTICULATION_CLASS_DEFAULTS"),
+        default=False,
+    )
+    if require_class_defaults and articulation_candidate and sim_role.startswith("articulated"):
+        return True, "class_default"
+
+    if articulation_candidate:
+        return False, "optional_candidate"
+    return False, "none"
+
+
+def _object_from_house_state(
+    raw_obj: Mapping[str, Any],
+    index: int,
+    *,
+    force_generated_assets: bool,
+) -> Dict[str, Any]:
     obj_id = str(raw_obj.get("id") or f"obj_{index:03d}").strip() or f"obj_{index:03d}"
     semantic = str(raw_obj.get("semantic_class") or raw_obj.get("class_name") or "object").strip() or "object"
     category = semantic.lower().replace(" ", "_")
@@ -162,7 +261,19 @@ def _object_from_house_state(raw_obj: Mapping[str, Any], index: int) -> Dict[str
     depth = max(0.01, abs(_safe_float(extent.get("z"), default=0.3)))
 
     placement_stage = "manipulands" if sim_role == "manipulable_object" else "furniture"
-    articulation_required = sim_role.startswith("articulated")
+    articulation_candidate, candidate_source = _infer_articulation_candidate(category, raw_obj)
+    articulation_required, requirement_source = _infer_articulation_required(
+        raw_obj=raw_obj,
+        sim_role=sim_role,
+        articulation_candidate=articulation_candidate,
+        force_generated_assets=force_generated_assets,
+    )
+    if articulation_required:
+        backend_hint = "particulate_first"
+    elif articulation_candidate:
+        backend_hint = "particulate_optional"
+    else:
+        backend_hint = "none"
 
     return {
         "id": obj_id,
@@ -197,8 +308,11 @@ def _object_from_house_state(raw_obj: Mapping[str, Any], index: int) -> Dict[str
         "asset_strategy": "retrieved",
         "placement_stage": placement_stage,
         "articulation": {
+            "candidate": articulation_candidate,
             "required": articulation_required,
-            "backend_hint": "particulate_first" if articulation_required else "none",
+            "backend_hint": backend_hint,
+            "detection_source": candidate_source,
+            "requirement_source": requirement_source,
         },
         "source_backend": "scenesmith_paper",
     }
@@ -336,6 +450,10 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     keep_run_dir = _is_truthy(os.getenv("SCENESMITH_PAPER_KEEP_RUN_DIR"), default=False)
+    force_generated_assets = _is_truthy(os.getenv("SCENESMITH_PAPER_ALL_SAM3D"), default=False) or _is_truthy(
+        os.getenv("SCENESMITH_PAPER_FORCE_GENERATED_ASSETS"),
+        default=False,
+    )
 
     try:
         overrides = _hydra_overrides(payload=payload, run_dir=run_dir, scene_name=scene_name)
@@ -366,7 +484,14 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
         if not raw_objects:
             raise RuntimeError(f"Official SceneSmith returned zero objects (house_state={house_state_path})")
 
-        objects = [_object_from_house_state(item, idx) for idx, item in enumerate(raw_objects, start=1)]
+        objects = [
+            _object_from_house_state(
+                item,
+                idx,
+                force_generated_assets=force_generated_assets,
+            )
+            for idx, item in enumerate(raw_objects, start=1)
+        ]
         constraints = payload.get("constraints")
         room_type = (
             str(constraints.get("room_type") or "generic_room")

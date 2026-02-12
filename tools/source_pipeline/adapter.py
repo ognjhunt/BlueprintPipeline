@@ -1419,6 +1419,7 @@ def _build_manifest(
     objects: List[Dict[str, Any]],
     assets_prefix: str,
     source_request: Mapping[str, Any],
+    layout_plan: Optional[Mapping[str, Any]],
     provider_used: str,
     quality_tier: str,
     seed: int,
@@ -1434,6 +1435,19 @@ def _build_manifest(
     }
     source_type = source_type_map.get(text_backend, "text")
     manifest_objects: List[Dict[str, Any]] = []
+    room_min, room_max = _room_box_from_layout_plan(layout_plan)
+    scene_room = {
+        "bounds": {
+            "width": round(max(0.1, room_max[0] - room_min[0]), 4),
+            "depth": round(max(0.1, room_max[2] - room_min[2]), 4),
+            "height": round(max(0.1, room_max[1] - room_min[1]), 4),
+        },
+        "origin": [
+            round((room_min[0] + room_max[0]) / 2.0, 4),
+            round(room_min[1], 4),
+            round((room_min[2] + room_max[2]) / 2.0, 4),
+        ],
+    }
 
     for obj in objects:
         oid = str(obj.get("id") or "")
@@ -1443,6 +1457,19 @@ def _build_manifest(
         transform = obj.get("transform") if isinstance(obj.get("transform"), Mapping) else {}
         position = transform.get("position") if isinstance(transform.get("position"), Mapping) else {}
         scale = transform.get("scale") if isinstance(transform.get("scale"), Mapping) else {}
+
+        source_articulation = obj.get("articulation") if isinstance(obj.get("articulation"), Mapping) else {}
+        manifest_articulation: Dict[str, Any] = {
+            "required": bool(source_articulation.get("required", False)),
+            "backend_hint": str(source_articulation.get("backend_hint", "none")),
+        }
+        candidate_value = source_articulation.get("candidate")
+        if candidate_value is not None:
+            manifest_articulation["candidate"] = bool(candidate_value)
+        if source_articulation.get("detection_source") is not None:
+            manifest_articulation["detection_source"] = str(source_articulation.get("detection_source"))
+        if source_articulation.get("requirement_source") is not None:
+            manifest_articulation["requirement_source"] = str(source_articulation.get("requirement_source"))
 
         manifest_obj: Dict[str, Any] = {
             "id": oid,
@@ -1469,10 +1496,7 @@ def _build_manifest(
             },
             "dimensions_est": dims,
             "physics_hints": dict(obj.get("physics_hints") or {}),
-            "articulation": {
-                "required": bool((obj.get("articulation") or {}).get("required", False)),
-                "backend_hint": str((obj.get("articulation") or {}).get("backend_hint", "none")),
-            },
+            "articulation": manifest_articulation,
             "source": {
                 "type": source_type,
                 "generation_tier": quality_tier,
@@ -1513,6 +1537,7 @@ def _build_manifest(
             "coordinate_frame": "y_up",
             "meters_per_unit": 1.0,
             "environment_type": str(source_request.get("constraints", {}).get("room_type", "generic")),
+            "room": scene_room,
         },
         "objects": manifest_objects,
         "metadata": {
@@ -1534,17 +1559,9 @@ def _build_manifest(
     }
 
 
-def _build_layout(
-    *,
-    scene_id: str,
-    objects: List[Dict[str, Any]],
-    layout_plan: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
+def _room_box_from_layout_plan(layout_plan: Optional[Mapping[str, Any]]) -> tuple[List[float], List[float]]:
     room_min = [-3.0, 0.0, -3.0]
     room_max = [3.0, 3.0, 3.0]
-    wall_thickness_m = 0.12
-    openings: List[Dict[str, Any]] = []
-
     if isinstance(layout_plan, Mapping):
         room_box = layout_plan.get("room_box")
         if isinstance(room_box, Mapping):
@@ -1562,6 +1579,23 @@ def _build_layout(
                     _safe_float(candidate_max[1], room_max[1]),
                     _safe_float(candidate_max[2], room_max[2]),
                 ]
+
+    normalized_min = [min(room_min[idx], room_max[idx]) for idx in range(3)]
+    normalized_max = [max(room_min[idx], room_max[idx]) for idx in range(3)]
+    return normalized_min, normalized_max
+
+
+def _build_layout(
+    *,
+    scene_id: str,
+    objects: List[Dict[str, Any]],
+    layout_plan: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    room_min, room_max = _room_box_from_layout_plan(layout_plan)
+    wall_thickness_m = 0.12
+    openings: List[Dict[str, Any]] = []
+
+    if isinstance(layout_plan, Mapping):
         wall_thickness_m = max(0.06, _safe_float(layout_plan.get("wall_thickness_m"), wall_thickness_m))
         raw_openings = layout_plan.get("openings")
         if isinstance(raw_openings, list):
@@ -1645,12 +1679,14 @@ def build_manifest_layout_inventory(
         if isinstance(backend_runs_raw, list)
         else []
     )
+    layout_plan = textgen_payload.get("layout_plan") if isinstance(textgen_payload.get("layout_plan"), Mapping) else None
 
     manifest = _build_manifest(
         scene_id=scene_id,
         objects=objects,
         assets_prefix=assets_prefix,
         source_request=source_request,
+        layout_plan=layout_plan,
         provider_used=provider_used,
         quality_tier=quality_tier,
         seed=seed,
@@ -1661,7 +1697,7 @@ def build_manifest_layout_inventory(
     layout = _build_layout(
         scene_id=scene_id,
         objects=objects,
-        layout_plan=textgen_payload.get("layout_plan") if isinstance(textgen_payload.get("layout_plan"), Mapping) else None,
+        layout_plan=layout_plan,
     )
     inventory = _build_inventory(scene_id=scene_id, objects=objects)
 

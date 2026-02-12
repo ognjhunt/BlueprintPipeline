@@ -112,6 +112,131 @@ def test_official_scenesmith_adapter_requires_repo_dir(monkeypatch: pytest.Monke
 
 
 @pytest.mark.unit
+def test_official_scenesmith_adapter_marks_generated_cabinet_articulation_optional(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module("scenesmith_paper_command_optional_articulation_module", "scenesmith-service/scenesmith_paper_command.py")
+
+    repo_dir = tmp_path / "scenesmith"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "main.py").write_text("# placeholder\n", encoding="utf-8")
+
+    run_dir = tmp_path / "paper-run"
+    monkeypatch.setattr(module, "_run_root", lambda _scene_id: run_dir)
+
+    def _fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        output_dir = run_dir / "outputs" / "scene_demo_005" / "scene_000" / "combined_house"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        house_state = {
+            "objects": [
+                {
+                    "id": "cabinet_001",
+                    "semantic_class": "cabinet",
+                    "extent": {"x": 0.8, "y": 0.9, "z": 0.5},
+                    "pose": {
+                        "position": {"x": -1.0, "y": 0.0, "z": 1.2},
+                        "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                    },
+                    "floor_object": True,
+                }
+            ]
+        }
+        (output_dir / "house_state.json").write_text(json.dumps(house_state), encoding="utf-8")
+
+        class _Result:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return _Result()
+
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
+    monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
+    monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "true")
+    monkeypatch.setenv("SCENESMITH_PAPER_ALL_SAM3D", "true")
+
+    response = module._run_official_scenesmith(
+        {
+            "scene_id": "scene_demo_005",
+            "prompt": "A kitchen with cabinets",
+        }
+    )
+
+    assert len(response["objects"]) == 1
+    obj = response["objects"][0]
+    assert obj["sim_role"] == "articulated_furniture"
+    assert obj["articulation"]["candidate"] is True
+    assert obj["articulation"]["required"] is False
+    assert obj["articulation"]["backend_hint"] == "particulate_optional"
+    assert obj["articulation"]["requirement_source"] == "force_generated_assets"
+
+
+@pytest.mark.unit
+def test_official_scenesmith_adapter_preserves_required_joint_articulation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module("scenesmith_paper_command_joint_articulation_module", "scenesmith-service/scenesmith_paper_command.py")
+
+    repo_dir = tmp_path / "scenesmith"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "main.py").write_text("# placeholder\n", encoding="utf-8")
+
+    run_dir = tmp_path / "paper-run"
+    monkeypatch.setattr(module, "_run_root", lambda _scene_id: run_dir)
+
+    def _fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        output_dir = run_dir / "outputs" / "scene_demo_006" / "scene_000" / "combined_house"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        house_state = {
+            "objects": [
+                {
+                    "id": "door_001",
+                    "semantic_class": "cabinet",
+                    "joint_type": "revolute",
+                    "extent": {"x": 0.6, "y": 0.8, "z": 0.4},
+                    "pose": {
+                        "position": {"x": 0.0, "y": 0.0, "z": 0.5},
+                        "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                    },
+                }
+            ]
+        }
+        (output_dir / "house_state.json").write_text(json.dumps(house_state), encoding="utf-8")
+
+        class _Result:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return _Result()
+
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
+    monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
+    monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "true")
+    monkeypatch.setenv("SCENESMITH_PAPER_ALL_SAM3D", "true")
+
+    response = module._run_official_scenesmith(
+        {
+            "scene_id": "scene_demo_006",
+            "prompt": "A kitchen cabinet with opening doors",
+        }
+    )
+
+    assert len(response["objects"]) == 1
+    obj = response["objects"][0]
+    assert obj["articulation"]["candidate"] is True
+    assert obj["articulation"]["required"] is True
+    assert obj["articulation"]["backend_hint"] == "particulate_first"
+    assert obj["articulation"]["requirement_source"] == "joint_type"
+
+
+@pytest.mark.unit
 def test_hydra_overrides_all_sam3d_and_gemini_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     module = _load_module("scenesmith_paper_command_overrides_module", "scenesmith-service/scenesmith_paper_command.py")
 

@@ -212,6 +212,30 @@ def test_backend_dispatcher_resolves_particulate_heuristic_and_auto() -> None:
     )
 
 
+def test_required_articulation_defaults_to_explicit_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    obj = {
+        "sim_role": "articulated_furniture",
+        "articulation_required": False,
+        "articulation": {"required": False},
+    }
+    monkeypatch.delenv("INTERACTIVE_REQUIRE_SIM_ROLE_DEFAULTS", raising=False)
+    assert run_interactive_assets.is_required_articulation_object(obj) is False
+
+    monkeypatch.setenv("INTERACTIVE_REQUIRE_SIM_ROLE_DEFAULTS", "true")
+    assert run_interactive_assets.is_required_articulation_object(obj) is True
+
+
+def test_candidate_articulation_explicit_flag_overrides_sim_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    obj = {
+        "sim_role": "articulated_furniture",
+        "articulation_candidate": False,
+        "articulation": {"candidate": False, "required": False},
+    }
+    monkeypatch.delenv("INTERACTIVE_REQUIRE_SIM_ROLE_DEFAULTS", raising=False)
+    monkeypatch.setenv("INTERACTIVE_CANDIDATE_FROM_SIM_ROLE", "true")
+    assert run_interactive_assets.is_articulation_candidate_object(obj) is False
+
+
 def test_required_articulation_object_fails_closed_on_non_articulated_output(tmp_path, monkeypatch) -> None:
     assets_prefix = f"interactive-required-{tmp_path.name}"
     assets_root = build_scene_assets(assets_prefix, ["desk_0"], gcs_root=tmp_path)

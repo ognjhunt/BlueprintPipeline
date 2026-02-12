@@ -86,6 +86,8 @@ def test_text_adapter_builds_canonical_artifacts_and_marker(tmp_path: Path) -> N
     assert manifest["metadata"]["source"]["type"] == "text"
     assert manifest["metadata"]["source"]["provider"] == "openai"
     assert manifest["metadata"]["source"]["seed"] == 1
+    assert manifest["scene"]["room"]["bounds"] == {"width": 6.0, "depth": 6.0, "height": 3.0}
+    assert manifest["scene"]["room"]["origin"] == [0.0, 0.0, 0.0]
     assert manifest["objects"][0]["asset"]["path"].endswith("/obj_001/model.usd")
     assert layout["scene_id"] == scene_id
     assert len(layout["objects"]) == 1
@@ -191,6 +193,47 @@ def test_adapter_empty_objects_array(tmp_path: Path) -> None:
     assert layout["objects"] == []
     assert inventory["objects"] == []
     assert result["objects_count"] == 0
+
+
+def test_adapter_manifest_room_bounds_follow_layout_plan(tmp_path: Path) -> None:
+    scene_id = "scene_room_bounds"
+    assets_prefix = f"scenes/{scene_id}/assets"
+    layout_prefix = f"scenes/{scene_id}/layout"
+    seg_prefix = f"scenes/{scene_id}/seg"
+
+    textgen_payload = {
+        "schema_version": "v1",
+        "scene_id": scene_id,
+        "seed": 1,
+        "quality_tier": "standard",
+        "provider_used": "openai",
+        "layout_plan": {
+            "room_box": {
+                "min": [-2.0, 0.0, -1.0],
+                "max": [2.5, 2.8, 3.2],
+            }
+        },
+        "objects": [],
+    }
+    source_request = _base_source_request(scene_id)
+
+    result = build_manifest_layout_inventory(
+        root=tmp_path,
+        scene_id=scene_id,
+        assets_prefix=assets_prefix,
+        layout_prefix=layout_prefix,
+        seg_prefix=seg_prefix,
+        textgen_payload=textgen_payload,
+        source_request=source_request,
+    )
+
+    manifest = _load(Path(result["manifest_path"]))
+    layout = _load(Path(result["layout_path"]))
+
+    assert manifest["scene"]["room"]["bounds"] == {"width": 4.5, "depth": 4.2, "height": 2.8}
+    assert manifest["scene"]["room"]["origin"] == [0.25, 0.0, 1.1]
+    assert layout["room_box"]["min"] == [-2.0, 0.0, -1.0]
+    assert layout["room_box"]["max"] == [2.5, 2.8, 3.2]
 
 
 def test_adapter_multiple_objects_with_mixed_roles(tmp_path: Path) -> None:

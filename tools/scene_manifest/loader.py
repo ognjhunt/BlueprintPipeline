@@ -23,6 +23,20 @@ SIM_ROLE_TO_TYPE = {
 }
 
 
+def _coerce_optional_bool(value) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "y"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "n"}:
+            return False
+    return None
+
+
 def _canonical_to_legacy_object(obj: Dict) -> Dict:
     source = obj.get("source", {}) or {}
     from_scene_assets = source.get("scene_assets") or {}
@@ -32,6 +46,19 @@ def _canonical_to_legacy_object(obj: Dict) -> Dict:
     sim_role = obj.get("sim_role", "unknown")
     legacy_type = SIM_ROLE_TO_TYPE.get(sim_role, "static")
     articulation = obj.get("articulation") or {}
+    from_scene_assets_articulation = from_scene_assets.get("articulation")
+    combined_articulation: Dict = {}
+    if isinstance(from_scene_assets_articulation, dict):
+        combined_articulation.update(from_scene_assets_articulation)
+    if isinstance(articulation, dict):
+        combined_articulation.update(articulation)
+
+    explicit_candidate = None
+    if "candidate" in combined_articulation:
+        explicit_candidate = _coerce_optional_bool(combined_articulation.get("candidate"))
+    elif "articulation_candidate" in from_scene_assets:
+        explicit_candidate = _coerce_optional_bool(from_scene_assets.get("articulation_candidate"))
+
     articulation_hint = articulation.get("type")
     if not articulation_hint:
         hints = articulation.get("hints")
@@ -46,6 +73,7 @@ def _canonical_to_legacy_object(obj: Dict) -> Dict:
 
     entry = {
         "id": obj.get("id"),
+        "sim_role": sim_role,
         "class_name": obj.get("category")
         or (obj.get("semantics") or {}).get("category")
         or from_scene_assets.get("class_name"),
@@ -66,12 +94,15 @@ def _canonical_to_legacy_object(obj: Dict) -> Dict:
         or from_scene_assets.get("physx_endpoint"),
         "articulation_hint": articulation_hint or from_scene_assets.get("articulation_hint"),
         "articulation_required": bool(
-            articulation.get("required")
+            combined_articulation.get("required")
             or from_scene_assets.get("articulation_required")
         ),
+        "articulation": combined_articulation or None,
         "polygon": (obj.get("placement") or {}).get("polygon")
         or from_scene_assets.get("polygon"),
     }
+    if explicit_candidate is not None:
+        entry["articulation_candidate"] = explicit_candidate
 
     # Drop empty values to mirror scene_assets.json more closely
     return {k: v for k, v in entry.items() if v is not None}

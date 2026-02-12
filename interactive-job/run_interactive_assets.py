@@ -391,16 +391,36 @@ def find_crop_image(obj_dir: Path, multiview_root: Path, obj_id: str) -> Optiona
     return None
 
 
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "y"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "n"}:
+            return False
+    return None
+
+
 def is_required_articulation_object(obj: Dict[str, Any]) -> bool:
     """Return True when object is explicitly marked articulation-required."""
-    sim_role = str(obj.get("sim_role", "") or "").strip().lower()
-    if sim_role in {"articulated_furniture", "articulated_appliance"}:
-        return True
-    if obj.get("articulation_required") is True:
+    explicit_required = _coerce_optional_bool(obj.get("articulation_required"))
+    if explicit_required is True:
         return True
     articulation = obj.get("articulation")
-    if isinstance(articulation, dict) and articulation.get("required") is True:
-        return True
+    if isinstance(articulation, dict):
+        explicit_from_articulation = _coerce_optional_bool(articulation.get("required"))
+        if explicit_from_articulation is True:
+            return True
+
+    use_sim_role_defaults = env_flag(os.getenv("INTERACTIVE_REQUIRE_SIM_ROLE_DEFAULTS"), default=False)
+    if use_sim_role_defaults:
+        sim_role = str(obj.get("sim_role", "") or "").strip().lower()
+        if sim_role in {"articulated_furniture", "articulated_appliance"}:
+            return True
     return False
 
 
@@ -408,14 +428,30 @@ def is_articulation_candidate_object(obj: Dict[str, Any]) -> bool:
     """Return True when object should be considered for articulation processing."""
     if is_required_articulation_object(obj):
         return True
+
+    explicit_candidate = _coerce_optional_bool(obj.get("articulation_candidate"))
+    if explicit_candidate is not None:
+        return explicit_candidate
+
+    articulation = obj.get("articulation")
+    if isinstance(articulation, dict):
+        explicit_candidate = _coerce_optional_bool(articulation.get("candidate"))
+        if explicit_candidate is not None:
+            return explicit_candidate
+
     if obj.get("articulation_hint"):
         return True
-    articulation = obj.get("articulation")
     if isinstance(articulation, dict):
         if articulation.get("type"):
             return True
         hints = articulation.get("hints")
         if isinstance(hints, list) and len(hints) > 0:
+            return True
+
+    use_sim_role_candidates = env_flag(os.getenv("INTERACTIVE_CANDIDATE_FROM_SIM_ROLE"), default=True)
+    if use_sim_role_candidates:
+        sim_role = str(obj.get("sim_role", "") or "").strip().lower()
+        if sim_role in {"articulated_furniture", "articulated_appliance"}:
             return True
     return False
 
