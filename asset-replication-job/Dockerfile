@@ -5,10 +5,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY asset-replication-job/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY process_replication_queue.py .
+COPY asset-replication-job/process_replication_queue.py .
 
 CMD ["python", "process_replication_queue.py"]
-
