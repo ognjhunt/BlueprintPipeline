@@ -43,7 +43,7 @@ It replaces Stage 1 reconstruction with LLM/template-based scene generation from
 then feeds the result into the same Stage 2-5 pipeline used by the image path.
 
 - **Text path**: `text-scene-gen-job` → `text-scene-adapter-job` → Stage 2-5
-- **Text runtime modes**: `TEXT_GEN_RUNTIME=vm|cloudrun` (`vm` default, transient infra fallback to `cloudrun`)
+- **Text runtime modes**: `TEXT_GEN_RUNTIME=vm|cloudrun|runpod` (`vm` default; `runpod` uses on-demand L40S Stage 1)
 - **Stage 1 Cloud Run overrides**: `TEXT_SCENE_GEN_JOB_NAME` and `TEXT_SCENE_ADAPTER_JOB_NAME` allow non-default job names
 - **LLM-first Stage 1**: `TEXT_GEN_USE_LLM=true` default with deterministic fallback metadata and retry controls
 - **Stage 5 strictness**: `ARENA_EXPORT_REQUIRED=true` default (text completion requires Arena success)
@@ -139,7 +139,7 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `DEFAULT_SOURCE_MODE`: source-orchestrator default request mode (`text`, `image`, `auto`). Defaults to `text`.
 - `TEXT_BACKEND_DEFAULT`: default Stage 1 text backend when request omits `text_backend`. Defaults to `scenesmith`.
 - `TEXT_BACKEND_ALLOWLIST`: allowed Stage 1 text backends. Defaults to `internal,scenesmith,sage,hybrid_serial`.
-- `TEXT_GEN_RUNTIME`: source-orchestrator runtime profile hint for text Stage 1 (`vm`, `cloudrun`, etc.). Defaults to `vm`.
+- `TEXT_GEN_RUNTIME`: source-orchestrator runtime profile hint for text Stage 1 (`vm`, `cloudrun`, `runpod`). Defaults to `vm`.
 - `TEXT_SCENE_GEN_JOB_NAME`: Stage 1 Cloud Run job name override for text scene generation. Defaults to `text-scene-gen-job`.
 - `TEXT_SCENE_ADAPTER_JOB_NAME`: Stage 1 Cloud Run job name override for text scene adaptation. Defaults to `text-scene-adapter-job`.
 - `TEXT_GEN_STANDARD_PROFILE`: profile label injected into text-scene-gen-job for `quality_tier=standard`.
@@ -196,6 +196,14 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `TEXT_GEN_VM_ZONE`: VM zone used when `TEXT_GEN_RUNTIME=vm`. Defaults to `us-east1-c`.
 - `TEXT_GEN_VM_REPO_DIR`: repository directory on the VM for text Stage 1 scripts. Defaults to `~/BlueprintPipeline`.
 - `TEXT_GEN_VM_TIMEOUT_SECONDS`: VM text-stage Cloud Build polling timeout. Defaults to `2400`.
+- `RUNPOD_API_KEY`: required when `TEXT_GEN_RUNTIME=runpod`.
+- `RUNPOD_GPU_TYPE`: RunPod GPU type (default `NVIDIA L40S`) for Stage 1 runpod runtime.
+- `RUNPOD_IMAGE`: RunPod container image for Stage 1 runpod runtime.
+- `RUNPOD_REPO_DIR`: repository directory inside RunPod pod. Defaults to `/workspace/BlueprintPipeline`.
+- `RUNPOD_SCENESMITH_REPO_DIR`: official SceneSmith checkout path in RunPod pod. Defaults to `/workspace/scenesmith`.
+- `RUNPOD_BOOTSTRAP_COMMAND`: optional command executed on RunPod before repo-dir validation (use this to clone/install on fresh pods).
+- `RUNPOD_TERMINATE_ON_EXIT`: terminate pod after Stage 1 completes (`true` default).
+- `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `HF_TOKEN`, `GITHUB_TOKEN`: optional secrets forwarded to RunPod for Stage 1 backends/bootstrap.
 - `SCENESMITH_RUNTIME_MODE`: runtime selector for SceneSmith backend execution metadata (`cloudrun` default).
 - `SCENESMITH_SERVER_URL`: optional SceneSmith server URL used by Stage 1 generation.
 - `SCENESMITH_TIMEOUT_SECONDS`: timeout hint for SceneSmith backend calls (`1800` default).

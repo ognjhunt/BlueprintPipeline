@@ -5,6 +5,36 @@ ACTION=${1:-start}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+load_env_file() {
+  local file_path="$1"
+  if [[ -z "${file_path}" ]]; then
+    return 0
+  fi
+  local resolved_path="${file_path/#\~/${HOME}}"
+  if [[ ! -f "${resolved_path}" ]]; then
+    echo "Env file not found: ${resolved_path}" >&2
+    return 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "${resolved_path}"
+  set +a
+  echo "Loaded env: ${resolved_path}"
+}
+
+if [[ "${TEXT_BACKEND_SKIP_DOTENV:-0}" != "1" ]]; then
+  if [[ -f "${REPO_ROOT}/.env" ]]; then
+    load_env_file "${REPO_ROOT}/.env"
+  fi
+fi
+
+if [[ -n "${TEXT_BACKEND_ENV_FILE:-}" ]]; then
+  load_env_file "${TEXT_BACKEND_ENV_FILE}"
+elif [[ -f "${REPO_ROOT}/configs/text_backends.env" ]]; then
+  load_env_file "${REPO_ROOT}/configs/text_backends.env"
+fi
+
 PYTHON_BIN=${PYTHON_BIN:-python3}
 
 RUN_DIR=${TEXT_BACKEND_RUN_DIR:-/tmp/blueprint-text-backends}
@@ -60,9 +90,14 @@ start_one() {
   mode="${!mode_env_name:-internal}"
 
   if [[ "${name}" == "scenesmith-service" ]] && [[ "${mode}" == "paper" || "${mode}" == "paper_stack" ]]; then
-    if [[ -z "${SCENESMITH_PAPER_REPO_DIR:-}" ]]; then
-      echo "SCENESMITH_PAPER_REPO_DIR is required for SCENESMITH_SERVICE_MODE=${mode}" >&2
-      return 1
+    local paper_repo_dir
+    paper_repo_dir="${SCENESMITH_PAPER_REPO_DIR:-${HOME}/scenesmith}"
+    paper_repo_dir="${paper_repo_dir/#\~/${HOME}}"
+    if [[ ! -d "${paper_repo_dir}" ]]; then
+      echo "SceneSmith paper repo not found at ${paper_repo_dir}; falling back to internal mode." >&2
+      mode="internal"
+    else
+      export SCENESMITH_PAPER_REPO_DIR="${paper_repo_dir}"
     fi
   fi
 

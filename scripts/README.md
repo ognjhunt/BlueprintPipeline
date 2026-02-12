@@ -34,6 +34,7 @@ These scripts support live SceneSmith/SAGE endpoints for Stage 1 text generation
   - Starts/stops/status/logs local `scenesmith-service` and `sage-service` wrappers.
   - Supports `SCENESMITH_SERVICE_MODE=paper_stack` to run official SceneSmith via
     `/Users/nijelhunt_1/workspace/BlueprintPipeline/scenesmith-service/scenesmith_paper_command.py`.
+  - Auto-loads `/Users/nijelhunt_1/workspace/BlueprintPipeline/configs/text_backends.env` when present.
   - Example: `./start_text_backend_services.sh start`
 - `setup_text_backend_services.sh`
   - Creates a local virtualenv and installs service dependencies (Flask/Gunicorn).

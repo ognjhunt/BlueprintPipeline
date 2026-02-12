@@ -50,6 +50,21 @@ _ARTICULATED_CLASSES = {
     "washer",
 }
 
+_PLACEMENT_AGENT_CONFIG_PREFIXES = (
+    "furniture_agent",
+    "wall_agent",
+    "ceiling_agent",
+    "manipuland_agent",
+)
+
+_VALID_PIPELINE_STAGES = {
+    "floor_plan",
+    "furniture",
+    "wall_mounted",
+    "ceiling_mounted",
+    "manipuland",
+}
+
 
 def _safe_float(value: Any, *, default: float) -> float:
     try:
@@ -88,6 +103,35 @@ def _run_root(scene_id: str) -> Path:
     run_root.mkdir(parents=True, exist_ok=True)
     tag = uuid.uuid4().hex[:10]
     return run_root / f"{_slug(scene_id, default='scene')}-{tag}"
+
+
+def _parse_extra_overrides(raw: str | None) -> List[str]:
+    """Parse user-provided Hydra override strings from env.
+
+    Supports either:
+    - JSON array string: '["a=b", "c=d"]'
+    - Delimited string: "a=b;;c=d"
+    """
+    if raw is None:
+        return []
+    value = raw.strip()
+    if not value:
+        return []
+
+    if value.startswith("["):
+        parsed = json.loads(value)
+        if not isinstance(parsed, list):
+            raise ValueError("SCENESMITH_PAPER_EXTRA_OVERRIDES JSON must be a list")
+        overrides: List[str] = []
+        for item in parsed:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                overrides.append(text)
+        return overrides
+
+    return [part.strip() for part in value.split(";;") if part.strip()]
 
 
 def _classify_role(semantic_class: str, raw_obj: Mapping[str, Any]) -> str:
@@ -194,7 +238,6 @@ def _hydra_overrides(*, payload: Mapping[str, Any], run_dir: Path, scene_name: s
     if not prompt:
         raise ValueError("prompt is required")
 
-    backend = str(os.getenv("SCENESMITH_PAPER_BACKEND", "openai")).strip().lower() or "openai"
     overrides = [
         f"hydra.run.dir={run_dir.as_posix()}",
         f"+name={scene_name}",
@@ -207,6 +250,71 @@ def _hydra_overrides(*, payload: Mapping[str, Any], run_dir: Path, scene_name: s
         "experiment.materials_retrieval_server.port=17008",
         "experiment.objaverse_retrieval_server.port=17009",
     ]
+
+    requested_stages = payload.get("pipeline_stages")
+    if isinstance(requested_stages, list):
+        normalized_stages = [
+            str(stage).strip().lower()
+            for stage in requested_stages
+            if str(stage).strip().lower() in _VALID_PIPELINE_STAGES
+        ]
+        if normalized_stages:
+            overrides.append(f"experiment.pipeline.start_stage={normalized_stages[0]}")
+            overrides.append(f"experiment.pipeline.stop_stage={normalized_stages[-1]}")
+
+    all_sam3d = _is_truthy(os.getenv("SCENESMITH_PAPER_ALL_SAM3D"), default=False)
+    force_generated = all_sam3d or _is_truthy(
+        os.getenv("SCENESMITH_PAPER_FORCE_GENERATED_ASSETS"),
+        default=False,
+    )
+    disable_articulated = all_sam3d or _is_truthy(
+        os.getenv("SCENESMITH_PAPER_DISABLE_ARTICULATED_STRATEGY"),
+        default=False,
+    )
+
+    if force_generated:
+        for prefix in _PLACEMENT_AGENT_CONFIG_PREFIXES:
+            overrides.extend(
+                [
+                    f"{prefix}.asset_manager.general_asset_source=generated",
+                    f"{prefix}.asset_manager.backend=sam3d",
+                    f"{prefix}.asset_manager.router.strategies.generated.enabled=true",
+                ]
+            )
+
+    if disable_articulated:
+        for prefix in _PLACEMENT_AGENT_CONFIG_PREFIXES:
+            overrides.extend(
+                [
+                    f"{prefix}.asset_manager.router.strategies.articulated.enabled=false",
+                    f"{prefix}.asset_manager.articulated.sources.partnet_mobility.enabled=false",
+                    f"{prefix}.asset_manager.articulated.sources.artvip.enabled=false",
+                ]
+            )
+
+    image_backend = (
+        str(os.getenv("SCENESMITH_PAPER_IMAGE_BACKEND", "")).strip().lower()
+    )
+    if image_backend in {"openai", "gemini"}:
+        for prefix in _PLACEMENT_AGENT_CONFIG_PREFIXES:
+            overrides.append(f"{prefix}.asset_manager.image_generation.backend={image_backend}")
+
+    use_gemini_context_image = _is_truthy(
+        os.getenv("SCENESMITH_PAPER_ENABLE_GEMINI_CONTEXT_IMAGE"),
+        default=False,
+    )
+    if use_gemini_context_image:
+        overrides.extend(
+            [
+                "furniture_agent.context_image_generation.enabled=true",
+                "furniture_agent.asset_manager.image_generation.backend=gemini",
+            ]
+        )
+
+    if _is_truthy(os.getenv("SCENESMITH_PAPER_ENABLE_FURNITURE_CONTEXT_IMAGE"), default=False):
+        overrides.append("furniture_agent.context_image_generation.enabled=true")
+
+    overrides.extend(_parse_extra_overrides(os.getenv("SCENESMITH_PAPER_EXTRA_OVERRIDES")))
 
     return overrides
 

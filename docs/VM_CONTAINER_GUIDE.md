@@ -50,6 +50,9 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command='
 '
 ```
 
+The start script auto-loads `/home/nijelhunt1/BlueprintPipeline/configs/text_backends.env`,
+which is checked in with paper-stack + quality defaults for SceneSmith.
+
 ### Verify health
 
 ```bash
@@ -89,6 +92,7 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command='
 
 Required secrets for paper stack backend:
 - `OPENAI_API_KEY` (or provider key matching `SCENESMITH_PAPER_BACKEND`)
+- `GOOGLE_API_KEY` when using `SCENESMITH_PAPER_IMAGE_BACKEND=gemini`
 - Any additional keys required by official SceneSmith dependencies
 
 ### Service persistence (auto-start after reboot)

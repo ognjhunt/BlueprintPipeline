@@ -990,15 +990,132 @@ run_text_stage1_for_child:
     - init_runtime_defaults:
         assign:
           - vmErrMessage: ""
+          - runpodErrMessage: ""
         next: runtime_switch
 
     - runtime_switch:
         switch:
+          - condition: '${textGenRuntime == "runpod"}'
+            next: run_runpod_first
           - condition: '${textGenRuntime == "vm"}'
             next: run_vm_first
           - condition: '${textGenRuntime == "cloudrun"}'
             next: run_cloudrun_direct
         next: invalid_runtime
+
+    - run_runpod_first:
+        try:
+          call: run_text_jobs_on_runpod
+          args:
+            projectId: ${projectId}
+            region: ${region}
+            bucket: ${bucket}
+            childSceneId: ${childSceneId}
+            childRequestObject: ${childRequestObject}
+            childTextgenPrefix: ${childTextgenPrefix}
+            childAssetsPrefix: ${childAssetsPrefix}
+            childLayoutPrefix: ${childLayoutPrefix}
+            childSegPrefix: ${childSegPrefix}
+            seedIndex: ${seedIndex}
+            textGenMaxSeeds: ${textGenMaxSeeds}
+            textGenStandardProfile: ${textGenStandardProfile}
+            textGenPremiumProfile: ${textGenPremiumProfile}
+            textGenUseLlm: ${textGenUseLlm}
+            textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
+            textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+          result: runpodResult
+        except:
+          as: runpodErr
+          steps:
+            - set_runpod_err_message:
+                assign:
+                  - runpodErrMessage: '${string(runpodErr.message)}'
+            - runpod_error_switch:
+                switch:
+                  - condition: '${text.match_regex(runpodErrMessage, "^\\[runpod_transient\\].*")}'
+                    next: run_cloudrun_after_runpod_error
+                next: rethrow_runpod_error
+            - rethrow_runpod_error:
+                raise: ${runpodErrMessage}
+        next: return_runpod_result
+
+    - run_cloudrun_after_runpod_error:
+        call: run_text_jobs_on_cloudrun
+        args:
+          projectId: ${projectId}
+          region: ${region}
+          bucket: ${bucket}
+          childSceneId: ${childSceneId}
+          childRequestObject: ${childRequestObject}
+          childTextgenPrefix: ${childTextgenPrefix}
+          childAssetsPrefix: ${childAssetsPrefix}
+          childLayoutPrefix: ${childLayoutPrefix}
+          childSegPrefix: ${childSegPrefix}
+          seedIndex: ${seedIndex}
+          textGenMaxSeeds: ${textGenMaxSeeds}
+          textGenStandardProfile: ${textGenStandardProfile}
+          textGenPremiumProfile: ${textGenPremiumProfile}
+          textGenUseLlm: ${textGenUseLlm}
+          textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
+          textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+          textAssetRetrievalEnabled: ${textAssetRetrievalEnabled}
+          textAssetLibraryPrefixes: ${textAssetLibraryPrefixes}
+          textAssetLibraryMaxFiles: ${textAssetLibraryMaxFiles}
+          textAssetLibraryMinScore: ${textAssetLibraryMinScore}
+          textAssetRetrievalMode: ${textAssetRetrievalMode}
+          textAssetAnnEnabled: ${textAssetAnnEnabled}
+          textAssetAnnTopK: ${textAssetAnnTopK}
+          textAssetAnnMinScore: ${textAssetAnnMinScore}
+          textAssetAnnMaxRerank: ${textAssetAnnMaxRerank}
+          textAssetAnnNamespace: ${textAssetAnnNamespace}
+          textAssetLexicalFallbackEnabled: ${textAssetLexicalFallbackEnabled}
+          textAssetRolloutStatePrefix: ${textAssetRolloutStatePrefix}
+          textAssetRolloutMinDecisions: ${textAssetRolloutMinDecisions}
+          textAssetRolloutMinHitRate: ${textAssetRolloutMinHitRate}
+          textAssetRolloutMaxErrorRate: ${textAssetRolloutMaxErrorRate}
+          textAssetRolloutMaxP95Ms: ${textAssetRolloutMaxP95Ms}
+          textAssetEmbeddingQueuePrefix: ${textAssetEmbeddingQueuePrefix}
+          textAssetEmbeddingProcessedPrefix: ${textAssetEmbeddingProcessedPrefix}
+          textAssetEmbeddingFailedPrefix: ${textAssetEmbeddingFailedPrefix}
+          textAssetEmbeddingModel: ${textAssetEmbeddingModel}
+          vectorStoreProvider: ${vectorStoreProvider}
+          vectorStoreProjectId: ${vectorStoreProjectId}
+          vectorStoreLocation: ${vectorStoreLocation}
+          vectorStoreNamespace: ${vectorStoreNamespace}
+          vectorStoreDimension: ${vectorStoreDimension}
+          vertexIndexEndpoint: ${vertexIndexEndpoint}
+          vertexDeployedIndexId: ${vertexDeployedIndexId}
+          textAssetCatalogEnabled: ${textAssetCatalogEnabled}
+          textAssetReplicationEnabled: ${textAssetReplicationEnabled}
+          textAssetReplicationQueuePrefix: ${textAssetReplicationQueuePrefix}
+          textAssetReplicationTarget: ${textAssetReplicationTarget}
+          textAssetReplicationTargetPrefix: ${textAssetReplicationTargetPrefix}
+          textAssetGenerationEnabled: ${textAssetGenerationEnabled}
+          textAssetGenerationProvider: ${textAssetGenerationProvider}
+          textAssetGenerationProviderChain: ${textAssetGenerationProviderChain}
+          textAssetGeneratedCacheEnabled: ${textAssetGeneratedCacheEnabled}
+          textAssetGeneratedCachePrefix: ${textAssetGeneratedCachePrefix}
+          textSam3dApiHost: ${textSam3dApiHost}
+          textSam3dTextEndpoints: ${textSam3dTextEndpoints}
+          textSam3dTimeoutSeconds: ${textSam3dTimeoutSeconds}
+          textSam3dPollSeconds: ${textSam3dPollSeconds}
+          textHunyuanApiHost: ${textHunyuanApiHost}
+          textHunyuanTextEndpoints: ${textHunyuanTextEndpoints}
+          textHunyuanTimeoutSeconds: ${textHunyuanTimeoutSeconds}
+          textHunyuanPollSeconds: ${textHunyuanPollSeconds}
+        result: cloudrunFallbackAfterRunpod
+        next: return_cloudrun_fallback_after_runpod
+
+    - return_runpod_result:
+        return:
+          runtime_used: "runpod"
+          fallback_to_cloudrun: false
+
+    - return_cloudrun_fallback_after_runpod:
+        return:
+          runtime_used: "cloudrun"
+          fallback_to_cloudrun: true
+          fallback_reason: ${runpodErrMessage}
 
     - run_vm_first:
         try:
@@ -1237,6 +1354,426 @@ run_text_stage1_for_child:
 
     - invalid_runtime:
         raise: '${"Unsupported TEXT_GEN_RUNTIME: " + textGenRuntime}'
+
+
+run_text_jobs_on_runpod:
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds]
+  steps:
+    - init_runpod_timeout:
+        assign:
+          - runpodTimeoutSeconds: '${int(default(sys.get_env("RUNPOD_TEXT_STAGE_TIMEOUT_SECONDS"), "10800"))}'
+        next: ensure_runpod_api_key
+
+    - ensure_runpod_api_key:
+        switch:
+          - condition: '${default(sys.get_env("RUNPOD_API_KEY"), "") == ""}'
+            next: missing_runpod_api_key
+        next: run_runpod_text_stage_via_cloud_build
+
+    - missing_runpod_api_key:
+        raise: '${"[runpod_non_transient] RUNPOD_API_KEY is required when TEXT_GEN_RUNTIME=runpod"}'
+
+    - run_runpod_text_stage_via_cloud_build:
+        try:
+          call: googleapis.cloudbuild.v1.projects.builds.create
+          args:
+            projectId: ${projectId}
+            body:
+              steps:
+                - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+                  entrypoint: "bash"
+                  env:
+                    - '${"PROJECT_ID=" + projectId}'
+                    - '${"BUCKET=" + bucket}'
+                    - '${"SCENE_ID=" + childSceneId}'
+                    - '${"REQUEST_OBJECT=" + childRequestObject}'
+                    - '${"TEXTGEN_PREFIX=" + childTextgenPrefix}'
+                    - '${"ASSETS_PREFIX=" + childAssetsPrefix}'
+                    - '${"LAYOUT_PREFIX=" + childLayoutPrefix}'
+                    - '${"SEG_PREFIX=" + childSegPrefix}'
+                    - '${"TEXT_SEED=" + string(seedIndex)}'
+                    - '${"TEXT_GEN_MAX_SEEDS=" + string(textGenMaxSeeds)}'
+                    - '${"TEXT_GEN_STANDARD_PROFILE=" + textGenStandardProfile}'
+                    - '${"TEXT_GEN_PREMIUM_PROFILE=" + textGenPremiumProfile}'
+                    - '${"TEXT_GEN_USE_LLM=" + textGenUseLlm}'
+                    - '${"TEXT_GEN_LLM_MAX_ATTEMPTS=" + textGenLlmMaxAttempts}'
+                    - '${"TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=" + textGenLlmRetryBackoffSeconds}'
+                    - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "scenesmith")}'
+                    - '${"TEXT_BACKEND_ALLOWLIST=" + default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
+                    - '${"SCENESMITH_TIMEOUT_SECONDS=" + default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
+                    - '${"SAGE_TIMEOUT_SECONDS=" + default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
+                    - '${"TEXT_SAGE_ACTION_DEMO_ENABLED=" + default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false")}'
+                    - '${"RUNPOD_API_KEY=" + default(sys.get_env("RUNPOD_API_KEY"), "")}'
+                    - '${"OPENAI_API_KEY=" + default(sys.get_env("OPENAI_API_KEY"), "")}'
+                    - '${"GOOGLE_API_KEY=" + default(sys.get_env("BP_GOOGLE_API_KEY"), "")}'
+                    - '${"GEMINI_API_KEY=" + default(sys.get_env("GEMINI_API_KEY"), "")}'
+                    - '${"RUNPOD_EXTRA_JSON=" + default(sys.get_env("RUNPOD_EXTRA_JSON"), "{}")}'
+                    - '${"SCENESMITH_PAPER_JSON=" + default(sys.get_env("SCENESMITH_PAPER_JSON"), "{}")}'
+                  args:
+                    - "-c"
+                    - |
+                      set -euo pipefail
+                      python3 - <<'PY'
+                      import json
+                      import os
+                      import shlex
+                      import subprocess
+                      import sys
+                      import tempfile
+                      import time
+                      import urllib.error
+                      import urllib.request
+
+
+                      def _safe_int(raw, default):
+                          try:
+                              return int(str(raw).strip())
+                          except (TypeError, ValueError):
+                              return default
+
+
+                      def _is_truthy(raw, default=False):
+                          if raw is None:
+                              return default
+                          value = str(raw).strip().lower()
+                          if not value:
+                              return default
+                          return value in {"1", "true", "yes", "y", "on"}
+
+
+                      def _escape_graphql(value: str) -> str:
+                          return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+                      def _graphql_query(api_url: str, query: str) -> dict:
+                          req = urllib.request.Request(
+                              api_url,
+                              data=json.dumps({"query": query}).encode("utf-8"),
+                              headers={"content-type": "application/json"},
+                              method="POST",
+                          )
+                          with urllib.request.urlopen(req, timeout=60) as response:
+                              payload = json.loads(response.read().decode("utf-8"))
+                          if isinstance(payload, dict) and payload.get("errors"):
+                              raise RuntimeError(json.dumps(payload.get("errors"), separators=(",", ":")))
+                          data = payload.get("data") if isinstance(payload, dict) else None
+                          if not isinstance(data, dict):
+                              raise RuntimeError("RunPod API returned malformed response payload")
+                          return data
+
+
+                      def _build_remote_command() -> str:
+                          q = shlex.quote
+
+                          # Unpack JSON blobs into os.environ so downstream code
+                          # reads them the same way as individual env vars.
+                          import json as _json
+                          for blob_key in ("RUNPOD_EXTRA_JSON", "SCENESMITH_PAPER_JSON"):
+                              raw = os.environ.get(blob_key, "").strip()
+                              if raw and raw != "{}":
+                                  try:
+                                      for k, v in _json.loads(raw).items():
+                                          if v and not os.environ.get(k):
+                                              os.environ[k] = str(v)
+                                  except Exception:
+                                      pass
+
+                          repo_dir = os.environ.get("RUNPOD_REPO_DIR", "/workspace/BlueprintPipeline")
+                          stage1_python = os.environ.get("RUNPOD_STAGE1_PYTHON_BIN", "python3")
+                          service_python = os.environ.get("RUNPOD_SERVICE_PYTHON_BIN", "python3")
+                          scenesmith_repo_dir = os.environ.get("RUNPOD_SCENESMITH_REPO_DIR", "/workspace/scenesmith")
+                          scenesmith_python_bin = os.environ.get("RUNPOD_SCENESMITH_PYTHON_BIN", "/workspace/scenesmith/.venv/bin/python")
+                          bootstrap_command = os.environ.get("RUNPOD_BOOTSTRAP_COMMAND", "").strip()
+                          sa_json_b64 = os.environ.get("RUNPOD_GCP_SERVICE_ACCOUNT_JSON_B64", "").strip()
+
+                          paper_passthrough_keys = [
+                              "SCENESMITH_PAPER_BACKEND",
+                              "SCENESMITH_PAPER_MODEL",
+                              "SCENESMITH_PAPER_TIMEOUT_SECONDS",
+                              "SCENESMITH_PAPER_ALL_SAM3D",
+                              "SCENESMITH_PAPER_FORCE_GENERATED_ASSETS",
+                              "SCENESMITH_PAPER_DISABLE_ARTICULATED_STRATEGY",
+                              "SCENESMITH_PAPER_IMAGE_BACKEND",
+                              "SCENESMITH_PAPER_ENABLE_GEMINI_CONTEXT_IMAGE",
+                              "SCENESMITH_PAPER_ENABLE_FURNITURE_CONTEXT_IMAGE",
+                              "SCENESMITH_PAPER_EXTRA_OVERRIDES",
+                          ]
+
+                          bootstrap_passthrough_keys = [
+                              "OPENAI_API_KEY",
+                              "GOOGLE_API_KEY",
+                              "GEMINI_API_KEY",
+                              "HF_TOKEN",
+                              "GITHUB_TOKEN",
+                          ]
+
+                          gen_env = {
+                              "BUCKET": os.environ["BUCKET"],
+                              "SCENE_ID": os.environ["SCENE_ID"],
+                              "REQUEST_OBJECT": os.environ["REQUEST_OBJECT"],
+                              "TEXTGEN_PREFIX": os.environ["TEXTGEN_PREFIX"],
+                              "TEXT_SEED": os.environ["TEXT_SEED"],
+                              "DEFAULT_SOURCE_MODE": "text",
+                              "TEXT_GEN_MAX_SEEDS": os.environ["TEXT_GEN_MAX_SEEDS"],
+                              "TEXT_GEN_STANDARD_PROFILE": os.environ["TEXT_GEN_STANDARD_PROFILE"],
+                              "TEXT_GEN_PREMIUM_PROFILE": os.environ["TEXT_GEN_PREMIUM_PROFILE"],
+                              "TEXT_GEN_USE_LLM": os.environ["TEXT_GEN_USE_LLM"],
+                              "TEXT_GEN_LLM_MAX_ATTEMPTS": os.environ["TEXT_GEN_LLM_MAX_ATTEMPTS"],
+                              "TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS": os.environ["TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS"],
+                              "TEXT_BACKEND_DEFAULT": os.environ["TEXT_BACKEND_DEFAULT"],
+                              "TEXT_BACKEND_ALLOWLIST": os.environ["TEXT_BACKEND_ALLOWLIST"],
+                              "SAGE_RUNTIME_MODE": "vm",
+                              "SAGE_SERVER_URL": "http://127.0.0.1:8082/v1/refine",
+                              "SAGE_TIMEOUT_SECONDS": os.environ.get("SAGE_TIMEOUT_SECONDS", "900"),
+                              "SCENESMITH_RUNTIME_MODE": "vm",
+                              "SCENESMITH_SERVER_URL": "http://127.0.0.1:8081/v1/generate",
+                              "SCENESMITH_TIMEOUT_SECONDS": os.environ.get("SCENESMITH_TIMEOUT_SECONDS", "1800"),
+                              "TEXT_SAGE_ACTION_DEMO_ENABLED": os.environ.get("TEXT_SAGE_ACTION_DEMO_ENABLED", "false"),
+                              "TEXT_GEN_RUNTIME": "runpod",
+                          }
+
+                          adapt_env = {
+                              "BUCKET": os.environ["BUCKET"],
+                              "SCENE_ID": os.environ["SCENE_ID"],
+                              "REQUEST_OBJECT": os.environ["REQUEST_OBJECT"],
+                              "TEXTGEN_PREFIX": os.environ["TEXTGEN_PREFIX"],
+                              "ASSETS_PREFIX": os.environ["ASSETS_PREFIX"],
+                              "LAYOUT_PREFIX": os.environ["LAYOUT_PREFIX"],
+                              "SEG_PREFIX": os.environ["SEG_PREFIX"],
+                          }
+
+                          remote_parts = []
+                          remote_parts.append("set -euo pipefail")
+                          for key in bootstrap_passthrough_keys:
+                              value = os.environ.get(key, "")
+                              if value:
+                                  remote_parts.append(f"export {key}={q(value)}")
+                          if bootstrap_command:
+                              remote_parts.append(bootstrap_command)
+                          remote_parts.append(
+                              f"if [ ! -d {q(repo_dir)} ]; then echo '[runpod_non_transient] Missing repo dir: {repo_dir} (bootstrap may have failed)' >&2; exit 42; fi"
+                          )
+                          remote_parts.append(f"cd {q(repo_dir)}")
+                          if sa_json_b64:
+                              remote_parts.append(
+                                  f"printf %s {q(sa_json_b64)} | base64 -d > /tmp/runpod-gcp-sa.json"
+                              )
+                              remote_parts.append("export GOOGLE_APPLICATION_CREDENTIALS=/tmp/runpod-gcp-sa.json")
+
+                          remote_parts.append(f"export PYTHON_BIN={q(service_python)}")
+                          remote_parts.append("export SCENESMITH_SERVICE_MODE=paper_stack")
+                          remote_parts.append(f"export SCENESMITH_PAPER_REPO_DIR={q(scenesmith_repo_dir)}")
+                          remote_parts.append(f"export SCENESMITH_PAPER_PYTHON_BIN={q(scenesmith_python_bin)}")
+                          remote_parts.append("export LIDRA_SKIP_INIT=1")
+
+                          for key in paper_passthrough_keys:
+                              value = os.environ.get(key, "")
+                              if value:
+                                  remote_parts.append(f"export {key}={q(value)}")
+
+                          remote_parts.append("./scripts/start_text_backend_services.sh restart")
+
+                          gen_env_assign = " ".join(f"{k}={q(v)}" for k, v in gen_env.items())
+                          adapt_env_assign = " ".join(f"{k}={q(v)}" for k, v in adapt_env.items())
+                          remote_parts.append(f"{gen_env_assign} {q(stage1_python)} text-scene-gen-job/generate_text_scene.py")
+                          remote_parts.append(f"{adapt_env_assign} {q(stage1_python)} text-scene-adapter-job/adapt_text_scene.py")
+
+                          return " && ".join(remote_parts)
+
+
+                      runpod_api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+                      if not runpod_api_key:
+                          raise RuntimeError("[runpod_non_transient] RUNPOD_API_KEY is missing")
+
+                      cloud_type = os.environ.get("RUNPOD_CLOUD_TYPE", "COMMUNITY").strip().upper() or "COMMUNITY"
+                      if cloud_type not in {"COMMUNITY", "SECURE"}:
+                          cloud_type = "COMMUNITY"
+
+                      runpod_timeout_seconds = _safe_int(os.environ.get("RUNPOD_BOOT_TIMEOUT_SECONDS", "900"), 900)
+                      runpod_ssh_timeout_seconds = _safe_int(os.environ.get("RUNPOD_SSH_READY_TIMEOUT_SECONDS", "180"), 180)
+                      runpod_volume_gb = _safe_int(os.environ.get("RUNPOD_VOLUME_GB", "80"), 80)
+                      runpod_disk_gb = _safe_int(os.environ.get("RUNPOD_CONTAINER_DISK_GB", "40"), 40)
+                      runpod_min_vcpu = _safe_int(os.environ.get("RUNPOD_MIN_VCPU", "8"), 8)
+                      runpod_min_memory = _safe_int(os.environ.get("RUNPOD_MIN_MEMORY_GB", "30"), 30)
+                      runpod_gpu_type = os.environ.get("RUNPOD_GPU_TYPE", "NVIDIA L40S")
+                      runpod_image = os.environ.get("RUNPOD_IMAGE", "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04")
+                      pod_name_prefix = os.environ.get("RUNPOD_POD_NAME_PREFIX", "bp-textgen")
+                      terminate_on_exit = _is_truthy(os.environ.get("RUNPOD_TERMINATE_ON_EXIT"), default=True)
+
+                      runpod_api_url = f"https://api.runpod.io/graphql?api_key={runpod_api_key}"
+                      temp_dir = tempfile.mkdtemp(prefix="runpod-stage1-")
+                      key_path = os.path.join(temp_dir, "id_ed25519")
+                      subprocess.run(
+                          ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", key_path],
+                          check=True,
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL,
+                      )
+                      public_key = open(key_path + ".pub", encoding="utf-8").read().strip()
+                      pod_name = f"{pod_name_prefix}-{int(time.time())}"
+                      pod_id = None
+
+                      try:
+                          launch_query = (
+                              "mutation { podFindAndDeployOnDemand(input: { "
+                              f"cloudType: {cloud_type}, gpuCount: 1, volumeInGb: {runpod_volume_gb}, "
+                              f"containerDiskInGb: {runpod_disk_gb}, minVcpuCount: {runpod_min_vcpu}, "
+                              f"minMemoryInGb: {runpod_min_memory}, gpuTypeId: \"{_escape_graphql(runpod_gpu_type)}\", "
+                              f"name: \"{_escape_graphql(pod_name)}\", imageName: \"{_escape_graphql(runpod_image)}\", "
+                              "dockerArgs: \"\", ports: \"22/tcp\", volumeMountPath: \"/workspace\", "
+                              f"env: [{{ key: \"PUBLIC_KEY\", value: \"{_escape_graphql(public_key)}\" }}] "
+                              "}) { id desiredStatus costPerHr } }"
+                          )
+                          launch = _graphql_query(runpod_api_url, launch_query).get("podFindAndDeployOnDemand") or {}
+                          pod_id = str(launch.get("id") or "").strip()
+                          if not pod_id:
+                              raise RuntimeError("[runpod_transient] RunPod returned no pod ID")
+
+                          ssh_ip = ""
+                          ssh_port = 0
+                          deadline = time.time() + max(120, runpod_timeout_seconds)
+                          while time.time() < deadline:
+                              status_query = (
+                                  "query { pod(input: {podId: \"" + _escape_graphql(pod_id) + "\"}) { "
+                                  "desiredStatus runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort } } } }"
+                              )
+                              pod_payload = _graphql_query(runpod_api_url, status_query).get("pod") or {}
+                              runtime = pod_payload.get("runtime") or {}
+                              ports = runtime.get("ports") or []
+                              for port in ports:
+                                  if (
+                                      port.get("privatePort") == 22
+                                      and port.get("isIpPublic")
+                                      and port.get("ip")
+                                      and port.get("publicPort")
+                                  ):
+                                      ssh_ip = str(port.get("ip"))
+                                      ssh_port = int(port.get("publicPort"))
+                                      break
+                              if ssh_ip and ssh_port > 0:
+                                  break
+                              time.sleep(15)
+
+                          if not ssh_ip or ssh_port <= 0:
+                              raise RuntimeError(f"[runpod_transient] Timed out waiting for RunPod SSH endpoint (pod={pod_id})")
+
+                          remote_cmd = _build_remote_command()
+                          ssh_base = [
+                              "ssh",
+                              "-i",
+                              key_path,
+                              "-o",
+                              "StrictHostKeyChecking=no",
+                              "-o",
+                              "UserKnownHostsFile=/dev/null",
+                              "-o",
+                              "ConnectTimeout=30",
+                              "-p",
+                              str(ssh_port),
+                              f"root@{ssh_ip}",
+                          ]
+
+                          ssh_deadline = time.time() + max(60, runpod_ssh_timeout_seconds)
+                          while True:
+                              probe = subprocess.run(
+                                  ssh_base + ["echo ready"],
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL,
+                              )
+                              if probe.returncode == 0:
+                                  break
+                              if time.time() >= ssh_deadline:
+                                  raise RuntimeError(
+                                      f"[runpod_transient] Timed out waiting for RunPod SSH readiness (pod={pod_id})"
+                                  )
+                              time.sleep(10)
+
+                          run_result = subprocess.run(ssh_base + [remote_cmd])
+                          if run_result.returncode != 0:
+                              raise RuntimeError(
+                                  f"[runpod_non_transient] RunPod text stage command failed (pod={pod_id}, exit={run_result.returncode})"
+                              )
+                      finally:
+                          if pod_id and terminate_on_exit:
+                              try:
+                                  terminate_query = (
+                                      "mutation { podTerminate(input: {podId: \"" + _escape_graphql(pod_id) + "\"}) }"
+                                  )
+                                  _graphql_query(runpod_api_url, terminate_query)
+                              except Exception:
+                                  pass
+                      PY
+              timeout: '${string(runpodTimeoutSeconds + 900) + "s"}'
+              options:
+                logging: CLOUD_LOGGING_ONLY
+          result: runpodBuild
+        except:
+          as: runpodStartErr
+          steps:
+            - raise_runpod_start_transient:
+                raise: '${"[runpod_transient] Failed to start RunPod text stage via Cloud Build: " + runpodStartErr.message}'
+        next: init_runpod_build_poll
+
+    - init_runpod_build_poll:
+        assign:
+          - runpodBuildId: '${if(runpodBuild.metadata != null and runpodBuild.metadata.build != null and runpodBuild.metadata.build.id != null, runpodBuild.metadata.build.id, if(runpodBuild.id != null, runpodBuild.id, ""))}'
+          - runpodBuildPollStartTime: '${time.format(sys.now())}'
+        next: ensure_runpod_build_id
+
+    - ensure_runpod_build_id:
+        switch:
+          - condition: '${runpodBuildId == ""}'
+            next: missing_runpod_build_id
+        next: check_runpod_build_status
+
+    - missing_runpod_build_id:
+        raise: '${"[runpod_transient] RunPod text stage Cloud Build returned no build ID for scene " + childSceneId}'
+
+    - check_runpod_build_status:
+        call: googleapis.cloudbuild.v1.projects.builds.get
+        args:
+          projectId: ${projectId}
+          id: ${runpodBuildId}
+        result: runpodBuildStatus
+        next: runpod_build_status_switch
+
+    - runpod_build_status_switch:
+        switch:
+          - condition: '${runpodBuildStatus.status == "SUCCESS"}'
+            next: return_runpod_build_success
+          - condition: '${runpodBuildStatus.status == "TIMEOUT" or runpodBuildStatus.status == "INTERNAL_ERROR" or runpodBuildStatus.status == "EXPIRED" or runpodBuildStatus.status == "CANCELLED" or runpodBuildStatus.status == "FAILURE"}'
+            next: raise_runpod_build_transient
+        next: check_runpod_build_timeout
+
+    - check_runpod_build_timeout:
+        assign:
+          - runpodBuildPollNow: '${time.format(sys.now())}'
+          - runpodBuildPollElapsedSeconds: '${time.parse(runpodBuildPollNow) - time.parse(runpodBuildPollStartTime)}'
+        next: runpod_build_timeout_switch
+
+    - runpod_build_timeout_switch:
+        switch:
+          - condition: '${runpodBuildPollElapsedSeconds >= runpodTimeoutSeconds}'
+            next: raise_runpod_build_transient_timeout
+        next: wait_runpod_build_poll
+
+    - wait_runpod_build_poll:
+        call: sys.sleep
+        args:
+          seconds: 20
+        next: check_runpod_build_status
+
+    - raise_runpod_build_transient:
+        raise: '${"[runpod_transient] RunPod text stage build unstable for scene " + childSceneId + " (build " + runpodBuildId + ", status=" + runpodBuildStatus.status + ")"}'
+
+    - raise_runpod_build_transient_timeout:
+        raise: '${"[runpod_transient] RunPod text stage build polling timed out for scene " + childSceneId + " (build " + runpodBuildId + ")"}'
+
+    - return_runpod_build_success:
+        return:
+          status: "SUCCEEDED"
+          runtime_used: "runpod"
+          build_id: ${runpodBuildId}
 
 
 run_text_jobs_on_cloudrun:

@@ -109,3 +109,54 @@ def test_official_scenesmith_adapter_requires_repo_dir(monkeypatch: pytest.Monke
                 "seed": 1,
             }
         )
+
+
+@pytest.mark.unit
+def test_hydra_overrides_all_sam3d_and_gemini_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = _load_module("scenesmith_paper_command_overrides_module", "scenesmith-service/scenesmith_paper_command.py")
+
+    monkeypatch.setenv("SCENESMITH_PAPER_ALL_SAM3D", "true")
+    monkeypatch.setenv("SCENESMITH_PAPER_ENABLE_GEMINI_CONTEXT_IMAGE", "true")
+    monkeypatch.setenv("SCENESMITH_PAPER_EXTRA_OVERRIDES", '["experiment.pipeline.stop_stage=furniture"]')
+
+    overrides = module._hydra_overrides(
+        payload={
+            "prompt": "A modern kitchen",
+            "pipeline_stages": ["floor_plan", "furniture"],
+        },
+        run_dir=tmp_path,
+        scene_name="scene_demo_003",
+    )
+
+    assert "experiment.pipeline.start_stage=floor_plan" in overrides
+    assert "experiment.pipeline.stop_stage=furniture" in overrides
+    assert "furniture_agent.context_image_generation.enabled=true" in overrides
+    assert "furniture_agent.asset_manager.image_generation.backend=gemini" in overrides
+
+    for prefix in module._PLACEMENT_AGENT_CONFIG_PREFIXES:
+        assert f"{prefix}.asset_manager.general_asset_source=generated" in overrides
+        assert f"{prefix}.asset_manager.backend=sam3d" in overrides
+        assert f"{prefix}.asset_manager.router.strategies.articulated.enabled=false" in overrides
+        assert f"{prefix}.asset_manager.articulated.sources.artvip.enabled=false" in overrides
+
+
+@pytest.mark.unit
+def test_hydra_overrides_supports_delimited_extra_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module("scenesmith_paper_command_extra_overrides_module", "scenesmith-service/scenesmith_paper_command.py")
+
+    monkeypatch.setenv(
+        "SCENESMITH_PAPER_EXTRA_OVERRIDES",
+        "furniture_agent.context_image_generation.enabled=true;;experiment.num_workers=2",
+    )
+
+    overrides = module._hydra_overrides(
+        payload={"prompt": "A compact kitchen"},
+        run_dir=tmp_path,
+        scene_name="scene_demo_004",
+    )
+
+    assert "furniture_agent.context_image_generation.enabled=true" in overrides
+    assert "experiment.num_workers=2" in overrides

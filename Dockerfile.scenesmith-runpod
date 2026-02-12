@@ -1,0 +1,172 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# SceneSmith + SAM3D — RunPod L40S Docker Image
+# =============================================================================
+#
+# Pre-built image with ALL deps for running SceneSmith Stage 1 on RunPod.
+# Eliminates the 15-20 min bootstrap cold start.
+#
+# Build (MUST use --platform linux/amd64):
+#   docker build --platform linux/amd64 \
+#     -f Dockerfile.scenesmith-runpod \
+#     -t <your-registry>/scenesmith-runpod:latest .
+#
+# Push to Docker Hub (or any registry RunPod can pull from):
+#   docker push <your-registry>/scenesmith-runpod:latest
+#
+# Then set in orchestrator config:
+#   RUNPOD_IMAGE=<your-registry>/scenesmith-runpod:latest
+#   RUNPOD_BOOTSTRAP_COMMAND=""  (no bootstrap needed!)
+#
+# What's included:
+#   - SceneSmith repo (nepfaff/scenesmith) + venv + all Python deps
+#   - SAM3D (sam-3d-objects) + inference pipeline
+#   - GPU packages: pytorch3d, kaolin, nvdiffrast, gsplat, xformers
+#   - BlueprintPipeline (text-scene-gen, text-scene-adapter, scenesmith-service)
+#   - System libs (EGL, OpenGL, Blender deps)
+#   - torch 2.5.1+cu124 (pinned — xformers won't upgrade it)
+#
+# NOT included (must be on /workspace network volume or downloaded at runtime):
+#   - SAM3D model checkpoints (~16 GB)
+#   - AmbientCG materials (~10 GB)
+#   - ArtVIP data (~8.7 GB) — not needed with ALL_SAM3D=true
+#   - API keys (OPENAI_API_KEY, GOOGLE_API_KEY, HF_TOKEN)
+#
+# Image size: ~25-30 GB (GPU packages are large)
+# =============================================================================
+
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_LINK_MODE=copy \
+    LIDRA_SKIP_INIT=1 \
+    CUDA_VISIBLE_DEVICES=0 \
+    HYDRA_FULL_ERROR=1
+
+# =============================================================================
+# Phase 1: System libraries
+# =============================================================================
+RUN apt-get update -qq && \
+    apt-get install -y -qq \
+        libpython3.11-dev \
+        libxrender1 libxi6 libxxf86vm1 libxfixes3 libgl1 \
+        libxkbcommon0 libsm6 libice6 libxext6 libxrandr2 \
+        libxcursor1 libxinerama1 libepoxy0 libglu1-mesa \
+        libegl1 libegl-mesa0 libgles2-mesa libopengl0 libglx-mesa0 \
+        psmisc git-lfs && \
+    apt-get remove -y bubblewrap 2>/dev/null || true && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# =============================================================================
+# Phase 2: Install uv
+# =============================================================================
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+# =============================================================================
+# Phase 3: Clone SceneSmith repo + submodules
+# =============================================================================
+WORKDIR /opt
+RUN git clone --depth 1 https://github.com/nepfaff/scenesmith.git /opt/scenesmith && \
+    cd /opt/scenesmith && \
+    git submodule update --init --recursive
+
+# =============================================================================
+# Phase 4: SceneSmith Python deps
+# =============================================================================
+WORKDIR /opt/scenesmith
+RUN uv sync --no-dev
+
+# Activate venv for all subsequent RUN commands
+ENV VIRTUAL_ENV=/opt/scenesmith/.venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# =============================================================================
+# Phase 5: GPU packages from source
+# =============================================================================
+RUN uv pip install --no-build-isolation \
+    "git+https://github.com/nerfstudio-project/gsplat.git@2323de5905d5e90e035f792fe65bad0fedd413e7"
+
+RUN uv pip install --no-build-isolation \
+    "git+https://github.com/NVlabs/nvdiffrast.git"
+
+RUN FORCE_CUDA=1 uv pip install --no-build-isolation \
+    "git+https://github.com/facebookresearch/pytorch3d.git"
+
+RUN uv pip install kaolin \
+    -f "https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu124.html"
+
+# =============================================================================
+# Phase 6: Pin xformers + torch (CRITICAL)
+# =============================================================================
+RUN uv pip install 'xformers==0.0.28.post3' \
+    --index-url https://download.pytorch.org/whl/cu124 && \
+    uv pip install 'torch==2.5.1+cu124' 'torchvision==0.20.1+cu124' \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# =============================================================================
+# Phase 7: SAM3D + remaining deps
+# =============================================================================
+RUN uv pip install -e external/sam-3d-objects/ --no-deps
+
+RUN uv pip install \
+    open3d optree roma loguru \
+    astor einops-exts point-cloud-utils scikit-image trimesh \
+    easydict einops fvcore \
+    plyfile spconv-cu120 timm \
+    lightning pyvista pymeshfix igraph
+
+RUN uv pip install \
+    'MoGe @ git+https://github.com/microsoft/MoGe.git@a8c37341bc0325ca99b9d57981cc3bb2bd3e255b'
+
+# Flask for scenesmith_service.py
+RUN uv pip install flask gunicorn
+
+# =============================================================================
+# Phase 8: Copy BlueprintPipeline (Stage 1 jobs + tools)
+# =============================================================================
+WORKDIR /opt/BlueprintPipeline
+COPY tools/ /opt/BlueprintPipeline/tools/
+COPY text-scene-gen-job/ /opt/BlueprintPipeline/text-scene-gen-job/
+COPY text-scene-adapter-job/ /opt/BlueprintPipeline/text-scene-adapter-job/
+COPY scenesmith-service/ /opt/BlueprintPipeline/scenesmith-service/
+COPY scripts/start_text_backend_services.sh /opt/BlueprintPipeline/scripts/start_text_backend_services.sh
+COPY scripts/run-scenesmith-quality.sh /opt/BlueprintPipeline/scripts/run-scenesmith-quality.sh
+COPY scripts/runpod-bootstrap-stage1.sh /opt/BlueprintPipeline/scripts/runpod-bootstrap-stage1.sh
+COPY configs/ /opt/BlueprintPipeline/configs/
+COPY requirements.txt /opt/BlueprintPipeline/requirements.txt
+
+# Install BlueprintPipeline Python deps
+RUN if [ -f requirements.txt ]; then uv pip install -r requirements.txt 2>/dev/null || pip install -r requirements.txt || true; fi
+
+# =============================================================================
+# Phase 9: Symlink to /workspace paths (where orchestrator expects them)
+# =============================================================================
+# The orchestrator SSHes in and expects repos at /workspace/*.
+# We create symlinks so both /opt/* and /workspace/* work.
+# The /workspace volume mount will override these if a volume is attached.
+RUN mkdir -p /workspace && \
+    ln -sf /opt/BlueprintPipeline /workspace/BlueprintPipeline && \
+    ln -sf /opt/scenesmith /workspace/scenesmith
+
+# =============================================================================
+# Phase 10: Verification script
+# =============================================================================
+RUN echo '#!/bin/bash\n\
+source /opt/scenesmith/.venv/bin/activate\n\
+export LIDRA_SKIP_INIT=1\n\
+python3 -c "\n\
+import torch; print(f\"torch {torch.__version__} cuda={torch.cuda.is_available()}\")\n\
+import kaolin; print(f\"kaolin {kaolin.__version__} OK\")\n\
+import xformers; print(f\"xformers {xformers.__version__} OK\")\n\
+from sam3d_objects.pipeline.inference_pipeline_pointmap import InferencePipelinePointMap\n\
+print(\"SAM3D pipeline OK\")\n\
+print(\"ALL CHECKS PASSED\")\n\
+"' > /opt/verify.sh && chmod +x /opt/verify.sh
+
+# Default working directory for SSH sessions
+WORKDIR /workspace
+
+# Keep default RunPod entrypoint (SSH + Jupyter)

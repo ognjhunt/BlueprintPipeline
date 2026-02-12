@@ -38,6 +38,12 @@ export PYTHON_BIN=/Users/nijelhunt_1/workspace/BlueprintPipeline/.venv-text-back
 ./scripts/start_text_backend_services.sh status
 ```
 
+`start_text_backend_services.sh` auto-loads:
+- `/Users/nijelhunt_1/workspace/BlueprintPipeline/.env` (unless `TEXT_BACKEND_SKIP_DOTENV=1`)
+- `/Users/nijelhunt_1/workspace/BlueprintPipeline/configs/text_backends.env` (if present)
+
+This allows persistent paper-stack settings for autonomous VM runs.
+
 Defaults:
 - SceneSmith on `http://127.0.0.1:8081/v1/generate`
 - SAGE on `http://127.0.0.1:8082/v1/refine`
@@ -53,12 +59,52 @@ TEXT_BACKEND_DEFAULT=scenesmith
 TEXT_GEN_RUNTIME=vm
 ```
 
+When `TEXT_GEN_RUNTIME=vm`, `setup-source-orchestrator-trigger.sh` now defaults to:
+- `SCENESMITH_RUNTIME_MODE=vm`
+- `SCENESMITH_SERVER_URL=http://127.0.0.1:8081/v1/generate`
+- `SAGE_RUNTIME_MODE=vm`
+- `SAGE_SERVER_URL=http://127.0.0.1:8082/v1/refine`
+
 Then redeploy source orchestrator trigger/workflow:
 
 ```bash
 cd /Users/nijelhunt_1/workspace/BlueprintPipeline/workflows
 bash setup-source-orchestrator-trigger.sh <project_id> <bucket> <region>
 ```
+
+### 2b) Run Stage 1 on RunPod L40S (autonomous runtime)
+
+Set `TEXT_GEN_RUNTIME=runpod` before deploying `source-orchestrator`.
+When enabled, the workflow will:
+- start an on-demand RunPod L40S pod,
+- run Stage 1 text generation + adapter on that pod,
+- terminate the pod (default),
+- continue Stages 2-5 on the normal GCP workflows/jobs.
+
+Required env vars for deploy:
+
+```bash
+TEXT_GEN_RUNTIME=runpod
+RUNPOD_API_KEY=<runpod-api-key>
+```
+
+Recommended env vars:
+
+```bash
+RUNPOD_GPU_TYPE="NVIDIA L40S"
+RUNPOD_IMAGE="runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
+RUNPOD_REPO_DIR=/workspace/BlueprintPipeline
+RUNPOD_SCENESMITH_REPO_DIR=/workspace/scenesmith
+RUNPOD_TERMINATE_ON_EXIT=true
+# Optional on fresh pods; runs before repo-dir check:
+RUNPOD_BOOTSTRAP_COMMAND="curl -sSfL https://raw.githubusercontent.com/<org>/<repo>/<ref>/scripts/runpod-bootstrap-stage1.sh | bash -s"
+```
+
+Notes:
+- If the image already contains `/workspace/BlueprintPipeline/scripts/runpod-bootstrap-stage1.sh`, you can set `RUNPOD_BOOTSTRAP_COMMAND="bash /workspace/BlueprintPipeline/scripts/runpod-bootstrap-stage1.sh"` instead.
+- If you do not set `RUNPOD_BOOTSTRAP_COMMAND`, the RunPod pod must already have BlueprintPipeline + SceneSmith checked out at the configured paths.
+- Stage 1 credentials are forwarded into the RunPod pod when set in workflow env (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `HF_TOKEN`, `GITHUB_TOKEN`).
+- If the RunPod stage fails transiently, the workflow falls back to Cloud Run Stage 1.
 
 ### 3) Validate services
 
