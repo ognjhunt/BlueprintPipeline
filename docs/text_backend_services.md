@@ -24,6 +24,7 @@ Both support runtime modes:
 - `internal`: run in-repo implementation (default)
 - `command`: execute external backend command via stdin/stdout JSON
 - `http_forward`: forward to upstream URL
+- `paper_stack` (SceneSmith only): run official SceneSmith stack via command bridge
 
 ## Quick start on VM (recommended first)
 
@@ -48,7 +49,7 @@ Set in workflow deploy environment:
 ```bash
 SCENESMITH_SERVER_URL=http://127.0.0.1:8081/v1/generate
 SAGE_SERVER_URL=http://127.0.0.1:8082/v1/refine
-TEXT_BACKEND_DEFAULT=hybrid_serial
+TEXT_BACKEND_DEFAULT=scenesmith
 TEXT_GEN_RUNTIME=vm
 ```
 
@@ -93,6 +94,28 @@ Or command bridge:
 - `SCENESMITH_SERVICE_MODE=command`
 - `SCENESMITH_COMMAND="<cmd that reads JSON stdin and writes JSON stdout>"`
 
+Or official SceneSmith paper stack (still through same local endpoint):
+- `SCENESMITH_SERVICE_MODE=paper_stack`
+- `SCENESMITH_PAPER_REPO_DIR=<path to nepfaff/scenesmith checkout>`
+- `SCENESMITH_PAPER_PYTHON_BIN=<python in official scenesmith venv>`
+- Optional:
+  - `SCENESMITH_PAPER_BACKEND=openai|gemini|anthropic` (default `openai`)
+  - `SCENESMITH_PAPER_MODEL=<backend-specific model id>`
+  - `SCENESMITH_PAPER_TIMEOUT_SECONDS=5400`
+  - `SCENESMITH_PAPER_KEEP_RUN_DIR=false`
+
+Example VM launch for paper stack:
+
+```bash
+cd /Users/nijelhunt_1/workspace/BlueprintPipeline
+export SCENESMITH_SERVICE_MODE=paper_stack
+export SCENESMITH_PAPER_REPO_DIR=/home/nijelhunt1/scenesmith
+export SCENESMITH_PAPER_PYTHON_BIN=/home/nijelhunt1/scenesmith/.venv/bin/python
+export SCENESMITH_PAPER_BACKEND=openai
+export SCENESMITH_PAPER_MODEL=gpt-4o
+./scripts/start_text_backend_services.sh restart
+```
+
 ### SAGE wrapper
 - `SAGE_SERVICE_MODE=http_forward`
 - `SAGE_UPSTREAM_URL=<your-real-sage-endpoint>`
@@ -115,7 +138,7 @@ Example:
   "schema_version": "v1",
   "scene_id": "scene_demo_001",
   "source_mode": "text",
-  "text_backend": "hybrid_serial",
+  "text_backend": "scenesmith",
   "prompt": "A cluttered kitchen where a robot moves a bowl to a shelf",
   "quality_tier": "standard",
   "seed_count": 1,

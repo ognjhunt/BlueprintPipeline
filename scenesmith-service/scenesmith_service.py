@@ -8,6 +8,7 @@ Modes:
 - internal: use in-repo SceneSmith strategy implementation
 - command:  invoke external process defined by SCENESMITH_COMMAND
 - http_forward: forward request payload to SCENESMITH_UPSTREAM_URL
+- paper_stack: command bridge that runs official SceneSmith and converts outputs
 """
 
 from __future__ import annotations
@@ -234,6 +235,16 @@ def _run_http_forward(payload: Mapping[str, Any]) -> Dict[str, Any]:
     return dict(parsed)
 
 
+def _run_paper_stack(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    paper_command = os.getenv("SCENESMITH_PAPER_COMMAND", "").strip()
+    if not paper_command:
+        adapter = REPO_ROOT / "scenesmith-service" / "scenesmith_paper_command.py"
+        paper_command = f"{shlex.quote(sys.executable)} {shlex.quote(str(adapter))}"
+
+    with _temporary_env("SCENESMITH_COMMAND", paper_command):
+        return _run_command_backend(payload)
+
+
 def _normalize_backend_response(result: Mapping[str, Any], *, request_id: str) -> Dict[str, Any]:
     response = dict(result)
     if not isinstance(response.get("package"), Mapping) and not isinstance(response.get("objects"), list):
@@ -258,6 +269,8 @@ def _invoke_backend(payload: Mapping[str, Any], context: TextGenerationContext, 
         return _normalize_backend_response(_run_command_backend(payload), request_id=request_id)
     if mode == "http_forward":
         return _normalize_backend_response(_run_http_forward(payload), request_id=request_id)
+    if mode in {"paper", "paper_stack"}:
+        return _normalize_backend_response(_run_paper_stack(payload), request_id=request_id)
 
     raise RuntimeError(f"Unsupported SCENESMITH_SERVICE_MODE={mode!r}")
 

@@ -145,6 +145,50 @@ def test_scenesmith_service_command_mode(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 @pytest.mark.unit
+def test_scenesmith_service_paper_stack_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCENESMITH_SERVICE_MODE", "paper_stack")
+    monkeypatch.setenv("SCENESMITH_PAPER_COMMAND", "python /tmp/paper_cmd.py")
+
+    module = _load_module("scenesmith_service_paper_module", "scenesmith-service/scenesmith_service.py")
+
+    called = {"command": None}
+
+    def _fake_run_command(payload):  # type: ignore[no-untyped-def]
+        called["command"] = module.os.environ.get("SCENESMITH_COMMAND")
+        return {
+            "schema_version": "v1",
+            "request_id": "paper-1",
+            "objects": [
+                {
+                    "id": "obj_200",
+                    "name": "plate",
+                    "category": "plate",
+                    "sim_role": "manipulable_object",
+                    "transform": {"position": {"x": 0, "y": 0, "z": 0}},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(module, "_run_command_backend", _fake_run_command)
+
+    response = module.app.test_client().post(
+        "/v1/generate",
+        json={
+            "scene_id": "svc_scene_005",
+            "prompt": "A test prompt",
+            "quality_tier": "standard",
+            "seed": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["request_id"] == "paper-1"
+    assert isinstance(payload.get("objects"), list)
+    assert called["command"] == "python /tmp/paper_cmd.py"
+
+
+@pytest.mark.unit
 def test_sage_service_http_forward_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SAGE_SERVICE_MODE", "http_forward")
     monkeypatch.setenv("SAGE_UPSTREAM_URL", "https://sage-upstream.example/v1/refine")

@@ -59,6 +59,13 @@ start_one() {
   local mode
   mode="${!mode_env_name:-internal}"
 
+  if [[ "${name}" == "scenesmith-service" ]] && [[ "${mode}" == "paper" || "${mode}" == "paper_stack" ]]; then
+    if [[ -z "${SCENESMITH_PAPER_REPO_DIR:-}" ]]; then
+      echo "SCENESMITH_PAPER_REPO_DIR is required for SCENESMITH_SERVICE_MODE=${mode}" >&2
+      return 1
+    fi
+  fi
+
   echo "Starting ${name} on port ${port} (mode=${mode})"
   nohup env PORT="${port}" "${mode_env_name}=${mode}" "${PYTHON_BIN}" "${module_path}" >"${log_file}" 2>&1 &
   local pid=$!

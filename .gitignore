@@ -12,6 +12,7 @@ downloaded_episodes/
 # secrets / env
 .env
 .env.*
+configs/aws_credentials.env
 
 # local scratch / caches
 __pycache__/

@@ -136,7 +136,7 @@ def main() -> int:
         raise ValueError("BUCKET is required")
     state_prefix = os.getenv("TEXT_AUTONOMY_STATE_PREFIX", "automation/text_daily").strip("/")
     provider_policy = os.getenv("TEXT_AUTONOMY_PROVIDER_POLICY", "openai_primary").strip() or "openai_primary"
-    text_backend = os.getenv("TEXT_AUTONOMY_TEXT_BACKEND", "sage").strip().lower() or "sage"
+    text_backend = os.getenv("TEXT_AUTONOMY_TEXT_BACKEND", "scenesmith").strip().lower() or "scenesmith"
     if text_backend not in {"internal", "scenesmith", "sage", "hybrid_serial"}:
         raise ValueError(
             "TEXT_AUTONOMY_TEXT_BACKEND must be internal|scenesmith|sage|hybrid_serial, "

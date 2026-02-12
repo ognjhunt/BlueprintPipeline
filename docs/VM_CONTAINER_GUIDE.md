@@ -26,7 +26,7 @@ Current workflow routing (deployed):
 - Workflow: `source-orchestrator` (region `us-central1`)
 - Trigger: `scene-request-source-orchestrator-trigger`
 - Bucket: `blueprint-8c1ca.appspot.com`
-- Default backend: `hybrid_serial` (SceneSmith -> SAGE)
+- Default backend: `scenesmith`
 - Runtime: `vm`
 
 ### How it works
@@ -34,9 +34,8 @@ Current workflow routing (deployed):
 1. Upload `scenes/<scene_id>/prompts/scene_request.json`.
 2. Eventarc triggers `source-orchestrator`.
 3. Stage 1 text generation runs on VM (`TEXT_GEN_RUNTIME=vm`).
-4. Generator backend `hybrid_serial` runs:
-   - SceneSmith endpoint first (`/v1/generate`)
-   - SAGE endpoint second (`/v1/refine`)
+4. Generator backend `scenesmith` runs (`/v1/generate`).
+   - Optional: set `text_backend` to `hybrid_serial` for SceneSmith -> SAGE chaining.
 5. Adapter and Stage 2-5 continue as normal (`scene_manifest.json` contract unchanged).
 
 ### Start/restart text backend services on VM
@@ -60,6 +59,38 @@ gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command='
 '
 ```
 
+### Switch SceneSmith wrapper to official paper stack
+
+Use this when you want the SceneSmith endpoint (`/v1/generate`) to run official
+`nepfaff/scenesmith` instead of the in-repo lightweight strategy.
+
+```bash
+gcloud compute ssh isaac-sim-ubuntu --zone=us-east1-c --command='
+  set -euo pipefail
+  if [[ ! -d ~/scenesmith ]]; then
+    git clone https://github.com/nepfaff/scenesmith.git ~/scenesmith
+  fi
+  cd ~/scenesmith
+  python3 -m venv .venv
+  . .venv/bin/activate
+  pip install --upgrade pip
+  pip install -r requirements.txt
+  # Follow official repo README for SAM3D/ArtVIP/AmbientCG prerequisites.
+  cd ~/BlueprintPipeline
+  export SCENESMITH_SERVICE_MODE=paper_stack
+  export SCENESMITH_PAPER_REPO_DIR=~/scenesmith
+  export SCENESMITH_PAPER_PYTHON_BIN=~/scenesmith/.venv/bin/python
+  export SCENESMITH_PAPER_BACKEND=openai
+  export SCENESMITH_PAPER_MODEL=gpt-4o
+  ./scripts/start_text_backend_services.sh restart
+  curl -s http://127.0.0.1:8081/healthz && echo
+'
+```
+
+Required secrets for paper stack backend:
+- `OPENAI_API_KEY` (or provider key matching `SCENESMITH_PAPER_BACKEND`)
+- Any additional keys required by official SceneSmith dependencies
+
 ### Service persistence (auto-start after reboot)
 
 Systemd unit is installed and enabled:
@@ -78,7 +109,7 @@ cat > /tmp/scene_request.json <<'JSON'
   "schema_version": "v1",
   "scene_id": "scene_demo_001",
   "source_mode": "text",
-  "text_backend": "hybrid_serial",
+  "text_backend": "scenesmith",
   "prompt": "A cluttered kitchen where a robot moves a bowl to a shelf",
   "quality_tier": "standard",
   "seed_count": 1,

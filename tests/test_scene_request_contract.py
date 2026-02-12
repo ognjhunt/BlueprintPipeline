@@ -11,7 +11,7 @@ def test_scene_request_schema_accepts_valid_text_request() -> None:
         "schema_version": "v1",
         "scene_id": "scene_123",
         "source_mode": "text",
-        "text_backend": "sage",
+        "text_backend": "scenesmith",
         "prompt": "A modern kitchen for robot pick-and-place tasks",
         "quality_tier": "standard",
         "seed_count": 2,

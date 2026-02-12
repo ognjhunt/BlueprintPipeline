@@ -437,7 +437,7 @@ cd workflows
 TEXT_DAILY_QUOTA=1 \
 TEXT_AUTONOMY_TIMEZONE=America/New_York \
 TEXT_AUTONOMY_PROVIDER_POLICY=openai_primary \
-TEXT_AUTONOMY_TEXT_BACKEND=sage \
+TEXT_AUTONOMY_TEXT_BACKEND=scenesmith \
 TEXT_AUTONOMY_QUALITY_TIER=premium \
 bash setup-text-autonomy-scheduler.sh <project_id> <bucket> <region>
 ```

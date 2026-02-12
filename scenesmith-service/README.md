@@ -28,6 +28,20 @@ Response contract:
   - Command must return JSON on stdout.
 - `SCENESMITH_SERVICE_MODE=http_forward`
   - Forwards request to `SCENESMITH_UPSTREAM_URL`.
+- `SCENESMITH_SERVICE_MODE=paper_stack` (or `paper`)
+  - Runs the official SceneSmith stack through the command bridge at
+    `/Users/nijelhunt_1/workspace/BlueprintPipeline/scenesmith-service/scenesmith_paper_command.py`.
+  - Requires these env vars:
+    - `SCENESMITH_PAPER_REPO_DIR` (path to cloned official `nepfaff/scenesmith` repo)
+    - `SCENESMITH_PAPER_PYTHON_BIN` (python inside that repo's env, optional; default `python3`)
+  - Optional controls:
+    - `SCENESMITH_PAPER_BACKEND` (`openai|gemini|anthropic`, default `openai`)
+    - `SCENESMITH_PAPER_MODEL` (override backend model)
+    - `SCENESMITH_PAPER_TIMEOUT_SECONDS` (default `5400`)
+    - `SCENESMITH_PAPER_RUN_ROOT` (default `/tmp/scenesmith-paper-runs`)
+    - `SCENESMITH_PAPER_KEEP_RUN_DIR` (`true|false`, default `false`)
+    - `SCENESMITH_PAPER_SPLIT_WALLS`, `SCENESMITH_PAPER_VALIDATE_PHYSICS`,
+      `SCENESMITH_PAPER_GENERATE_OVERVIEW_IMAGES`
 
 Common env:
 - `PORT` (default `8081` when running directly)

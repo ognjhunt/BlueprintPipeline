@@ -20,7 +20,7 @@ Emits daily autonomous text `scene_request.json` files for `source-orchestrator`
 - `TEXT_AUTONOMY_TIMEZONE` (default `America/New_York`)
 - `TEXT_AUTONOMY_RUN_DATE` (optional override, `YYYY-MM-DD`)
 - `TEXT_AUTONOMY_PROVIDER_POLICY` (default `openai_primary`)
-- `TEXT_AUTONOMY_TEXT_BACKEND` (default `sage`, one of `internal|scenesmith|sage|hybrid_serial`)
+- `TEXT_AUTONOMY_TEXT_BACKEND` (default `scenesmith`, one of `internal|scenesmith|sage|hybrid_serial`)
 - `TEXT_AUTONOMY_QUALITY_TIER` (default `premium`)
 - `TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK` (default `false`)
 - `TEXT_AUTONOMY_SEED_COUNT` (default `1`)

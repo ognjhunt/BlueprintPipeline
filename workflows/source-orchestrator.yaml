@@ -34,7 +34,7 @@ main:
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - defaultSourceMode: '${text.to_lower(default(sys.get_env("DEFAULT_SOURCE_MODE"), "text"))}'
-          - textBackendDefault: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage"))}'
+          - textBackendDefault: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_DEFAULT"), "scenesmith"))}'
           - textBackendAllowlist: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial"))}'
           - textGenRuntime: '${text.to_lower(default(sys.get_env("TEXT_GEN_RUNTIME"), "vm"))}'
           - textSceneGenJobName: '${default(sys.get_env("TEXT_SCENE_GEN_JOB_NAME"), "text-scene-gen-job")}'
@@ -100,8 +100,8 @@ main:
           - imageOrchestratorWorkflow: '${default(sys.get_env("IMAGE_ORCHESTRATOR_WORKFLOW_NAME"), "image-to-scene-orchestrator")}'
           - imageLegacyWorkflow: '${default(sys.get_env("IMAGE_LEGACY_WORKFLOW_NAME"), "image-to-scene-pipeline")}'
           - imageLegacyWaitSeconds: '${int(default(sys.get_env("IMAGE_LEGACY_CHAIN_WAIT_SECONDS"), "7200"))}'
-          - textVmName: '${default(sys.get_env("TEXT_GEN_VM_NAME"), "isaac-sim-ubuntu")}'
-          - textVmZone: '${default(sys.get_env("TEXT_GEN_VM_ZONE"), "us-east1-c")}'
+          - textVmName: '${default(sys.get_env("TEXT_GEN_VM_NAME"), "isaac-sim-ubuntu-b")}'
+          - textVmZone: '${default(sys.get_env("TEXT_GEN_VM_ZONE"), "us-east1-b")}'
           - textVmRepoDir: '${default(sys.get_env("TEXT_GEN_VM_REPO_DIR"), "~/BlueprintPipeline")}'
           - textVmTimeoutSeconds: '${int(default(sys.get_env("TEXT_GEN_VM_TIMEOUT_SECONDS"), "2400"))}'
         next: extract_env_more2
@@ -122,7 +122,7 @@ main:
           - cloudrunFallbackCount: 0
           - lockAcquired: false
           - requestSourceMode: "unknown"
-          - requestTextBackend: "sage"
+          - requestTextBackend: "scenesmith"
           - qualityTier: "standard"
           - providerPolicy: "openai_primary"
           - vmErrMessage: ""
@@ -1277,7 +1277,7 @@ run_text_jobs_on_cloudrun:
             - name: TEXT_GEN_RUNTIME
               value: "cloudrun"
             - name: TEXT_BACKEND_DEFAULT
-              value: '${default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage")}'
+              value: '${default(sys.get_env("TEXT_BACKEND_DEFAULT"), "scenesmith")}'
             - name: TEXT_BACKEND_ALLOWLIST
               value: '${default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
             - name: SAGE_RUNTIME_MODE
@@ -1446,7 +1446,7 @@ run_text_jobs_on_vm:
                     - '${"TEXT_GEN_USE_LLM=" + textGenUseLlm}'
                     - '${"TEXT_GEN_LLM_MAX_ATTEMPTS=" + textGenLlmMaxAttempts}'
                     - '${"TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=" + textGenLlmRetryBackoffSeconds}'
-                    - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage")}'
+                    - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "scenesmith")}'
                     - '${"TEXT_BACKEND_ALLOWLIST=" + default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
                     - '${"SAGE_RUNTIME_MODE=" + default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun")}'
                     - '${"SAGE_SERVER_URL=" + default(sys.get_env("SAGE_SERVER_URL"), "")}'
