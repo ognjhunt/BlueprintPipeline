@@ -71,7 +71,7 @@ _apply_patch_script() {
 _file_looks_patched() {
   local _file="$1"
   [ -f "${_file}" ] || return 1
-  grep -qE "BPv3_pre_play_kinematic|BPv7_keep_kinematic|BPv_dynamic_grasp_toggle|scene_collision_injected|BlueprintPipeline contact_report patch|BlueprintPipeline sim_thread_physics_cache patch" "${_file}" 2>/dev/null
+  grep -qE "BPv3_pre_play_kinematic|BPv7_keep_kinematic|BPv_dynamic_grasp_toggle|BPv_domain_randomization|scene_collision_injected|BlueprintPipeline contact_report patch|BlueprintPipeline sim_thread_physics_cache patch" "${_file}" 2>/dev/null
 }
 
 _ensure_patch_baseline_and_restore() {
@@ -270,6 +270,9 @@ if [ -d "${PATCHES_DIR}" ]; then
   _apply_patch_script "${PATCHES_DIR}/patch_dynamic_teleport_v5.py" "dynamic_teleport_v5" "1"
   _apply_patch_script "${PATCHES_DIR}/patch_fix_dynamic_prims_overwrite.py" "fix_dynamic_prims_overwrite" "1"
   _apply_patch_script "${PATCHES_DIR}/patch_scene_collision.py" "scene_collision" "1"
+  # P1: Domain randomization (visual + physics) dispatch via set_task_metric.
+  # Optional by default so strict startup is not blocked if the patch fails.
+  _apply_patch_script "${PATCHES_DIR}/patch_domain_randomization.py" "domain_randomization" "0"
   if [ "${GENIESIM_KEEP_OBJECTS_KINEMATIC}" = "1" ]; then
     _apply_patch_script "${PATCHES_DIR}/patch_keep_objects_kinematic.py" "keep_objects_kinematic" "0"
   else

@@ -103,12 +103,127 @@ def _est_dims(obj, fallback=None):
     """Estimate dimensions for an object, using Gemini if available."""
     if fallback is None:
         fallback = [0.1, 0.1, 0.1]
-    if _DIM_ESTIMATOR and isinstance(obj, dict):
-        dims, _src = _DIM_ESTIMATOR.estimate_dimensions(obj, fallback)
-        return dims
+
+    def _safe_float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _dims_from_mapping(payload: Dict[str, Any]) -> Optional[List[float]]:
+        # Canonical manifest path: dimensions_est:{width,depth,height}
+        if any(k in payload for k in ("width", "depth", "height")):
+            width = _safe_float(payload.get("width"), fallback[0])
+            depth = _safe_float(payload.get("depth"), fallback[1])
+            height = _safe_float(payload.get("height"), fallback[2])
+            return [width, depth, height]
+        # Alternate common keys
+        if any(k in payload for k in ("x", "y", "z")):
+            return [
+                _safe_float(payload.get("x"), fallback[0]),
+                _safe_float(payload.get("y"), fallback[1]),
+                _safe_float(payload.get("z"), fallback[2]),
+            ]
+        return None
+
     if isinstance(obj, dict):
-        return obj.get("dimensions", obj.get("bbox", fallback))
+        dims = obj.get("dimensions")
+        if isinstance(dims, (list, tuple)) and len(dims) == 3:
+            return [float(d) for d in dims]
+        if isinstance(dims, dict):
+            mapped = _dims_from_mapping(dims)
+            if mapped is not None:
+                return mapped
+
+        dims_est = obj.get("dimensions_est")
+        if isinstance(dims_est, (list, tuple)) and len(dims_est) == 3:
+            return [float(d) for d in dims_est]
+        if isinstance(dims_est, dict):
+            mapped = _dims_from_mapping(dims_est)
+            if mapped is not None:
+                return mapped
+
+        bbox = obj.get("bbox")
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 3:
+            return [float(d) for d in bbox]
+        if isinstance(bbox, dict):
+            mapped = _dims_from_mapping(bbox)
+            if mapped is not None:
+                return mapped
+
+        # LLM-based estimation is a last resort; do not override explicit metadata.
+        if _DIM_ESTIMATOR:
+            dims, _src = _DIM_ESTIMATOR.estimate_dimensions(obj, fallback)
+            if isinstance(dims, (list, tuple)) and len(dims) == 3:
+                return [float(d) for d in dims]
+
     return fallback
+
+
+def _est_position(obj: Any, fallback: Optional[List[float]] = None) -> List[float]:
+    """Extract a best-effort (x, y, z) position from multiple manifest schemas."""
+    if fallback is None:
+        fallback = [0.5, 0.0, 0.85]
+
+    def _safe_float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _from_mapping(payload: Dict[str, Any]) -> Optional[List[float]]:
+        if not any(k in payload for k in ("x", "y", "z")):
+            return None
+        return [
+            _safe_float(payload.get("x"), fallback[0]),
+            _safe_float(payload.get("y"), fallback[1]),
+            _safe_float(payload.get("z"), fallback[2]),
+        ]
+
+    if isinstance(obj, dict):
+        pos = obj.get("position")
+        if isinstance(pos, (list, tuple)) and len(pos) == 3:
+            return [float(p) for p in pos]
+        if isinstance(pos, dict):
+            mapped = _from_mapping(pos)
+            if mapped is not None:
+                return mapped
+
+        transform = obj.get("transform")
+        if isinstance(transform, dict):
+            tf_pos = transform.get("position")
+            if isinstance(tf_pos, (list, tuple)) and len(tf_pos) == 3:
+                return [float(p) for p in tf_pos]
+            if isinstance(tf_pos, dict):
+                mapped = _from_mapping(tf_pos)
+                if mapped is not None:
+                    return mapped
+
+    return list(fallback)
+
+
+def _normalize_manifest_objects(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize scene objects to include flat `position` and `dimensions` fields.
+
+    Several components (task generation, motion planning, collision checking,
+    sensor metadata) expect a simple schema with:
+      - obj["position"] = [x, y, z]
+      - obj["dimensions"] = [sx, sy, sz] (sz treated as height)
+
+    This helper keeps compatibility with canonical manifests that store poses
+    under `transform.position` and extents under `dimensions_est`.
+    """
+    objects = manifest.get("objects")
+    if not isinstance(objects, list):
+        return manifest
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        obj["position"] = _est_position(obj, obj.get("position") if isinstance(obj.get("position"), list) else [0.0, 0.0, 0.0])
+        obj["dimensions"] = _est_dims(obj, obj.get("dimensions") if isinstance(obj.get("dimensions"), list) else [0.1, 0.1, 0.1])
+    return manifest
+
+
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 from tools.config.production_mode import resolve_production_mode
 from tools.config.seed_manager import set_global_seed
@@ -737,6 +852,18 @@ class ManipulationTaskGenerator:
     at the top of the stack.
     """
 
+    _GENERIC_TASK_KEYS = {
+        # Broad categories that commonly appear inside more specific object names.
+        # We prefer specialized matches (e.g. "pill" in "pill_bottle") over these.
+        "object",
+        "container",
+        "box",
+        "bottle",
+        "tool",
+        "device",
+        "fabric",
+    }
+
     # Mapping from object categories to manipulation tasks
     CATEGORY_TASKS = {
         # Kitchen objects
@@ -747,11 +874,47 @@ class ManipulationTaskGenerator:
         "utensil": [("pick_utensil", "Pick up the utensil and place in drawer")],
         "bottle": [("pick_bottle", "Pick up the bottle and place on shelf")],
 
-        # Warehouse objects
+        # Logistics / warehouse objects
         "box": [("pick_box", "Pick up the box and place on pallet")],
+        "crate": [("pick_crate", "Pick up the crate and move it to the staging area")],
+        "container": [("pick_container", "Pick up the container and place it in a bin")],
+        "bin": [("pick_bin", "Pick up the bin and move it to the cart")],
+        "basket": [("pick_basket", "Pick up the basket and place it on the counter")],
+        "parcel": [("pick_parcel", "Pick up the parcel and place it on the pack table")],
         "package": [("pick_package", "Pick up the package and place in bin")],
         "carton": [("pick_carton", "Pick up the carton and stack it")],
         "tote": [("pick_tote", "Pick up the tote and move to staging area")],
+
+        # Grocery / retail objects
+        "can": [("stock_can", "Pick up the can and place it on the shelf")],
+        "cereal": [("stock_box", "Pick up the box and place it on the shelf")],
+        "snack": [("stock_snack", "Pick up the snack and place it on the display")],
+        "produce": [("move_produce", "Pick up the produce item and place it in the bin")],
+        "fruit": [("move_fruit", "Pick up the fruit and place it in the bin")],
+        "vegetable": [("move_vegetable", "Pick up the vegetable and place it in the bin")],
+
+        # Hospital / clinic objects
+        "pill": [("pick_meds", "Pick up the medication and place it on the tray")],
+        "medicine": [("pick_meds", "Pick up the medication and place it on the tray")],
+        "syringe": [("pick_supply", "Pick up the supply and place it in the bin")],
+        "gauze": [("pick_supply", "Pick up the supply and place it in the bin")],
+        "bandage": [("pick_supply", "Pick up the supply and place it in the bin")],
+        "specimen": [("pick_specimen", "Pick up the specimen container and place it on the counter")],
+        "clipboard": [("pick_clipboard", "Pick up the clipboard and place it on the table")],
+        "tray": [("pick_tray", "Pick up the tray and place it on the table")],
+
+        # Home laundry objects
+        "detergent": [("pick_detergent", "Pick up the detergent and place it on the counter")],
+        "towel": [("pick_towel", "Pick up the towel and place it in the hamper")],
+        "shirt": [("pick_shirt", "Pick up the shirt and place it in the hamper")],
+        "sock": [("pick_sock", "Pick up the sock and place it in the hamper")],
+
+        # Utility room objects
+        "wrench": [("pick_tool", "Pick up the tool and place it on the workbench")],
+        "screwdriver": [("pick_tool", "Pick up the tool and place it on the workbench")],
+        "valve": [("turn_valve", "Turn the valve handle")],
+        "breaker": [("toggle_breaker", "Toggle the breaker switch")],
+        "switch": [("toggle_switch", "Toggle the switch")],
 
         # Articulated objects
         "drawer": [
@@ -1014,7 +1177,8 @@ class ManipulationTaskGenerator:
                 "task_name": episode.task_name,
                 "description": episode.description,
                 "target_object_id": target_id,
-                "target_position": target_obj.get("position", workspace_center) if target_obj else workspace_center,
+                "target_object_category": target_obj.get("category", "object") if target_obj else "object",
+                "target_position": _est_position(target_obj, workspace_center) if target_obj else workspace_center,
                 "target_dimensions": _est_dims(target_obj) if target_obj else [0.1, 0.1, 0.1],
                 "place_position": self._calculate_place_position(target_obj, manifest),
                 "is_articulated": episode.source_template.requires_articulation if episode.source_template else False,
@@ -1034,38 +1198,49 @@ class ManipulationTaskGenerator:
         workspace_center = robot_config.get("workspace_center", [0.5, 0.0, 0.85])
 
         for obj in objects:
-            category = obj.get("category", "object").lower()
+            category = str(obj.get("category", "object")).lower()
             obj_id = obj.get("id", obj.get("name", "unknown"))
-            position = obj.get("position", workspace_center)
+            name = str(obj.get("name") or obj_id).lower()
+            match_text = f"{category} {name}"
+            position = _est_position(obj, workspace_center)
             dimensions = _est_dims(obj)
 
-            # Find matching task templates
-            for cat_key, task_templates in self.CATEGORY_TASKS.items():
-                if cat_key in category:
-                    for task_name, description in task_templates:
-                        task = {
-                            "task_id": f"{task_name}_{obj_id}",
-                            "task_name": task_name,
-                            "description": description.replace("the ", f"the {obj_id} "),
-                            "target_object_id": obj_id,
-                            "target_position": position if isinstance(position, list) else list(position),
-                            "target_dimensions": dimensions if isinstance(dimensions, list) else list(dimensions),
-                            "place_position": self._calculate_place_position(obj, manifest),
-                            "is_articulated": "drawer" in category or "door" in category,
-                        }
-                        tasks.append(task)
-                    break
-            else:
+            matches = [key for key in self.CATEGORY_TASKS if key in match_text]
+            selected_key: Optional[str] = None
+            if matches:
+                specialized = [key for key in matches if key not in self._GENERIC_TASK_KEYS]
+                candidates = specialized or matches
+                # Prefer longer keys for disambiguation (e.g. "detergent" over "gent").
+                selected_key = max(candidates, key=len)
+
+            if selected_key is None:
                 # Default task for unknown categories
                 task = {
                     "task_id": f"manipulate_{obj_id}",
                     "task_name": "pick_object",
                     "description": f"Pick up {obj_id} and relocate it",
                     "target_object_id": obj_id,
-                    "target_position": position if isinstance(position, list) else list(position),
-                    "target_dimensions": dimensions if isinstance(dimensions, list) else list(dimensions),
+                    "target_object_category": category,
+                    "target_position": position,
+                    "target_dimensions": dimensions,
                     "place_position": self._calculate_place_position(obj, manifest),
                     "is_articulated": False,
+                }
+                tasks.append(task)
+                continue
+
+            task_templates = self.CATEGORY_TASKS[selected_key]
+            for task_name, description in task_templates:
+                task = {
+                    "task_id": f"{task_name}_{obj_id}",
+                    "task_name": task_name,
+                    "description": description.replace("the ", f"the {obj_id} "),
+                    "target_object_id": obj_id,
+                    "target_object_category": category,
+                    "target_position": position,
+                    "target_dimensions": dimensions,
+                    "place_position": self._calculate_place_position(obj, manifest),
+                    "is_articulated": any(token in match_text for token in ("drawer", "door", "cabinet", "refrigerator")),
                 }
                 tasks.append(task)
 
@@ -1098,9 +1273,11 @@ class ManipulationTaskGenerator:
             top_obj = stackable[1]
             base_id = base_obj.get("id", base_obj.get("name", "base"))
             top_id = top_obj.get("id", top_obj.get("name", "top"))
-            base_position = base_obj.get("position", [0.5, 0.0, 0.85])
+            base_position = _est_position(base_obj, [0.5, 0.0, 0.85])
             base_dims = _est_dims(base_obj)
             stack_position = self._calculate_stack_position(base_position, base_dims)
+            top_position = _est_position(top_obj, base_position)
+            top_dims = _est_dims(top_obj, base_dims)
 
             tasks.append({
                 "task_id": f"stack_{top_id}_on_{base_id}",
@@ -1110,8 +1287,9 @@ class ManipulationTaskGenerator:
                     base_obj=base_id,
                 ),
                 "target_object_id": top_id,
-                "target_position": top_obj.get("position", base_position),
-                "target_dimensions": top_obj.get("dimensions", base_dims),
+                "target_object_category": str(top_obj.get("category", "object")).lower(),
+                "target_position": top_position,
+                "target_dimensions": top_dims,
                 "place_position": stack_position,
                 "task_steps": [
                     {
@@ -1119,8 +1297,8 @@ class ManipulationTaskGenerator:
                         "action": "pick_place",
                         "description": f"Pick {top_id} and place on {base_id}",
                         "target_object_id": top_id,
-                        "target_position": top_obj.get("position", base_position),
-                        "target_dimensions": top_obj.get("dimensions", base_dims),
+                        "target_position": top_position,
+                        "target_dimensions": top_dims,
                         "place_position": stack_position,
                         "place_on_object_id": base_id,
                         "depends_on": [],
@@ -1134,10 +1312,14 @@ class ManipulationTaskGenerator:
             obj_a_id = obj_a.get("id", obj_a.get("name", "obj_a"))
             obj_b_id = obj_b.get("id", obj_b.get("name", "obj_b"))
             obj_c_id = obj_c.get("id", obj_c.get("name", "obj_c"))
-            obj_b_position = obj_b.get("position", [0.5, 0.0, 0.85])
+            obj_b_position = _est_position(obj_b, [0.5, 0.0, 0.85])
             obj_b_dims = _est_dims(obj_b)
-            obj_c_position = obj_c.get("position", [0.5, 0.0, 0.85])
+            obj_c_position = _est_position(obj_c, [0.5, 0.0, 0.85])
             obj_c_dims = _est_dims(obj_c)
+            obj_a_position = _est_position(obj_a, obj_b_position)
+            obj_a_dims = _est_dims(obj_a, obj_b_dims)
+            obj_c_position = _est_position(obj_c, obj_c_position)
+            obj_c_dims = _est_dims(obj_c, obj_c_dims)
 
             place_on_b = self._calculate_stack_position(obj_b_position, obj_b_dims)
             place_on_c = self._calculate_stack_position(obj_c_position, obj_c_dims)
@@ -1151,8 +1333,9 @@ class ManipulationTaskGenerator:
                     obj_c=obj_c_id,
                 ),
                 "target_object_id": obj_a_id,
-                "target_position": obj_a.get("position", obj_b_position),
-                "target_dimensions": obj_a.get("dimensions", obj_b_dims),
+                "target_object_category": str(obj_a.get("category", "object")).lower(),
+                "target_position": obj_a_position,
+                "target_dimensions": obj_a_dims,
                 "place_position": place_on_c,
                 "task_steps": [
                     {
@@ -1160,8 +1343,8 @@ class ManipulationTaskGenerator:
                         "action": "pick_place",
                         "description": f"Pick {obj_a_id} and place on {obj_b_id}",
                         "target_object_id": obj_a_id,
-                        "target_position": obj_a.get("position", obj_b_position),
-                        "target_dimensions": obj_a.get("dimensions", obj_b_dims),
+                        "target_position": obj_a_position,
+                        "target_dimensions": obj_a_dims,
                         "place_position": place_on_b,
                         "place_on_object_id": obj_b_id,
                         "depends_on": [],
@@ -1171,9 +1354,9 @@ class ManipulationTaskGenerator:
                         "action": "pick_place",
                         "description": f"Pick {obj_c_id} and place on {obj_a_id}",
                         "target_object_id": obj_c_id,
-                        "target_position": obj_c.get("position", obj_c_position),
-                        "target_dimensions": obj_c.get("dimensions", obj_c_dims),
-                        "place_position": self._calculate_stack_position(place_on_b, obj_a.get("dimensions", obj_b_dims)),
+                        "target_position": _est_position(obj_c, obj_c_position),
+                        "target_dimensions": _est_dims(obj_c, obj_c_dims),
+                        "place_position": self._calculate_stack_position(place_on_b, _est_dims(obj_a, obj_b_dims)),
                         "place_on_object_id": obj_a_id,
                         "depends_on": ["stack_first"],
                     },
@@ -1293,9 +1476,7 @@ class ManipulationTaskGenerator:
                     break
 
             if target_obj:
-                pos = target_obj.get("position", workspace_center)
-                if isinstance(pos, np.ndarray):
-                    pos = pos.tolist()
+                pos = _est_position(target_obj, workspace_center)
 
                 # Offset placement position (place nearby, not on top)
                 return [pos[0] - 0.2, pos[1] + 0.15, pos[2]]
@@ -1320,9 +1501,7 @@ class ManipulationTaskGenerator:
         if obj is None:
             return workspace_center
 
-        pos = obj.get("position", workspace_center)
-        if isinstance(pos, np.ndarray):
-            pos = pos.tolist()
+        pos = _est_position(obj, workspace_center)
 
         # Offset placement position (place nearby, not on top)
         return [pos[0] - 0.2, pos[1] + 0.15, pos[2]]
@@ -2192,6 +2371,9 @@ class EpisodeGenerator:
             scene_id=self.config.scene_id,
             robot_type=self.config.robot_type,
         )
+
+        # Normalize object schema for downstream planning/capture modules.
+        manifest = _normalize_manifest_objects(manifest)
 
         # Step 1: Generate tasks with full specifications
         self.log("\nStep 1: Generating task specifications (Gemini at top of stack)...")

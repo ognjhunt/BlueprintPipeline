@@ -305,12 +305,53 @@ def _extract_layout_id(stdout: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _default_room_desc_for_archetype(archetype: str) -> str:
+    normalized = archetype.strip().lower()
+    presets = {
+        "kitchen": "A medium-sized commercial kitchen prep line with stainless counters, drawers, and mugs.",
+        "grocery": "A grocery / retail aisle with stocked shelves, a refrigerated case, baskets, and price labels.",
+        "warehouse": "A warehouse tote-picking zone with racking, carts, boxes, and a packing table.",
+        "loading_dock": "A loading dock bay with pallets, a roll-up door, staging area, and shipping supplies.",
+        "lab": "A laboratory bench area with workbenches, cabinets, sample racks, and lab containers.",
+        "hospital": "A hospital patient room with a bed, medical cart, supply cabinets, and bright clinical lighting.",
+        "office": "An office workspace with desks, drawers, shelves, and small objects on surfaces.",
+        "utility_room": "A utility / mechanical room with electrical panels, tool shelves, cabinets, and maintenance clutter.",
+        "home_laundry": "A home laundry room with washer, dryer, hamper, cabinets, and clothing items.",
+    }
+    if normalized in presets:
+        return presets[normalized]
+    humanized = normalized.replace("_", " ")
+    return f"A medium-sized {humanized}."
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="RunPod SAGE baseline (TRELLIS + Isaac Sim + SAGE).")
     parser.add_argument("--secrets-env-file", type=str, default="", help="Optional env file with HF_TOKEN/OPENAI_API_KEY/NGC_API_KEY.")
     parser.add_argument("--keep-pods", action="store_true", help="Do not terminate pods at the end.")
     parser.add_argument("--skip-runs", action="store_true", help="Only bootstrap pods, do not run generation.")
-    parser.add_argument("--room-desc", type=str, default="A medium-sized kitchen.", help="Text-only baseline room description.")
+    parser.add_argument(
+        "--archetype",
+        type=str,
+        default="kitchen",
+        choices=[
+            "kitchen",
+            "grocery",
+            "warehouse",
+            "loading_dock",
+            "lab",
+            "hospital",
+            "office",
+            "utility_room",
+            "home_laundry",
+        ],
+        help="Optional archetype preset that selects a default room description (used when --room-desc is empty).",
+    )
+    parser.add_argument(
+        "--room-desc",
+        type=str,
+        default="",
+        help="Text-only baseline room description (overrides --archetype when set).",
+    )
     parser.add_argument(
         "--image",
         type=str,
@@ -338,6 +379,7 @@ def main() -> int:
     parser.add_argument("--boot-timeout-s", type=int, default=900)
     parser.add_argument("--ssh-ready-timeout-s", type=int, default=240)
     args = parser.parse_args()
+    room_desc = (args.room_desc or "").strip() or _default_room_desc_for_archetype(args.archetype)
 
     # Load optional secrets env file.
     if args.secrets_env_file:
@@ -490,7 +532,7 @@ def main() -> int:
         run1 = _ssh_run(
             key_path=key_path,
             ssh=pod_b.ssh,
-            remote_cmd="bash -lc " + shlex.quote(f'/workspace/run_room_desc.sh {shlex.quote(args.room_desc)}'),
+            remote_cmd="bash -lc " + shlex.quote(f'/workspace/run_room_desc.sh {shlex.quote(room_desc)}'),
             capture=True,
         )
         run1_out = run1.stdout or ""
@@ -500,7 +542,7 @@ def main() -> int:
         else:
             _log("WARNING: could not parse layout id from baseline 1 output")
 
-        out_state["baseline1"] = {"room_desc": args.room_desc, "layout_id": layout1}
+        out_state["baseline1"] = {"archetype": args.archetype, "room_desc": room_desc, "layout_id": layout1}
         save_state()
 
         # Optional: Run 2 with image

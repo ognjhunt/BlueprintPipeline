@@ -140,10 +140,41 @@ export LEROBOT_EXPORT_FORMAT=lerobot_v3
 export LEROBOT_REQUIRE_V3=1
 ```
 
-LeRobot v3 exports use a single multi-episode `data/chunk-000/episodes.parquet` file with
-`meta/episode_index.json` for row-group offsets, while v2 exports keep per-episode Parquet files
-under chunked directories. This allows streaming-friendly reads without changing the rest of the
-dataset metadata layout.
+LeRobot v3 exports use the official multi-episode layout:
+- `data/chunk-000/file-0000.parquet` (row-groups per episode)
+- `meta/episodes/chunk-000/file-0000.parquet` (per-episode index)
+
+Legacy v3 runs may include `meta/episode_index.json` instead of the Parquet index.
+
+RLDS export (TFRecord) can be enabled alongside LeRobot export:
+
+```bash
+export ENABLE_RLDS_EXPORT=1
+```
+
+P1 domain randomization (essential tier) can be enabled for synthetic-to-real robustness:
+
+```bash
+export GENIESIM_DR_LEVEL=essential
+export GENIESIM_DR_SEED=0
+
+# Optional knobs (defaults are reasonable):
+export GENIESIM_DR_ENABLE_OBS_NOISE=1
+export GENIESIM_DR_RGB_NOISE_STD=3.0
+export GENIESIM_DR_DEPTH_NOISE_STD_M=0.001
+```
+
+P1 depth + point clouds can be exported as first-class ground-truth artifacts alongside LeRobot:
+
+```bash
+# Depth sidecar (default: enabled)
+export LEROBOT_EXPORT_INCLUDE_DEPTH=1
+
+# Point cloud sidecar (default: disabled)
+export LEROBOT_EXPORT_INCLUDE_POINT_CLOUD=1
+export LEROBOT_POINT_CLOUD_MAX_POINTS=2048
+export LEROBOT_POINT_CLOUD_FRAME=world
+```
 
 ```bash
 USE_GENIESIM=true \

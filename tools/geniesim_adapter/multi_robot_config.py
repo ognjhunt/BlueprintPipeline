@@ -93,7 +93,20 @@ def validate_geniesim_robot_allowlist(
             invalid.append(str(robot_type))
             continue
         normalized = normalize_robot_name(robot_type)
-        if normalized not in allowlist:
+        # Accept common aliases / variants without forcing them into the
+        # canonical catalog (e.g. arm-side variants share the same server
+        # embodiment but control different joints).
+        alias_map = {
+            "panda": "franka",
+            "franka_panda": "franka",
+            "g1_left_arm": "g1",
+            "g1_right_arm": "g1",
+            "g1_dual": "g1",
+            "aloha_dual": "aloha",
+            "viperx_dual": "aloha",
+        }
+        canonical = alias_map.get(normalized, normalized)
+        if canonical not in allowlist:
             invalid.append(robot_type)
     if invalid:
         message = (

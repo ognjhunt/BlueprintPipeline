@@ -1186,6 +1186,9 @@ def _run_local_data_collection_with_handshake(
     if result.success and result.recording_dir:
         lerobot_dir = output_dir / "lerobot"
         framework.export_to_lerobot(result.recording_dir, lerobot_dir)
+        if parse_bool_env(os.getenv("ENABLE_RLDS_EXPORT"), default=False):
+            rlds_dir = output_dir / "rlds"
+            framework.export_to_rlds(result.recording_dir, rlds_dir)
 
     return result
 

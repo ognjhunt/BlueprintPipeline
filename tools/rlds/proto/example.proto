@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+// Minimal subset of TensorFlow's core/example/example.proto.
+// Import path includes the repo-relative location so generated python imports
+// are package-qualified (tools.rlds.proto.*) rather than top-level modules.
+package tensorflow;
+
+import "tools/rlds/proto/feature.proto";
+
+message Example {
+  Features features = 1;
+}
+
+message SequenceExample {
+  Features context = 1;
+  FeatureLists feature_lists = 2;
+}
+

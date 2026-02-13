@@ -89,6 +89,7 @@ import base64
 import binascii
 import concurrent.futures
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -232,6 +233,23 @@ def _normalize_required_camera_ids(
             if camera_id not in normalized:
                 normalized.append(camera_id)
     return normalized
+
+
+def _stable_uint32(*parts: Any) -> int:
+    """Deterministic 32-bit hash for reproducible RNG seeding.
+
+    Do not use Python's built-in hash() for dataset-relevant seeding; it is
+    intentionally randomized per process unless PYTHONHASHSEED is fixed.
+    """
+    h = hashlib.blake2b(digest_size=16)
+    for part in parts:
+        if isinstance(part, (bytes, bytearray)):
+            payload = bytes(part)
+        else:
+            payload = str(part).encode("utf-8")
+        h.update(payload)
+        h.update(b"\x1e")  # field separator
+    return int.from_bytes(h.digest()[:4], "little", signed=False)
 
 
 def _derive_task_complexity(task: Mapping[str, Any]) -> str:
@@ -4130,6 +4148,8 @@ class GenieSimGRPCClient:
         self,
         arm_positions: List[float],
         gripper_aperture: Optional[float] = None,
+        *,
+        is_right: Optional[bool] = None,
     ) -> List[float]:
         """Expand arm-only joint trajectory to full-body command (e.g. 7→34 for G1).
 
@@ -4147,7 +4167,19 @@ class GenieSimGRPCClient:
         if len(full_body) <= len(arm_positions):
             return arm_positions  # Can't expand if we don't have full state
 
-        arm_indices = _resolve_g1_arm_joint_indices(robot_type, joint_names, len(full_body))
+        robot_type_for_side = robot_type
+        if is_right is not None:
+            # _resolve_g1_* helpers infer side from "left"/"right" tokens in the
+            # robot_type string. For dual-arm configs ("g1", "g1_dual", etc.),
+            # allow the caller (per-waypoint) to choose a side explicitly.
+            if bool(is_right):
+                if "right" not in normalized and "left" not in normalized:
+                    robot_type_for_side = f"{normalized}_right_arm"
+            else:
+                if "left" not in normalized:
+                    robot_type_for_side = f"{normalized}_left_arm"
+
+        arm_indices = _resolve_g1_arm_joint_indices(robot_type_for_side, joint_names, len(full_body))
         if not arm_indices or len(arm_indices) != len(arm_positions):
             return arm_positions
 
@@ -4156,7 +4188,7 @@ class GenieSimGRPCClient:
 
         if gripper_aperture is not None:
             gripper_indices = _resolve_g1_gripper_joint_indices(
-                robot_type, joint_names, len(full_body), arm_indices,
+                robot_type_for_side, joint_names, len(full_body), arm_indices,
             )
             gripper_width = gripper_aperture * 0.04  # per-finger width
             for gi in gripper_indices:
@@ -4300,6 +4332,8 @@ class GenieSimGRPCClient:
         width: float,
         force: float = 0.0,
         wait_for_completion: bool = True,
+        *,
+        is_right: bool = True,
     ) -> GrpcCallResult:
         """
         Set gripper state.
@@ -4340,7 +4374,7 @@ class GenieSimGRPCClient:
         cmd_bytes = gripper_command.encode("utf-8")
         payload = (
             b"\x0a" + bytes([len(cmd_bytes)]) + cmd_bytes  # field 1
-            + b"\x10\x01"  # field 2: is_right=True
+            + b"\x10" + (b"\x01" if is_right else b"\x00")  # field 2: is_right
             + b"\x19" + _struct.pack("<d", width)  # field 3: opened_width
         )
 
@@ -4352,12 +4386,24 @@ class GenieSimGRPCClient:
                 response_deserializer=lambda x: x,
             )
             raw_response = call(payload, timeout=self.timeout)
-            logger.info("[GRIPPER] set_gripper_state(%s, width=%.4f) succeeded", gripper_command, width)
-            self._last_gripper_state = {
+            logger.info(
+                "[GRIPPER] set_gripper_state(%s, width=%.4f, is_right=%s) succeeded",
+                gripper_command,
+                width,
+                is_right,
+            )
+            # Track last-commanded gripper state per side so downstream tooling
+            # (and bimanual trajectories) can reason about both grippers.
+            _state = getattr(self, "_last_gripper_state", None)
+            if not isinstance(_state, dict) or "left" not in _state or "right" not in _state:
+                _state = {"left": {}, "right": {}}
+            _side_key = "right" if is_right else "left"
+            _state[_side_key] = {
                 "command": gripper_command,
                 "width": width,
                 "force": force,
             }
+            self._last_gripper_state = _state
             return GrpcCallResult(success=True, available=True)
         except Exception as exc:
             logger.warning(f"[GRIPPER] set_gripper_state failed: {exc}")
@@ -5088,6 +5134,23 @@ class GenieSimGRPCClient:
 
         last_timestamp = None
         _require_dynamic_toggle = bool(getattr(self, "_require_dynamic_toggle", False))
+        _trajectory_used_sides: Set[bool] = set()
+
+        def _resolve_is_right(waypoint: Dict[str, Any]) -> bool:
+            """Best-effort selection of which hand/arm a waypoint targets."""
+            if "is_right" in waypoint:
+                return bool(waypoint.get("is_right"))
+            arm = waypoint.get("arm") or waypoint.get("hand") or waypoint.get("gripper_side")
+            if isinstance(arm, str):
+                lowered = arm.strip().lower()
+                if lowered in {"left", "l"}:
+                    return False
+                if lowered in {"right", "r"}:
+                    return True
+            robot_type = str(getattr(self, "_robot_type", "") or "").strip().lower()
+            if "left" in robot_type and "right" not in robot_type:
+                return False
+            return True
 
         def _restore_dynamic_grasp_prim(reason: str) -> None:
             _active_dynamic_prim = getattr(self, "_active_dynamic_grasp_prim", None)
@@ -5126,10 +5189,16 @@ class GenieSimGRPCClient:
             if not joint_positions:
                 continue
 
+            phase = waypoint.get("phase")
+            is_right = _resolve_is_right(waypoint)
+            _trajectory_used_sides.add(bool(is_right))
+
             # --- Fix 5: Expand arm-only trajectory to full-body (e.g. 7→34 for G1) ---
             gripper_aperture = waypoint.get("gripper_aperture")
             joint_positions = self._expand_arm_to_full_body(
-                list(joint_positions), gripper_aperture,
+                list(joint_positions),
+                gripper_aperture,
+                is_right=is_right,
             )
 
             joint_names = self._resolve_joint_names(len(joint_positions))
@@ -5182,14 +5251,21 @@ class GenieSimGRPCClient:
             self._latest_joint_positions = list(joint_positions)
 
             # --- Fix 4: Execute gripper commands + object attach/detach ---
-            phase = waypoint.get("phase")
-            _prev_gripper = getattr(self, "_last_gripper_aperture", None)
+            _side_key = "right" if is_right else "left"
+            _aperture_by_side = getattr(self, "_last_gripper_aperture_by_side", None)
+            if not isinstance(_aperture_by_side, dict):
+                _aperture_by_side = {"left": None, "right": None}
+                setattr(self, "_last_gripper_aperture_by_side", _aperture_by_side)
+
+            _prev_gripper = _aperture_by_side.get(_side_key)
             if gripper_aperture is not None and gripper_aperture != _prev_gripper:
                 _gripper_width = gripper_aperture * 0.08  # Panda max gripper width (~0.08m)
                 try:
-                    self.set_gripper_state(width=_gripper_width, force=10.0)
+                    self.set_gripper_state(width=_gripper_width, force=10.0, is_right=is_right)
                 except Exception as _g_err:
                     logger.warning("Gripper command failed at wp %d: %s", _wp_idx, _g_err)
+                _aperture_by_side[_side_key] = gripper_aperture
+                # Back-compat: keep the last-commanded aperture for legacy callers.
                 self._last_gripper_aperture = gripper_aperture
             # Attach object on grasp (gripper closing)
             if phase == "grasp" and gripper_aperture is not None and gripper_aperture < 0.1:
@@ -5255,7 +5331,7 @@ class GenieSimGRPCClient:
                         except Exception as _toggle_err:
                             logger.warning("[DYNAMIC_TOGGLE] Exception while toggling %s dynamic: %s", _cand, _toggle_err)
                         try:
-                            _attach_result = self.attach_object(_cand, is_right=True)
+                            _attach_result = self.attach_object(_cand, is_right=is_right)
                             if _attach_result.available and _attach_result.success:
                                 _attached_prim = _cand
                                 logger.info("[GRASP] Attached object: %s", _attached_prim)
@@ -5390,8 +5466,9 @@ class GenieSimGRPCClient:
                         _attached_prim,
                         sorted(_override_keys),
                     )
-            # Detach object on place (gripper opening)
-            if phase == "place" and gripper_aperture is not None and gripper_aperture > 0.9:
+            # Detach object when we open the gripper at the goal pose.
+            # Some task templates (e.g. insertion) use an explicit "release" phase.
+            if phase in ("place", "release") and gripper_aperture is not None and gripper_aperture > 0.9:
                 try:
                     self.detach_object()
                     logger.info("[PLACE] Detached object")
@@ -5424,17 +5501,34 @@ class GenieSimGRPCClient:
         # was never issued (due to early abort), issue it now explicitly.
         if trajectory:
             _last_wp = trajectory[-1] if not (abort_event and abort_event.is_set()) else None
-            # Also check: did we ever close the gripper?  If so, reopen.
-            _last_aperture = getattr(self, "_last_gripper_aperture", None)
-            if _last_aperture is not None and _last_aperture < 0.5:
-                # Gripper is closed — reopen it for the place phase
+            _aperture_by_side = getattr(self, "_last_gripper_aperture_by_side", None)
+            if not isinstance(_aperture_by_side, dict):
+                _aperture_by_side = {"left": getattr(self, "_last_gripper_aperture", None), "right": getattr(self, "_last_gripper_aperture", None)}
+                setattr(self, "_last_gripper_aperture_by_side", _aperture_by_side)
+
+            # Also check: did we ever close either gripper? If so, reopen the
+            # used side(s) to avoid leaving the robot in a grasped state.
+            _reopened_any = False
+            for _is_right in sorted(_trajectory_used_sides) or [True]:
+                _side_key = "right" if _is_right else "left"
+                _last_aperture = _aperture_by_side.get(_side_key)
+                if _last_aperture is None or _last_aperture >= 0.5:
+                    continue
                 try:
-                    self.set_gripper_state(width=0.08, force=10.0)
+                    self.set_gripper_state(width=0.08, force=10.0, is_right=_is_right)
+                    _aperture_by_side[_side_key] = 1.0
                     self._last_gripper_aperture = 1.0
-                    logger.info("[GRIPPER] Explicit reopen at trajectory end (aperture was %.1f)", _last_aperture)
+                    logger.info(
+                        "[GRIPPER] Explicit reopen (%s) at trajectory end (aperture was %.1f)",
+                        _side_key,
+                        _last_aperture,
+                    )
+                    _reopened_any = True
                 except Exception as _g_err:
-                    logger.warning("[GRIPPER] Reopen at trajectory end failed: %s", _g_err)
-                # Also detach any attached object
+                    logger.warning("[GRIPPER] Reopen (%s) at trajectory end failed: %s", _side_key, _g_err)
+
+            if _reopened_any:
+                # Also detach any attached object (server-side detach is global).
                 try:
                     self.detach_object()
                     logger.info("[PLACE] Detached object at trajectory end")
@@ -6531,6 +6625,7 @@ class GenieSimLocalFramework:
         robot_cfg_file: str,
         base_pose: Dict[str, Any],
         scene_usd: str,
+        robot_usd_path: str = "",
     ) -> None:
         """Send init_robot + gripper open + joint warmup to the Genie Sim server.
 
@@ -6538,7 +6633,10 @@ class GenieSimLocalFramework:
         so the server always has a loaded robot before we attempt episode
         collection.
         """
-        self.log(f"Initializing robot: cfg_file={robot_cfg_file}, scene_usd={scene_usd}")
+        self.log(
+            f"Initializing robot: cfg_file={robot_cfg_file}, scene_usd={scene_usd}, "
+            f"robot_usd_path={robot_usd_path or ''}"
+        )
         # Store robot type on client for full-body expansion
         self._client._robot_type = getattr(self.config, "robot_type", "")
         expected_joint_count = self._expected_joint_count_for_robot(robot_cfg_file)
@@ -6596,6 +6694,7 @@ class GenieSimLocalFramework:
                 try:
                     init_result = self._client.init_robot(
                         robot_type=robot_cfg_file,
+                        urdf_path=robot_usd_path or "",
                         base_pose=base_pose,
                         scene_usd_path=scene_usd,
                         abort_event=_init_abort_event,
@@ -6669,12 +6768,45 @@ class GenieSimLocalFramework:
             # Initialize server-side robot articulation by sending a gripper open
             # command.  The server's CommandController only sets self.robot inside
             # _set_gripper_state(), so we must trigger it before any recording.
-            grip_result = self._client.set_gripper_state(width=0.08)
-            if grip_result.success:
-                self.log("Server robot articulation initialized via gripper open")
+            _normalized_robot = _normalize_robot_name(getattr(self.config, "robot_type", "") or "")
+            _open_both = (
+                "dual" in str(robot_cfg_file or "").lower()
+                or "bimanual" in str(robot_cfg_file or "").lower()
+                or "dual" in _normalized_robot
+                or "bimanual" in _normalized_robot
+                or parse_bool_env(os.getenv("GENIESIM_INIT_OPEN_BOTH_GRIPPERS"), default=False)
+            )
+            if _open_both:
+                _sides = [True, False]
+            elif "left" in _normalized_robot and "right" not in _normalized_robot:
+                _sides = [False]
             else:
+                _sides = [True]
+
+            _any_grip_ok = False
+            _last_grip_err = None
+            for _is_right in _sides:
+                try:
+                    grip_result = self._client.set_gripper_state(width=0.08, is_right=_is_right)
+                except TypeError:
+                    # Back-compat: older client signature had no is_right.
+                    grip_result = self._client.set_gripper_state(width=0.08)
+                if grip_result.success:
+                    _any_grip_ok = True
+                    self.log(
+                        "Server robot articulation initialized via gripper open "
+                        f"({'right' if _is_right else 'left'})"
+                    )
+                else:
+                    _last_grip_err = grip_result.error
+                    self.log(
+                        "Gripper init returned "
+                        f"({'right' if _is_right else 'left'}): {grip_result.error} (may be non-fatal)",
+                        "WARNING",
+                    )
+            if not _any_grip_ok:
                 self.log(
-                    f"Gripper init returned: {grip_result.error} (may be non-fatal)",
+                    f"Gripper init did not succeed on any side (last_error={_last_grip_err})",
                     "WARNING",
                 )
 
@@ -6840,6 +6972,7 @@ class GenieSimLocalFramework:
             robot_cfg_file=params["robot_cfg_file"],
             base_pose=params["base_pose"],
             scene_usd=params["scene_usd"],
+            robot_usd_path=str(params.get("robot_usd_path") or ""),
         )
         self.log("Post-restart joint health check...")
         self._post_restart_articulation_health_check()
@@ -7861,6 +7994,18 @@ class GenieSimLocalFramework:
             # crashes with AttributeError.
             robot_cfg = task_config.get("robot_config", {})
             requested_robot = str(robot_cfg.get("type", self.config.robot_type or "franka")).strip().lower()
+            requested_robot_cfg_file = str(
+                robot_cfg.get("robot_cfg_file")
+                or robot_cfg.get("cfg_file")
+                or robot_cfg.get("robot_cfg")
+                or ""
+            ).strip()
+            robot_usd_path = str(
+                robot_cfg.get("robot_usd_path")
+                or robot_cfg.get("usd_path")
+                or robot_cfg.get("urdf_path")
+                or ""
+            ).strip()
             base_pos = robot_cfg.get("base_position", [0, 0, 0])
             base_pose = {
                 "position": {"x": base_pos[0], "y": base_pos[1], "z": base_pos[2]},
@@ -7884,17 +8029,48 @@ class GenieSimLocalFramework:
                     )
                     scene_usd = container_path
 
+            # Translate robot asset paths to container paths when the server runs
+            # inside Docker (/workspace/BlueprintPipeline mount). For pre-baked
+            # robots in the image, allow resolving relative paths via SIM_ASSETS_ROBOTS.
+            if robot_usd_path:
+                if os.path.isabs(robot_usd_path):
+                    _repo_marker = "BlueprintPipeline/"
+                    _idx = robot_usd_path.find(_repo_marker)
+                    if _idx >= 0:
+                        _container_path = "/workspace/" + robot_usd_path[_idx:]
+                        self.log(
+                            f"Translating robot USD/URDF to container path: {_container_path}"
+                        )
+                        robot_usd_path = _container_path
+                    else:
+                        self.log(
+                            "Robot asset path is absolute but not under the repo mount; "
+                            f"server may not be able to access it: {robot_usd_path}",
+                            "WARNING",
+                        )
+                else:
+                    # If the client container has SIM_ASSETS_ROBOTS mounted, use it.
+                    robot_usd_path = _resolve_robot_usd(robot_usd_path)
+
+            # Preserve requested robot type (incl. left/right arm variants) during init.
+            # _initialize_runtime_robot_with_fallback will update runtime_robot on success.
+            self.config.robot_type = requested_robot
+            self._client._robot_type = requested_robot
+
             runtime_robot, robot_cfg_file, fallback_reason = (
                 self._initialize_runtime_robot_with_fallback(
                     requested_robot=requested_robot,
                     base_pose=base_pose,
                     scene_usd=scene_usd,
+                    robot_cfg_file_override=requested_robot_cfg_file or None,
+                    robot_usd_path=robot_usd_path,
                 )
             )
             self._robot_init_params = {
                 "robot_cfg_file": robot_cfg_file,
                 "base_pose": base_pose,
                 "scene_usd": scene_usd,
+                "robot_usd_path": robot_usd_path,
             }
             if fallback_reason:
                 self.log(
@@ -8780,6 +8956,347 @@ class GenieSimLocalFramework:
             except Exception as e:
                 self.log(f"Failed to configure object {obj.get('id')}: {e}", "WARNING")
 
+    def _apply_domain_randomization_for_episode(
+        self,
+        *,
+        task: Dict[str, Any],
+        episode_id: str,
+    ) -> Dict[str, Any]:
+        """Apply essential-tier domain randomization (P1) before recording.
+
+        This is intentionally best-effort: failures are recorded in the returned
+        report but do not abort the episode unless strict mode demands it.
+        """
+        level_raw = str(os.getenv("GENIESIM_DR_LEVEL", "off") or "off").strip().lower()
+        enabled = level_raw in {"1", "true", "yes", "on", "essential"}
+        if not enabled:
+            return {"enabled": False, "level": level_raw}
+
+        def _parse_range(env_name: str, default_min: float, default_max: float) -> Tuple[float, float]:
+            raw = str(os.getenv(env_name, "") or "").strip()
+            if not raw:
+                return float(default_min), float(default_max)
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
+            if len(parts) != 2:
+                return float(default_min), float(default_max)
+            try:
+                lo = float(parts[0])
+                hi = float(parts[1])
+            except ValueError:
+                return float(default_min), float(default_max)
+            if hi < lo:
+                lo, hi = hi, lo
+            return lo, hi
+
+        def _quat_from_euler(roll: float, pitch: float, yaw: float) -> np.ndarray:
+            cr = math.cos(roll * 0.5)
+            sr = math.sin(roll * 0.5)
+            cp = math.cos(pitch * 0.5)
+            sp = math.sin(pitch * 0.5)
+            cy = math.cos(yaw * 0.5)
+            sy = math.sin(yaw * 0.5)
+            # XYZ intrinsic (roll, pitch, yaw)
+            qw = cr * cp * cy + sr * sp * sy
+            qx = sr * cp * cy - cr * sp * sy
+            qy = cr * sp * cy + sr * cp * sy
+            qz = cr * cp * sy - sr * sp * cy
+            return np.array([qw, qx, qy, qz], dtype=np.float64)
+
+        def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+            w1, x1, y1, z1 = [float(v) for v in q1]
+            w2, x2, y2, z2 = [float(v) for v in q2]
+            return np.array(
+                [
+                    w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                    w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                    w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                    w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+                ],
+                dtype=np.float64,
+            )
+
+        base_seed = 0
+        raw_base_seed = str(os.getenv("GENIESIM_DR_SEED", "0") or "0").strip()
+        try:
+            base_seed = int(float(raw_base_seed))
+        except ValueError:
+            base_seed = 0
+        dr_seed = _stable_uint32(int(base_seed), str(episode_id), "dr")
+        rng = np.random.default_rng(int(dr_seed))
+
+        report: Dict[str, Any] = {
+            "enabled": True,
+            "level": level_raw,
+            "seed": int(dr_seed),
+            "task_name": str(task.get("task_name") or ""),
+            "applied": {},
+        }
+        report["sensor_noise"] = {
+            "enabled": os.environ.get("INJECT_SENSOR_NOISE", "1") == "1",
+            "provenance": "client_frame_builder",
+        }
+        obs_noise_enabled = parse_bool_env(
+            os.getenv("GENIESIM_DR_ENABLE_OBS_NOISE"),
+            default=True,
+        )
+        try:
+            rgb_noise_std = float(os.getenv("GENIESIM_DR_RGB_NOISE_STD", "3.0") or 3.0)
+        except ValueError:
+            rgb_noise_std = 3.0
+        try:
+            depth_noise_std_m = float(os.getenv("GENIESIM_DR_DEPTH_NOISE_STD_M", "0.001") or 0.001)
+        except ValueError:
+            depth_noise_std_m = 0.001
+        report["observation_noise"] = {
+            "enabled": bool(obs_noise_enabled),
+            "rgb_gaussian_std": float(rgb_noise_std),
+            "depth_gaussian_std_m": float(depth_noise_std_m),
+            "provenance": "client_attach_camera_frames",
+        }
+
+        # --------------------------------------------------------------
+        # Lighting randomization (dome + directional)
+        # --------------------------------------------------------------
+        enable_lighting = parse_bool_env(
+            os.getenv("GENIESIM_DR_ENABLE_LIGHTING"),
+            default=True,
+        )
+        if enable_lighting:
+            intensity_lo, intensity_hi = _parse_range(
+                "GENIESIM_DR_DOME_INTENSITY_RANGE", 1500.0, 6000.0
+            )
+            temp_lo, temp_hi = _parse_range(
+                "GENIESIM_DR_DOME_TEMPERATURE_RANGE", 3500.0, 8000.0
+            )
+            dome_intensity = float(rng.uniform(intensity_lo, intensity_hi))
+            dome_temp = float(rng.uniform(temp_lo, temp_hi))
+            dome_textures = [
+                t.strip()
+                for t in str(os.getenv("GENIESIM_DR_DOME_TEXTURES", "") or "").split(",")
+                if t.strip()
+            ]
+            dome_texture = str(rng.choice(dome_textures)) if dome_textures else ""
+
+            # Directional light rotation jitter
+            dir_intensity_lo, dir_intensity_hi = _parse_range(
+                "GENIESIM_DR_DIR_INTENSITY_RANGE", 200.0, 2500.0
+            )
+            dir_temp_lo, dir_temp_hi = _parse_range(
+                "GENIESIM_DR_DIR_TEMPERATURE_RANGE", 3500.0, 8000.0
+            )
+            dir_intensity = float(rng.uniform(dir_intensity_lo, dir_intensity_hi))
+            dir_temp = float(rng.uniform(dir_temp_lo, dir_temp_hi))
+            # Sample a plausible sun direction (pitch down, yaw around)
+            yaw = float(rng.uniform(-math.pi, math.pi))
+            pitch = float(rng.uniform(-1.3, -0.2))
+            roll = float(rng.uniform(-0.2, 0.2))
+            q_dir = _quat_from_euler(roll, pitch, yaw)
+
+            dome_cfg = {
+                "light_type": "dome",
+                "light_prim": "/World/DefaultDomeLight",
+                "light_intensity": dome_intensity,
+                "light_temperature": dome_temp,
+                "light_texture": dome_texture,
+            }
+            dir_cfg = {
+                "light_type": "distant",
+                "light_prim": "/World/DRDirectionalLight",
+                "light_intensity": dir_intensity,
+                "light_temperature": dir_temp,
+                "light_rotation": {
+                    "rw": float(q_dir[0]),
+                    "rx": float(q_dir[1]),
+                    "ry": float(q_dir[2]),
+                    "rz": float(q_dir[3]),
+                },
+                "light_texture": "",
+            }
+            report["lighting"] = {
+                "dome": dict(dome_cfg),
+                "directional": {
+                    "light_intensity": dir_intensity,
+                    "light_temperature": dir_temp,
+                    "euler_rpy_rad": [roll, pitch, yaw],
+                },
+            }
+            try:
+                light_result = self._client.send_command(
+                    command=CommandType.SET_LIGHT,
+                    data={"lights": [dome_cfg, dir_cfg]},
+                )
+                report["applied"]["lighting"] = {
+                    "success": bool(light_result.success),
+                    "error": light_result.error,
+                    "msg": (light_result.payload or {}).get("msg") if isinstance(light_result.payload, dict) else None,
+                }
+            except Exception as exc:
+                report["applied"]["lighting"] = {"success": False, "error": str(exc), "msg": None}
+        else:
+            report["applied"]["lighting"] = {"skipped": True}
+
+        # --------------------------------------------------------------
+        # Camera pose jitter (world cameras only; do not touch wrist camera)
+        # --------------------------------------------------------------
+        enable_cam_jitter = parse_bool_env(
+            os.getenv("GENIESIM_DR_ENABLE_CAMERA_JITTER"),
+            default=True,
+        )
+        cam_jitter_report: Dict[str, Any] = {"enabled": bool(enable_cam_jitter), "cameras": {}}
+        if enable_cam_jitter:
+            pos_std = float(os.getenv("GENIESIM_DR_CAMERA_POS_STD_M", "0.01") or 0.01)
+            rot_std_deg = float(os.getenv("GENIESIM_DR_CAMERA_ROT_STD_DEG", "2.0") or 2.0)
+            rot_std = math.radians(rot_std_deg)
+
+            object_poses: List[Dict[str, Any]] = []
+            cam_map = getattr(self._client, "_camera_prim_map", {}) or {}
+            for cam_id in ("left", "right"):
+                prim_path = str(cam_map.get(cam_id) or "").strip()
+                if not prim_path:
+                    continue
+                # Only jitter the cameras we provision (world-fixed)
+                if not prim_path.startswith("/World/BlueprintPipeline/Cameras/"):
+                    continue
+                base = CAMERA_PROVISIONING_DEFAULTS.get(cam_id, {}).get("pose") or {}
+                pos = base.get("position") or {}
+                ori = base.get("orientation") or {}
+                base_pos = np.array(
+                    [
+                        float(pos.get("x", 0.0)),
+                        float(pos.get("y", 0.0)),
+                        float(pos.get("z", 0.0)),
+                    ],
+                    dtype=np.float64,
+                )
+                base_q = np.array(
+                    [
+                        float(ori.get("rw", 1.0)),
+                        float(ori.get("rx", 0.0)),
+                        float(ori.get("ry", 0.0)),
+                        float(ori.get("rz", 0.0)),
+                    ],
+                    dtype=np.float64,
+                )
+                delta_pos = rng.normal(0.0, pos_std, size=3).astype(np.float64)
+                delta_euler = rng.normal(0.0, rot_std, size=3).astype(np.float64)
+                q_noise = _quat_from_euler(float(delta_euler[0]), float(delta_euler[1]), float(delta_euler[2]))
+                q_new = _quat_mul(q_noise, base_q)
+                q_norm = float(np.linalg.norm(q_new))
+                if q_norm > 0:
+                    q_new = q_new / q_norm
+                new_pos = base_pos + delta_pos
+                object_poses.append(
+                    {
+                        "prim_path": prim_path,
+                        "pose": {
+                            "position": {"x": float(new_pos[0]), "y": float(new_pos[1]), "z": float(new_pos[2])},
+                            "orientation": {"rw": float(q_new[0]), "rx": float(q_new[1]), "ry": float(q_new[2]), "rz": float(q_new[3])},
+                        },
+                    }
+                )
+                cam_jitter_report["cameras"][cam_id] = {
+                    "prim_path": prim_path,
+                    "delta_pos_m": [float(v) for v in delta_pos.tolist()],
+                    "delta_euler_rpy_rad": [float(v) for v in delta_euler.tolist()],
+                }
+
+            if object_poses:
+                try:
+                    pose_result = self._client.send_command(
+                        command=CommandType.SET_OBJECT_POSE,
+                        data={"object_poses": object_poses},
+                    )
+                    cam_jitter_report["applied"] = bool(pose_result.success)
+                    cam_jitter_report["error"] = pose_result.error
+                    cam_jitter_report["msg"] = (
+                        (pose_result.payload or {}).get("msg")
+                        if isinstance(pose_result.payload, dict)
+                        else None
+                    )
+                except Exception as exc:
+                    cam_jitter_report["applied"] = False
+                    cam_jitter_report["error"] = str(exc)
+        report["camera_pose_jitter"] = cam_jitter_report
+
+        # --------------------------------------------------------------
+        # Physics/material randomization (server patch via set_task_metric)
+        # --------------------------------------------------------------
+        enable_physics = parse_bool_env(
+            os.getenv("GENIESIM_DR_ENABLE_PHYSICS"),
+            default=True,
+        )
+        enable_visual = parse_bool_env(
+            os.getenv("GENIESIM_DR_ENABLE_VISUAL"),
+            default=True,
+        )
+        if enable_physics or enable_visual:
+            sf_lo, sf_hi = _parse_range("GENIESIM_DR_STATIC_FRICTION_RANGE", 0.3, 1.2)
+            df_lo, df_hi = _parse_range("GENIESIM_DR_DYNAMIC_FRICTION_RANGE", 0.2, 1.1)
+            re_lo, re_hi = _parse_range("GENIESIM_DR_RESTITUTION_RANGE", 0.0, 0.2)
+            ms_lo, ms_hi = _parse_range("GENIESIM_DR_MASS_SCALE_RANGE", 0.8, 1.2)
+            static_friction = float(rng.uniform(sf_lo, sf_hi))
+            dynamic_friction = float(min(static_friction, rng.uniform(df_lo, df_hi)))
+            restitution = float(rng.uniform(re_lo, re_hi))
+            mass_scale = float(rng.uniform(ms_lo, ms_hi))
+            max_objects = int(float(os.getenv("GENIESIM_DR_MAX_OBJECTS", "0") or 0))
+
+            visual_cfg = {
+                "enabled": bool(enable_visual),
+            }
+            physics_cfg = {
+                "static_friction": static_friction,
+                "dynamic_friction": dynamic_friction,
+                "restitution": restitution,
+                "mass_scale": mass_scale,
+            }
+            metric_payload = {
+                "seed": int(dr_seed),
+                "max_objects": int(max_objects),
+                "physics": physics_cfg if enable_physics else {},
+                "visual": visual_cfg if enable_visual else {"enabled": False},
+            }
+            report["physics"] = physics_cfg if enable_physics else {"skipped": True}
+            report["visual"] = visual_cfg if enable_visual else {"skipped": True}
+            try:
+                metric = "bp::domain_randomization::" + json.dumps(
+                    metric_payload,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                metric_result = self._client.send_command(
+                    command=CommandType.SET_TASK_METRIC,
+                    data={"metric": metric},
+                )
+                msg = (metric_result.payload or {}).get("msg") if isinstance(metric_result.payload, dict) else None
+                ok = bool(metric_result.success) and isinstance(msg, str) and "ok" in msg
+                report["applied"]["domain_randomization_metric"] = {
+                    "success": ok,
+                    "grpc_success": bool(metric_result.success),
+                    "error": metric_result.error,
+                    "msg": msg,
+                    "payload": metric_payload,
+                }
+            except Exception as exc:
+                report["applied"]["domain_randomization_metric"] = {
+                    "success": False,
+                    "grpc_success": False,
+                    "error": str(exc),
+                    "msg": None,
+                    "payload": metric_payload,
+                }
+        else:
+            report["applied"]["domain_randomization_metric"] = {"skipped": True}
+
+        # Give the sim thread a moment to apply queued changes.
+        try:
+            settle_s = float(os.getenv("GENIESIM_DR_SETTLE_S", "0.15") or 0.15)
+        except ValueError:
+            settle_s = 0.15
+        if settle_s > 0:
+            time.sleep(settle_s)
+
+        return report
+
     def _run_single_episode(
         self,
         task: Dict[str, Any],
@@ -8831,6 +9348,20 @@ class GenieSimLocalFramework:
         recording_stopped = False
 
         try:
+            # Domain randomization (P1): apply before recording starts so all
+            # captured frames reflect the randomized scene.
+            try:
+                domain_randomization = self._apply_domain_randomization_for_episode(
+                    task=task,
+                    episode_id=episode_id,
+                )
+            except Exception as _dr_exc:
+                domain_randomization = {
+                    "enabled": False,
+                    "level": str(os.getenv("GENIESIM_DR_LEVEL", "off") or "off"),
+                    "error": str(_dr_exc),
+                }
+
             # Start recording
             recording_result = self._client.start_recording(episode_id, str(output_dir))
             if not recording_result.available:
@@ -10402,7 +10933,7 @@ class GenieSimLocalFramework:
                     pass
 
             # Reproducibility seed (deterministic trajectory, but record for traceability)
-            episode_seed = hash((episode_id, robot_type, num_joints)) & 0xFFFFFFFF
+            episode_seed = _stable_uint32(episode_id, robot_type, num_joints)
 
             # =================================================================
             # EPISODE VALIDITY GATE — reject garbage before export
@@ -11615,6 +12146,7 @@ class GenieSimLocalFramework:
                     "sim_to_real_assessment": sim2real,
                     "failure_diagnosis": failure_diagnosis,
                     "language_annotations": llm_metadata.get("language_annotations"),
+                    "domain_randomization": domain_randomization,
                 }, f, default=_json_default)
 
             result["success"] = True
@@ -13832,7 +14364,7 @@ class GenieSimLocalFramework:
             # --- Improvement E: Sensor noise injection ---
             if _inject_noise:
                 import random as _rng_mod
-                _noise_rng = _rng_mod.Random(hash((episode_id, step_idx)) & 0xFFFFFFFF)
+                _noise_rng = _rng_mod.Random(_stable_uint32(episode_id, step_idx, "sensor_noise"))
                 _jp = robot_state.get("joint_positions", [])
                 if _jp:
                     robot_state["joint_positions"] = [
@@ -13858,7 +14390,7 @@ class GenieSimLocalFramework:
                         try:
                             _depth_arr = np.array(_depth, dtype=np.float32)
                             _depth_noise = np.random.RandomState(
-                                hash((episode_id, step_idx, _cam_id)) & 0xFFFFFFFF
+                                _stable_uint32(episode_id, step_idx, _cam_id, "depth_noise")
                             ).normal(0, 0.001, _depth_arr.shape).astype(np.float32)
                             _cam_data["depth"] = (_depth_arr + _depth_noise).tolist()
                         except Exception:
@@ -14026,7 +14558,7 @@ class GenieSimLocalFramework:
                         # Add velocity noise (Improvement E)
                         if _inject_noise:
                             import random as _rng_mod
-                            _vn_rng = _rng_mod.Random(hash((episode_id, i, "vel")) & 0xFFFFFFFF)
+                            _vn_rng = _rng_mod.Random(_stable_uint32(episode_id, i, "vel_noise"))
                             _jv = _jv + np.array([_vn_rng.gauss(0, _jv_noise_std) for _ in range(_jv.size)])
                         # Clamp to velocity limits when known.
                         if _VEL_LIMITS is not None:
@@ -15339,21 +15871,34 @@ class GenieSimLocalFramework:
 
         return normalized_tasks
 
-    def _select_robot_cfg_candidates(self, requested_robot: str) -> List[str]:
+    def _select_robot_cfg_candidates(
+        self,
+        requested_robot: str,
+        *,
+        robot_cfg_file_override: Optional[str] = None,
+    ) -> List[str]:
         normalized = str(requested_robot or "").strip().lower()
         if not normalized:
             normalized = "franka"
         override = os.environ.get("GENIESIM_ROBOT_CFG_FILE")
         if override:
             return [override]
+        if robot_cfg_file_override:
+            return [robot_cfg_file_override]
         candidate_map: Dict[str, List[str]] = {
             # Default robot: Franka Panda. Do not silently fail over to a different embodiment.
             "franka": ["franka_panda.json"],
             "franka_panda": ["franka_panda.json"],
             "panda": ["franka_panda.json"],
             "g1": ["G1_omnipicker_fixed.json"],
+            "g1_right_arm": ["G1_omnipicker_fixed.json"],
+            "g1_left_arm": ["G1_omnipicker_fixed.json"],
             "g1_dual": ["G1_omnipicker_fixed_dual.json"],
             "g2": ["G2_omnipicker_fixed_dual.json"],
+            # ALOHA-style dual ViperX (community naming varies)
+            "aloha": ["aloha_viperx_dual.json", "aloha_dual_viperx.json", "aloha.json"],
+            "aloha_dual": ["aloha_viperx_dual.json", "aloha_dual_viperx.json", "aloha.json"],
+            "viperx_dual": ["aloha_viperx_dual.json", "aloha_dual_viperx.json", "aloha.json"],
         }
         return list(candidate_map.get(normalized, [f"{normalized}.json"]))
 
@@ -15361,11 +15906,17 @@ class GenieSimLocalFramework:
         lowered = str(robot_cfg_file or "").strip().lower()
         if "franka" in lowered or "panda" in lowered:
             return "franka"
+        normalized_requested = _normalize_robot_name(str(requested_robot or "").strip())
         if "g1" in lowered:
+            # Preserve arm-side variants so downstream IK/gripper logic can
+            # target the correct hand even when the server config is shared.
+            if "left" in normalized_requested and "right" not in normalized_requested:
+                return "g1_left_arm"
+            if "right" in normalized_requested and "left" not in normalized_requested:
+                return "g1_right_arm"
             return "g1"
         if "g2" in lowered:
             return "g2"
-        normalized_requested = str(requested_robot or "").strip().lower()
         return normalized_requested or "franka"
 
     def _initialize_runtime_robot_with_fallback(
@@ -15374,12 +15925,22 @@ class GenieSimLocalFramework:
         requested_robot: str,
         base_pose: Dict[str, Any],
         scene_usd: str,
+        robot_cfg_file_override: Optional[str] = None,
+        robot_usd_path: str = "",
     ) -> Tuple[str, str, Optional[str]]:
         errors: List[str] = []
-        candidates = self._select_robot_cfg_candidates(requested_robot)
+        candidates = self._select_robot_cfg_candidates(
+            requested_robot,
+            robot_cfg_file_override=robot_cfg_file_override,
+        )
         for idx, robot_cfg_file in enumerate(candidates):
             try:
-                self._init_robot_on_server(robot_cfg_file, base_pose, scene_usd)
+                self._init_robot_on_server(
+                    robot_cfg_file,
+                    base_pose,
+                    scene_usd,
+                    robot_usd_path=robot_usd_path,
+                )
                 joint_result = self._client.get_joint_position(lock_timeout=5.0)
                 expected_joint_count = self._expected_joint_count_for_robot(robot_cfg_file)
                 ok, error_text, count = self._validate_joint_payload(
@@ -15572,6 +16133,102 @@ class GenieSimLocalFramework:
                                     _sanitized["depth_all_non_finite"] = bool(np.all(~np.isfinite(_arr)))
                                 except Exception:
                                     _sanitized["depth_all_non_finite"] = False
+                            # P1 Domain Randomization: observation noise injection
+                            # (best-effort; avoids masking placeholder frames).
+                            try:
+                                _dr_level_raw = str(os.getenv("GENIESIM_DR_LEVEL", "off") or "off").strip().lower()
+                                _dr_enabled = _dr_level_raw in {"1", "true", "yes", "on", "essential"}
+                                _obs_noise_enabled = _dr_enabled and parse_bool_env(
+                                    os.getenv("GENIESIM_DR_ENABLE_OBS_NOISE"),
+                                    default=True,
+                                )
+                                if _obs_noise_enabled:
+                                    _raw_base_seed = str(os.getenv("GENIESIM_DR_SEED", "0") or "0").strip()
+                                    try:
+                                        _base_seed = int(float(_raw_base_seed))
+                                    except ValueError:
+                                        _base_seed = 0
+                                    _dr_seed = _stable_uint32(int(_base_seed), str(episode_id), "dr")
+                                    _noise_seed = _stable_uint32(
+                                        int(_dr_seed),
+                                        int(_frame_idx),
+                                        str(camera_id),
+                                        str(_key),
+                                        "obs_noise",
+                                    )
+                                    _noise_rng = np.random.default_rng(int(_noise_seed))
+
+                                    if _key == "rgb":
+                                        try:
+                                            _rgb_std = float(os.getenv("GENIESIM_DR_RGB_NOISE_STD", "3.0") or 3.0)
+                                        except ValueError:
+                                            _rgb_std = 3.0
+                                        if (
+                                            _rgb_std > 0
+                                            and isinstance(_arr, np.ndarray)
+                                            and _arr.dtype == np.uint8
+                                            and _arr.ndim == 3
+                                            and _arr.shape[-1] >= 3
+                                        ):
+                                            try:
+                                                if not is_placeholder_rgb(_arr):
+                                                    _arr_f = _arr.astype(np.float32, copy=True)
+                                                    _noise = _noise_rng.normal(
+                                                        0.0,
+                                                        float(_rgb_std),
+                                                        size=_arr_f[..., :3].shape,
+                                                    ).astype(np.float32)
+                                                    _arr_f[..., :3] = _arr_f[..., :3] + _noise
+                                                    _arr = np.clip(_arr_f, 0.0, 255.0).astype(np.uint8)
+                                            except Exception:
+                                                pass
+                                    elif _key == "depth":
+                                        try:
+                                            _depth_std_m = float(
+                                                os.getenv("GENIESIM_DR_DEPTH_NOISE_STD_M", "0.001") or 0.001
+                                            )
+                                        except ValueError:
+                                            _depth_std_m = 0.001
+                                        if (
+                                            _depth_std_m > 0
+                                            and isinstance(_arr, np.ndarray)
+                                            and _arr.ndim in (2, 3)
+                                        ):
+                                            try:
+                                                if not is_placeholder_depth(_arr):
+                                                    _depth_arr = _arr[..., 0] if (_arr.ndim == 3 and _arr.shape[-1] >= 1) else _arr
+                                                    # Avoid corrupting 8-bit "depth" encodings (likely PNG/normalized).
+                                                    _depth_noisy = None
+                                                    if _depth_arr.dtype != np.uint8:
+                                                        _enc_l = str(_enc or "").lower()
+                                                        if _depth_arr.dtype == np.uint16 or "16u" in _enc_l or "uint16" in _enc_l:
+                                                            _std = float(_depth_std_m) * 1000.0  # meters -> millimeters
+                                                            _noise = _noise_rng.normal(0.0, _std, size=_depth_arr.shape).astype(np.float32)
+                                                            _depth_f = _depth_arr.astype(np.float32) + _noise
+                                                            _depth_f = np.clip(
+                                                                _depth_f, 0.0, float(np.iinfo(np.uint16).max)
+                                                            )
+                                                            _depth_noisy = _depth_f.astype(np.uint16)
+                                                        else:
+                                                            _noise = _noise_rng.normal(
+                                                                0.0, float(_depth_std_m), size=_depth_arr.shape
+                                                            ).astype(np.float32)
+                                                            _depth_f = _depth_arr.astype(np.float32) + _noise
+                                                            _depth_noisy = _depth_f.astype(
+                                                                _depth_arr.dtype
+                                                                if np.issubdtype(_depth_arr.dtype, np.floating)
+                                                                else np.float32
+                                                            )
+                                                    if _depth_noisy is not None:
+                                                        if _arr.ndim == 3:
+                                                            _arr = _arr.copy()
+                                                            _arr[..., 0] = _depth_noisy
+                                                        else:
+                                                            _arr = _depth_noisy
+                                            except Exception:
+                                                pass
+                            except Exception:
+                                pass
                             try:
                                 _ref = _save_array(_arr, _key)
                                 if _ref is not None:
@@ -15729,6 +16386,7 @@ class GenieSimLocalFramework:
                 self._robot_init_params["robot_cfg_file"],
                 _new_base_pose,
                 self._robot_init_params["scene_usd"],
+                robot_usd_path=str(self._robot_init_params.get("robot_usd_path") or ""),
             )
             # Update stored base pose for subsequent reference
             self._robot_init_params["base_pose"] = _new_base_pose
@@ -15761,16 +16419,26 @@ class GenieSimLocalFramework:
 
         # Truncate to expected DOF if server returns full-body joints (e.g. 34)
         robot_type = getattr(self.config, "robot_type", "")
-        robot_config = ROBOT_CONFIGS.get(robot_type, ROBOT_CONFIGS.get("franka"))
+        robot_config = _resolve_robot_config(robot_type)
         normalized_robot = _normalize_robot_name(robot_type) if robot_type else ""
         if normalized_robot.startswith("g1"):
+            task_is_right = self._resolve_task_is_right(task)
             joint_names = (
                 list(self._client._joint_names)
                 if hasattr(self._client, "_joint_names") and self._client._joint_names
                 else []
             )
+            robot_type_for_side = robot_type
+            # If the runtime robot name doesn't encode a side ("g1"), but the task
+            # does, use the task's side when selecting indices.
+            if "left" not in normalized_robot and "right" not in normalized_robot:
+                robot_type_for_side = (
+                    f"{normalized_robot}_right_arm"
+                    if task_is_right
+                    else f"{normalized_robot}_left_arm"
+                )
             arm_joint_indices = _resolve_g1_arm_joint_indices(
-                robot_type,
+                robot_type_for_side,
                 joint_names,
                 len(initial_joints),
             )
@@ -15802,7 +16470,20 @@ class GenieSimLocalFramework:
                 "WARNING",
             )
 
-        if CUROBO_INTEGRATION_AVAILABLE and self.config.use_curobo:
+        _task_key = (task.get("task_type") or task.get("task_name") or "").lower()
+        _use_curobo_for_task = bool(self.config.use_curobo)
+        if ("insert" in _task_key or "peg" in _task_key) and not parse_bool_env(
+            os.getenv("GENIESIM_USE_CUROBO_FOR_INSERT"),
+            default=False,
+        ):
+            _use_curobo_for_task = False
+            self.log(
+                "  ℹ️  Skipping cuRobo for insertion-style task "
+                "(set GENIESIM_USE_CUROBO_FOR_INSERT=1 to enable).",
+                "INFO",
+            )
+
+        if CUROBO_INTEGRATION_AVAILABLE and _use_curobo_for_task:
             trajectory = self._generate_curobo_trajectory(
                 task=task,
                 initial_joints=np.array(initial_joints),
@@ -16252,6 +16933,94 @@ class GenieSimLocalFramework:
             return np.array([_base[0] - 0.05, _base[1] + 0.25, _base[2] - 0.05], dtype=float)
         return None
 
+    def _find_object_position_from_obs_or_manifest(
+        self,
+        object_id: Any,
+        initial_obs: Dict[str, Any],
+        *,
+        log_prefix: str = "TRAJ",
+    ) -> Optional[np.ndarray]:
+        """Resolve an object's position from observation scene_state or manifest transforms."""
+        if object_id is None:
+            return None
+
+        # Allow explicit position dictionaries/lists.
+        if isinstance(object_id, dict):
+            pos = object_id.get("position") or object_id.get("pos") or object_id.get("center")
+            if pos is not None:
+                if isinstance(pos, dict):
+                    return np.array(
+                        [pos.get("x", 0.0), pos.get("y", 0.0), pos.get("z", 0.0)],
+                        dtype=float,
+                    )
+                if isinstance(pos, (list, tuple, np.ndarray)) and len(pos) >= 3:
+                    return np.array(list(pos)[:3], dtype=float)
+        if isinstance(object_id, (list, tuple, np.ndarray)) and len(object_id) >= 3:
+            try:
+                return np.array(list(object_id)[:3], dtype=float)
+            except Exception:
+                pass
+
+        object_id_str = str(object_id).strip()
+        if not object_id_str:
+            return None
+
+        scene_state = initial_obs.get("scene_state", {}) if isinstance(initial_obs, dict) else {}
+        objects = scene_state.get("objects", []) if isinstance(scene_state, dict) else []
+        _MAX_SANE_DISTANCE = 10.0
+
+        def _extract_pos(obj_dict: Mapping[str, Any]) -> Optional[np.ndarray]:
+            pose = obj_dict.get("pose", {}) if isinstance(obj_dict, Mapping) else {}
+            position = pose.get("position") if isinstance(pose, Mapping) else None
+            if position is not None:
+                if isinstance(position, dict):
+                    arr = np.array(
+                        [position.get("x", 0), position.get("y", 0), position.get("z", 0)],
+                        dtype=float,
+                    )
+                else:
+                    arr = np.array(position, dtype=float)
+                if np.linalg.norm(arr) > _MAX_SANE_DISTANCE:
+                    return None
+                return arr
+            if isinstance(pose, Mapping) and "x" in pose and "y" in pose and "z" in pose:
+                arr = np.array([pose["x"], pose["y"], pose["z"]], dtype=float)
+                if np.linalg.norm(arr) > _MAX_SANE_DISTANCE:
+                    return None
+                return arr
+            return None
+
+        _tid_lower = object_id_str.lower()
+        _tid_base = _tid_lower.split("_obj_")[-1] if "_obj_" in _tid_lower else _tid_lower
+        for obj in objects:
+            if not isinstance(obj, Mapping):
+                continue
+            obj_id = obj.get("object_id") or obj.get("id") or obj.get("name") or ""
+            _oid_lower = str(obj_id).lower()
+            _oid_base = _oid_lower.split("_obj_")[-1] if "_obj_" in _oid_lower else _oid_lower
+            if _oid_lower == _tid_lower or _oid_base == _tid_base:
+                pos = _extract_pos(obj)
+                if pos is not None:
+                    return pos
+
+        manifest_pose = self._client._get_manifest_transform_fallback(object_id_str)
+        if manifest_pose is not None:
+            pos = manifest_pose.get("position")
+            if pos is not None:
+                if isinstance(pos, dict):
+                    arr = np.array([pos.get("x", 0), pos.get("y", 0), pos.get("z", 0)], dtype=float)
+                else:
+                    arr = np.array(pos, dtype=float)
+                logger.info(
+                    "[%s] Resolved position from manifest for %s: %s",
+                    log_prefix,
+                    object_id_str,
+                    arr.round(3).tolist(),
+                )
+                return arr
+
+        return None
+
     def _resolve_task_waypoints(
         self,
         task: Dict[str, Any],
@@ -16293,6 +17062,31 @@ class GenieSimLocalFramework:
                     )
                     break
 
+            # Contact-rich insertion tasks require a goal pose; prefer goal_region
+            # for place_position when present (e.g., peg-in-hole style tasks).
+            goal_region = task.get("goal_region")
+            if place_position is None and goal_region:
+                _force_goal_place = parse_bool_env(
+                    os.getenv("GENIESIM_USE_GOAL_REGION_AS_PLACE"),
+                    default=False,
+                )
+                if _force_goal_place or "insert" in task_key or "peg" in task_key:
+                    goal_pos = self._find_object_position_from_obs_or_manifest(
+                        goal_region,
+                        initial_obs,
+                        log_prefix="TRAJ_GOAL",
+                    )
+                    if goal_pos is not None:
+                        place_position = goal_pos
+                        try:
+                            task["_resolved_goal_region_position"] = goal_pos.round(6).tolist()
+                        except Exception:
+                            pass
+                        self.log(
+                            f"  ℹ️  Derived place position from goal_region='{goal_region}'.",
+                            "INFO",
+                        )
+
         target_position, target_clamped = self._apply_workspace_bounds(
             target_position, workspace_bounds
         )
@@ -16308,6 +17102,27 @@ class GenieSimLocalFramework:
                 self.log("  ⚠️  Place position clamped to workspace bounds.", "WARNING")
 
         return target_position, place_position
+
+    def _resolve_task_is_right(self, task: Mapping[str, Any]) -> bool:
+        """Resolve which arm/hand a task should use (best-effort)."""
+        if isinstance(task, Mapping) and "is_right" in task:
+            try:
+                return bool(task.get("is_right"))
+            except Exception:
+                pass
+        arm = None
+        if isinstance(task, Mapping):
+            arm = task.get("arm") or task.get("hand") or task.get("gripper_side")
+        if isinstance(arm, str):
+            lowered = arm.strip().lower()
+            if lowered in {"left", "l"}:
+                return False
+            if lowered in {"right", "r"}:
+                return True
+        normalized_robot = _normalize_robot_name(getattr(self.config, "robot_type", "") or "")
+        if "left" in normalized_robot and "right" not in normalized_robot:
+            return False
+        return True
 
     def _compute_fk_positions(
         self,
@@ -16515,6 +17330,7 @@ Scene objects: {scene_summary}
 
     def _build_ik_fallback_waypoints(
         self,
+        task: Dict[str, Any],
         target_position: np.ndarray,
         place_position: Optional[np.ndarray],
         target_orientation: np.ndarray,
@@ -16522,6 +17338,28 @@ Scene objects: {scene_summary}
     ) -> List["Waypoint"]:
         waypoints: List[Waypoint] = []
         timestamp = 0.0
+        task_key = (task.get("task_type") or task.get("task_name") or "").lower()
+        is_insert_task = ("insert" in task_key) or ("peg" in task_key)
+        insert_depth_m = None
+        constraints = task.get("constraints") if isinstance(task.get("constraints"), dict) else {}
+        for _k in ("insert_depth_m", "insert_depth", "insertion_depth_m", "depth_m"):
+            if _k in task:
+                try:
+                    insert_depth_m = float(task.get(_k))
+                except (TypeError, ValueError):
+                    insert_depth_m = None
+                break
+            if _k in (constraints or {}):
+                try:
+                    insert_depth_m = float((constraints or {}).get(_k))
+                except (TypeError, ValueError):
+                    insert_depth_m = None
+                break
+        if insert_depth_m is None:
+            insert_depth_m = float(os.getenv("GENIESIM_INSERT_DEPTH_M", "0.05"))
+        insert_depth_m = max(0.0, float(insert_depth_m))
+        pre_insert_height_m = float(os.getenv("GENIESIM_PRE_INSERT_HEIGHT_M", "0.06"))
+        pre_insert_height_m = max(0.02, float(pre_insert_height_m))
 
         def _add_waypoint(
             position: np.ndarray,
@@ -16586,24 +17424,65 @@ Scene objects: {scene_summary}
                 gripper_aperture=0.0,  # Fix 4A: keep gripper closed during transport
             )
 
-            _add_waypoint(
-                place_position,
-                place_orientation,
-                MotionPhase.PLACE,
-                duration=1.0,
-                gripper_aperture=1.0,  # Fix 4A: open gripper to release
-            )
+            if is_insert_task:
+                # Contact-rich insertion: approach above goal, insert along -Z,
+                # then release. (Goal_region is resolved into place_position.)
+                pre_insert_position = place_position.copy()
+                pre_insert_position[2] += pre_insert_height_m
+                _add_waypoint(
+                    pre_insert_position,
+                    place_orientation,
+                    MotionPhase.PRE_PLACE,
+                    duration=1.0,
+                    gripper_aperture=0.0,
+                )
 
-            # Fix 4A: RETRACT waypoint — pull back after placing
-            retract_position = place_position.copy()
-            retract_position[2] += 0.18
-            _add_waypoint(
-                retract_position,
-                place_orientation,
-                MotionPhase.RETRACT,
-                duration=1.0,
-                gripper_aperture=1.0,  # gripper stays open
-            )
+                insert_position = place_position.copy()
+                insert_position[2] -= insert_depth_m
+                _add_waypoint(
+                    insert_position,
+                    place_orientation,
+                    MotionPhase.PLACE,
+                    duration=1.0,
+                    gripper_aperture=0.0,
+                )
+
+                _add_waypoint(
+                    insert_position,
+                    place_orientation,
+                    MotionPhase.RELEASE,
+                    duration=0.7,
+                    gripper_aperture=1.0,
+                )
+
+                retract_position = insert_position.copy()
+                retract_position[2] += 0.18
+                _add_waypoint(
+                    retract_position,
+                    place_orientation,
+                    MotionPhase.RETRACT,
+                    duration=1.0,
+                    gripper_aperture=1.0,
+                )
+            else:
+                _add_waypoint(
+                    place_position,
+                    place_orientation,
+                    MotionPhase.PLACE,
+                    duration=1.0,
+                    gripper_aperture=1.0,  # Fix 4A: open gripper to release
+                )
+
+                # Fix 4A: RETRACT waypoint — pull back after placing
+                retract_position = place_position.copy()
+                retract_position[2] += 0.18
+                _add_waypoint(
+                    retract_position,
+                    place_orientation,
+                    MotionPhase.RETRACT,
+                    duration=1.0,
+                    gripper_aperture=1.0,  # gripper stays open
+                )
 
         return waypoints
 
@@ -16676,6 +17555,7 @@ Scene objects: {scene_summary}
 
         # Geometric waypoint planner (LLM waypoint planning removed — deterministic is faster & sufficient)
         waypoints = self._build_ik_fallback_waypoints(
+            task=task,
             target_position=_target_local,
             place_position=_place_local,
             target_orientation=target_orientation,
@@ -16707,7 +17587,12 @@ Scene objects: {scene_summary}
         normalized_robot = _normalize_robot_name(getattr(self.config, "robot_type", ""))
         _curobo_mode = os.environ.get("GENIESIM_SERVER_CUROBO_MODE", "off").lower()
         _use_server_ik = normalized_robot.startswith("g1") and _curobo_mode not in ("off", "disabled", "none", "0", "false")
-        self.log(f"[TRAJ] robot_type={normalized_robot}, use_server_ik={_use_server_ik}, curobo_mode={_curobo_mode}, waypoints={len(waypoints)}")
+        task_is_right = self._resolve_task_is_right(task)
+        self.log(
+            f"[TRAJ] robot_type={normalized_robot}, use_server_ik={_use_server_ik}, "
+            f"curobo_mode={_curobo_mode}, waypoints={len(waypoints)}, "
+            f"task_is_right={task_is_right}"
+        )
 
         for wp in waypoints:
             joints = None
@@ -16725,7 +17610,7 @@ Scene objects: {scene_summary}
             # are non-empty and non-NaN.
             if _use_server_ik and joints is None:
                 try:
-                    is_right = "left" not in normalized_robot
+                    is_right = task_is_right
                     _wp_world_pos = wp.position + _robot_base  # local → world
                     T = _pose_to_4x4(_wp_world_pos, wp.orientation)
 
@@ -16748,9 +17633,9 @@ Scene objects: {scene_summary}
                                     _jn = payload.get("joint_names", [])
                                     if _jn and len(_jn) == len(_jp_arr):
                                         _arm_names = (
-                                            _G1_LEFT_ARM_JOINT_NAMES
-                                            if "left" in normalized_robot
-                                            else _G1_RIGHT_ARM_JOINT_NAMES
+                                            _G1_RIGHT_ARM_JOINT_NAMES
+                                            if is_right
+                                            else _G1_LEFT_ARM_JOINT_NAMES
                                         )
                                         _arm_idx = [
                                             i for i, n in enumerate(_jn)
@@ -16908,6 +17793,7 @@ Scene objects: {scene_summary}
                     "timestamp": current_time + t * duration,
                     "gripper_aperture": wp.gripper_aperture,
                     "phase": wp.phase.value,
+                    "is_right": task_is_right,
                 }
                 # Annotate grasp/lift/transport with object prim for attach
                 if wp.phase.value in ("grasp", "lift", "transport") and _target_prim:
@@ -17319,6 +18205,7 @@ Scene objects: {scene_summary}
         total_duration = num_waypoints / fps
 
         current_aperture = 1.0  # start with gripper open
+        task_is_right = self._resolve_task_is_right(task)
 
         for phase_idx, (phase_name, _, _, duration_frac) in enumerate(phase_configs):
             target_joints = phase_targets[phase_idx]
@@ -17361,6 +18248,7 @@ Scene objects: {scene_summary}
                         "timestamp": current_time + t * phase_duration,
                         "phase": phase_name,
                         "gripper_aperture": _step_aperture,
+                        "is_right": task_is_right,
                     }
                 )
 
@@ -17682,14 +18570,32 @@ Scene objects: {scene_summary}
             # Combine all trajectory segments
             full_trajectory = []
             timestamp = 0.0
-            dt = 1.0 / 30.0  # 30Hz
+            dt = 1.0 / float(get_geniesim_trajectory_fps())
+            task_is_right = self._resolve_task_is_right(task)
 
             for phase_name, segment_joints in trajectory_segments:
                 for i, joint_pos in enumerate(segment_joints):
+                    # Ensure gripper commands exist for cuRobo trajectories. Without
+                    # gripper_aperture, execute_trajectory will never issue open/close
+                    # commands or attach/detach objects, yielding unusable episodes.
+                    if phase_name in ("approach", "pre_grasp", "pre_place"):
+                        gripper_aperture = 1.0
+                    elif phase_name in ("grasp",):
+                        # Close only at the end of grasp so we don't pinch early.
+                        gripper_aperture = 0.0 if i >= len(segment_joints) - 1 else 1.0
+                    elif phase_name in ("lift", "transport", "insert"):
+                        gripper_aperture = 0.0
+                    elif phase_name in ("place", "release"):
+                        # Open at the end of place/release.
+                        gripper_aperture = 1.0 if i >= len(segment_joints) - 1 else 0.0
+                    else:
+                        gripper_aperture = 1.0
                     full_trajectory.append({
                         "joint_positions": joint_pos.tolist(),
                         "timestamp": timestamp,
                         "phase": phase_name,
+                        "gripper_aperture": gripper_aperture,
+                        "is_right": task_is_right,
                     })
                     timestamp += dt
 
@@ -19323,6 +20229,17 @@ Scene objects: {scene_summary}
                 recording_dir=task_staging,
                 output_dir=task_output_dir,
             )
+            if parse_bool_env(os.getenv("ENABLE_RLDS_EXPORT"), default=False):
+                try:
+                    self.export_to_rlds(
+                        recording_dir=task_staging,
+                        output_dir=task_output_dir / "rlds",
+                    )
+                except Exception as exc:
+                    self.log(
+                        f"Per-task RLDS export failed for {task_name}: {exc}",
+                        "WARNING",
+                    )
             # Write a completion marker so consumers can detect finished tasks.
             marker = {
                 "task_name": task_name,
@@ -19388,6 +20305,42 @@ Scene objects: {scene_summary}
                 "`pip install pyarrow` and retry."
             ) from exc
 
+        # Ground-truth export toggles (depth + point clouds).
+        # Depth export is enabled by default because the recording JSON already
+        # requires depth for camera rigs; without exporting it, downstream
+        # consumers cannot train depth/3D policies from the delivered dataset.
+        include_depth = parse_bool_env(
+            os.getenv("LEROBOT_EXPORT_INCLUDE_DEPTH"),
+            default=True,
+        )
+        include_point_cloud = parse_bool_env(
+            os.getenv("LEROBOT_EXPORT_INCLUDE_POINT_CLOUD"),
+            default=False,
+        )
+        try:
+            depth_downsample = max(1, int(float(os.getenv("LEROBOT_DEPTH_DOWNSAMPLE", "1"))))
+        except ValueError:
+            depth_downsample = 1
+        try:
+            point_cloud_max_points = int(float(os.getenv("LEROBOT_POINT_CLOUD_MAX_POINTS", "2048")))
+        except ValueError:
+            point_cloud_max_points = 2048
+        if point_cloud_max_points < 0:
+            point_cloud_max_points = 0
+        try:
+            point_cloud_max_depth_m = float(os.getenv("LEROBOT_POINT_CLOUD_MAX_DEPTH_M", "10.0"))
+        except ValueError:
+            point_cloud_max_depth_m = 10.0
+        point_cloud_export_frame = str(
+            os.getenv("LEROBOT_POINT_CLOUD_FRAME", "world")
+        ).strip().lower()
+        if point_cloud_export_frame not in {"world", "camera"}:
+            point_cloud_export_frame = "world"
+
+        wrote_depth_any = False
+        wrote_point_cloud_any = False
+        wrote_camera_calib_any = False
+
         def _compute_v3_stats(parquet_path: Path) -> Optional[Dict[str, Any]]:
             try:
                 table = pq.read_table(parquet_path)
@@ -19420,14 +20373,16 @@ Scene objects: {scene_summary}
         meta_episodes_dir = meta_dir / "episodes" / "chunk-000"
         data_dir.mkdir(parents=True, exist_ok=True)
         meta_dir.mkdir(parents=True, exist_ok=True)
+        v3_chunk_size = int(os.getenv("LEROBOT_V3_CHUNK_SIZE", "1000"))
 
         exported_count = 0
         skipped_count = 0
         total_frames = 0
-        frame_counts: Dict[str, int] = {}
+        frame_counts: Dict[int, int] = {}
         episode_meta_rows: List[Dict[str, Any]] = []
         episode_stats_rows: List[Dict[str, Any]] = []
-        task_registry: Dict[str, Dict[str, Any]] = {}
+        task_text_to_index: Dict[str, int] = {}
+        task_rows: List[Dict[str, Any]] = []
         global_channel_values: Dict[str, List[float]] = {
             "timestamp": [],
             "reward": [],
@@ -19466,23 +20421,154 @@ Scene objects: {scene_summary}
                 return value.decode("utf-8", errors="replace")
             return value
 
+        def _coerce_float_list(value: Any) -> List[float]:
+            if value is None:
+                return []
+            if isinstance(value, np.ndarray):
+                try:
+                    value = value.tolist()
+                except Exception:
+                    return []
+            if isinstance(value, (list, tuple)):
+                out: List[float] = []
+                for item in value:
+                    try:
+                        out.append(float(item))
+                    except (TypeError, ValueError):
+                        continue
+                return out
+            try:
+                return [float(value)]
+            except (TypeError, ValueError):
+                return []
+
+        def _extract_state(frame: Mapping[str, Any]) -> List[float]:
+            obs = frame.get("observation") if isinstance(frame.get("observation"), dict) else {}
+            # Prefer an explicit state vector when present.
+            for candidate in (
+                obs.get("robot_state"),
+                frame.get("robot_state"),
+                obs.get("state"),
+                frame.get("state"),
+            ):
+                vec = _coerce_float_list(candidate)
+                if vec:
+                    return vec
+
+            # Fall back to common robotics fields.
+            for candidate in (
+                obs.get("joint_positions"),
+                frame.get("joint_positions"),
+                obs.get("joint_velocities"),
+                frame.get("joint_velocities"),
+            ):
+                vec = _coerce_float_list(candidate)
+                if vec:
+                    return vec
+
+            robot_state = obs.get("robot_state")
+            if isinstance(robot_state, dict):
+                flattened: List[float] = []
+                for key in (
+                    "joint_positions",
+                    "joint_velocities",
+                    "joint_efforts",
+                    "gripper_position",
+                    "gripper_openness",
+                ):
+                    val = robot_state.get(key)
+                    if val is None:
+                        continue
+                    flattened.extend(_coerce_float_list(val))
+                if flattened:
+                    return flattened
+
+            return []
+
+        def _extract_action(frame: Mapping[str, Any]) -> List[float]:
+            obs = frame.get("observation") if isinstance(frame.get("observation"), dict) else {}
+            for candidate in (
+                frame.get("action"),
+                frame.get("action_abs"),
+                obs.get("action"),
+                obs.get("action_abs"),
+            ):
+                vec = _coerce_float_list(candidate)
+                if vec:
+                    return vec
+            return []
+
+        class _RunningVectorStats:
+            def __init__(self, name: str) -> None:
+                self._name = name
+                self._count = 0
+                self._mean: Optional[np.ndarray] = None
+                self._m2: Optional[np.ndarray] = None
+                self._min: Optional[np.ndarray] = None
+                self._max: Optional[np.ndarray] = None
+
+            def update(self, vec: Sequence[float], *, context: str = "") -> None:
+                arr = np.asarray([float(v) for v in vec], dtype=np.float64)
+                if arr.size == 0:
+                    return
+                if self._mean is None:
+                    self._count = 1
+                    self._mean = arr.copy()
+                    self._m2 = np.zeros_like(arr)
+                    self._min = arr.copy()
+                    self._max = arr.copy()
+                    return
+                if arr.shape != self._mean.shape:
+                    raise ValueError(
+                        f"{self._name} dimension mismatch: expected {self._mean.shape[0]} got "
+                        f"{arr.shape[0]} ({context})"
+                    )
+                self._count += 1
+                delta = arr - self._mean
+                self._mean += delta / float(self._count)
+                delta2 = arr - self._mean
+                if self._m2 is None:
+                    self._m2 = np.zeros_like(arr)
+                self._m2 = self._m2 + delta * delta2
+                self._min = np.minimum(self._min, arr) if self._min is not None else arr.copy()
+                self._max = np.maximum(self._max, arr) if self._max is not None else arr.copy()
+
+            def to_payload(self) -> Optional[Dict[str, Any]]:
+                if self._mean is None or self._m2 is None or self._min is None or self._max is None:
+                    return None
+                denom = float(self._count) if self._count > 0 else 1.0
+                var = self._m2 / denom
+                std = np.sqrt(np.maximum(var, 0.0))
+                return {
+                    "min": self._min.astype(np.float64).tolist(),
+                    "max": self._max.astype(np.float64).tolist(),
+                    "mean": self._mean.astype(np.float64).tolist(),
+                    "std": std.astype(np.float64).tolist(),
+                }
+
+        state_stats = _RunningVectorStats("observation.state")
+        action_stats = _RunningVectorStats("action")
+
+        # LeRobot parquet schema (v2/v3). Keep the core columns aligned with the
+        # episode-generation-job LeRobot exporter so downstream consumers can
+        # load without special-casing Genie Sim runs.
         schema = pa.schema(
             [
-                ("episode_id", pa.string()),
-                ("frame_index", pa.int64()),
                 ("timestamp", pa.float64()),
-                ("observation", pa.large_string()),
-                ("action", pa.large_string()),
-                ("reward", pa.float64()),
+                ("frame_index", pa.int64()),
+                ("episode_index", pa.int64()),
+                ("index", pa.int64()),
+                ("task_index", pa.int64()),
+                ("observation.state", pa.list_(pa.float32())),
+                ("action", pa.list_(pa.float32())),
+                ("reward", pa.float32()),
                 ("done", pa.bool_()),
-                ("task_name", pa.string()),
-                ("task_id", pa.string()),
             ]
         )
 
         parquet_writer = None
         v3_output_file = None
-        episode_index: Dict[str, Any] = {}
+        v3_episode_index: Dict[int, Dict[str, Any]] = {}
         row_group_index = 0
 
         if resolved_format == LeRobotExportFormat.LEROBOT_V3:
@@ -19490,12 +20576,27 @@ Scene objects: {scene_summary}
             parquet_writer = pq.ParquetWriter(v3_output_file, schema=schema, compression="zstd")
 
         # Set up video directories for camera data export
-        videos_dir = lerobot_root / "videos" / "chunk-000"
+        videos_dir = lerobot_root / "videos"
+        if resolved_format != LeRobotExportFormat.LEROBOT_V3:
+            videos_dir = videos_dir / "chunk-000"
+
+        # Ground-truth output root (depth + point clouds + per-episode camera calibration).
+        gt_root = lerobot_root / "ground_truth"
 
         for ep_file in episode_files:
             try:
                 with open(ep_file) as f:
                     episode = json.load(f)
+
+                frames = episode.get("frames")
+                if not isinstance(frames, list):
+                    # recording_dir may contain non-episode JSON artifacts (e.g. checkpoints)
+                    continue
+                if not frames:
+                    skipped_count += 1
+                    code_key = "NO_FRAMES"
+                    rejected_by_gate_code[code_key] = rejected_by_gate_code.get(code_key, 0) + 1
+                    continue
 
                 dataset_tier = str(episode.get("dataset_tier") or "raw_preserved")
                 cert_payload = episode.get("certification") if isinstance(episode.get("certification"), dict) else {}
@@ -19522,12 +20623,21 @@ Scene objects: {scene_summary}
                     continue
 
                 episode_id = str(episode.get("episode_id", ep_file.stem))
+                episode_index_num = exported_count
                 task_name = str(
                     episode.get("task_name")
                     or episode.get("name")
                     or episode.get("task")
                     or _derive_task_name(episode, task_index=exported_count)
                 )
+                task_text = str(
+                    episode.get("task_description")
+                    or episode.get("language_instruction")
+                    or episode.get("instruction")
+                    or ""
+                ).strip()
+                if not task_text:
+                    task_text = task_name.strip() or "manipulation task"
                 task_id = str(episode.get("task_id") or _derive_task_id(episode, task_index=exported_count))
                 task_complexity = _derive_task_complexity(episode)
                 curriculum_split = _derive_curriculum_split(
@@ -19540,17 +20650,23 @@ Scene objects: {scene_summary}
                     or episode.get("camera_ids"),
                     ensure_all_canonical=True,
                 )
-                task_registry.setdefault(
-                    task_id,
-                    {
-                        "task_id": task_id,
-                        "task_name": task_name,
-                        "task_complexity": task_complexity,
-                        "curriculum_split": curriculum_split,
-                        "required_camera_ids": list(required_camera_ids),
-                    },
-                )
-                frames = episode.get("frames", [])
+                if task_text not in task_text_to_index:
+                    next_task_index = len(task_text_to_index)
+                    task_text_to_index[task_text] = next_task_index
+                    task_rows.append(
+                        {
+                            "task_index": next_task_index,
+                            "task": task_text,
+                            "task_id": task_id,
+                            "task_name": task_name,
+                            "task_type": episode.get("task_type"),
+                            "target_object": episode.get("target_object"),
+                            "task_complexity": task_complexity,
+                            "curriculum_split": curriculum_split,
+                            "required_camera_ids": list(required_camera_ids),
+                        }
+                    )
+                task_index = task_text_to_index[task_text]
                 frame_count = len(frames)
                 ep_dir = ep_file.parent
                 # .npy refs are relative to the run directory, not the
@@ -19565,16 +20681,62 @@ Scene objects: {scene_summary}
                     _candidate = ep_dir  # fallback
                 ep_dir = _candidate
 
-                # Collect camera frames for video export
-                camera_rgb_frames: Dict[str, List[np.ndarray]] = {}
+                # Collect camera frames (aligned by frame index).
+                camera_rgb_by_frame: Dict[str, List[Optional[np.ndarray]]] = {}
+                camera_depth_by_frame: Dict[str, List[Optional[np.ndarray]]] = {}
+                per_frame_extrinsics: Dict[str, List[Optional[Any]]] = {}
+                per_episode_intrinsics: Dict[str, Dict[str, Any]] = {}
+                per_episode_depth_encoding: Dict[str, str] = {}
                 for idx, frame in enumerate(frames):
                     cam_frames = frame.get("observation", {}).get("camera_frames", {})
                     for cam_id, cam_data in cam_frames.items():
                         if not isinstance(cam_data, dict):
                             continue
                         rgb_arr = load_camera_frame(cam_data, "rgb", ep_dir=ep_dir)
-                        if rgb_arr is not None:
-                            camera_rgb_frames.setdefault(cam_id, []).append(rgb_arr)
+                        if cam_id not in camera_rgb_by_frame:
+                            camera_rgb_by_frame[cam_id] = [None] * frame_count
+                        if rgb_arr is not None and 0 <= idx < len(camera_rgb_by_frame[cam_id]):
+                            camera_rgb_by_frame[cam_id][idx] = rgb_arr
+                        if include_depth or include_point_cloud:
+                            depth_arr = load_camera_frame(cam_data, "depth", ep_dir=ep_dir)
+                            if cam_id not in camera_depth_by_frame:
+                                camera_depth_by_frame[cam_id] = [None] * frame_count
+                            if depth_arr is not None and 0 <= idx < len(camera_depth_by_frame[cam_id]):
+                                camera_depth_by_frame[cam_id][idx] = depth_arr
+                            extrinsic = cam_data.get("extrinsic")
+                            if cam_id not in per_frame_extrinsics:
+                                per_frame_extrinsics[cam_id] = [None] * frame_count
+                            if extrinsic is not None and 0 <= idx < len(per_frame_extrinsics[cam_id]):
+                                per_frame_extrinsics[cam_id][idx] = extrinsic
+                            if cam_id not in per_episode_intrinsics:
+                                fx = cam_data.get("fx")
+                                fy = cam_data.get("fy")
+                                ppx = cam_data.get("ppx")
+                                ppy = cam_data.get("ppy")
+                                width = cam_data.get("width")
+                                height = cam_data.get("height")
+                                calib_id = cam_data.get("calibration_id") or f"{cam_id}_calib"
+                                per_episode_intrinsics[cam_id] = {
+                                    "camera_id": cam_id,
+                                    "calibration_id": calib_id,
+                                    "width": int(width) if isinstance(width, (int, float)) else None,
+                                    "height": int(height) if isinstance(height, (int, float)) else None,
+                                    "fx": float(fx) if isinstance(fx, (int, float)) else None,
+                                    "fy": float(fy) if isinstance(fy, (int, float)) else None,
+                                    "ppx": float(ppx) if isinstance(ppx, (int, float)) else None,
+                                    "ppy": float(ppy) if isinstance(ppy, (int, float)) else None,
+                                }
+                            if cam_id not in per_episode_depth_encoding:
+                                per_episode_depth_encoding[cam_id] = str(
+                                    cam_data.get("depth_encoding") or cam_data.get("encoding") or ""
+                                )
+
+                # Dense RGB lists for video export (omit missing frames).
+                camera_rgb_frames: Dict[str, List[np.ndarray]] = {
+                    cam_id: [arr for arr in arrs if arr is not None]
+                    for cam_id, arrs in camera_rgb_by_frame.items()
+                    if isinstance(arrs, list) and any(arr is not None for arr in arrs)
+                }
 
                 require_camera_data = os.getenv("REQUIRE_CAMERA_DATA", "false").lower() == "true"
                 total_rgb_frames = sum(len(v) for v in camera_rgb_frames.values())
@@ -19609,10 +20771,16 @@ Scene objects: {scene_summary}
                 for cam_id, rgb_list in camera_rgb_frames.items():
                     if not rgb_list:
                         continue
-                    cam_video_dir = videos_dir / f"observation.images.{cam_id}"
+                    if resolved_format == LeRobotExportFormat.LEROBOT_V3:
+                        chunk_idx = episode_index_num // v3_chunk_size
+                        file_idx = episode_index_num % v3_chunk_size
+                        cam_video_dir = videos_dir / cam_id / f"chunk-{chunk_idx:03d}"
+                        video_stem = f"file-{file_idx:04d}"
+                    else:
+                        cam_video_dir = videos_dir / f"observation.images.{cam_id}"
+                        video_stem = f"episode_{episode_index_num:06d}"
                     cam_video_dir.mkdir(parents=True, exist_ok=True)
-                    ep_num = exported_count
-                    video_path = cam_video_dir / f"episode_{ep_num:06d}.mp4"
+                    video_path = cam_video_dir / f"{video_stem}.mp4"
 
                     if _have_imageio:
                         try:
@@ -19629,10 +20797,286 @@ Scene objects: {scene_summary}
                             self.log(f"  Video write failed for {cam_id}: {_vid_err}", "WARNING")
                     else:
                         # Fallback: save as individual .npy frames
-                        frames_out_dir = cam_video_dir / f"episode_{ep_num:06d}_frames"
+                        frames_out_dir = cam_video_dir / f"{video_stem}_frames"
                         frames_out_dir.mkdir(parents=True, exist_ok=True)
                         for fi, rgb_frame in enumerate(rgb_list):
                             np.save(frames_out_dir / f"frame_{fi:06d}.npy", rgb_frame)
+
+                # -----------------------------------------------------------------
+                # Ground-truth: camera calibration + depth maps + point clouds
+                # -----------------------------------------------------------------
+                depth_paths: Dict[str, str] = {}
+                point_cloud_paths: Dict[str, str] = {}
+                camera_calib_rel: Optional[str] = None
+
+                def _artifact_stem(ep_index: int) -> Tuple[str, str]:
+                    if resolved_format == LeRobotExportFormat.LEROBOT_V3:
+                        chunk_idx = ep_index // 1000
+                        file_idx = ep_index % 1000
+                        return f"chunk-{chunk_idx:03d}", f"file-{file_idx:04d}"
+                    return "chunk-000", f"episode_{ep_index:06d}"
+
+                # Per-episode camera calibration JSON (small, always written when depth/pc enabled)
+                if include_depth or include_point_cloud:
+                    chunk_name, stem = _artifact_stem(int(episode_index_num))
+                    calib_dir = gt_root / chunk_name / "camera_calibration"
+                    calib_dir.mkdir(parents=True, exist_ok=True)
+                    calib_path = calib_dir / f"{stem}.json"
+
+                    calib_payload = {
+                        "episode_id": episode_id,
+                        "episode_index": int(episode_index_num),
+                        "task": task_text,
+                        "camera_calibration": per_episode_intrinsics,
+                        "per_frame_extrinsics": per_frame_extrinsics,
+                        "depth_encoding": per_episode_depth_encoding,
+                        "depth_unit": "meters",
+                        "depth_downsample": int(depth_downsample),
+                    }
+                    try:
+                        calib_path.write_text(json.dumps(_to_json_serializable(calib_payload), indent=2))
+                        wrote_camera_calib_any = True
+                        camera_calib_rel = calib_path.relative_to(lerobot_root).as_posix()
+                    except Exception as calib_exc:
+                        self.log(
+                            f"Camera calibration write failed for episode {episode_id}: {calib_exc}",
+                            "WARNING",
+                        )
+
+                def _coerce_depth_to_meters(
+                    depth: np.ndarray,
+                    encoding: str,
+                ) -> Optional[np.ndarray]:
+                    if depth is None or not isinstance(depth, np.ndarray):
+                        return None
+                    if depth.ndim != 2:
+                        if depth.ndim == 3 and depth.shape[-1] >= 1:
+                            depth = depth[..., 0]
+                        else:
+                            return None
+                    enc = (encoding or "").lower()
+                    # If depth is encoded as PNG without a known linearization,
+                    # skip rather than exporting garbage.
+                    if "png" in enc and depth.dtype == np.uint8:
+                        return None
+                    orig_dtype = depth.dtype
+                    depth = depth.astype(np.float32, copy=False)
+                    enc = (encoding or "").lower()
+                    # Heuristic: uint16 is usually millimeters; float32 is meters.
+                    if orig_dtype == np.uint16 or "16u" in enc or "uint16" in enc:
+                        depth = depth.astype(np.float32) * 0.001
+                    return depth
+
+                def _coerce_extrinsic_matrix(extrinsic: Any) -> Optional[np.ndarray]:
+                    """Coerce a camera-to-world transform into a (4,4) float64 matrix."""
+                    if extrinsic is None:
+                        return None
+                    try:
+                        arr = np.asarray(extrinsic, dtype=np.float64)
+                    except Exception:
+                        return None
+                    if arr.shape == (4, 4):
+                        return arr
+                    if arr.size == 16:
+                        try:
+                            return arr.reshape((4, 4))
+                        except Exception:
+                            return None
+                    return None
+
+                if include_depth:
+                    for cam_id, depth_by_frame in camera_depth_by_frame.items():
+                        if not depth_by_frame:
+                            continue
+                        chunk_name, stem = _artifact_stem(int(episode_index_num))
+                        depth_dir = gt_root / chunk_name / "depth" / cam_id
+                        depth_dir.mkdir(parents=True, exist_ok=True)
+                        depth_path = depth_dir / f"{stem}.npz"
+
+                        depth_encoding = per_episode_depth_encoding.get(cam_id, "")
+                        target_shape: Optional[Tuple[int, int]] = None
+                        for depth_frame in depth_by_frame:
+                            depth_m = (
+                                _coerce_depth_to_meters(depth_frame, depth_encoding)
+                                if depth_frame is not None
+                                else None
+                            )
+                            if depth_m is None:
+                                continue
+                            if depth_downsample > 1:
+                                depth_m = depth_m[::depth_downsample, ::depth_downsample]
+                            if isinstance(depth_m, np.ndarray) and depth_m.ndim == 2:
+                                target_shape = (int(depth_m.shape[0]), int(depth_m.shape[1]))
+                                break
+                        if target_shape is None:
+                            continue
+                        nan_frame = np.full(target_shape, np.nan, dtype=np.float32)
+                        aligned_frames: List[np.ndarray] = []
+                        valid_mask: List[bool] = []
+                        depth_encoding = per_episode_depth_encoding.get(cam_id, "")
+                        for depth_frame in depth_by_frame:
+                            depth_m = (
+                                _coerce_depth_to_meters(depth_frame, depth_encoding)
+                                if depth_frame is not None
+                                else None
+                            )
+                            if depth_m is None:
+                                aligned_frames.append(nan_frame)
+                                valid_mask.append(False)
+                                continue
+                            if depth_downsample > 1:
+                                depth_m = depth_m[::depth_downsample, ::depth_downsample]
+                            if not isinstance(depth_m, np.ndarray) or depth_m.ndim != 2:
+                                aligned_frames.append(nan_frame)
+                                valid_mask.append(False)
+                                continue
+                            if (int(depth_m.shape[0]), int(depth_m.shape[1])) != target_shape:
+                                aligned_frames.append(nan_frame)
+                                valid_mask.append(False)
+                                continue
+                            aligned_frames.append(depth_m.astype(np.float32, copy=False))
+                            valid_mask.append(True)
+
+                        if not aligned_frames:
+                            continue
+                        try:
+                            np.savez_compressed(
+                                depth_path,
+                                depth=np.stack(aligned_frames).astype(np.float32, copy=False),
+                                valid_mask=np.asarray(valid_mask, dtype=np.bool_),
+                                fps=30.0,
+                                unit="meters",
+                                downsample=int(depth_downsample),
+                            )
+                            wrote_depth_any = True
+                            depth_paths[cam_id] = depth_path.relative_to(lerobot_root).as_posix()
+                        except Exception as depth_exc:
+                            self.log(
+                                f"Depth write failed for episode {episode_id} camera {cam_id}: {depth_exc}",
+                                "WARNING",
+                            )
+
+                if include_point_cloud and point_cloud_max_points > 0:
+                    try:
+                        from tools.point_cloud import (
+                            CameraIntrinsics as _PCIntr,
+                            depth_to_points as _depth_to_points,
+                            pad_or_truncate_points as _pad_pts,
+                            pad_or_truncate_colors as _pad_cols,
+                        )
+                    except Exception as pc_import_exc:
+                        self.log(
+                            f"Point cloud export unavailable (import failed): {pc_import_exc}",
+                            "WARNING",
+                        )
+                        include_point_cloud = False
+
+                if include_point_cloud and point_cloud_max_points > 0:
+                    # Deterministic sampling per episode for reproducibility
+                    pc_seed = _stable_uint32(episode_id, "point_cloud")
+                    pc_rng = np.random.default_rng(pc_seed)
+                    for cam_id, depth_by_frame in camera_depth_by_frame.items():
+                        if not depth_by_frame:
+                            continue
+                        intr = per_episode_intrinsics.get(cam_id, {})
+                        fx = intr.get("fx")
+                        fy = intr.get("fy")
+                        cx = intr.get("ppx")
+                        cy = intr.get("ppy")
+                        if not all(isinstance(v, (int, float)) and float(v) != 0.0 for v in (fx, fy, cx, cy)):
+                            continue
+
+                        chunk_name, stem = _artifact_stem(int(episode_index_num))
+                        pc_dir = gt_root / chunk_name / "point_cloud" / cam_id
+                        pc_dir.mkdir(parents=True, exist_ok=True)
+                        pc_path = pc_dir / f"{stem}.npz"
+
+                        points_frames: List[np.ndarray] = []
+                        colors_frames: List[np.ndarray] = []
+                        valid_counts: List[int] = []
+
+                        depth_encoding = per_episode_depth_encoding.get(cam_id, "")
+                        rgb_by_frame = camera_rgb_by_frame.get(cam_id, [])
+                        for frame_idx, depth_frame in enumerate(depth_by_frame):
+                            depth_m = _coerce_depth_to_meters(depth_frame, depth_encoding) if depth_frame is not None else None
+                            if depth_m is None:
+                                pts_pad, n_valid = _pad_pts(None, point_cloud_max_points)
+                                cols_pad = _pad_cols(None, point_cloud_max_points)
+                                points_frames.append(pts_pad)
+                                colors_frames.append(cols_pad)
+                                valid_counts.append(int(n_valid))
+                                continue
+
+                            rgb_frame = rgb_by_frame[frame_idx] if isinstance(rgb_by_frame, list) and frame_idx < len(rgb_by_frame) else None
+                            if rgb_frame is not None and rgb_frame.ndim == 3 and rgb_frame.shape[-1] == 4:
+                                rgb_frame = rgb_frame[:, :, :3]
+
+                            if depth_downsample > 1:
+                                depth_m = depth_m[::depth_downsample, ::depth_downsample]
+                                if rgb_frame is not None and isinstance(rgb_frame, np.ndarray) and rgb_frame.ndim >= 2:
+                                    rgb_frame = rgb_frame[::depth_downsample, ::depth_downsample]
+
+                            # Adjust intrinsics for downsampled resolution
+                            _fx = float(fx) / float(depth_downsample)
+                            _fy = float(fy) / float(depth_downsample)
+                            _cx = float(cx) / float(depth_downsample)
+                            _cy = float(cy) / float(depth_downsample)
+
+                            extr = None
+                            if point_cloud_export_frame == "world":
+                                extr_list = per_frame_extrinsics.get(cam_id)
+                                if isinstance(extr_list, list) and frame_idx < len(extr_list):
+                                    extr = extr_list[frame_idx]
+                                else:
+                                    # Fallback: use episode-level extrinsic if per-frame missing
+                                    extr = (episode.get("camera_calibration") or {}).get(cam_id, {}).get("extrinsic_matrix")
+                                extr = _coerce_extrinsic_matrix(extr)
+                                if extr is None:
+                                    pts_pad, n_valid = _pad_pts(None, point_cloud_max_points)
+                                    cols_pad = _pad_cols(None, point_cloud_max_points)
+                                    points_frames.append(pts_pad)
+                                    colors_frames.append(cols_pad)
+                                    valid_counts.append(int(n_valid))
+                                    continue
+                            out_pc = _depth_to_points(
+                                depth_m,
+                                _PCIntr(fx=_fx, fy=_fy, cx=_cx, cy=_cy),
+                                rgb=rgb_frame,
+                                extrinsic_cam_to_world=extr if point_cloud_export_frame == "world" else None,
+                                max_points=point_cloud_max_points,
+                                rng=pc_rng,
+                                max_depth_m=float(point_cloud_max_depth_m),
+                            )
+                            pts = out_pc.get("points")
+                            cols = out_pc.get("colors")
+                            pts_pad, n_valid = _pad_pts(pts, point_cloud_max_points)
+                            cols_pad = _pad_cols(cols, point_cloud_max_points)
+                            points_frames.append(pts_pad)
+                            colors_frames.append(cols_pad)
+                            valid_counts.append(int(n_valid))
+
+                        if not points_frames:
+                            continue
+                        try:
+                            np.savez_compressed(
+                                pc_path,
+                                points=np.stack(points_frames).astype(np.float32, copy=False),
+                                colors=np.stack(colors_frames).astype(np.uint8, copy=False),
+                                valid_counts=np.asarray(valid_counts, dtype=np.int32),
+                                fps=30.0,
+                                unit="meters",
+                                frame=point_cloud_export_frame,
+                                max_points=int(point_cloud_max_points),
+                                max_depth_m=float(point_cloud_max_depth_m),
+                                downsample=int(depth_downsample),
+                            )
+                            wrote_point_cloud_any = True
+                            point_cloud_paths[cam_id] = pc_path.relative_to(lerobot_root).as_posix()
+                        except Exception as pc_exc:
+                            self.log(
+                                f"Point cloud write failed for episode {episode_id} camera {cam_id}: {pc_exc}",
+                                "WARNING",
+                            )
 
                 replay_root = lerobot_root / "replay"
                 replay_episode_dir = replay_root / f"episode_{episode_id}"
@@ -19703,48 +21147,72 @@ Scene objects: {scene_summary}
                         )
 
                 columns: Dict[str, List[Any]] = {
-                    "episode_id": [],
-                    "frame_index": [],
                     "timestamp": [],
-                    "observation": [],
+                    "frame_index": [],
+                    "episode_index": [],
+                    "index": [],
+                    "task_index": [],
+                    "observation.state": [],
                     "action": [],
                     "reward": [],
                     "done": [],
-                    "task_name": [],
-                    "task_id": [],
                 }
 
                 for idx, frame in enumerate(frames):
                     timestamp = frame.get("timestamp")
                     if timestamp is None:
                         timestamp = float(idx)
-                    columns["episode_id"].append(episode_id)
-                    columns["frame_index"].append(idx)
-                    columns["timestamp"].append(timestamp)
-                    # Strip camera pixel data from observation for lightweight parquet
-                    obs_stripped = strip_camera_data(frame.get("observation"))
-                    columns["observation"].append(
-                        json.dumps(_to_json_serializable(obs_stripped))
-                    )
-                    columns["action"].append(
-                        json.dumps(_to_json_serializable(frame.get("action")))
-                    )
+                    else:
+                        try:
+                            timestamp = float(timestamp)
+                        except (TypeError, ValueError):
+                            timestamp = float(idx)
+
+                    state_vec = _extract_state(frame)
+                    action_vec = _extract_action(frame)
+                    state_stats.update(state_vec, context=f"episode={episode_id} frame={idx}")
+                    action_stats.update(action_vec, context=f"episode={episode_id} frame={idx}")
+
+                    columns["timestamp"].append(float(timestamp))
+                    columns["frame_index"].append(int(idx))
+                    columns["episode_index"].append(int(episode_index_num))
+                    columns["index"].append(int(idx))
+                    columns["task_index"].append(int(task_index))
+                    columns["observation.state"].append([float(v) for v in state_vec])
+                    columns["action"].append([float(v) for v in action_vec])
                     columns["reward"].append(float(frame.get("reward", 0.0)))
-                    columns["done"].append(bool(frame.get("done", False)))
-                    columns["task_name"].append(task_name)
-                    columns["task_id"].append(task_id)
+                    done_val = frame.get("done")
+                    if done_val is None:
+                        done_val = idx == (frame_count - 1)
+                    columns["done"].append(bool(done_val))
 
                 table = pa.Table.from_pydict(columns, schema=schema)
                 episode_parquet_rel = ""
                 if resolved_format == LeRobotExportFormat.LEROBOT_V3 and parquet_writer:
                     parquet_writer.write_table(table)
-                    episode_index[episode_id] = {
-                        "frames": frame_count,
+                    video_paths: Dict[str, str] = {}
+                    for camera_id in sorted(camera_rgb_frames.keys()):
+                        chunk_idx = episode_index_num // v3_chunk_size
+                        file_idx = episode_index_num % v3_chunk_size
+                        rel_path = f"videos/{camera_id}/chunk-{chunk_idx:03d}/file-{file_idx:04d}.mp4"
+                        if (lerobot_root / rel_path).exists():
+                            video_paths[camera_id] = rel_path
+                    v3_episode_index[int(episode_index_num)] = {
+                        "episode_index": int(episode_index_num),
+                        "episode_id": episode_id,
+                        "num_frames": frame_count,
+                        "length": frame_count,
                         "row_group": row_group_index,
+                        "task_index": int(task_index),
+                        "task": task_text,
                         "task_id": task_id,
                         "task_name": task_name,
                         "task_complexity": task_complexity,
                         "curriculum_split": curriculum_split,
+                        "scene_id": str(episode.get("scene_id") or ""),
+                        "split": "train",
+                        "data_path": "data/chunk-000/file-0000.parquet",
+                        "video_paths": dict(video_paths),
                     }
                     episode_parquet_rel = "data/chunk-000/file-0000.parquet"
                     row_group_index += 1
@@ -19768,8 +21236,11 @@ Scene objects: {scene_summary}
                 episode_stats_rows.append(
                     {
                         "episode_id": episode_id,
+                        "episode_index": int(episode_index_num),
                         "task_id": task_id,
                         "task_name": task_name,
+                        "task_index": int(task_index),
+                        "task": task_text,
                         "task_complexity": task_complexity,
                         "curriculum_split": curriculum_split,
                         "length": frame_count,
@@ -19783,8 +21254,11 @@ Scene objects: {scene_summary}
                 episode_meta_rows.append(
                     {
                         "episode_id": episode_id,
+                        "episode_index": int(episode_index_num),
                         "task_id": task_id,
                         "task_name": task_name,
+                        "task_index": int(task_index),
+                        "task": task_text,
                         "task_complexity": task_complexity,
                         "curriculum_split": curriculum_split,
                         "length": frame_count,
@@ -19797,12 +21271,17 @@ Scene objects: {scene_summary}
                         "scene_snapshot_path": scene_snapshot_rel,
                         "episode_stats_ref": f"meta/episodes_stats.jsonl#episode_id={episode_id}",
                         "parquet_path": episode_parquet_rel,
+                        "ground_truth": {
+                            "camera_calibration_path": camera_calib_rel,
+                            "depth_paths": dict(depth_paths),
+                            "point_cloud_paths": dict(point_cloud_paths),
+                        },
                     }
                 )
 
                 exported_count += 1
                 total_frames += frame_count
-                frame_counts[episode_id] = frame_count
+                frame_counts[int(episode_index_num)] = frame_count
 
             except _CameraDataRequiredError:
                 raise
@@ -19831,6 +21310,15 @@ Scene objects: {scene_summary}
                 "certified_only_export": _certified_only,
                 "exported_at": datetime.utcnow().isoformat() + "Z",
                 "data_path": "data",
+                "ground_truth_path": "ground_truth" if (wrote_depth_any or wrote_point_cloud_any or wrote_camera_calib_any) else None,
+                "includes_depth": bool(wrote_depth_any),
+                "includes_point_cloud": bool(wrote_point_cloud_any),
+                "point_cloud": {
+                    "frame": point_cloud_export_frame,
+                    "max_points": int(point_cloud_max_points),
+                    "max_depth_m": float(point_cloud_max_depth_m),
+                    "downsample": int(depth_downsample),
+                } if wrote_point_cloud_any else None,
                 "chunking": {
                     "strategy": "aggregated",
                     "chunk_dir": "chunk-000",
@@ -19843,8 +21331,7 @@ Scene objects: {scene_summary}
                 },
                 "schema": schema_description,
                 "frame_counts": frame_counts,
-                "episode_index": "meta/episode_index.json",
-                "episodes_meta": "meta/episodes/chunk-000/file-0000.parquet",
+                "episodes_path": "meta/episodes/chunk-000/file-0000.parquet",
                 "requested_robot": self._runtime_robot_metadata.get("requested_robot"),
                 "runtime_robot": self._runtime_robot_metadata.get("runtime_robot"),
                 "robot_fallback_reason": self._runtime_robot_metadata.get("fallback_reason"),
@@ -19873,6 +21360,15 @@ Scene objects: {scene_summary}
                 "certified_only_export": _certified_only,
                 "exported_at": datetime.utcnow().isoformat() + "Z",
                 "data_path": "data",
+                "ground_truth_path": "ground_truth" if (wrote_depth_any or wrote_point_cloud_any or wrote_camera_calib_any) else None,
+                "includes_depth": bool(wrote_depth_any),
+                "includes_point_cloud": bool(wrote_point_cloud_any),
+                "point_cloud": {
+                    "frame": point_cloud_export_frame,
+                    "max_points": int(point_cloud_max_points),
+                    "max_depth_m": float(point_cloud_max_depth_m),
+                    "downsample": int(depth_downsample),
+                } if wrote_point_cloud_any else None,
                 "chunking": {"strategy": "single", "chunk_dir": "chunk-000"},
                 "schema": schema_description,
                 "frame_counts": frame_counts,
@@ -19886,11 +21382,16 @@ Scene objects: {scene_summary}
 
         # Add video paths to info if videos were written
         if videos_dir.exists():
-            _video_cameras = [
-                d.name.replace("observation.images.", "")
-                for d in videos_dir.iterdir()
-                if d.is_dir() and d.name.startswith("observation.images.")
-            ]
+            if resolved_format == LeRobotExportFormat.LEROBOT_V3:
+                _video_cameras = [
+                    d.name for d in videos_dir.iterdir() if d.is_dir()
+                ]
+            else:
+                _video_cameras = [
+                    d.name.replace("observation.images.", "")
+                    for d in videos_dir.iterdir()
+                    if d.is_dir() and d.name.startswith("observation.images.")
+                ]
             if _video_cameras:
                 info["video_path"] = "videos"
                 info["cameras"] = sorted(_video_cameras)
@@ -19898,42 +21399,50 @@ Scene objects: {scene_summary}
         with open(meta_dir / "info.json", "w") as f:
             json.dump(info, f, indent=2)
         if resolved_format == LeRobotExportFormat.LEROBOT_V3:
-            with open(meta_dir / "episode_index.json", "w") as f:
-                json.dump(episode_index, f, indent=2)
             meta_episodes_dir.mkdir(parents=True, exist_ok=True)
             meta_episodes_file = meta_episodes_dir / "file-0000.parquet"
             episode_rows = [
-                {
-                    "episode_id": episode_id,
-                    "frames": payload.get("frames"),
-                    "row_group": payload.get("row_group"),
-                    "task_id": payload.get("task_id"),
-                    "task_name": payload.get("task_name"),
-                }
-                for episode_id, payload in episode_index.items()
+                v3_episode_index[key]
+                for key in sorted(v3_episode_index.keys())
             ]
             meta_schema = pa.schema(
                 [
-                    ("episode_id", pa.string()),
-                    ("frames", pa.int64()),
-                    ("row_group", pa.int64()),
-                    ("task_id", pa.string()),
-                    ("task_name", pa.string()),
+                    ("episode_index", pa.int64()),
+                    ("num_frames", pa.int64()),
+                    ("length", pa.int64()),
+                    ("task_index", pa.int64()),
+                    ("task", pa.string()),
+                    ("scene_id", pa.string()),
+                    ("data_path", pa.string()),
+                    ("video_paths", pa.string()),
+                    ("split", pa.string()),
+                    ("failure_labels", pa.string()),
                 ]
             )
             meta_payload = {
-                "episode_id": [row.get("episode_id") for row in episode_rows],
-                "frames": [row.get("frames") for row in episode_rows],
-                "row_group": [row.get("row_group") for row in episode_rows],
-                "task_id": [row.get("task_id") for row in episode_rows],
-                "task_name": [row.get("task_name") for row in episode_rows],
+                "episode_index": [int(row.get("episode_index", 0)) for row in episode_rows],
+                "num_frames": [int(row.get("num_frames", 0)) for row in episode_rows],
+                "length": [int(row.get("length", 0)) for row in episode_rows],
+                "task_index": [int(row.get("task_index", 0)) for row in episode_rows],
+                "task": [str(row.get("task") or "") for row in episode_rows],
+                "scene_id": [str(row.get("scene_id") or "") for row in episode_rows],
+                "data_path": [str(row.get("data_path") or "") for row in episode_rows],
+                "video_paths": [
+                    json.dumps(row.get("video_paths") or {}) if isinstance(row.get("video_paths"), dict) else str(row.get("video_paths") or "")
+                    for row in episode_rows
+                ],
+                "split": [str(row.get("split") or "train") for row in episode_rows],
+                "failure_labels": [
+                    json.dumps(row.get("failure_labels") or {}) if isinstance(row.get("failure_labels"), dict) else str(row.get("failure_labels") or "")
+                    for row in episode_rows
+                ],
             }
             meta_table = pa.Table.from_pydict(meta_payload, schema=meta_schema)
-            pq.write_table(meta_table, meta_episodes_file)
+            pq.write_table(meta_table, meta_episodes_file, compression="zstd")
 
         tasks_jsonl_path = meta_dir / "tasks.jsonl"
         with open(tasks_jsonl_path, "w") as tasks_file:
-            for task_payload in sorted(task_registry.values(), key=lambda item: item.get("task_id", "")):
+            for task_payload in sorted(task_rows, key=lambda item: int(item.get("task_index", 0))):
                 tasks_file.write(json.dumps(_to_json_serializable(task_payload)) + "\n")
 
         episodes_meta_path = meta_dir / "episodes.jsonl"
@@ -19946,12 +21455,33 @@ Scene objects: {scene_summary}
             for row in episode_stats_rows:
                 episodes_stats_file.write(json.dumps(_to_json_serializable(row)) + "\n")
 
-        # Write episodes.jsonl (required by v2 validation)
-        if resolved_format != LeRobotExportFormat.LEROBOT_V3:
-            episodes_jsonl_path = lerobot_root / "episodes.jsonl"
-            with open(episodes_jsonl_path, "w") as ejf:
-                for ep_id, fc in frame_counts.items():
-                    ejf.write(json.dumps({"episode_id": ep_id, "length": fc}) + "\n")
+        # Write a root-level episodes.jsonl for compatibility with consumers that
+        # don't inspect meta/episodes.jsonl (and for backwards compatibility with
+        # older import/validation tooling).
+        episodes_jsonl_path = lerobot_root / "episodes.jsonl"
+        with open(episodes_jsonl_path, "w") as ejf:
+            for row in episode_meta_rows:
+                episode_index_num = row.get("episode_index")
+                payload = {
+                    "episode_id": row.get("episode_id"),
+                    "episode_index": episode_index_num,
+                    "length": row.get("length"),
+                    "task_index": row.get("task_index"),
+                    "task": row.get("task"),
+                    "task_id": row.get("task_id"),
+                    "task_name": row.get("task_name"),
+                    "task_complexity": row.get("task_complexity"),
+                    "curriculum_split": row.get("curriculum_split"),
+                }
+                if resolved_format == LeRobotExportFormat.LEROBOT_V3 and episode_index_num is not None:
+                    v3_meta = v3_episode_index.get(int(episode_index_num), {})
+                    if v3_meta.get("row_group") is not None:
+                        payload["parquet_row_group"] = v3_meta.get("row_group")
+                    if v3_meta.get("data_path"):
+                        payload["parquet_path"] = v3_meta.get("data_path")
+                    if v3_meta.get("video_paths"):
+                        payload["video_paths"] = v3_meta.get("video_paths")
+                ejf.write(json.dumps(_to_json_serializable(payload)) + "\n")
 
         dataset_info = {
             "format": "lerobot",
@@ -19967,6 +21497,9 @@ Scene objects: {scene_summary}
             "certified_only_export": _certified_only,
             "exported_at": datetime.utcnow().isoformat() + "Z",
             "lerobot_info": "meta/info.json",
+            "ground_truth_path": "ground_truth" if (wrote_depth_any or wrote_point_cloud_any or wrote_camera_calib_any) else None,
+            "includes_depth": bool(wrote_depth_any),
+            "includes_point_cloud": bool(wrote_point_cloud_any),
             "debug_json_output": False,
             "requested_robot": self._runtime_robot_metadata.get("requested_robot"),
             "runtime_robot": self._runtime_robot_metadata.get("runtime_robot"),
@@ -19985,6 +21518,12 @@ Scene objects: {scene_summary}
             )
             if stats is not None
         }
+        state_payload = state_stats.to_payload()
+        if state_payload is not None:
+            global_stats_payload["observation.state"] = state_payload
+        action_payload = action_stats.to_payload()
+        if action_payload is not None:
+            global_stats_payload["action"] = action_payload
         camera_ids_seen: Dict[str, int] = {}
         full_camera_rig_episodes = 0
         for row in episode_meta_rows:
@@ -20020,7 +21559,7 @@ Scene objects: {scene_summary}
                         info=info,
                         dataset_info=dataset_info,
                         episodes_meta=episode_meta_rows,
-                        tasks=list(task_registry.values()),
+                        tasks=task_rows,
                         episode_stats_rows=episode_stats_rows,
                         global_stats=global_stats_payload,
                         enable_curriculum_layout=self._enable_curriculum_layout,
@@ -20049,6 +21588,500 @@ Scene objects: {scene_summary}
             "exported_raw_only": exported_raw_only,
             "rejected_by_gate_code": dict(sorted(rejected_by_gate_code.items())),
             "parquet_episodes": exported_count,
+            "output_dir": output_dir,
+        }
+
+    def export_to_rlds(
+        self,
+        recording_dir: Path,
+        output_dir: Path,
+        *,
+        min_quality_score: float = 0.5,
+        split_name: str = "train",
+    ) -> Dict[str, Any]:
+        """Export collected episodes to an RLDS-compatible TFRecord layout.
+
+        Notes:
+        - We write TFRecord files containing tf.train.Example records per step.
+        - We vendor the minimal TF Example protos + TFRecord writer so this does
+          not require the tensorflow runtime.
+        - A natural-language instruction is written per-step via the
+          `language_instruction` feature (repeated across all steps in an episode).
+        """
+        self.log(f"Exporting to RLDS (TFRecord): {output_dir}")
+
+        from tools.rlds.tfrecord_writer import (
+            TFRecordWriter,
+            bytes_feature,
+            float_feature,
+            int64_feature,
+            make_tf_example,
+        )
+
+        # Optional: encode RGB frames to JPEG for compact TFRecord storage.
+        try:
+            from PIL import Image
+            import io
+            _have_pil = True
+        except Exception:
+            _have_pil = False
+            Image = None
+            io = None
+
+        def _encode_rgb(rgb: np.ndarray) -> Optional[bytes]:
+            if rgb is None:
+                return None
+            if rgb.ndim != 3:
+                return None
+            if rgb.shape[-1] == 4:
+                rgb = rgb[:, :, :3]
+            if rgb.shape[-1] != 3:
+                return None
+            if not _have_pil:
+                return None
+            try:
+                img = Image.fromarray(rgb.astype(np.uint8))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=int(os.getenv("RLDS_JPEG_QUALITY", "90")))
+                return buf.getvalue()
+            except Exception:
+                return None
+
+        def _coerce_float_list(value: Any) -> List[float]:
+            if value is None:
+                return []
+            if isinstance(value, np.ndarray):
+                try:
+                    value = value.tolist()
+                except Exception:
+                    return []
+            if isinstance(value, (list, tuple)):
+                out: List[float] = []
+                for item in value:
+                    try:
+                        out.append(float(item))
+                    except (TypeError, ValueError):
+                        continue
+                return out
+            try:
+                return [float(value)]
+            except (TypeError, ValueError):
+                return []
+
+        def _extract_state(frame: Mapping[str, Any]) -> List[float]:
+            obs = frame.get("observation") if isinstance(frame.get("observation"), dict) else {}
+            # Prefer an explicit state vector when present.
+            for candidate in (
+                obs.get("robot_state"),
+                frame.get("robot_state"),
+                obs.get("state"),
+                frame.get("state"),
+            ):
+                vec = _coerce_float_list(candidate)
+                if vec:
+                    return vec
+
+            # Fall back to common robotics fields.
+            for candidate in (
+                obs.get("joint_positions"),
+                frame.get("joint_positions"),
+                obs.get("joint_velocities"),
+                frame.get("joint_velocities"),
+            ):
+                vec = _coerce_float_list(candidate)
+                if vec:
+                    return vec
+
+            robot_state = obs.get("robot_state")
+            if isinstance(robot_state, dict):
+                flattened: List[float] = []
+                for key in (
+                    "joint_positions",
+                    "joint_velocities",
+                    "joint_efforts",
+                    "gripper_position",
+                    "gripper_openness",
+                ):
+                    val = robot_state.get(key)
+                    if val is None:
+                        continue
+                    flattened.extend(_coerce_float_list(val))
+                if flattened:
+                    return flattened
+
+            return []
+
+        def _extract_action(frame: Mapping[str, Any]) -> List[float]:
+            obs = frame.get("observation") if isinstance(frame.get("observation"), dict) else {}
+            for candidate in (
+                frame.get("action"),
+                frame.get("action_abs"),
+                obs.get("action"),
+                obs.get("action_abs"),
+            ):
+                vec = _coerce_float_list(candidate)
+                if vec:
+                    return vec
+            return []
+
+        class _RunningVectorStats:
+            def __init__(self, name: str) -> None:
+                self._name = name
+                self._count = 0
+                self._mean: Optional[np.ndarray] = None
+                self._m2: Optional[np.ndarray] = None
+                self._min: Optional[np.ndarray] = None
+                self._max: Optional[np.ndarray] = None
+
+            def update(self, vec: Sequence[float], *, context: str = "") -> None:
+                arr = np.asarray([float(v) for v in vec], dtype=np.float64)
+                if arr.size == 0:
+                    return
+                if self._mean is None:
+                    self._count = 1
+                    self._mean = arr.copy()
+                    self._m2 = np.zeros_like(arr)
+                    self._min = arr.copy()
+                    self._max = arr.copy()
+                    return
+                if arr.shape != self._mean.shape:
+                    raise ValueError(
+                        f"{self._name} dimension mismatch: expected {self._mean.shape[0]} got "
+                        f"{arr.shape[0]} ({context})"
+                    )
+                self._count += 1
+                delta = arr - self._mean
+                self._mean += delta / float(self._count)
+                delta2 = arr - self._mean
+                if self._m2 is None:
+                    self._m2 = np.zeros_like(arr)
+                self._m2 = self._m2 + delta * delta2
+                self._min = np.minimum(self._min, arr) if self._min is not None else arr.copy()
+                self._max = np.maximum(self._max, arr) if self._max is not None else arr.copy()
+
+            def to_payload(self) -> Optional[Dict[str, Any]]:
+                if self._mean is None or self._m2 is None or self._min is None or self._max is None:
+                    return None
+                denom = float(self._count) if self._count > 0 else 1.0
+                var = self._m2 / denom
+                std = np.sqrt(np.maximum(var, 0.0))
+                return {
+                    "min": self._min.astype(np.float64).tolist(),
+                    "max": self._max.astype(np.float64).tolist(),
+                    "mean": self._mean.astype(np.float64).tolist(),
+                    "std": std.astype(np.float64).tolist(),
+                }
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        split_dir = output_dir / split_name
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        exported_count = 0
+        skipped_count = 0
+        total_steps = 0
+        episode_index_rows: List[Dict[str, Any]] = []
+        task_text_to_index: Dict[str, int] = {}
+        task_rows: List[Dict[str, Any]] = []
+        eligible_certified = 0
+        exported_raw_only = 0
+        rejected_by_gate_code: Dict[str, int] = {}
+
+        _certified_only_env = os.getenv("RLDS_EXPORT_CERTIFIED_ONLY")
+        if _certified_only_env is None:
+            _certified_only_env = os.getenv("LEROBOT_EXPORT_CERTIFIED_ONLY", "true")
+        _certified_only = str(_certified_only_env).lower() == "true"
+
+        state_stats = _RunningVectorStats("observation/state")
+        action_stats = _RunningVectorStats("action")
+
+        camera_ids_env = os.getenv("RLDS_CAMERA_IDS", "")
+        if camera_ids_env.strip():
+            camera_ids = []
+            for raw_id in camera_ids_env.split(","):
+                canonical = _canonicalize_camera_id(raw_id)
+                if canonical:
+                    camera_ids.append(canonical)
+        else:
+            camera_ids = list(CANONICAL_CAMERA_IDS)
+        # Deduplicate while preserving order.
+        camera_ids = list(dict.fromkeys(camera_ids))
+
+        require_camera_data = os.getenv("RLDS_REQUIRE_CAMERA_DATA", "true").lower() == "true"
+        require_encoded_images = os.getenv("RLDS_REQUIRE_ENCODED_IMAGES", "true").lower() == "true"
+
+        episode_files = sorted(recording_dir.glob("*.json"), key=lambda p: p.name)
+
+        for ep_file in episode_files:
+            try:
+                episode = json.loads(ep_file.read_text())
+
+                frames = episode.get("frames")
+                if not isinstance(frames, list):
+                    # recording_dir may contain non-episode JSON artifacts (e.g. checkpoints)
+                    continue
+                if not frames:
+                    skipped_count += 1
+                    code_key = "NO_FRAMES"
+                    rejected_by_gate_code[code_key] = rejected_by_gate_code.get(code_key, 0) + 1
+                    continue
+
+                dataset_tier = str(episode.get("dataset_tier") or "raw_preserved")
+                cert_payload = episode.get("certification") if isinstance(episode.get("certification"), dict) else {}
+                critical_failures = cert_payload.get("critical_failures", []) if isinstance(cert_payload, dict) else []
+                if dataset_tier == "physics_certified":
+                    eligible_certified += 1
+                if _certified_only:
+                    if dataset_tier != "physics_certified":
+                        exported_raw_only += 1
+                        skipped_count += 1
+                        if isinstance(critical_failures, list) and critical_failures:
+                            for code in critical_failures:
+                                code_key = str(code)
+                                rejected_by_gate_code[code_key] = rejected_by_gate_code.get(code_key, 0) + 1
+                        else:
+                            code_key = "NOT_PHYSICS_CERTIFIED"
+                            rejected_by_gate_code[code_key] = rejected_by_gate_code.get(code_key, 0) + 1
+                        continue
+
+                if float(episode.get("quality_score", 0.0)) < float(min_quality_score):
+                    skipped_count += 1
+                    code_key = "QUALITY_SCORE_BELOW_MIN"
+                    rejected_by_gate_code[code_key] = rejected_by_gate_code.get(code_key, 0) + 1
+                    continue
+
+                episode_id = str(episode.get("episode_id", ep_file.stem))
+                episode_index_num = exported_count
+                frame_count = len(frames)
+
+                task_name = str(
+                    episode.get("task_name")
+                    or episode.get("name")
+                    or episode.get("task")
+                    or _derive_task_name(episode, task_index=exported_count)
+                )
+                task_text = str(
+                    episode.get("task_description")
+                    or episode.get("language_instruction")
+                    or episode.get("instruction")
+                    or ""
+                ).strip()
+                if not task_text:
+                    task_text = task_name.strip() or "manipulation task"
+
+                task_id = str(episode.get("task_id") or _derive_task_id(episode, task_index=exported_count))
+                task_complexity = _derive_task_complexity(episode)
+                curriculum_split = _derive_curriculum_split(
+                    episode,
+                    task_complexity=task_complexity,
+                )
+                required_camera_ids = _normalize_required_camera_ids(
+                    episode.get("required_camera_ids")
+                    or episode.get("required_cameras")
+                    or episode.get("camera_ids"),
+                    ensure_all_canonical=False,
+                )
+
+                if task_text not in task_text_to_index:
+                    next_task_index = len(task_text_to_index)
+                    task_text_to_index[task_text] = next_task_index
+                    task_rows.append(
+                        {
+                            "task_index": next_task_index,
+                            "task": task_text,
+                            "task_id": task_id,
+                            "task_name": task_name,
+                            "task_type": episode.get("task_type"),
+                            "target_object": episode.get("target_object"),
+                            "task_complexity": task_complexity,
+                            "curriculum_split": curriculum_split,
+                            "required_camera_ids": list(required_camera_ids),
+                        }
+                    )
+                task_index = task_text_to_index[task_text]
+
+                # Resolve directory for camera frame .npy references.
+                ep_dir = ep_file.parent
+                _candidate = ep_dir
+                for _ in range(4):
+                    if any(_candidate.glob("*_frames")):
+                        break
+                    _candidate = _candidate.parent
+                else:
+                    _candidate = ep_dir  # fallback
+                ep_dir = _candidate
+
+                # Write one TFRecord file per episode. Each record is a step.
+                tfrecord_path = split_dir / f"episode_{episode_index_num:06d}.tfrecord"
+                records_written = 0
+                missing_cameras: Dict[str, int] = {cid: 0 for cid in camera_ids}
+
+                with TFRecordWriter(tfrecord_path) as writer:
+                    for idx, frame in enumerate(frames):
+                        try:
+                            timestamp = frame.get("timestamp")
+                            timestamp_f = float(idx) if timestamp is None else float(timestamp)
+                        except (TypeError, ValueError):
+                            timestamp_f = float(idx)
+
+                        state_vec = _extract_state(frame)
+                        action_vec = _extract_action(frame)
+                        state_stats.update(state_vec, context=f"episode={episode_id} frame={idx}")
+                        action_stats.update(action_vec, context=f"episode={episode_id} frame={idx}")
+
+                        is_first = idx == 0
+                        is_last = idx == (frame_count - 1)
+
+                        feature_dict: Dict[str, Any] = {
+                            "episode_id": bytes_feature(episode_id.encode("utf-8")),
+                            "episode_index": int64_feature(int(episode_index_num)),
+                            "step_index": int64_feature(int(idx)),
+                            "timestamp": float_feature(float(timestamp_f)),
+                            "observation/state": float_feature(state_vec),
+                            "action": float_feature(action_vec),
+                            "reward": float_feature(float(frame.get("reward", 0.0))),
+                            "is_first": int64_feature(1 if is_first else 0),
+                            "is_last": int64_feature(1 if is_last else 0),
+                            "is_terminal": int64_feature(1 if is_last else 0),
+                            "discount": float_feature(1.0),
+                            "language_instruction": bytes_feature(task_text.encode("utf-8")),
+                        }
+
+                        obs_payload = frame.get("observation") if isinstance(frame.get("observation"), dict) else {}
+                        camera_frames = (
+                            obs_payload.get("camera_frames")
+                            if isinstance(obs_payload.get("camera_frames"), dict)
+                            else {}
+                        )
+                        camera_frames_canonical: Dict[str, Any] = {}
+                        for raw_camera_id, raw_payload in camera_frames.items():
+                            canonical_id = _canonicalize_camera_id(raw_camera_id)
+                            if canonical_id and canonical_id not in camera_frames_canonical:
+                                camera_frames_canonical[canonical_id] = raw_payload
+                        for cam_id in camera_ids:
+                            cam_payload = camera_frames_canonical.get(cam_id)
+                            if not isinstance(cam_payload, dict):
+                                missing_cameras[cam_id] = missing_cameras.get(cam_id, 0) + 1
+                                continue
+                            rgb_arr = load_camera_frame(cam_payload, "rgb", ep_dir=ep_dir)
+                            rgb_bytes = _encode_rgb(rgb_arr) if rgb_arr is not None else None
+                            if rgb_bytes:
+                                feature_dict[f"observation/image_{cam_id}"] = bytes_feature(rgb_bytes)
+                            else:
+                                missing_cameras[cam_id] = missing_cameras.get(cam_id, 0) + 1
+
+                        if require_encoded_images:
+                            missing_required = [
+                                cam_id
+                                for cam_id in camera_ids
+                                if missing_cameras.get(cam_id, 0) > 0
+                            ]
+                            if require_camera_data and missing_required:
+                                raise _CameraDataRequiredError(
+                                    f"Episode {episode_id} missing encoded RGB frames for required cameras "
+                                    f"{missing_required} at step {idx}."
+                                )
+
+                        writer.write(make_tf_example(feature_dict))
+                        records_written += 1
+
+                episode_index_rows.append(
+                    {
+                        "episode_id": episode_id,
+                        "episode_index": int(episode_index_num),
+                        "task_index": int(task_index),
+                        "task": task_text,
+                        "task_id": task_id,
+                        "task_name": task_name,
+                        "task_complexity": task_complexity,
+                        "curriculum_split": curriculum_split,
+                        "length": int(frame_count),
+                        "split": split_name,
+                        "tfrecord_path": tfrecord_path.relative_to(output_dir).as_posix(),
+                        "camera_ids": list(camera_ids),
+                        "required_camera_ids": list(required_camera_ids),
+                    }
+                )
+
+                exported_count += 1
+                total_steps += records_written
+
+            except _CameraDataRequiredError:
+                raise
+            except Exception as exc:
+                self.log(f"Failed to export RLDS for {ep_file.name}: {exc}", "WARNING")
+                skipped_count += 1
+
+        # Metadata files
+        dataset_info = {
+            "format": "rlds",
+            "version": "1.0",
+            "episodes": exported_count,
+            "total_episodes": exported_count,
+            "skipped": skipped_count,
+            "total_steps": total_steps,
+            "eligible_certified": eligible_certified,
+            "exported_raw_only": exported_raw_only,
+            "rejected_by_gate_code": dict(sorted(rejected_by_gate_code.items())),
+            "certified_only_export": _certified_only,
+            "exported_at": datetime.utcnow().isoformat() + "Z",
+            "split": split_name,
+            "camera_ids": camera_ids,
+            "jpeg_quality": int(os.getenv("RLDS_JPEG_QUALITY", "90")),
+            "require_encoded_images": require_encoded_images,
+            "require_camera_data": require_camera_data,
+        }
+        (output_dir / "dataset_info.json").write_text(json.dumps(dataset_info, indent=2))
+
+        features_payload: Dict[str, Any] = {
+            "episode_id": {"dtype": "string", "shape": []},
+            "episode_index": {"dtype": "int64", "shape": []},
+            "step_index": {"dtype": "int64", "shape": []},
+            "timestamp": {"dtype": "float32", "shape": []},
+            "observation/state": {"dtype": "float32", "shape": ["D"]},
+            "action": {"dtype": "float32", "shape": ["A"]},
+            "reward": {"dtype": "float32", "shape": []},
+            "is_first": {"dtype": "bool", "shape": []},
+            "is_last": {"dtype": "bool", "shape": []},
+            "is_terminal": {"dtype": "bool", "shape": []},
+            "discount": {"dtype": "float32", "shape": []},
+            "language_instruction": {"dtype": "string", "shape": []},
+        }
+        for cam_id in camera_ids:
+            features_payload[f"observation/image_{cam_id}"] = {
+                "dtype": "bytes",
+                "shape": ["H", "W", 3],
+                "encoding": "jpeg",
+            }
+        (output_dir / "features.json").write_text(json.dumps(features_payload, indent=2))
+
+        stats_payload: Dict[str, Any] = {}
+        state_payload = state_stats.to_payload()
+        if state_payload is not None:
+            stats_payload["observation/state"] = state_payload
+        action_payload = action_stats.to_payload()
+        if action_payload is not None:
+            stats_payload["action"] = action_payload
+        (output_dir / "stats.json").write_text(json.dumps(stats_payload, indent=2))
+
+        tasks_jsonl_path = output_dir / "tasks.jsonl"
+        with open(tasks_jsonl_path, "w") as tasks_file:
+            for task_payload in sorted(task_rows, key=lambda item: int(item.get("task_index", 0))):
+                tasks_file.write(json.dumps(task_payload) + "\n")
+
+        episodes_jsonl_path = output_dir / "episodes.jsonl"
+        with open(episodes_jsonl_path, "w") as ejf:
+            for row in episode_index_rows:
+                ejf.write(json.dumps(row) + "\n")
+
+        self.log(f"RLDS export: {exported_count} episodes, skipped {skipped_count}")
+        return {
+            "success": True,
+            "exported": exported_count,
+            "skipped": skipped_count,
+            "eligible_certified": eligible_certified,
+            "exported_raw_only": exported_raw_only,
+            "rejected_by_gate_code": dict(sorted(rejected_by_gate_code.items())),
+            "tfrecord_episodes": exported_count,
             "output_dir": output_dir,
         }
 
@@ -20184,6 +22217,9 @@ def run_local_data_collection(
     if result.success and result.recording_dir:
         lerobot_dir = output_dir / "lerobot"
         framework.export_to_lerobot(result.recording_dir, lerobot_dir)
+        if parse_bool_env(os.getenv("ENABLE_RLDS_EXPORT"), default=False):
+            rlds_dir = output_dir / "rlds"
+            framework.export_to_rlds(result.recording_dir, rlds_dir)
 
     return result
 

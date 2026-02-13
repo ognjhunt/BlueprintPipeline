@@ -18,14 +18,15 @@ This job generates realistic, wide-angle scene images for different environment 
 
 | Archetype | Description | Weight |
 |-----------|-------------|--------|
-| `kitchen` | Commercial prep lines, dish pits, quick-serve stations | 18% |
-| `warehouse` | Fulfillment centers, pallet racking, tote picking | 17% |
-| `grocery` | Retail aisles, refrigeration, checkout | 15% |
-| `lab` | Scientific labs, cleanrooms, precision equipment | 12% |
-| `office` | Workspaces, conference rooms, filing | 12% |
-| `home_laundry` | Residential laundry rooms, folding areas | 10% |
-| `loading_dock` | Shipping bays, dock levelers | 8% |
-| `utility_room` | Electrical panels, HVAC, mechanical spaces | 8% |
+| `kitchen` | Commercial prep lines, dish pits, quick-serve stations | 17% |
+| `warehouse` | Fulfillment centers, pallet racking, tote picking | 16% |
+| `grocery` | Retail aisles, refrigeration, checkout | 14% |
+| `lab` | Scientific labs, cleanrooms, precision equipment | 11% |
+| `office` | Workspaces, conference rooms, filing | 11% |
+| `home_laundry` | Residential laundry rooms, folding areas | 9% |
+| `hospital` | Patient rooms, exam rooms, supply areas | 8% |
+| `loading_dock` | Shipping bays, dock levelers | 7% |
+| `utility_room` | Electrical panels, HVAC, mechanical spaces | 7% |
 
 ## Image Specifications
 

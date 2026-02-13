@@ -86,6 +86,12 @@
       "category": "dual_arm",
       "vendor": "Rethink Robotics",
       "notes": "Baxter dual-arm."
+    },
+    {
+      "name": "aloha",
+      "category": "dual_arm",
+      "vendor": "Trossen Robotics / Community",
+      "notes": "ALOHA dual ViperX arms (common research embodiment)."
     }
   ]
 }

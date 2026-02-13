@@ -212,6 +212,7 @@ class EnvironmentArchetype(str, Enum):
     WAREHOUSE = "warehouse"
     LOADING_DOCK = "loading_dock"
     LAB = "lab"
+    HOSPITAL = "hospital"
     OFFICE = "office"
     UTILITY_ROOM = "utility_room"
     HOME_LAUNDRY = "home_laundry"
@@ -300,6 +301,23 @@ ARCHETYPE_DESCRIPTIONS = {
         "floor_types": ["epoxy resin", "static-dissipative tile", "vinyl sheet"],
         "policy_focus": ["precision sample handling", "equipment operation", "safety procedures"]
     },
+    EnvironmentArchetype.HOSPITAL: {
+        "name": "Hospital / Clinic Room",
+        "description": "Clinical environments including patient rooms, exam rooms, nurses stations, and supply areas",
+        "key_elements": [
+            "hospital bed with rails", "overbed tray tables", "bedside cabinets",
+            "medical carts", "IV poles and pumps", "supply cabinets and drawers",
+            "hand-washing sinks", "wall-mounted dispensers", "privacy curtains",
+            "monitor stands", "clean linen carts"
+        ],
+        "articulated_objects": [
+            "cabinet doors", "drawers", "bed rail mechanisms",
+            "cart drawers", "curtain rails"
+        ],
+        "lighting_conditions": ["bright clinical overhead", "soft exam lighting", "night shift dim"],
+        "floor_types": ["vinyl tile", "sealed linoleum", "anti-slip hospital flooring"],
+        "policy_focus": ["supply retrieval", "bedside assistance", "drawer/cabinet access"]
+    },
     EnvironmentArchetype.OFFICE: {
         "name": "Office / Workspace",
         "description": "Office environments with desks, storage, and collaborative spaces",
@@ -352,14 +370,15 @@ ARCHETYPE_DESCRIPTIONS = {
 
 # Distribution weights for balanced scene generation
 ARCHETYPE_WEIGHTS = {
-    EnvironmentArchetype.KITCHEN: 0.18,      # High demand
-    EnvironmentArchetype.GROCERY: 0.15,
-    EnvironmentArchetype.WAREHOUSE: 0.17,    # High demand
-    EnvironmentArchetype.LOADING_DOCK: 0.08,
-    EnvironmentArchetype.LAB: 0.12,
-    EnvironmentArchetype.OFFICE: 0.12,
-    EnvironmentArchetype.UTILITY_ROOM: 0.08,
-    EnvironmentArchetype.HOME_LAUNDRY: 0.10,
+    EnvironmentArchetype.KITCHEN: 0.17,      # High demand
+    EnvironmentArchetype.GROCERY: 0.14,
+    EnvironmentArchetype.WAREHOUSE: 0.16,    # High demand
+    EnvironmentArchetype.LOADING_DOCK: 0.07,
+    EnvironmentArchetype.LAB: 0.11,
+    EnvironmentArchetype.HOSPITAL: 0.08,
+    EnvironmentArchetype.OFFICE: 0.11,
+    EnvironmentArchetype.UTILITY_ROOM: 0.07,
+    EnvironmentArchetype.HOME_LAUNDRY: 0.09,
 }
 
 

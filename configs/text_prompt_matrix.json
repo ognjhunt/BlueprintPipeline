@@ -7,9 +7,14 @@
   "dimensions": {
     "archetype": [
       {"value": "kitchen", "weight": 1.4},
+      {"value": "grocery", "weight": 1.0},
       {"value": "office", "weight": 1.2},
       {"value": "warehouse", "weight": 1.0},
+      {"value": "loading_dock", "weight": 0.7},
+      {"value": "utility_room", "weight": 0.6},
+      {"value": "home_laundry", "weight": 0.7},
       {"value": "lab", "weight": 1.0},
+      {"value": "hospital", "weight": 0.9},
       {"value": "living_room", "weight": 0.9},
       {"value": "bedroom", "weight": 0.8}
     ],

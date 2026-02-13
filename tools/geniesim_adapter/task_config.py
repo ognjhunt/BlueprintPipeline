@@ -128,6 +128,7 @@ class RobotConfig:
     """Robot configuration for Genie Sim."""
 
     robot_type: str = "franka"  # franka, g2, ur10, custom
+    robot_cfg_file: Optional[str] = None  # Optional explicit server robot config JSON
     urdf_path: Optional[str] = None
     base_position: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     workspace_bounds: List[List[float]] = field(
@@ -140,6 +141,8 @@ class RobotConfig:
             "base_position": self.base_position,
             "workspace_bounds": self.workspace_bounds,
         }
+        if self.robot_cfg_file:
+            result["robot_cfg_file"] = self.robot_cfg_file
         if self.urdf_path:
             result["urdf_path"] = self.urdf_path
         return result

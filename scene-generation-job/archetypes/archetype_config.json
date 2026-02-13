@@ -85,7 +85,7 @@
         "drawer_manipulation",
         "door_manipulation"
       ],
-      "weight": 0.18
+      "weight": 0.17
     },
     "grocery": {
       "name": "Grocery / Retail Aisle",
@@ -156,7 +156,7 @@
         "dexterous_pick_place",
         "articulated_access"
       ],
-      "weight": 0.15
+      "weight": 0.14
     },
     "warehouse": {
       "name": "Warehouse / Fulfillment Center",
@@ -224,7 +224,7 @@
         "dexterous_pick_place",
         "general_manipulation"
       ],
-      "weight": 0.17
+      "weight": 0.16
     },
     "loading_dock": {
       "name": "Loading Dock / Shipping Bay",
@@ -285,7 +285,7 @@
         "mixed_sku_logistics",
         "general_manipulation"
       ],
-      "weight": 0.08
+      "weight": 0.07
     },
     "lab": {
       "name": "Laboratory / Cleanroom",
@@ -354,7 +354,63 @@
         "articulated_access",
         "drawer_manipulation"
       ],
-      "weight": 0.12
+      "weight": 0.11
+    },
+    "hospital": {
+      "name": "Hospital / Clinic Room",
+      "marketplace_category": "Healthcare",
+      "description": "Clinical environments including patient rooms, exam rooms, and supply areas",
+      "sub_types": [
+        "patient_room",
+        "exam_room",
+        "nurse_station",
+        "supply_room",
+        "triage_bay"
+      ],
+      "key_elements": [
+        "hospital beds with rails",
+        "overbed tray tables",
+        "bedside cabinets",
+        "medical carts",
+        "IV poles and pumps",
+        "wall-mounted dispensers",
+        "hand washing sinks",
+        "privacy curtains",
+        "monitor stands",
+        "linen carts",
+        "sharps containers",
+        "supply shelving"
+      ],
+      "articulated_objects": [
+        "cabinet doors",
+        "drawers",
+        "cart drawers",
+        "curtain rails"
+      ],
+      "lighting_variations": [
+        "bright clinical overhead",
+        "soft exam lighting",
+        "night shift dim"
+      ],
+      "floor_types": [
+        "vinyl tile",
+        "sealed linoleum",
+        "anti-slip hospital flooring"
+      ],
+      "state_variations": [
+        "clean_ready",
+        "patient_care_in_progress",
+        "supplies_staged",
+        "restocking",
+        "overnight_quiet"
+      ],
+      "policy_targets": [
+        "supply_retrieval",
+        "bedside_assistance",
+        "drawer_manipulation",
+        "articulated_access"
+      ],
+      "weight": 0.08
     },
     "office": {
       "name": "Office / Workspace",
@@ -423,7 +479,7 @@
         "dexterous_pick_place",
         "panel_interaction"
       ],
-      "weight": 0.12
+      "weight": 0.11
     },
     "utility_room": {
       "name": "Utility Room / Mechanical Space",
@@ -486,7 +542,7 @@
         "door_manipulation",
         "articulated_access"
       ],
-      "weight": 0.08
+      "weight": 0.07
     },
     "home_laundry": {
       "name": "Home Laundry Room",
@@ -551,7 +607,7 @@
         "knob_manipulation",
         "dexterous_pick_place"
       ],
-      "weight": 0.10
+      "weight": 0.09
     }
   },
   "generation_settings": {

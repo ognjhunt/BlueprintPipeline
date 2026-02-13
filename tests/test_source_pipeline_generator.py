@@ -128,6 +128,12 @@ def test_generate_text_scene_package_v2_emits_staged_fields(monkeypatch) -> None
 
 def test_extract_room_type_from_prompt_keywords() -> None:
     assert _extract_room_type("A modern kitchen with steel appliances", {}) == "kitchen"
+    assert _extract_room_type("A grocery aisle with stocked shelves", {}) == "grocery"
+    assert _extract_room_type("A retail aisle with price tags", {}) == "grocery"  # retail aliases to grocery
+    assert _extract_room_type("A loading dock with pallets and bays", {}) == "loading_dock"
+    assert _extract_room_type("A utility room with electrical panels", {}) == "utility_room"
+    assert _extract_room_type("A home laundry room with washer and dryer", {}) == "home_laundry"
+    assert _extract_room_type("A hospital patient room with a bed", {}) == "hospital"
     assert _extract_room_type("cozy bedroom with a queen bed", {}) == "bedroom"
     assert _extract_room_type("the living room has a sofa", {}) == "living_room"
     assert _extract_room_type("a corporate office", {}) == "office"
@@ -195,7 +201,20 @@ def test_resolve_provider_chain_openai_primary() -> None:
 
 
 def test_room_template_returns_non_empty_for_known_types() -> None:
-    for room in ["kitchen", "living_room", "bedroom", "office", "lab", "warehouse", "bathroom"]:
+    for room in [
+        "kitchen",
+        "grocery",
+        "loading_dock",
+        "utility_room",
+        "home_laundry",
+        "hospital",
+        "living_room",
+        "bedroom",
+        "office",
+        "lab",
+        "warehouse",
+        "bathroom",
+    ]:
         template = _room_template(room)
         assert len(template) >= 5
         for name, category, sim_role in template:

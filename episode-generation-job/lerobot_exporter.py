@@ -3229,7 +3229,11 @@ class LeRobotExporter:
     def _get_v3_chunk_file_indices(self, episode_index: int) -> Tuple[int, int]:
         """Compute (chunk_idx, file_idx) for v3 export based on episode index."""
         chunk_idx = episode_index // self.config.chunk_size
-        return chunk_idx, chunk_idx
+        # v3 stores per-episode videos as chunked files. The file index is the
+        # episode's offset within the chunk, not the chunk id itself. Using the
+        # chunk id for both would cause later episodes to overwrite earlier ones.
+        file_idx = episode_index % self.config.chunk_size
+        return chunk_idx, file_idx
 
     def _get_v3_video_rel_path(self, episode_index: int, camera_id: str) -> str:
         """Build v3-relative video path for metadata."""

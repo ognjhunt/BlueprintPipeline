@@ -38,14 +38,15 @@ The import job expects a bundled episode layout that mirrors the directory check
 * `recordings/` containing `episode_*.json` (and any per-episode artifacts produced by Genie Sim).
 * `lerobot/` containing the LeRobot export when conversion is required:
   * `dataset_info.json` (always required when LeRobot is enforced).
-  * `episodes.jsonl` (LeRobot v3 metadata index).
-  * `meta/episode_index.json` (LeRobot v3 index) **or** `episode_*.parquet` files for legacy v2 runs.
+  * `episodes.jsonl` (per-episode list; the importer also falls back to `meta/episodes.jsonl`).
+  * `meta/episodes/chunk-000/file-0000.parquet` (LeRobot v3 episode index, official layout) **or**
+    `meta/episode_index.json` (legacy v3) **or** `episode_*.parquet` files for legacy v2 runs.
 * Optional `videos/` directories can live under `lerobot/` and may include robot-specific subdirectories (for example, `lerobot/videos/spot/episode_0001.mp4`) when multi-robot runs are exported.
 
 ### Minimum artifacts for a successful import
 
 * **Recordings-only import:** `recordings/episode_*.json` must exist and resolve via `_resolve_recordings_dir`.
-* **LeRobot-required import:** `recordings/episode_*.json` **plus** `lerobot/dataset_info.json` must exist. The importer will then resolve additional metadata via `_resolve_lerobot_info_path` (v3 `meta/episode_index.json` or v2 `episode_*.parquet`) and load `episodes.jsonl` when present.
+* **LeRobot-required import:** `recordings/episode_*.json` **plus** `lerobot/dataset_info.json` must exist. The importer will then resolve additional metadata via `_resolve_lerobot_info_path` (v3 Parquet index or legacy `meta/episode_index.json`, or v2 `episode_*.parquet`) and load `episodes.jsonl` when present.
 
 ### Example trees
 
@@ -61,7 +62,9 @@ episodes/
       dataset_info.json
       episodes.jsonl
       meta/
-        episode_index.json
+        episodes/
+          chunk-000/
+            file-0000.parquet
       videos/
         episode_0001.mp4
         episode_0002.mp4
@@ -78,7 +81,9 @@ episodes/
       dataset_info.json
       episodes.jsonl
       meta/
-        episode_index.json
+        episodes/
+          chunk-000/
+            file-0000.parquet
       videos/
         spot/
           episode_0001.mp4

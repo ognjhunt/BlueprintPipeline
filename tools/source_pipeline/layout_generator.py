@@ -6,11 +6,16 @@ from typing import Any, Dict, Mapping, Optional
 
 _ROOM_DIMENSIONS: Dict[str, Dict[str, float]] = {
     "kitchen": {"width": 7.0, "depth": 6.0, "height": 3.1},
+    "grocery": {"width": 9.0, "depth": 8.0, "height": 3.5},
     "living_room": {"width": 8.0, "depth": 7.0, "height": 3.2},
     "bedroom": {"width": 6.0, "depth": 5.5, "height": 3.0},
     "office": {"width": 7.0, "depth": 6.0, "height": 3.0},
     "lab": {"width": 8.5, "depth": 7.0, "height": 3.4},
     "warehouse": {"width": 10.0, "depth": 9.0, "height": 4.2},
+    "loading_dock": {"width": 12.0, "depth": 10.0, "height": 5.0},
+    "utility_room": {"width": 6.5, "depth": 5.5, "height": 3.0},
+    "home_laundry": {"width": 4.5, "depth": 3.8, "height": 2.8},
+    "hospital": {"width": 8.0, "depth": 7.0, "height": 3.2},
     "bathroom": {"width": 4.0, "depth": 3.5, "height": 2.8},
 }
 
@@ -73,4 +78,3 @@ def generate_layout_plan(
         "wall_thickness_m": round(wall_thickness_m, 4),
         "openings": openings,
     }
-

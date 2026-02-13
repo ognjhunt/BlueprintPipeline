@@ -1416,6 +1416,7 @@ def _enqueue_replication_request(
 def _build_manifest(
     *,
     scene_id: str,
+    room_type: str,
     objects: List[Dict[str, Any]],
     assets_prefix: str,
     source_request: Mapping[str, Any],
@@ -1536,7 +1537,7 @@ def _build_manifest(
         "scene": {
             "coordinate_frame": "y_up",
             "meters_per_unit": 1.0,
-            "environment_type": str(source_request.get("constraints", {}).get("room_type", "generic")),
+            "environment_type": room_type,
             "room": scene_room,
         },
         "objects": manifest_objects,
@@ -1656,7 +1657,21 @@ def build_manifest_layout_inventory(
 
     objects = [dict(obj) for obj in (textgen_payload.get("objects") or []) if isinstance(obj, Mapping)]
     constraints = source_request.get("constraints") if isinstance(source_request.get("constraints"), Mapping) else {}
-    room_type = str(constraints.get("room_type") or "generic").strip()
+    # Prefer explicit request room_type, but fall back to the textgen payload / prompt-diversity archetype.
+    # This keeps downstream asset retrieval + manifest environment_type aligned with what was generated.
+    raw_room_type = (
+        str(constraints.get("room_type") or "").strip()
+        or str(textgen_payload.get("room_type") or "").strip()
+        or str(((constraints.get("prompt_diversity") or {}).get("dimensions") or {}).get("archetype") or "").strip()
+    )
+    if not raw_room_type:
+        raw_room_type = "generic_room"
+    try:
+        from .generator import _canonicalize_room_type  # local import to avoid incidental cycles
+
+        room_type = _canonicalize_room_type(raw_room_type)
+    except Exception:
+        room_type = raw_room_type.lower().replace(" ", "_").replace("-", "_")
     retrieval_report: Dict[str, Any] = {}
 
     provenance_assets = materialize_placeholder_assets(
@@ -1683,6 +1698,7 @@ def build_manifest_layout_inventory(
 
     manifest = _build_manifest(
         scene_id=scene_id,
+        room_type=room_type,
         objects=objects,
         assets_prefix=assets_prefix,
         source_request=source_request,
