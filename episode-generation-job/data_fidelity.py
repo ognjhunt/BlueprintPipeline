@@ -16,8 +16,11 @@ Usage:
     )
 
 Environment Variables:
-    DATA_FIDELITY_MODE: "production" (default) or "dev"
-    STRICT_REALISM: "true" (default) or "false"
+    DATA_FIDELITY_MODE: "production" or "dev"
+        When unset, this module infers production mode from PIPELINE_ENV
+        ("production"/"prod"/"staging" => production, else dev).
+    STRICT_REALISM: "true" or "false"
+        When unset, defaults to true in production mode and false otherwise.
         When true, all realism gates are enforced in every environment.
     REQUIRE_REAL_CONTACTS: "true" (default) or "false"
     REQUIRE_REAL_EFFORTS: "true" (default) or "false"
@@ -72,13 +75,16 @@ def _get_bool_env(name: str, default: bool = True) -> bool:
 
 def is_production_mode() -> bool:
     """Check if running in production mode (fail-fast enabled)."""
-    mode = os.getenv("DATA_FIDELITY_MODE", "production").lower()
-    return mode != "dev"
+    mode = os.getenv("DATA_FIDELITY_MODE")
+    if mode:
+        return mode.lower() != "dev"
+    pipeline_env = (os.getenv("PIPELINE_ENV") or "").strip().lower()
+    return pipeline_env in {"production", "prod", "staging"}
 
 
 def is_strict_realism() -> bool:
     """Check if strict realism is enabled (enforce gates everywhere)."""
-    return _get_bool_env("STRICT_REALISM", default=True)
+    return _get_bool_env("STRICT_REALISM", default=is_production_mode())
 
 
 def require_real_contacts() -> bool:

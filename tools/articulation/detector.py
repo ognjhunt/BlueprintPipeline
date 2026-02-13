@@ -452,10 +452,11 @@ def detect_scene_articulations(
         total = len(results)
         articulated = sum(1 for r in results.values() if r.has_articulation)
         high_conf = sum(1 for r in results.values() if r.is_high_confidence and r.has_articulation)
+        articulated_pct = (articulated / total * 100.0) if total else 0.0
 
         logger.info(f"\n[ARTICULATION] Detection summary:")
         logger.info(f"  Total objects: {total}")
-        logger.info(f"  Articulated: {articulated} ({articulated / total * 100:.1f}%)")
+        logger.info(f"  Articulated: {articulated} ({articulated_pct:.1f}%)")
         logger.info(f"  High confidence: {high_conf}")
 
     return results

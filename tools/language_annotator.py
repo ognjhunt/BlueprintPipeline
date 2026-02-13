@@ -19,10 +19,12 @@ Usage:
     annotations = annotator.annotate_episode(episode_data)
 """
 
+import json
 import logging
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -647,3 +649,92 @@ def annotate_episode_batch(
         annotations.append(annotation)
 
     return annotations
+
+
+def integrate_with_lerobot_export(
+    lerobot_dir: str | Path,
+    *,
+    overwrite: bool = False,
+    annotator: Optional[LanguageAnnotator] = None,
+) -> Path:
+    """
+    Attach per-episode natural language annotations to a LeRobot export directory.
+
+    This writes a line-delimited JSON file at:
+      <lerobot_dir>/meta/language_annotations.jsonl
+
+    The function is intentionally lightweight and template-driven (no LLM calls
+    by default) so it can run in CI/local workflows without credentials.
+    """
+    lerobot_dir = Path(lerobot_dir)
+    meta_dir = lerobot_dir / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    out_path = meta_dir / "language_annotations.jsonl"
+
+    if out_path.is_file() and not overwrite:
+        return out_path
+
+    if annotator is None:
+        annotator = LanguageAnnotator(use_vlm=False)
+
+    # Prefer LeRobot v3 meta index when present; fall back to legacy root episodes.jsonl.
+    episode_index_candidates = [
+        meta_dir / "episodes.jsonl",
+        lerobot_dir / "episodes.jsonl",
+    ]
+    episode_records: List[Dict[str, Any]] = []
+    for candidate in episode_index_candidates:
+        if not candidate.is_file():
+            continue
+        for line in candidate.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(rec, dict):
+                episode_records.append(rec)
+        break
+
+    if not episode_records:
+        logger.warning(
+            "No episode index found under %s (checked: %s); skipping language annotation export.",
+            lerobot_dir,
+            ", ".join(str(p) for p in episode_index_candidates),
+        )
+        return out_path
+
+    with out_path.open("w", encoding="utf-8") as f:
+        for rec in episode_records:
+            task_name = (
+                rec.get("task_instruction")
+                or rec.get("task_name")
+                or rec.get("task")
+                or rec.get("task_id")
+                or "manipulation"
+            )
+            task_description = rec.get("task_description") or rec.get("instruction") or rec.get("language")
+            scene_objects = rec.get("scene_objects") or rec.get("objects") or []
+            skill_segments = rec.get("skill_segments") or rec.get("segments") or []
+            num_frames = rec.get("num_frames") or rec.get("length") or 0
+            try:
+                num_frames_int = int(num_frames)
+            except Exception:
+                num_frames_int = 0
+
+            annotation = annotator.annotate_episode(
+                task_name=str(task_name),
+                task_description=str(task_description) if task_description is not None else None,
+                scene_objects=scene_objects if isinstance(scene_objects, list) else [],
+                skill_segments=skill_segments if isinstance(skill_segments, list) else [],
+                num_frames=num_frames_int,
+            )
+            payload = {
+                "episode_id": rec.get("episode_id") or rec.get("id") or rec.get("episode") or "",
+                **annotation.to_dict(),
+            }
+            f.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+
+    return out_path

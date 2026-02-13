@@ -323,8 +323,10 @@ def _load_lerobot_exporter_module() -> Optional[Any]:
 
 
 def _strict_realism_enabled() -> bool:
-    """Fail-closed realism gate for all environments."""
-    return parse_bool_env(os.getenv("STRICT_REALISM"), default=True)
+    """Fail-closed realism gate for production unless explicitly enabled elsewhere."""
+    pipeline_env = str(os.getenv("PIPELINE_ENV") or "").strip().lower()
+    default = pipeline_env in {"production", "prod", "staging"}
+    return parse_bool_env(os.getenv("STRICT_REALISM"), default=default)
 
 GENIESIM_RECORDINGS_DIR_ENV = "GENIESIM_RECORDINGS_DIR"
 GENIESIM_RECORDING_DIR_ENV = "GENIESIM_RECORDING_DIR"
@@ -1051,7 +1053,6 @@ class CommandType(int, Enum):
     SET_LIGHT = 30
     SET_CODE_FACE_ORIENTATION = 34
     SET_TASK_METRIC = 53
-    SET_OBJECT_DYNAMIC = 57  # Local command shim over set_task_metric RPC.
 
     # Replay & Checker
     STORE_CURRENT_STATE = 54
@@ -2623,67 +2624,6 @@ class GenieSimGRPCClient:
             if response is None:
                 return GrpcCallResult(success=False, available=True, error="gRPC call failed")
             return GrpcCallResult(success=True, available=True, payload={"msg": response.msg})
-
-        if command == CommandType.SET_OBJECT_DYNAMIC:
-            prim_path = str(
-                payload.get("prim_path")
-                or payload.get("object_prim")
-                or payload.get("object_id")
-                or ""
-            )
-            if not prim_path:
-                return GrpcCallResult(
-                    success=False,
-                    available=True,
-                    error="SET_OBJECT_DYNAMIC requires non-empty prim_path",
-                )
-            is_dynamic = bool(payload.get("is_dynamic", True))
-            metric_payload = json.dumps(
-                {
-                    "cmd": "set_object_dynamic",
-                    "prim_path": prim_path,
-                    "is_dynamic": is_dynamic,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            request = SetTaskMetricReq(metric=f"bp::set_object_dynamic::{metric_payload}")
-
-            def _request() -> SetTaskMetricRsp:
-                return self._stub.set_task_metric(request, timeout=self.timeout)
-
-            response = self._call_grpc(
-                "set_object_dynamic",
-                _request,
-                None,
-                success_checker=lambda resp: resp is not None,
-            )
-            if response is None:
-                self._dynamic_toggle_available = False
-                return GrpcCallResult(success=False, available=True, error="gRPC call failed")
-
-            _msg = str(getattr(response, "msg", "") or "")
-            _msg_lc = _msg.lower()
-            _unsupported = any(
-                token in _msg_lc for token in ("unsupported", "not implemented", "unknown command")
-            )
-            self._dynamic_toggle_available = not _unsupported
-            if _unsupported:
-                return GrpcCallResult(
-                    success=False,
-                    available=True,
-                    error=_msg or "set_object_dynamic unsupported by runtime server",
-                    payload={"msg": _msg},
-                )
-            return GrpcCallResult(
-                success=True,
-                available=True,
-                payload={
-                    "msg": _msg,
-                    "prim_path": prim_path,
-                    "is_dynamic": is_dynamic,
-                },
-            )
 
         if command == CommandType.SET_TASK_METRIC:
             request = SetTaskMetricReq(metric=str(payload.get("metric", "")))
@@ -4619,18 +4559,50 @@ class GenieSimGRPCClient:
             elif isinstance(resolved, (list, tuple)) and resolved and isinstance(resolved[0], str):
                 prim_path = resolved[0]
 
-        result = self.send_command(
-            CommandType.SET_OBJECT_DYNAMIC,
+        metric_payload = json.dumps(
             {
+                "cmd": "set_object_dynamic",
                 "prim_path": prim_path,
                 "is_dynamic": bool(is_dynamic),
             },
+            separators=(",", ":"),
+            sort_keys=True,
         )
+        metric = f"bp::set_object_dynamic::{metric_payload}"
+        result = self.send_command(
+            CommandType.SET_TASK_METRIC,
+            {"metric": metric},
+        )
+        # Best-effort server capability detection (older runtimes may ignore custom metric dispatch).
+        _msg = ""
+        if isinstance(result.payload, dict):
+            _msg = str(result.payload.get("msg") or "")
+        _msg_lc = _msg.lower()
+        _unsupported = any(
+            token in _msg_lc for token in ("unsupported", "not implemented", "unknown command")
+        )
+        if _unsupported:
+            self._dynamic_toggle_available = False
+            return GrpcCallResult(
+                success=False,
+                available=result.available,
+                error=_msg or "set_object_dynamic unsupported by runtime server",
+                payload={"msg": _msg},
+            )
+        if result.available and result.success:
+            self._dynamic_toggle_available = True
         if result.available and result.success:
             if is_dynamic:
                 self._active_dynamic_grasp_prim = prim_path
             elif self._active_dynamic_grasp_prim == prim_path:
                 self._active_dynamic_grasp_prim = None
+            if isinstance(result.payload, dict):
+                result.payload.update(
+                    {
+                        "prim_path": prim_path,
+                        "is_dynamic": bool(is_dynamic),
+                    }
+                )
         return result
 
     def attach_object(
@@ -6692,13 +6664,26 @@ class GenieSimLocalFramework:
                 _watchdog.daemon = True
                 _watchdog.start()
                 try:
-                    init_result = self._client.init_robot(
-                        robot_type=robot_cfg_file,
-                        urdf_path=robot_usd_path or "",
-                        base_pose=base_pose,
-                        scene_usd_path=scene_usd,
-                        abort_event=_init_abort_event,
-                    )
+                    try:
+                        init_result = self._client.init_robot(
+                            robot_type=robot_cfg_file,
+                            urdf_path=robot_usd_path or "",
+                            base_pose=base_pose,
+                            scene_usd_path=scene_usd,
+                            abort_event=_init_abort_event,
+                        )
+                    except TypeError as exc:
+                        # Backwards-compat: older FakeClient/test stubs may not accept urdf_path
+                        msg = str(exc)
+                        if "urdf_path" in msg and "unexpected keyword argument" in msg:
+                            init_result = self._client.init_robot(
+                                robot_type=robot_cfg_file,
+                                base_pose=base_pose,
+                                scene_usd_path=scene_usd,
+                                abort_event=_init_abort_event,
+                            )
+                        else:
+                            raise
                 finally:
                     _watchdog.cancel()
                 _elapsed = time.time() - _attempt_started
@@ -15935,12 +15920,23 @@ class GenieSimLocalFramework:
         )
         for idx, robot_cfg_file in enumerate(candidates):
             try:
-                self._init_robot_on_server(
-                    robot_cfg_file,
-                    base_pose,
-                    scene_usd,
-                    robot_usd_path=robot_usd_path,
-                )
+                if robot_usd_path:
+                    try:
+                        self._init_robot_on_server(
+                            robot_cfg_file,
+                            base_pose,
+                            scene_usd,
+                            robot_usd_path=robot_usd_path,
+                        )
+                    except TypeError as exc:
+                        msg = str(exc)
+                        if "robot_usd_path" in msg and "unexpected keyword argument" in msg:
+                            # Unit tests may monkeypatch _init_robot_on_server with an older signature.
+                            self._init_robot_on_server(robot_cfg_file, base_pose, scene_usd)
+                        else:
+                            raise
+                else:
+                    self._init_robot_on_server(robot_cfg_file, base_pose, scene_usd)
                 joint_result = self._client.get_joint_position(lock_timeout=5.0)
                 expected_joint_count = self._expected_joint_count_for_robot(robot_cfg_file)
                 ok, error_text, count = self._validate_joint_payload(

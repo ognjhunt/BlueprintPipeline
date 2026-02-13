@@ -2870,6 +2870,14 @@ class LocalPipelineRunner:
             manifest=manifest,
             layout=layout,
         )
+        if self._should_skip_quality_gates():
+            # Stage 1 quality is a gate; allow local/test workflows to proceed when
+            # SKIP_QUALITY_GATES is set (never allowed in production).
+            quality_details = dict(quality_details)
+            quality_details["skipped"] = True
+            quality_details["skip_reason"] = "SKIP_QUALITY_GATES environment override"
+            quality_ok = True
+            quality_message = "Stage 1 quality gate skipped (SKIP_QUALITY_GATES)"
         quality_report_path = self._write_stage1_quality_report(
             quality_ok=quality_ok,
             quality_message=quality_message,
@@ -3931,15 +3939,24 @@ class LocalPipelineRunner:
             preview = ", ".join(missing_usdz[:5])
             if len(missing_usdz) > 5:
                 preview = f"{preview}, ..."
-            return StepResult(
-                step=PipelineStep.SIMREADY,
-                success=False,
-                duration_seconds=0,
-                message=(
+            if self._is_production_mode() or not self._should_skip_quality_gates():
+                return StepResult(
+                    step=PipelineStep.SIMREADY,
+                    success=False,
+                    duration_seconds=0,
+                    message=(
+                        "GLB→USDZ conversion incomplete before SimReady; "
+                        f"missing asset.usdz in {len(missing_usdz)} asset directories: {preview}"
+                    ),
+                    outputs={"missing_usdz_assets": missing_usdz},
+                )
+            self.log(
+                (
                     "GLB→USDZ conversion incomplete before SimReady; "
-                    f"missing asset.usdz in {len(missing_usdz)} asset directories: {preview}"
+                    f"missing asset.usdz in {len(missing_usdz)} asset directories: {preview}. "
+                    "Continuing because SKIP_QUALITY_GATES is enabled."
                 ),
-                outputs={"missing_usdz_assets": missing_usdz},
+                "WARNING",
             )
         try:
             from blueprint_sim.simready import run_from_env
@@ -3955,12 +3972,15 @@ class LocalPipelineRunner:
         os.environ.setdefault("BUCKET", "local")
         os.environ.setdefault("SCENE_ID", self.scene_id)
         os.environ.setdefault("ASSETS_PREFIX", assets_prefix)
-        os.environ.setdefault("SIMREADY_PHYSICS_MODE", "gemini")
-        os.environ.setdefault("SIMREADY_ALLOW_DETERMINISTIC_PHYSICS", "0")
-        os.environ.setdefault("SIMREADY_ALLOW_HEURISTIC_FALLBACK", "0")
-
+        production_mode = self._is_production_mode()
+        # Default physics policy:
+        # - prod: Gemini-first (fail closed if configured that way in simready-job)
+        # - dev/test: auto + heuristic fallback allowed (CI-friendly)
+        os.environ.setdefault("SIMREADY_PHYSICS_MODE", "gemini" if production_mode else "auto")
+        os.environ.setdefault("SIMREADY_ALLOW_DETERMINISTIC_PHYSICS", "0" if production_mode else "1")
+        os.environ.setdefault("SIMREADY_ALLOW_HEURISTIC_FALLBACK", "0" if production_mode else "1")
         physics_mode = (os.environ.get("SIMREADY_PHYSICS_MODE") or "").strip().lower()
-        if physics_mode == "gemini" and not os.environ.get("GEMINI_API_KEY"):
+        if not production_mode and physics_mode == "gemini" and not os.environ.get("GEMINI_API_KEY"):
             return StepResult(
                 step=PipelineStep.SIMREADY,
                 success=False,

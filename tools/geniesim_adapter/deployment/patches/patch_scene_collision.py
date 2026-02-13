@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Patch: scene-collision fix + validation hook for strict runtime safety.
+"""Patch: scene-collision validation hook for strict runtime safety.
 
-This patch adds CollisionAPI to mesh prims that are missing it, then validates
-collision coverage. It runs on the sim thread (handle_init_robot) BEFORE v3's
-dynamic restore, so collision is in place before objects become dynamic.
+This patch is intentionally *validator-only*:
+- It DOES NOT mutate the stage to "fix" collisions at runtime.
+- It validates that collision is already authored on mesh prims and that
+  dynamic meshes have an acceptable approximation mode.
 
-If coverage < 1.0 after fix AND strict mode is on, startup aborts.
+It runs on the sim thread (handle_init_robot) BEFORE v3's dynamic restore.
+
+If coverage < 1.0 (or bad approximation modes are detected) AND strict mode is
+on, startup aborts.
 """
 import os
 import re
@@ -17,7 +21,7 @@ TARGET = os.path.join(
 MARKER = "# [PATCH] scene_collision_injected"
 
 # Version tag — bumped whenever the method body changes.
-VERSION_TAG = "# scene_collision_v5"
+VERSION_TAG = "# scene_collision_v6"
 
 
 def _read(path):
@@ -30,23 +34,23 @@ def _write(path, content):
         f.write(content)
 
 
-# Fix-and-validate method body. Runs on the sim thread inside handle_init_robot,
-# BEFORE v3's dynamic restore. Adds CollisionAPI to any mesh that's missing it,
-# then validates coverage.
+# Validator-only method body. Runs on the sim thread inside handle_init_robot,
+# BEFORE v3's dynamic restore. Validates collision coverage and approximation
+# modes; does not apply CollisionAPI or author approximation attributes.
 COLLISION_SETUP_CODE = '''
     # [PATCH] scene_collision_injected
     def _patch_add_scene_collision(self):
-        """Add missing CollisionAPI to mesh prims, then validate coverage.
+        """Validate CollisionAPI coverage and approximation modes.
 
         Runs on the sim thread BEFORE v3 dynamic restore. Safe to mutate
         because physics hasn't started yet (pre-_play or post-init).
         """
-        # scene_collision_v5
+        # scene_collision_v6
         import sys as _sys_sc
         try:
             import os
             import omni.usd
-            from pxr import Usd, UsdGeom, UsdPhysics, Sdf
+            from pxr import Usd, UsdGeom, UsdPhysics
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print("[PATCH] scene_collision: no stage available")
@@ -98,19 +102,10 @@ COLLISION_SETUP_CODE = '''
                             continue
                         mesh_total += 1
 
-                        # --- FIX: Add CollisionAPI if missing ---
-                        if not desc.HasAPI(UsdPhysics.CollisionAPI):
-                            try:
-                                col_api = UsdPhysics.CollisionAPI.Apply(desc)
-                                col_api.CreateCollisionEnabledAttr().Set(True)
-                                collision_added += 1
-                            except Exception as _e_col:
-                                print("[PATCH] scene_collision: failed to add collision to %s: %s" % (desc.GetPath(), _e_col))
-
                         if desc.HasAPI(UsdPhysics.CollisionAPI):
                             mesh_with_collision += 1
 
-                        # --- FIX: Set approximation for meshes missing it ---
+                        # Validate approximation for dynamic meshes (should not be triangleMesh).
                         approx_attr = desc.GetAttribute("physics:approximation")
                         approx_value = ""
                         if approx_attr:
@@ -119,40 +114,9 @@ COLLISION_SETUP_CODE = '''
                         if is_dynamic:
                             dynamic_mesh_total += 1
                             if not approx_value or approx_value in ("triangleMesh", "meshSimplification", "none", ""):
-                                try:
-                                    desc.CreateAttribute(
-                                        "physics:approximation",
-                                        Sdf.ValueTypeNames.Token,
-                                    ).Set("convexHull")
-                                    approx_fixed += 1
-                                except Exception:
-                                    bad_dynamic_approx += 1
+                                bad_dynamic_approx += 1
                             elif approx_value not in allowed_dynamic_approx:
                                 bad_dynamic_approx += 1
-                        else:
-                            # Kinematic objects: set convexHull if missing
-                            if not approx_value or approx_value in ("triangleMesh", "meshSimplification", "none", ""):
-                                try:
-                                    desc.CreateAttribute(
-                                        "physics:approximation",
-                                        Sdf.ValueTypeNames.Token,
-                                    ).Set("convexHull")
-                                    approx_fixed += 1
-                                except Exception:
-                                    pass
-
-            # Also ensure GroundPlane has collision
-            for gp_path in ["/World/GroundPlane", "/World/groundPlane", "/World/Ground"]:
-                gp = stage.GetPrimAtPath(gp_path)
-                if gp and gp.IsValid():
-                    if not gp.HasAPI(UsdPhysics.CollisionAPI):
-                        try:
-                            col_api = UsdPhysics.CollisionAPI.Apply(gp)
-                            col_api.CreateCollisionEnabledAttr().Set(True)
-                            collision_added += 1
-                            print("[PATCH] scene_collision: added collision to %s" % gp_path)
-                        except Exception as _e_gp:
-                            print("[PATCH] scene_collision: failed to add collision to %s: %s" % (gp_path, _e_gp))
 
             collision_coverage = 1.0 if mesh_total == 0 else float(mesh_with_collision) / float(mesh_total)
             summary = {
@@ -177,7 +141,7 @@ COLLISION_SETUP_CODE = '''
                 )
             )
 
-            if collision_added == 0 and mesh_with_collision == mesh_total:
+            if mesh_with_collision == mesh_total:
                 print("[PATCH] scene_collision: all meshes already had collision — bake worked correctly")
 
             strict_runtime = str(os.getenv("GENIESIM_STRICT_RUNTIME_READINESS", "0")).strip().lower() in (
@@ -187,7 +151,7 @@ COLLISION_SETUP_CODE = '''
                 summary["collision_coverage"] < 1.0 or summary["mesh_prims_bad_dynamic_approx"] > 0
             ):
                 raise RuntimeError(
-                    "strict collision validation failed after fix attempt: "
+                    "strict collision validation failed: "
                     "coverage=%.4f, bad_dynamic_approx=%d"
                     % (summary["collision_coverage"], summary["mesh_prims_bad_dynamic_approx"])
                 )
