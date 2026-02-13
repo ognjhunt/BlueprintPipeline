@@ -1489,6 +1489,10 @@ run_text_jobs_on_runpod:
                           paper_passthrough_keys = [
                               "SCENESMITH_PAPER_BACKEND",
                               "SCENESMITH_PAPER_MODEL",
+                              "SCENESMITH_PAPER_OPENAI_API",
+                              "SCENESMITH_PAPER_OPENAI_API_KEY",
+                              "SCENESMITH_PAPER_OPENAI_BASE_URL",
+                              "SCENESMITH_PAPER_OPENAI_TRACING_KEY",
                               "SCENESMITH_PAPER_TIMEOUT_SECONDS",
                               "SCENESMITH_PAPER_ALL_SAM3D",
                               "SCENESMITH_PAPER_FORCE_GENERATED_ASSETS",
@@ -1505,6 +1509,8 @@ run_text_jobs_on_runpod:
                               "GEMINI_API_KEY",
                               "HF_TOKEN",
                               "GITHUB_TOKEN",
+                              "OPENROUTER_API_KEY",
+                              "OPENROUTER_BASE_URL",
                           ]
 
                           gen_env = {

@@ -36,7 +36,11 @@ Response contract:
     - `SCENESMITH_PAPER_PYTHON_BIN` (python inside that repo's env, optional; default `python3`)
   - Optional controls:
     - `SCENESMITH_PAPER_BACKEND` (`openai|gemini|anthropic`, default `openai`)
-    - `SCENESMITH_PAPER_MODEL` (override backend model)
+    - `SCENESMITH_PAPER_MODEL` (override backend model; bridged to `OPENAI_DEFAULT_MODEL`/`OPENAI_MODEL` for the subprocess)
+    - `SCENESMITH_PAPER_OPENAI_API` (`responses|chat_completions`, forces Agents SDK API for the subprocess)
+    - `SCENESMITH_PAPER_OPENAI_API_KEY` (override `OPENAI_API_KEY` for the subprocess)
+    - `SCENESMITH_PAPER_OPENAI_BASE_URL` (override `OPENAI_BASE_URL` for the subprocess, e.g. OpenAI-compatible gateways)
+    - `SCENESMITH_PAPER_OPENAI_TRACING_KEY` (override `OPENAI_TRACING_KEY` for the subprocess)
     - `SCENESMITH_PAPER_TIMEOUT_SECONDS` (default `5400`)
     - `SCENESMITH_PAPER_RUN_ROOT` (default `/tmp/scenesmith-paper-runs`)
     - `SCENESMITH_PAPER_KEEP_RUN_DIR` (`true|false`, default `false`)

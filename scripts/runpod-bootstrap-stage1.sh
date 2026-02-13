@@ -216,6 +216,8 @@ _append_if_set() {
 _append_if_set OPENAI_API_KEY
 _append_if_set GOOGLE_API_KEY
 _append_if_set HF_TOKEN
+_append_if_set OPENROUTER_API_KEY
+_append_if_set OPENROUTER_BASE_URL
 
 # Ensure LIDRA_SKIP_INIT
 if ! grep -q 'LIDRA_SKIP_INIT' "${WORKSPACE}/.env"; then

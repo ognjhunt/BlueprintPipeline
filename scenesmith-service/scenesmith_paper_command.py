@@ -77,6 +77,41 @@ _VALID_PIPELINE_STAGES = {
     "manipuland",
 }
 
+_OPENAI_API_WRAPPER = """\
+import os
+import runpy
+import sys
+
+
+def _configure_openai_agents() -> None:
+    api = os.environ.get("SCENESMITH_PAPER_OPENAI_API", "").strip().lower()
+    if not api:
+        return
+
+    try:
+        from agents import set_default_openai_api, set_default_openai_client
+        from openai import AsyncOpenAI
+    except Exception:
+        return
+
+    if api in {"chat", "chat_completions"}:
+        set_default_openai_api("chat_completions")
+    elif api in {"responses"}:
+        set_default_openai_api("responses")
+
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if base_url and api_key:
+        set_default_openai_client(AsyncOpenAI(base_url=base_url, api_key=api_key))
+
+
+_configure_openai_agents()
+
+args = sys.argv[1:]
+sys.argv = ["main.py"] + args
+runpy.run_path("main.py", run_name="__main__")
+"""
+
 
 def _safe_float(value: Any, *, default: float) -> float:
     try:
@@ -158,6 +193,48 @@ def _parse_extra_overrides(raw: str | None) -> List[str]:
         return overrides
 
     return [part.strip() for part in value.split(";;") if part.strip()]
+
+
+def _normalize_paper_openai_api(raw: str | None) -> str:
+    value = str(raw or "").strip().lower()
+    if not value:
+        return ""
+    if value in {"chat", "chat_completions"}:
+        return "chat_completions"
+    if value in {"responses"}:
+        return "responses"
+    raise ValueError(f"Unsupported SCENESMITH_PAPER_OPENAI_API={raw!r} (expected 'responses' or 'chat_completions')")
+
+
+def _apply_paper_openai_env_overrides(env: Dict[str, str]) -> None:
+    """Apply paper-stack scoped OpenAI/Agents SDK overrides for the subprocess.
+
+    This lets the parent process keep its own OpenAI config while the official
+    SceneSmith stack uses a different key/base URL/model (e.g. OpenRouter).
+    """
+
+    api_key = str(os.getenv("SCENESMITH_PAPER_OPENAI_API_KEY", "")).strip()
+    if api_key:
+        env["OPENAI_API_KEY"] = api_key
+
+    base_url = str(os.getenv("SCENESMITH_PAPER_OPENAI_BASE_URL", "")).strip()
+    if base_url:
+        env["OPENAI_BASE_URL"] = base_url
+
+    tracing_key = str(os.getenv("SCENESMITH_PAPER_OPENAI_TRACING_KEY", "")).strip()
+    if tracing_key:
+        env["OPENAI_TRACING_KEY"] = tracing_key
+
+    # Bridge SCENESMITH_PAPER_MODEL into the OpenAI Agents SDK default model.
+    model = str(os.getenv("SCENESMITH_PAPER_MODEL", "")).strip()
+    if model:
+        env["OPENAI_DEFAULT_MODEL"] = model
+        # Some stacks read OPENAI_MODEL instead.
+        env["OPENAI_MODEL"] = model
+
+    api = _normalize_paper_openai_api(os.getenv("SCENESMITH_PAPER_OPENAI_API"))
+    if api:
+        env["SCENESMITH_PAPER_OPENAI_API"] = api
 
 
 def _classify_role(semantic_class: str, raw_obj: Mapping[str, Any]) -> str:
@@ -457,9 +534,15 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
 
     try:
         overrides = _hydra_overrides(payload=payload, run_dir=run_dir, scene_name=scene_name)
-        cmd: List[str] = [python_bin, "main.py"] + overrides
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        _apply_paper_openai_env_overrides(env)
+
+        openai_api = str(env.get("SCENESMITH_PAPER_OPENAI_API", "")).strip().lower()
+        if openai_api:
+            cmd: List[str] = [python_bin, "-c", _OPENAI_API_WRAPPER] + overrides
+        else:
+            cmd = [python_bin, "main.py"] + overrides
 
         completed = subprocess.run(
             cmd,

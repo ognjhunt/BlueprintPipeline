@@ -207,6 +207,9 @@ if [[ ! -f /workspace/.env ]]; then
   cat > /workspace/.env << 'ENVEOF'
 # Required — fill these in:
 export OPENAI_API_KEY="<your-openai-api-key>"
+# Optional (OpenRouter / OpenAI-compatible gateways):
+export OPENROUTER_API_KEY=""
+export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 # Optional:
 export GOOGLE_API_KEY=""
 export HF_TOKEN=""

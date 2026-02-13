@@ -14,6 +14,7 @@ downloaded_episodes/
 .env.*
 configs/aws_credentials.env
 configs/runpod_credentials.env
+configs/sage_runpod_secrets.env
 
 # local scratch / caches
 __pycache__/
