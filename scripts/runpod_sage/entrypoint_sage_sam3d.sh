@@ -100,6 +100,37 @@ else
     log "  Set it before running SAGE: export OPENAI_API_KEY=sk-..."
 fi
 
+# ── 1.5. Pull latest patches from GitHub (if repo available) ─────────────────
+BP_DIR="${WORKSPACE}/BlueprintPipeline"
+PATCH_REPO="${SAGE_PATCH_REPO:-https://github.com/ognjhunt/BlueprintPipeline.git}"
+PATCH_BRANCH="${SAGE_PATCH_BRANCH:-main}"
+
+if [[ "${SKIP_PATCH_PULL:-0}" != "1" ]]; then
+    if [[ -d "${BP_DIR}/.git" ]]; then
+        log "Pulling latest patches from GitHub..."
+        (cd "${BP_DIR}" && git pull --ff-only origin "${PATCH_BRANCH}" 2>&1 | head -5) || \
+            log "  WARNING: git pull failed (using baked-in patches)"
+        # Update the entrypoint-adjacent scripts
+        if [[ -f "${BP_DIR}/scripts/runpod_sage/apply_sage_patches.sh" ]]; then
+            cp -f "${BP_DIR}/scripts/runpod_sage/apply_sage_patches.sh" "${WORKSPACE}/apply_sage_patches.sh"
+            chmod +x "${WORKSPACE}/apply_sage_patches.sh"
+        fi
+        log "  Patches updated from GitHub (branch: ${PATCH_BRANCH})"
+    elif command -v git >/dev/null 2>&1; then
+        log "No BlueprintPipeline repo found. Cloning patch scripts..."
+        git clone --depth 1 --branch "${PATCH_BRANCH}" "${PATCH_REPO}" "${BP_DIR}" 2>&1 | tail -3 || \
+            log "  WARNING: git clone failed (using baked-in patches only)"
+        if [[ -f "${BP_DIR}/scripts/runpod_sage/apply_sage_patches.sh" ]]; then
+            cp -f "${BP_DIR}/scripts/runpod_sage/apply_sage_patches.sh" "${WORKSPACE}/apply_sage_patches.sh"
+            chmod +x "${WORKSPACE}/apply_sage_patches.sh"
+        fi
+    else
+        log "  git not available — using baked-in patches only"
+    fi
+else
+    log "Skipping patch pull (SKIP_PATCH_PULL=1)"
+fi
+
 # ── 2. Apply SAGE patches (idempotent) ──────────────────────────────────────
 if [[ -x "${WORKSPACE}/apply_sage_patches.sh" ]]; then
     log "Applying SAGE patches..."
