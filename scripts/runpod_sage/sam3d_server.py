@@ -483,6 +483,21 @@ def metrics():
     })
 
 
+@app.route("/shutdown", methods=["POST"])
+def shutdown():
+    """Gracefully shut down the server to free VRAM for later pipeline stages."""
+    import signal
+    print("[SAM3D] Shutdown requested — freeing GPU memory...")
+    # Return response before shutting down
+    response = jsonify({"status": "shutting_down", "message": "SAM3D server stopping to free VRAM"})
+    # Schedule shutdown after response is sent
+    def _shutdown():
+        time.sleep(0.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+    threading.Thread(target=_shutdown, daemon=True).start()
+    return response, 200
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     # Start worker thread

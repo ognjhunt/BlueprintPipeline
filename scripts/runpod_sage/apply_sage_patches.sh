@@ -180,4 +180,116 @@ else
     pip install nvdiffrast 2>&1 | tail -5 || log "  WARNING: nvdiffrast install failed (texture baking will use vertex colors)"
 fi
 
+# ── Patch 7: client_generation_robot_task.py — GPT 5.1 compat ────────────────
+log "Patch 7: client_generation_robot_task.py — GPT 5.1 compatibility"
+ROBOT_CLIENT="${SAGE_DIR}/client/client_generation_robot_task.py"
+if [[ -f "${ROBOT_CLIENT}" ]]; then
+    # max_tokens → max_completion_tokens
+    if grep -q '"max_tokens":' "${ROBOT_CLIENT}" && ! grep -q '"max_completion_tokens":' "${ROBOT_CLIENT}"; then
+        sed -i 's/"max_tokens":/"max_completion_tokens":/g' "${ROBOT_CLIENT}"
+        log "  PATCHED: max_tokens → max_completion_tokens"
+    else
+        log "  OK: max_completion_tokens already set"
+    fi
+
+    # Add reasoning_effort after max_completion_tokens if not present
+    if ! grep -q 'reasoning_effort' "${ROBOT_CLIENT}"; then
+        sed -i '/"max_completion_tokens":/a\                    "reasoning_effort": "medium",' "${ROBOT_CLIENT}"
+        log "  PATCHED: added reasoning_effort=medium"
+    else
+        log "  OK: reasoning_effort already present"
+    fi
+
+    # tool_choice: "none" → "auto"
+    if grep -q '"tool_choice"] = "none"' "${ROBOT_CLIENT}"; then
+        sed -i 's/"tool_choice"\] = "none"/"tool_choice"] = "auto"/g' "${ROBOT_CLIENT}"
+        log "  PATCHED: tool_choice none → auto"
+    else
+        log "  OK: tool_choice already auto"
+    fi
+
+    # Fix conda env name: simgen → sage
+    if grep -q 'conda activate simgen' "${ROBOT_CLIENT}"; then
+        sed -i 's/conda activate simgen/conda activate sage/g' "${ROBOT_CLIENT}"
+        log "  PATCHED: simgen → sage"
+    fi
+
+    # Fix bash init path
+    if grep -q 'source ~/.bashrc' "${ROBOT_CLIENT}"; then
+        sed -i 's|source ~/.bashrc|source /workspace/miniconda3/etc/profile.d/conda.sh|g' "${ROBOT_CLIENT}"
+        log "  PATCHED: bashrc → conda.sh"
+    fi
+fi
+
+# ── Patch 8: client_generation_scene_aug.py — GPT 5.1 compat ────────────────
+log "Patch 8: client_generation_scene_aug.py — GPT 5.1 compatibility"
+AUG_CLIENT="${SAGE_DIR}/client/client_generation_scene_aug.py"
+if [[ -f "${AUG_CLIENT}" ]]; then
+    # max_tokens → max_completion_tokens
+    if grep -q '"max_tokens":' "${AUG_CLIENT}" && ! grep -q '"max_completion_tokens":' "${AUG_CLIENT}"; then
+        sed -i 's/"max_tokens":/"max_completion_tokens":/g' "${AUG_CLIENT}"
+        log "  PATCHED: max_tokens → max_completion_tokens"
+    else
+        log "  OK: max_completion_tokens already set"
+    fi
+
+    # Add reasoning_effort after max_completion_tokens if not present
+    if ! grep -q 'reasoning_effort' "${AUG_CLIENT}"; then
+        sed -i '/"max_completion_tokens":/a\                    "reasoning_effort": "medium",' "${AUG_CLIENT}"
+        log "  PATCHED: added reasoning_effort=medium"
+    else
+        log "  OK: reasoning_effort already present"
+    fi
+
+    # tool_choice: "none" → "auto"
+    if grep -q '"tool_choice"\] = "none"' "${AUG_CLIENT}"; then
+        sed -i 's/"tool_choice"\] = "none"/"tool_choice"] = "auto"/g' "${AUG_CLIENT}"
+        log "  PATCHED: tool_choice none → auto"
+    else
+        log "  OK: tool_choice already auto"
+    fi
+
+    # Fix conda env name: simgen → sage
+    if grep -q 'conda activate simgen' "${AUG_CLIENT}"; then
+        sed -i 's/conda activate simgen/conda activate sage/g' "${AUG_CLIENT}"
+        log "  PATCHED: simgen → sage"
+    fi
+
+    # Fix bash init path
+    if grep -q 'source ~/.bashrc' "${AUG_CLIENT}"; then
+        sed -i 's|source ~/.bashrc|source /workspace/miniconda3/etc/profile.d/conda.sh|g' "${AUG_CLIENT}"
+        log "  PATCHED: bashrc → conda.sh"
+    fi
+fi
+
+# ── Patch 9: Ensure isaaclab fallback modules are symlinked ──────────────────
+log "Patch 9: Isaac Lab fallback modules"
+BP_FALLBACK="${WORKSPACE:-/workspace}/BlueprintPipeline/scripts/runpod_sage/isaaclab_fallback"
+ISAACLAB_DIR="${SAGE_DIR}/server/isaaclab"
+if [[ -d "${BP_FALLBACK}" ]]; then
+    # Create isaaclab package dir if it doesn't exist
+    mkdir -p "${ISAACLAB_DIR}"
+    # Create __init__.py if missing
+    if [[ ! -f "${ISAACLAB_DIR}/__init__.py" ]]; then
+        echo "# Isaac Lab fallback package" > "${ISAACLAB_DIR}/__init__.py"
+        log "  CREATED: ${ISAACLAB_DIR}/__init__.py"
+    fi
+    # Symlink fallback modules (only if the real module doesn't exist)
+    for fallback_file in "${BP_FALLBACK}"/*.py; do
+        module_name=$(basename "${fallback_file}")
+        if [[ "${module_name}" == "__init__.py" ]]; then
+            continue
+        fi
+        target="${ISAACLAB_DIR}/${module_name}"
+        if [[ ! -f "${target}" ]]; then
+            ln -sf "${fallback_file}" "${target}"
+            log "  LINKED: ${module_name} → isaaclab/"
+        else
+            log "  OK: ${module_name} already exists (using original)"
+        fi
+    done
+else
+    log "  SKIP: isaaclab_fallback not found (will be created later)"
+fi
+
 log "All patches applied."
