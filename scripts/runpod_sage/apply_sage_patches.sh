@@ -171,4 +171,13 @@ else
     log "  (This is normal if running outside the Docker image)"
 fi
 
+# ── Patch 6: Ensure texture baking dependencies ──────────────────────────────
+log "Patch 6: Texture baking dependencies (nvdiffrast)"
+if python3 -c "import nvdiffrast" 2>/dev/null; then
+    log "  OK: nvdiffrast already installed"
+else
+    log "  Installing nvdiffrast for SAM3D texture baking..."
+    pip install nvdiffrast 2>&1 | tail -5 || log "  WARNING: nvdiffrast install failed (texture baking will use vertex colors)"
+fi
+
 log "All patches applied."

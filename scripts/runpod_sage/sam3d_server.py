@@ -28,6 +28,10 @@ import traceback
 import types
 from pathlib import Path
 
+# ── Texture baking config ────────────────────────────────────────────────────
+# Set SAM3D_TEXTURE_BAKING=0 to disable (saves ~2-3GB VRAM per object)
+TEXTURE_BAKING_ENABLED = os.environ.get("SAM3D_TEXTURE_BAKING", "1") == "1"
+
 # ── Kaolin monkey-patch ───────────────────────────────────────────────────────
 # kaolin 0.17.0 pre-built wheels are for torch 2.5.1+cu121.
 # Our env has torch 2.10+cu128, so the C extension (_C.so) fails to load.
@@ -154,14 +158,29 @@ def load_sam3d():
     from sam3d_objects.pipeline.inference_pipeline_pointmap import InferencePipelinePointMap
 
     config = OmegaConf.load(config_path)
-    config.rendering_engine = "pytorch3d"  # avoid nvdiffrast issues
     config.compile_model = False
     config.workspace_dir = os.path.dirname(config_path)
+
+    # Choose rendering engine based on texture baking availability
+    global TEXTURE_BAKING_ENABLED
+    if TEXTURE_BAKING_ENABLED:
+        try:
+            import nvdiffrast
+            config.rendering_engine = "nvdiffrast"
+            print(f"Texture baking: ENABLED (nvdiffrast available)")
+        except ImportError:
+            print("WARNING: nvdiffrast not found — falling back to vertex colors only")
+            print("  Install with: pip install nvdiffrast")
+            config.rendering_engine = "pytorch3d"
+            TEXTURE_BAKING_ENABLED = False
+    else:
+        config.rendering_engine = "pytorch3d"
+        print(f"Texture baking: DISABLED (SAM3D_TEXTURE_BAKING=0)")
 
     # Safety check (simplified from notebook/inference.py)
     pipeline = instantiate(config)
     sam3d_model = pipeline
-    print(f"SAM3D model loaded! (rendering_engine=pytorch3d)")
+    print(f"SAM3D model loaded! (rendering_engine={config.rendering_engine}, texture_baking={TEXTURE_BAKING_ENABLED})")
     return sam3d_model
 
 
@@ -332,9 +351,9 @@ def _process_job(job_id, input_text, seed):
             seed=seed,
             stage1_only=False,
             with_mesh_postprocess=True,
-            with_texture_baking=False,
+            with_texture_baking=TEXTURE_BAKING_ENABLED,
             with_layout_postprocess=False,
-            use_vertex_color=True,
+            use_vertex_color=True,  # always generate vertex colors as fallback
         )
 
     t_sam3d = time.time() - t0 - t_image

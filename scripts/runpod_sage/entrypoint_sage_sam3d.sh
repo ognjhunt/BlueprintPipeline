@@ -38,8 +38,10 @@ SLURM_JOB_ID=${SLURM_JOB_ID:-12345}
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.1}"
 OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 SAM3D_IMAGE_BACKEND="${SAM3D_IMAGE_BACKEND:-gemini}"
+SAM3D_TEXTURE_BAKING="${SAM3D_TEXTURE_BAKING:-1}"
 
 export SLURM_JOB_ID
+export SAM3D_TEXTURE_BAKING
 
 log "=========================================="
 log "SAGE + SAM3D — Instant Start Entrypoint"
