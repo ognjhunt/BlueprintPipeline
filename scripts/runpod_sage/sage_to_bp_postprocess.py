@@ -4,12 +4,11 @@ SAGE → BlueprintPipeline Post-Processing Bridge.
 
 Takes SAGE pipeline outputs and applies BlueprintPipeline quality layers:
   1. Asset Validation (VLM-based scoring of generated 3D objects)
-  2. SimReady Analysis (physics property recommendations)
-  3. Episode Normalization (effort/contact synthesis, provenance tracking)
-  4. Physics Certification (quality gate checking)
-  5. Grasp Quality Analysis (force closure, stability metrics)
-  6. Diversity Metrics (scene/object/pose diversity)
-  7. Data Fidelity (cross-channel consistency)
+  2. SimReady Lite Analysis (physics/collision recommendations)
+  3. Grasp Quality Analysis (basic sanity + distribution)
+  4. Demo Analysis (HDF5 structure + sensor sanity)
+  5. Diversity Metrics (scene/object/pose diversity)
+  6. Quality Report (aggregate)
 
 Usage:
     python sage_to_bp_postprocess.py \
@@ -35,6 +34,8 @@ from pathlib import Path
 # Add BlueprintPipeline to path
 BP_DIR = os.environ.get("BP_DIR", "/workspace/BlueprintPipeline")
 sys.path.insert(0, BP_DIR)
+
+from scripts.runpod_sage.bp_simready_lite import recommend_simready_lite, preset_to_dict
 
 
 def load_sage_room(sage_results_dir):
@@ -159,57 +160,40 @@ def run_asset_validation(manifest, sage_results_dir, output_dir):
 
 def run_simready_analysis(manifest, output_dir):
     """
-    Analyze assets for SimReady conversion readiness.
+    Analyze assets for "SimReady Lite" (pre-collection physics presets).
 
-    NOTE: Full SimReady conversion (V-HACD, USD export) requires OpenUSD runtime
-    which may not be available. This provides a readiness analysis instead.
+    NOTE: This does NOT run V-HACD or bake full SimReady USD assets. It only
+    recommends values that can be applied in Isaac Sim prior to capture.
     """
     analysis = {
         "objects": [],
         "summary": {},
     }
 
-    # Physics property estimates by category
-    PHYSICS_PRESETS = {
-        "default": {"mass_kg": 1.0, "friction": 0.5, "restitution": 0.3},
-        "table": {"mass_kg": 25.0, "friction": 0.6, "restitution": 0.1},
-        "chair": {"mass_kg": 8.0, "friction": 0.5, "restitution": 0.2},
-        "sofa": {"mass_kg": 45.0, "friction": 0.7, "restitution": 0.15},
-        "mug": {"mass_kg": 0.3, "friction": 0.4, "restitution": 0.3},
-        "cup": {"mass_kg": 0.25, "friction": 0.4, "restitution": 0.3},
-        "plate": {"mass_kg": 0.5, "friction": 0.3, "restitution": 0.2},
-        "book": {"mass_kg": 0.5, "friction": 0.5, "restitution": 0.1},
-        "plant": {"mass_kg": 3.0, "friction": 0.5, "restitution": 0.1},
-        "lamp": {"mass_kg": 2.0, "friction": 0.4, "restitution": 0.2},
-        "cabinet": {"mass_kg": 35.0, "friction": 0.6, "restitution": 0.1},
-        "shelf": {"mass_kg": 15.0, "friction": 0.5, "restitution": 0.1},
-        "bookshelf": {"mass_kg": 30.0, "friction": 0.5, "restitution": 0.1},
-    }
-
     for obj in manifest.get("objects", []):
         category = obj.get("category", "unknown").lower()
-        # Find best matching preset
-        preset = PHYSICS_PRESETS.get("default")
-        for key in PHYSICS_PRESETS:
-            if key in category:
-                preset = PHYSICS_PRESETS[key]
-                break
-
         dims = obj.get("dimensions_est", {})
-        volume = (
-            dims.get("width", 0.5) *
-            dims.get("height", 0.5) *
-            dims.get("depth", 0.5)
+        preset = recommend_simready_lite(category=category, dimensions={
+            "width": dims.get("width", 0.0),
+            "length": dims.get("depth", 0.0),
+            "height": dims.get("height", 0.0),
+        })
+        preset_dict = preset_to_dict(preset)
+
+        volume = float(
+            (dims.get("width", 0.0) or 0.0)
+            * (dims.get("height", 0.0) or 0.0)
+            * (dims.get("depth", 0.0) or 0.0)
         )
 
         obj_analysis = {
             "name": obj.get("name", "unknown"),
             "id": obj.get("id", ""),
             "mesh_exists": obj.get("mesh_exists", False),
-            "recommended_physics": preset,
+            "recommended_physics": preset_dict,
             "estimated_volume_m3": round(volume, 6),
-            "collision_shape": "convex_decomposition" if volume > 0.01 else "convex_hull",
-            "collision_max_hulls": 128 if volume > 0.1 else 64,
+            "collision_shape": preset.collision_approximation,
+            "collision_max_hulls": preset.collision_max_hulls,
             "is_articulated": False,  # SAGE objects are rigid
             "simready_ready": obj.get("mesh_exists", False),
         }
@@ -297,12 +281,14 @@ def run_demo_analysis(sage_results_dir, output_dir):
     hdf5_file = demo_dir / "dataset.hdf5"
     meta_file = demo_dir / "demo_metadata.json"
     decomp_file = demo_dir / "step_decomposition.json"
+    capture_manifest = demo_dir / "capture_manifest.json"
 
     result = {"status": "analyzed"}
 
     if hdf5_file.exists():
         try:
             import h5py
+            import numpy as np
             with h5py.File(str(hdf5_file), "r") as f:
                 data = f["data"]
                 num_demos = len(data.keys())
@@ -320,6 +306,32 @@ def run_demo_analysis(sage_results_dir, output_dir):
                 result["observation_keys"] = obs_keys
                 result["has_rgb"] = any("rgb" in k for k in obs_keys)
                 result["has_depth"] = any("depth" in k for k in obs_keys)
+
+                # Sanity: ensure at least one RGB and one depth stream is non-degenerate.
+                rgb_ok = False
+                depth_ok = False
+                for key in obs_keys:
+                    if ("rgb" in key) and (not rgb_ok):
+                        arr = data[first_demo]["obs"][key]
+                        # Read first frame only.
+                        frame0 = np.array(arr[0])
+                        rgb_ok = bool(frame0.size > 0 and frame0.std() > 1.0)
+                        result.setdefault("rgb_sanity", {})[key] = {
+                            "std": float(frame0.std()) if frame0.size else 0.0,
+                            "shape": list(frame0.shape),
+                        }
+                    if ("depth" in key) and (not depth_ok):
+                        arr = data[first_demo]["obs"][key]
+                        frame0 = np.array(arr[0], dtype=np.float32)
+                        finite = np.isfinite(frame0)
+                        depth_ok = bool(frame0.size > 0 and finite.any() and frame0[finite].std() > 1e-4)
+                        result.setdefault("depth_sanity", {})[key] = {
+                            "finite_frac": float(finite.mean()) if frame0.size else 0.0,
+                            "std": float(frame0[finite].std()) if finite.any() else 0.0,
+                            "shape": list(frame0.shape),
+                        }
+                result["rgb_non_degenerate"] = rgb_ok
+                result["depth_non_degenerate"] = depth_ok
         except ImportError:
             result["format"] = "hdf5"
             result["note"] = "h5py not available for detailed analysis"
@@ -336,6 +348,18 @@ def run_demo_analysis(sage_results_dir, output_dir):
             "num_demos": decomp.get("num_demos", 0),
             "phase_labels": decomp.get("phase_labels", []),
         }
+
+    if capture_manifest.exists():
+        try:
+            with open(capture_manifest) as f:
+                manifest = json.load(f)
+            result["capture_manifest"] = {
+                "cameras": manifest.get("cameras", []),
+                "resolution": manifest.get("resolution"),
+                "modalities": manifest.get("modalities", []),
+            }
+        except Exception:
+            result["capture_manifest"] = {"error": "failed_to_read"}
 
     demo_analysis_dir = Path(output_dir) / "demo_analysis"
     demo_analysis_dir.mkdir(parents=True, exist_ok=True)
@@ -385,6 +409,62 @@ def run_diversity_metrics(manifest, sage_results_dir, output_dir):
         json.dump(result, f, indent=2)
 
     return result
+
+
+def validate_required_outputs(
+    room_dir: Path,
+    manifest: dict,
+    asset_val: dict,
+    simready: dict,
+    grasp_quality: dict,
+    demo_analysis: dict,
+    output_dir: str,
+) -> None:
+    """Fail fast when mandatory outputs are missing or obviously invalid."""
+    strict = os.getenv("BP_QUALITY_GATE", "").lower() in {"1", "true", "yes"} or \
+        os.getenv("BP_STRICT", "").lower() in {"1", "true", "yes"}
+    if not strict:
+        return
+
+    errors: list[str] = []
+
+    if not manifest.get("objects"):
+        errors.append("No objects in scene manifest.")
+
+    if asset_val.get("total_assets", 0) <= 0:
+        errors.append("No assets validated.")
+
+    grasp_num = int(grasp_quality.get("num_grasps", 0) or 0)
+    if grasp_num <= 0:
+        errors.append("No grasps available.")
+
+    if demo_analysis.get("format") == "hdf5":
+        if demo_analysis.get("num_demos", 0) <= 0:
+            errors.append("No demos in HDF5 dataset.")
+        if demo_analysis.get("has_rgb") and demo_analysis.get("rgb_non_degenerate") is False:
+            errors.append("RGB observation stream is degenerate.")
+        if demo_analysis.get("has_depth") and demo_analysis.get("depth_non_degenerate") is False:
+            errors.append("Depth observation stream is degenerate.")
+    else:
+        errors.append("Demo analysis missing HDF5 output.")
+
+    # Require all mandatory files generated by the collector for strict mode.
+    required_files = [
+        room_dir / "grasps" / "grasp_transforms.json",
+        room_dir / "demos" / "dataset.hdf5",
+        room_dir / "demos" / "demo_metadata.json",
+        room_dir / "demos" / "step_decomposition.json",
+        room_dir / "demos" / "capture_manifest.json",
+    ]
+    for path in required_files:
+        if not path.exists():
+            errors.append(f"Missing required artifact: {path}")
+
+    if simready.get("summary", {}).get("total", 0) < len(manifest.get("objects", [])):
+        errors.append("SimReady analysis missing entries for some objects.")
+
+    if errors:
+        raise RuntimeError("BP strict validation failed: " + "; ".join(errors))
 
 
 def generate_quality_report(
@@ -518,6 +598,27 @@ def main():
         args.sage_results, elapsed,
     )
     print(f"     Overall score: {report['overall_score']:.3f}")
+
+    # Strict postprocess gate: fail early when required artifacts are absent/invalid.
+    validate_required_outputs(
+        Path(args.sage_results),
+        manifest,
+        asset_val,
+        simready,
+        grasp_quality,
+        demo_analysis,
+        args.output_dir,
+    )
+
+    # Optional strict gating
+    if os.getenv("BP_QUALITY_GATE", "").lower() in {"1", "true", "yes"}:
+        min_score = float(os.getenv("BP_QUALITY_MIN_SCORE", "0.7"))
+        if report["overall_score"] < min_score:
+            print(
+                f"[BP-POST] ERROR: Quality gate failed: score={report['overall_score']:.3f} < {min_score:.3f}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     print()
     print("=" * 60)

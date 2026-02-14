@@ -1,0 +1,41 @@
+.git
+.github
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtualenvs / caches
+.venv/
+.venv-text-backends/
+
+# Large local artifacts not needed in runtime image
+analysis_outputs/
+htmlcov/
+local_runs/
+downloaded_episodes/
+dead_letter/
+cost_data/
+scenes/
+test_scenes/
+fixtures/
+tests/
+
+# Logs / coverage
+*.log
+.coverage
+coverage.xml
+covtest.xml
+firebase-debug.log
+
+# OS / IDE
+.vscode/
+.idea/
+
+# Archives
+*.tar.gz
+*.zip

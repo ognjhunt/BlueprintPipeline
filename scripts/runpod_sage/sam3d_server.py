@@ -31,6 +31,7 @@ from pathlib import Path
 # ── Texture baking config ────────────────────────────────────────────────────
 # Set SAM3D_TEXTURE_BAKING=0 to disable (saves ~2-3GB VRAM per object)
 TEXTURE_BAKING_ENABLED = os.environ.get("SAM3D_TEXTURE_BAKING", "1") == "1"
+SAM3D_TEXTURE_STRICT = os.environ.get("SAM3D_TEXTURE_STRICT", "1") == "1"
 
 # ── Kaolin monkey-patch ───────────────────────────────────────────────────────
 # kaolin 0.17.0 pre-built wheels are for torch 2.5.1+cu121.
@@ -169,8 +170,14 @@ def load_sam3d():
             config.rendering_engine = "nvdiffrast"
             print(f"Texture baking: ENABLED (nvdiffrast available)")
         except ImportError:
-            print("WARNING: nvdiffrast not found — falling back to vertex colors only")
-            print("  Install with: pip install nvdiffrast")
+            msg = (
+                "nvdiffrast not found. Install with: pip install nvdiffrast\n"
+                "Texture baking cannot run without nvdiffrast."
+            )
+            if SAM3D_TEXTURE_STRICT:
+                raise RuntimeError(msg)
+            print("WARNING:", msg.replace("\n", " "))
+            print("  Falling back to vertex colors only")
             config.rendering_engine = "pytorch3d"
             TEXTURE_BAKING_ENABLED = False
     else:

@@ -236,6 +236,12 @@ with open('${kf}', 'w') as f: json.dump(d, f, indent=4)
     fi
 done
 
+# Remove runtime secret file (rehydrated on container start)
+if [[ -f /workspace/.sage_runpod_secrets.env ]]; then
+    log "Removing runtime secret file from snapshot: /workspace/.sage_runpod_secrets.env"
+    rm -f /workspace/.sage_runpod_secrets.env
+fi
+
 # ── 6. Create archive ───────────────────────────────────────────────────────
 log ""
 log "Creating archive: ${ARCHIVE}"
@@ -248,14 +254,22 @@ tar czf "${ARCHIVE}" \
     --exclude='.cache/pip' \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
+    --exclude='workspace/BlueprintPipeline/.git' \
+    --exclude='workspace/BlueprintPipeline/.venv' \
+    --exclude='workspace/BlueprintPipeline/.venv-text-backends' \
+    --exclude='workspace/BlueprintPipeline/analysis_outputs' \
+    --exclude='workspace/BlueprintPipeline/htmlcov' \
+    --exclude='workspace/BlueprintPipeline/local_runs' \
+    --exclude='workspace/BlueprintPipeline/downloaded_episodes' \
+    --exclude='workspace/BlueprintPipeline/dead_letter' \
+    --exclude='workspace/.sage_runpod_secrets.env' \
     --warning=no-file-changed \
     -C / \
     workspace/SAGE \
     workspace/sam3d \
     workspace/miniconda3 \
     workspace/isaacsim_env \
-    workspace/BlueprintPipeline/scripts/runpod_sage \
-    workspace/BlueprintPipeline/configs \
+    workspace/BlueprintPipeline \
     workspace/entrypoint.sh \
     workspace/apply_sage_patches.sh \
     workspace/.isaacsim_path \

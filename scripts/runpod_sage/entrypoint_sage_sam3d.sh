@@ -39,13 +39,27 @@ OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.1}"
 OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 SAM3D_IMAGE_BACKEND="${SAM3D_IMAGE_BACKEND:-gemini}"
 SAM3D_TEXTURE_BAKING="${SAM3D_TEXTURE_BAKING:-1}"
+SKIP_PATCH_PULL="${SKIP_PATCH_PULL:-1}"
+RUN_MODE="${RUN_MODE:-services}"  # services|full_pipeline
 
 export SLURM_JOB_ID
 export SAM3D_TEXTURE_BAKING
+export SAM3D_PORT
 
 log "=========================================="
 log "SAGE + SAM3D — Instant Start Entrypoint"
 log "=========================================="
+
+# Load runtime secrets from mounted env file (if present).
+if [[ -f /workspace/.sage_runpod_secrets.env ]]; then
+    # shellcheck disable=SC1091
+    set -a
+    source /workspace/.sage_runpod_secrets.env
+    set +a
+fi
+
+# Keep SAM3D texture import path stable.
+export LIDRA_SKIP_INIT=1
 
 # ── 0. GPU Check ─────────────────────────────────────────────────────────────
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -102,43 +116,12 @@ else
     log "  Set it before running SAGE: export OPENAI_API_KEY=sk-..."
 fi
 
-# ── 1.5. Pull latest patches from GitHub (if repo available) ─────────────────
-BP_DIR="${WORKSPACE}/BlueprintPipeline"
-PATCH_REPO="${SAGE_PATCH_REPO:-https://github.com/ognjhunt/BlueprintPipeline.git}"
-PATCH_BRANCH="${SAGE_PATCH_BRANCH:-main}"
-
-if [[ "${SKIP_PATCH_PULL:-0}" != "1" ]]; then
-    if [[ -d "${BP_DIR}/.git" ]]; then
-        log "Pulling latest patches from GitHub..."
-        (cd "${BP_DIR}" && git pull --ff-only origin "${PATCH_BRANCH}" 2>&1 | head -5) || \
-            log "  WARNING: git pull failed (using baked-in patches)"
-        # Update the entrypoint-adjacent scripts
-        if [[ -f "${BP_DIR}/scripts/runpod_sage/apply_sage_patches.sh" ]]; then
-            cp -f "${BP_DIR}/scripts/runpod_sage/apply_sage_patches.sh" "${WORKSPACE}/apply_sage_patches.sh"
-            chmod +x "${WORKSPACE}/apply_sage_patches.sh"
-        fi
-        log "  Patches updated from GitHub (branch: ${PATCH_BRANCH})"
-    elif command -v git >/dev/null 2>&1; then
-        log "No BlueprintPipeline repo found. Cloning patch scripts..."
-        git clone --depth 1 --branch "${PATCH_BRANCH}" "${PATCH_REPO}" "${BP_DIR}" 2>&1 | tail -3 || \
-            log "  WARNING: git clone failed (using baked-in patches only)"
-        if [[ -f "${BP_DIR}/scripts/runpod_sage/apply_sage_patches.sh" ]]; then
-            cp -f "${BP_DIR}/scripts/runpod_sage/apply_sage_patches.sh" "${WORKSPACE}/apply_sage_patches.sh"
-            chmod +x "${WORKSPACE}/apply_sage_patches.sh"
-        fi
-    else
-        log "  git not available — using baked-in patches only"
-    fi
-else
-    log "Skipping patch pull (SKIP_PATCH_PULL=1)"
-fi
-
 # ── 2. Apply SAGE patches (idempotent) ──────────────────────────────────────
-if [[ -x "${WORKSPACE}/apply_sage_patches.sh" ]]; then
+if [[ "${SKIP_PATCH_PULL}" != "1" && -x "${WORKSPACE}/apply_sage_patches.sh" ]]; then
     log "Applying SAGE patches..."
     bash "${WORKSPACE}/apply_sage_patches.sh" || log "WARNING: Some patches may have failed (non-fatal)"
 else
-    log "No patch script found (patches may already be baked into image)."
+    log "Skipping runtime SAGE patch application."
 fi
 
 # ── 3. Early exit if SAGE_ONLY mode ─────────────────────────────────────────
@@ -171,9 +154,18 @@ if [[ "${SKIP_SAM3D:-0}" != "1" ]]; then
             log "  Download with: huggingface-cli download facebook/sam-3d-objects --local-dir /workspace/sam3d/checkpoints/hf"
         fi
 
-        nohup python3 "${SAM3D_SCRIPT}" ${SAM3D_ARGS} \
+        # Prefer conda env if it has SAM3D deps (portable for snapshot-based images).
+        SAM3D_CMD=(python3.11)
+        if [[ -x "/workspace/miniconda3/bin/conda" ]]; then
+            if /workspace/miniconda3/bin/conda run -n sage python -c "import sam3d_objects" >/dev/null 2>&1; then
+                SAM3D_CMD=(/workspace/miniconda3/bin/conda run -n sage python)
+            fi
+        fi
+
+        nohup "${SAM3D_CMD[@]}" "${SAM3D_SCRIPT}" ${SAM3D_ARGS} \
             > /tmp/sam3d_server.log 2>&1 &
         SAM3D_PID=$!
+        echo "${SAM3D_PID}" > /tmp/sam3d.pid
         log "SAM3D PID: ${SAM3D_PID}"
 
         # Wait for SAM3D health (model loading can take 30-90s)
@@ -259,10 +251,11 @@ if [[ "${SKIP_ISAAC_SIM:-0}" != "1" ]]; then
                     > /tmp/isaacsim.log 2>&1 &
             fi
             ISAAC_PID=$!
+            echo "${ISAAC_PID}" > /tmp/isaacsim.pid
             log "Isaac Sim PID: ${ISAAC_PID}"
 
             # Compute expected MCP port
-            MCP_PORT=$(python3 -c "
+            MCP_PORT=$(python3.11 -c "
 import hashlib, os
 job_id = os.environ.get('SLURM_JOB_ID', '12345')
 h = int(hashlib.md5(str(job_id).encode()).hexdigest(), 16)
@@ -315,10 +308,28 @@ log "  ROOM_TYPE=kitchen ROBOT_TYPE=mobile_franka \\"
 log "    TASK_DESC='Pick up the mug from the counter and place it on the table' \\"
 log "    bash /workspace/BlueprintPipeline/scripts/runpod_sage/run_full_pipeline.sh"
 log ""
+log "One-shot container mode (run once then exit):"
+log "  docker run --gpus all -e RUN_MODE=full_pipeline -e OPENAI_API_KEY=... <image>"
+log ""
+log "Smoke test (1 pose sample, 1 demo, strict):"
+log "  bash /workspace/BlueprintPipeline/scripts/runpod_sage/smoke_full_pipeline.sh"
+log ""
 log "Logs:"
 log "  SAM3D:     tail -f /tmp/sam3d_server.log"
 log "  Isaac Sim: tail -f /tmp/isaacsim.log"
 log "=========================================="
 
-# Keep container alive
-exec tail -f /dev/null
+if [[ "${RUN_MODE}" == "services" ]]; then
+    exec tail -f /dev/null
+elif [[ "${RUN_MODE}" == "full_pipeline" ]]; then
+    log "RUN_MODE=full_pipeline — running pipeline once, then exiting."
+    # shellcheck disable=SC1091
+    source /workspace/miniconda3/etc/profile.d/conda.sh
+    conda activate sage
+    bash /workspace/BlueprintPipeline/scripts/runpod_sage/run_full_pipeline.sh
+    log "Pipeline finished successfully. Exiting."
+    exit 0
+else
+    log "ERROR: Unknown RUN_MODE='${RUN_MODE}' (expected: services|full_pipeline)"
+    exit 2
+fi

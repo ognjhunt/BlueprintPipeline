@@ -52,6 +52,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update -qq && \
     apt-get install -y -qq \
         ca-certificates curl wget git jq gnupg \
+        build-essential ninja-build cmake pkg-config \
         libgl1 libglib2.0-0 libxrender1 libxi6 libxxf86vm1 \
         libxfixes3 libxkbcommon0 libsm6 libice6 libxext6 \
         libxrandr2 libxcursor1 libxinerama1 libepoxy0 \
@@ -84,8 +85,37 @@ RUN conda env create -n sage -f /workspace/SAGE/client/environment.yml && \
     conda clean -afy
 
 # Install pytorch_lightning (fixes doors/windows generation)
-SHELL ["/workspace/miniconda3/bin/conda", "run", "-n", "sage", "/bin/bash", "-c"]
-RUN pip install --no-cache-dir pytorch-lightning opencv-python-headless
+RUN /workspace/miniconda3/bin/conda run -n sage pip install --no-cache-dir \
+        pytorch-lightning opencv-python-headless
+
+# =============================================================================
+# Phase 4.5: Install M2T2 + nvdiffrast into conda env (Stage 5)
+# =============================================================================
+RUN /workspace/miniconda3/bin/conda run -n sage pip install --no-cache-dir nvdiffrast
+RUN test -d /workspace/SAGE/M2T2 && \
+    /workspace/miniconda3/bin/conda run -n sage pip install --no-cache-dir -r /workspace/SAGE/M2T2/requirements.txt && \
+    /workspace/miniconda3/bin/conda run -n sage pip install --no-cache-dir /workspace/SAGE/M2T2/pointnet2_ops && \
+    /workspace/miniconda3/bin/conda run -n sage pip install --no-cache-dir -e /workspace/SAGE/M2T2
+
+# Bake M2T2 weights into the image (no runtime downloads).
+# Public repo: wentao-yuan/m2t2
+RUN python3.11 -m pip install --no-cache-dir huggingface-hub && \
+    python3.11 - <<'PY'
+from huggingface_hub import hf_hub_download
+import os
+
+dst = "/workspace/SAGE/M2T2/m2t2.pth"
+os.makedirs(os.path.dirname(dst), exist_ok=True)
+path = hf_hub_download(
+    repo_id="wentao-yuan/m2t2",
+    filename="m2t2.pth",
+    local_dir=os.path.dirname(dst),
+    local_dir_use_symlinks=False,
+)
+if path != dst and os.path.exists(path):
+    os.replace(path, dst)
+print("Downloaded", dst)
+PY
 
 # =============================================================================
 # Phase 5: Apply SAGE patches (GPT 5.1 compatibility + import guards)
@@ -94,26 +124,35 @@ RUN pip install --no-cache-dir pytorch-lightning opencv-python-headless
 # Patch 2: layout.py — import guards for matfuse + isaaclab
 # Patch 3: layout_wo_robot.py — same import guards
 # Patch 4: client_generation_room_desc.py — GPT 5.1 compat
-# These are applied via the entrypoint script at runtime for flexibility,
-# but we copy the patch script into the image.
+# Patch 5: physics crash guard when Isaac Sim is unavailable
+# Patch 6: texture-baking guard + nvdiffrast validation
+# Patch 7: robot task client GPT5.1 compat
+# Patch 8: scene aug client GPT5.1 compat
+# Patch 9: isaaclab fallback modules
+# Patch 10: ANTHROPIC -> fallback to API_TOKEN
+# Patch 11: safe OpenAI fallback when ANTHROPIC_API_KEY is missing
 COPY scripts/runpod_sage/apply_sage_patches.sh /workspace/apply_sage_patches.sh
 RUN chmod +x /workspace/apply_sage_patches.sh
+RUN WORKSPACE=/workspace /workspace/apply_sage_patches.sh
 
 # =============================================================================
 # Phase 6: SAM3D setup (checkpoint download + dependencies)
 # =============================================================================
 # SAM3D Python dependencies (in the system Python, not conda)
-RUN pip install --no-cache-dir \
+RUN python3.11 -m pip install --no-cache-dir \
     flask flask-cors werkzeug psutil requests \
     omegaconf hydra-core \
     open3d trimesh plyfile numpy pillow \
     google-generativeai
 
+# Needed for SAM3D texture baking (and safe to have globally).
+RUN python3.11 -m pip install --no-cache-dir nvdiffrast
+
 # Download SAM3D checkpoints from HuggingFace (~16GB)
 # Uses the publicly available sam-3d-objects model
-RUN pip install --no-cache-dir huggingface-hub && \
+RUN python3.11 -m pip install --no-cache-dir huggingface-hub && \
     mkdir -p /workspace/sam3d/checkpoints && \
-    python3 -c "\
+    python3.11 -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('facebook/sam-3d-objects', local_dir='/workspace/sam3d/checkpoints/hf', \
                   ignore_patterns=['*.md', '*.txt', 'LICENSE*'])" && \
@@ -122,15 +161,15 @@ snapshot_download('facebook/sam-3d-objects', local_dir='/workspace/sam3d/checkpo
 # Clone and install SAM3D source
 RUN git clone --depth 1 https://github.com/facebookresearch/sam-3d-objects.git /workspace/sam3d/repo && \
     cd /workspace/sam3d/repo && \
-    pip install --no-cache-dir -e . --no-deps 2>/dev/null || \
-    pip install --no-cache-dir -e . 2>/dev/null || \
+    python3.11 -m pip install --no-cache-dir -e . --no-deps 2>/dev/null || \
+    python3.11 -m pip install --no-cache-dir -e . 2>/dev/null || \
     echo "SAM3D install attempted (may need runtime fixes)"
 
 # Additional SAM3D deps
-RUN pip install --no-cache-dir \
+RUN python3.11 -m pip install --no-cache-dir \
     roma loguru einops fvcore timm scipy \
     pytorch3d --no-build-isolation 2>/dev/null || \
-    FORCE_CUDA=1 pip install --no-cache-dir \
+    FORCE_CUDA=1 python3.11 -m pip install --no-cache-dir \
     "git+https://github.com/facebookresearch/pytorch3d.git" --no-build-isolation 2>/dev/null || \
     echo "pytorch3d install attempted"
 
@@ -143,6 +182,9 @@ RUN python3.11 -m venv /workspace/isaacsim_env && \
         "isaacsim[all,extscache]==5.1.0" \
         --extra-index-url https://pypi.nvidia.com
 
+# HDF5 writer for Stage 7 data collection (robomimic format).
+RUN /workspace/isaacsim_env/bin/pip install --no-cache-dir h5py
+
 # Symlink SAGE MCP extension into Isaac Sim
 RUN ISAACSIM_PATH=$(/workspace/isaacsim_env/bin/python3 -c \
       "import isaacsim; import os; print(os.path.dirname(isaacsim.__file__))") && \
@@ -151,10 +193,9 @@ RUN ISAACSIM_PATH=$(/workspace/isaacsim_env/bin/python3 -c \
     echo "ISAACSIM_PATH=${ISAACSIM_PATH}" > /workspace/.isaacsim_path
 
 # =============================================================================
-# Phase 8: Copy BlueprintPipeline scripts and configs
+# Phase 8: Copy full BlueprintPipeline repo (self-contained image)
 # =============================================================================
-COPY scripts/runpod_sage/ /workspace/BlueprintPipeline/scripts/runpod_sage/
-COPY configs/ /workspace/BlueprintPipeline/configs/
+COPY . /workspace/BlueprintPipeline
 
 # =============================================================================
 # Phase 9: Entrypoint + startup script

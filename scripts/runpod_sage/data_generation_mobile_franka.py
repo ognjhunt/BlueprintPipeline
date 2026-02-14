@@ -638,7 +638,18 @@ def main():
     parser.add_argument("--num_demos", type=int, default=16, help="Number of demos to generate")
     parser.add_argument("--enable_cameras", action="store_true", help="Enable camera observations")
     parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+    parser.add_argument("--strict", dest="strict", action="store_true", default=True)
+    parser.add_argument("--no-strict", dest="strict", action="store_false")
     args = parser.parse_args()
+
+    if args.strict:
+        print(
+            "[DATA-GEN] ERROR: This script is no longer used in strict mode.\n"
+            "[DATA-GEN] It contains placeholder camera observations and non-sim execution paths.\n"
+            "[DATA-GEN] Use: scripts/runpod_sage/sage_stage567_mobile_franka.py (Stages 5–7 strict) instead.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     layout_dir = Path(args.results_dir) / args.layout_id
     if not layout_dir.exists():

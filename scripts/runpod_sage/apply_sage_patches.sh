@@ -173,11 +173,11 @@ fi
 
 # ── Patch 6: Ensure texture baking dependencies ──────────────────────────────
 log "Patch 6: Texture baking dependencies (nvdiffrast)"
-if python3 -c "import nvdiffrast" 2>/dev/null; then
+if python3.11 -c "import nvdiffrast" 2>/dev/null; then
     log "  OK: nvdiffrast already installed"
 else
-    log "  Installing nvdiffrast for SAM3D texture baking..."
-    pip install nvdiffrast 2>&1 | tail -5 || log "  WARNING: nvdiffrast install failed (texture baking will use vertex colors)"
+    log "  WARNING: nvdiffrast missing. Texture baking will fail in strict mode."
+    log "  (Install it at image build time; runtime installs are disabled.)"
 fi
 
 # ── Patch 7: client_generation_robot_task.py — GPT 5.1 compat ────────────────
@@ -290,6 +290,66 @@ if [[ -d "${BP_FALLBACK}" ]]; then
     done
 else
     log "  SKIP: isaaclab_fallback not found (will be created later)"
+fi
+
+# ── Patch 10: layout.py — don't hard-fail when ANTHROPIC_API_KEY is missing ─────
+log "Patch 10: layout.py fallback for missing ANTHROPIC_API_KEY"
+for _layout in "${SAGE_DIR}/server/layout.py" "${SAGE_DIR}/server/layout_wo_robot.py"; do
+    if [[ ! -f "${_layout}" ]]; then
+        log "  SKIP: not found: ${_layout}"
+        continue
+    fi
+
+    python3 - "${_layout}" <<'PYEOF'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+orig = text
+
+text = text.replace("from key import ANTHROPIC_API_KEY", "from key import ANTHROPIC_API_KEY, API_TOKEN")
+
+parse_old = """        # Check if API key is available\n        api_key = ANTHROPIC_API_KEY\n        if not api_key:\n            return json.dumps({\n                \"success\": False,\n                \"error\": \"ANTHROPIC_API_KEY environment variable is not set\"\n            })\n"""
+parse_new = """        # Check for an available model key (prefer Anthropic, fallback to OpenAI)\n        api_key = ANTHROPIC_API_KEY or API_TOKEN\n        if not api_key:\n            return json.dumps({\n                \"success\": False,\n                \"error\": \"No ANTHROPIC_API_KEY or API_TOKEN available\"\n            })\n"""
+place_old = """        # Check if API key is available\n        api_key = ANTHROPIC_API_KEY\n        if not api_key:\n            print(\"❌ ANTHROPIC_API_KEY not found\", file=sys.stderr)\n            return json.dumps({\n                \"success\": False,\n                \"error\": \"ANTHROPIC_API_KEY environment variable is not set\"\n            })\n"""
+place_new = """        # Check for an available model key (prefer Anthropic, fallback to OpenAI)\n        api_key = ANTHROPIC_API_KEY or API_TOKEN\n        if not api_key:\n            print(\"❌ ANTHROPIC_API_KEY / API_TOKEN not found\", file=sys.stderr)\n            return json.dumps({\n                \"success\": False,\n                \"error\": \"No ANTHROPIC_API_KEY or API_TOKEN available\"\n            })\n"""
+
+if parse_old in text:
+    text = text.replace(parse_old, parse_new, 1)
+if place_old in text:
+    text = text.replace(place_old, place_new, 1)
+
+if text != orig:
+    path.write_text(text)
+    print(f"  PATCHED: {path}")
+else:
+    print(f"  OK: no-op in {path}")
+PYEOF
+done
+
+# Optional vLM hardening: keep Anthropic usage resilient (auto fallback to OpenAI).
+if [[ -f "${SAGE_DIR}/server/vlm.py" ]]; then
+    log "Patch 11: Add safe OpenAI fallback when Anthropic key is missing"
+    python3 - "${SAGE_DIR}/server/vlm.py" <<'PYEOF'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+text = path.read_text()
+orig = text
+
+old = "    if vlm_type == \"claude\":\n        return _call_claude_with_retry(\n            model, max_tokens, temperature, messages, thinking,\n            max_retries, retry_base_delay, retry_max_delay\n        )\n    elif vlm_type in [\"qwen\", \"openai\", \"glmv\"]:"
+new = "    if vlm_type == \"claude\":\n        # Prefer Claude when key is available, otherwise fallback to OpenAI path.\n        if ANTHROPIC_API_KEY:\n            return _call_claude_with_retry(\n                model, max_tokens, temperature, messages, thinking,\n                max_retries, retry_base_delay, retry_max_delay\n            )\n        print(\"⚠️ ANTHROPIC_API_KEY missing; falling back to OpenAI for call_vlm(claude)\")\n        return _call_openai_with_retry(\n            \"openai\",\n            model,\n            max_tokens,\n            temperature,\n            messages,\n            thinking,\n            response_format,\n            max_retries,\n            retry_base_delay,\n            retry_max_delay,\n        )\n    elif vlm_type in [\"qwen\", \"openai\", \"glmv\"]:"
+
+if old in text:
+    text = text.replace(old, new, 1)
+
+if text != orig:
+    path.write_text(text)
+    print(f"  PATCHED: {path}")
+else:
+    print(f"  OK: no-op in {path}")
+PYEOF
 fi
 
 log "All patches applied."
