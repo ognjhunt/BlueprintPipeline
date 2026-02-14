@@ -1,0 +1,210 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# SAGE + SAM3D + Isaac Sim — Portable Docker Image
+# =============================================================================
+#
+# All-in-one image for running SAGE scene generation with SAM3D as the 3D
+# backend. No TRELLIS pod needed — SAM3D runs locally on the same GPU.
+#
+# Build (MUST use --platform linux/amd64, needs GPU for CUDA extensions):
+#   docker build --platform linux/amd64 \
+#     -f Dockerfile.sage-sam3d \
+#     -t <registry>/sage-sam3d:latest .
+#
+# Run on any provider:
+#   docker run --gpus all \
+#     -e OPENAI_API_KEY=sk-... \
+#     -e GEMINI_API_KEY=AIza... \
+#     -e SLURM_JOB_ID=12345 \
+#     -p 8080:8080 \
+#     <registry>/sage-sam3d:latest
+#
+# What's included:
+#   - SAGE repo (NVlabs/sage) + all patches
+#   - SAM3D server (TRELLIS-compatible drop-in)
+#   - SAM3D model checkpoints (~16 GB)
+#   - Isaac Sim 5.1.0 (pip install) + MCP extension
+#   - Conda env 'sage' (from SAGE/client/environment.yml)
+#   - System libs (EGL, OpenGL, X11)
+#   - pytorch_lightning (fixes doors/windows generation)
+#   - All runtime scripts (run_room_desc.sh, sam3d_server.py, etc.)
+#
+# NOT included (injected at runtime via env vars):
+#   - OPENAI_API_KEY (required)
+#   - GEMINI_API_KEY (recommended — image generation)
+#   - ANTHROPIC_API_KEY (optional)
+#   - HF_TOKEN (optional — only if you need to re-download models)
+#
+# Image size: ~35-45 GB (SAM3D checkpoints + Isaac Sim + CUDA packages)
+# =============================================================================
+
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    LIDRA_SKIP_INIT=1 \
+    WORKSPACE=/workspace
+
+# =============================================================================
+# Phase 1: System libraries (X11, OpenGL, EGL for Isaac Sim headless)
+# =============================================================================
+RUN apt-get update -qq && \
+    apt-get install -y -qq \
+        ca-certificates curl wget git jq gnupg \
+        libgl1 libglib2.0-0 libxrender1 libxi6 libxxf86vm1 \
+        libxfixes3 libxkbcommon0 libsm6 libice6 libxext6 \
+        libxrandr2 libxcursor1 libxinerama1 libepoxy0 \
+        libglu1-mesa libegl1 libegl-mesa0 libgles2-mesa \
+        libopengl0 libglx-mesa0 libpython3.11-dev \
+        psmisc iproute2 git-lfs && \
+    apt-get remove -y bubblewrap 2>/dev/null || true && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# =============================================================================
+# Phase 2: Install Miniconda (for SAGE conda env)
+# =============================================================================
+RUN wget -q -O /tmp/miniconda.sh \
+      https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh && \
+    bash /tmp/miniconda.sh -b -p /workspace/miniconda3 && \
+    rm /tmp/miniconda.sh && \
+    /workspace/miniconda3/bin/conda init bash 2>/dev/null || true
+
+ENV PATH="/workspace/miniconda3/bin:${PATH}"
+
+# =============================================================================
+# Phase 3: Clone SAGE repo
+# =============================================================================
+RUN git clone --depth 1 https://github.com/NVlabs/sage.git /workspace/SAGE
+
+# =============================================================================
+# Phase 4: Create conda env 'sage' from environment.yml
+# =============================================================================
+RUN conda env create -n sage -f /workspace/SAGE/client/environment.yml && \
+    conda clean -afy
+
+# Install pytorch_lightning (fixes doors/windows generation)
+SHELL ["/workspace/miniconda3/bin/conda", "run", "-n", "sage", "/bin/bash", "-c"]
+RUN pip install --no-cache-dir pytorch-lightning opencv-python-headless
+
+# =============================================================================
+# Phase 5: Apply SAGE patches (GPT 5.1 compatibility + import guards)
+# =============================================================================
+# Patch 1: vlm.py — max_completion_tokens + reasoning_effort
+# Patch 2: layout.py — import guards for matfuse + isaaclab
+# Patch 3: layout_wo_robot.py — same import guards
+# Patch 4: client_generation_room_desc.py — GPT 5.1 compat
+# These are applied via the entrypoint script at runtime for flexibility,
+# but we copy the patch script into the image.
+COPY scripts/runpod_sage/apply_sage_patches.sh /workspace/apply_sage_patches.sh
+RUN chmod +x /workspace/apply_sage_patches.sh
+
+# =============================================================================
+# Phase 6: SAM3D setup (checkpoint download + dependencies)
+# =============================================================================
+# SAM3D Python dependencies (in the system Python, not conda)
+RUN pip install --no-cache-dir \
+    flask flask-cors werkzeug psutil requests \
+    omegaconf hydra-core \
+    open3d trimesh plyfile numpy pillow \
+    google-generativeai
+
+# Download SAM3D checkpoints from HuggingFace (~16GB)
+# Uses the publicly available sam-3d-objects model
+RUN pip install --no-cache-dir huggingface-hub && \
+    mkdir -p /workspace/sam3d/checkpoints && \
+    python3 -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('facebook/sam-3d-objects', local_dir='/workspace/sam3d/checkpoints/hf', \
+                  ignore_patterns=['*.md', '*.txt', 'LICENSE*'])" && \
+    echo "SAM3D checkpoints downloaded"
+
+# Clone and install SAM3D source
+RUN git clone --depth 1 https://github.com/facebookresearch/sam-3d-objects.git /workspace/sam3d/repo && \
+    cd /workspace/sam3d/repo && \
+    pip install --no-cache-dir -e . --no-deps 2>/dev/null || \
+    pip install --no-cache-dir -e . 2>/dev/null || \
+    echo "SAM3D install attempted (may need runtime fixes)"
+
+# Additional SAM3D deps
+RUN pip install --no-cache-dir \
+    roma loguru einops fvcore timm scipy \
+    pytorch3d --no-build-isolation 2>/dev/null || \
+    FORCE_CUDA=1 pip install --no-cache-dir \
+    "git+https://github.com/facebookresearch/pytorch3d.git" --no-build-isolation 2>/dev/null || \
+    echo "pytorch3d install attempted"
+
+# =============================================================================
+# Phase 7: Isaac Sim 5.1.0 via pip
+# =============================================================================
+RUN python3.11 -m venv /workspace/isaacsim_env && \
+    /workspace/isaacsim_env/bin/pip install --upgrade pip && \
+    /workspace/isaacsim_env/bin/pip install --no-cache-dir \
+        "isaacsim[all,extscache]==5.1.0" \
+        --extra-index-url https://pypi.nvidia.com
+
+# Symlink SAGE MCP extension into Isaac Sim
+RUN ISAACSIM_PATH=$(/workspace/isaacsim_env/bin/python3 -c \
+      "import isaacsim; import os; print(os.path.dirname(isaacsim.__file__))") && \
+    ln -sf /workspace/SAGE/server/isaacsim/isaac.sim.mcp_extension \
+           "${ISAACSIM_PATH}/exts/isaac.sim.mcp_extension" && \
+    echo "ISAACSIM_PATH=${ISAACSIM_PATH}" > /workspace/.isaacsim_path
+
+# =============================================================================
+# Phase 8: Copy BlueprintPipeline scripts and configs
+# =============================================================================
+COPY scripts/runpod_sage/ /workspace/BlueprintPipeline/scripts/runpod_sage/
+COPY configs/ /workspace/BlueprintPipeline/configs/
+
+# =============================================================================
+# Phase 9: Entrypoint + startup script
+# =============================================================================
+COPY scripts/runpod_sage/entrypoint_sage_sam3d.sh /workspace/entrypoint.sh
+RUN chmod +x /workspace/entrypoint.sh
+
+# =============================================================================
+# Phase 10: Verification script
+# =============================================================================
+RUN echo '#!/bin/bash\n\
+echo "=== SAGE + SAM3D Docker Image Verification ==="\n\
+echo ""\n\
+echo "--- System ---"\n\
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || echo "No GPU (expected during build)"\n\
+echo ""\n\
+echo "--- Conda env: sage ---"\n\
+source /workspace/miniconda3/etc/profile.d/conda.sh\n\
+conda activate sage 2>/dev/null && echo "sage env: OK" || echo "sage env: MISSING"\n\
+echo ""\n\
+echo "--- Isaac Sim ---"\n\
+source /workspace/isaacsim_env/bin/activate\n\
+python3 -c "import isaacsim; print(f\"Isaac Sim: OK\")" 2>/dev/null || echo "Isaac Sim: MISSING"\n\
+echo ""\n\
+echo "--- SAM3D checkpoints ---"\n\
+if [ -f /workspace/sam3d/checkpoints/hf/pipeline.yaml ]; then\n\
+  echo "SAM3D checkpoints: OK"\n\
+else\n\
+  echo "SAM3D checkpoints: MISSING (need to download)"\n\
+fi\n\
+echo ""\n\
+echo "--- SAGE repo ---"\n\
+if [ -d /workspace/SAGE/.git ]; then\n\
+  echo "SAGE repo: OK"\n\
+else\n\
+  echo "SAGE repo: MISSING"\n\
+fi\n\
+echo ""\n\
+echo "--- SAM3D server ---"\n\
+if [ -f /workspace/BlueprintPipeline/scripts/runpod_sage/sam3d_server.py ]; then\n\
+  echo "SAM3D server: OK"\n\
+else\n\
+  echo "SAM3D server: MISSING"\n\
+fi\n\
+echo ""\n\
+echo "=== Verification complete ===" \n\
+' > /workspace/verify.sh && chmod +x /workspace/verify.sh
+
+WORKDIR /workspace
+EXPOSE 8080
+
+# Default: run the entrypoint which starts all services
+CMD ["/workspace/entrypoint.sh"]

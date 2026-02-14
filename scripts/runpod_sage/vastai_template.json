@@ -1,0 +1,47 @@
+{
+    "_comment": "Vast.ai template for SAGE + SAM3D. Use after pushing Docker image.",
+    "_usage": "vastai create template --raw '{...this json...}'",
+
+    "name": "SAGE + SAM3D (Scene Generation)",
+    "image": "REPLACE_WITH_YOUR_REGISTRY/sage-sam3d:latest",
+    "image_tag": "latest",
+
+    "disk_space": 80,
+    "gpu_ram": 24,
+    "num_gpus": 1,
+
+    "env": {
+        "WORKSPACE": "/workspace",
+        "SLURM_JOB_ID": "12345",
+        "OMNI_KIT_ACCEPT_EULA": "YES",
+        "ACCEPT_EULA": "Y",
+        "PRIVACY_CONSENT": "Y",
+        "LIDRA_SKIP_INIT": "1",
+        "SAM3D_IMAGE_BACKEND": "gemini"
+    },
+
+    "ports": "8080/http,22/tcp",
+    "expose_ports": "8080,22",
+
+    "on_start": "/workspace/entrypoint.sh",
+
+    "recommended_gpus": [
+        "NVIDIA L40S",
+        "NVIDIA L40",
+        "NVIDIA A6000",
+        "NVIDIA RTX 4090",
+        "NVIDIA RTX A5000"
+    ],
+
+    "_notes": {
+        "min_vram": "24GB (L40S recommended for best performance)",
+        "driver": ">= 560 (for Isaac Sim 5.1.0)",
+        "runtime_env_vars": [
+            "OPENAI_API_KEY (required) — set in Vast.ai instance env",
+            "GEMINI_API_KEY (recommended) — for image generation",
+            "ANTHROPIC_API_KEY (optional)",
+            "HF_TOKEN (optional) — only if downloading new models"
+        ],
+        "startup_time": "~30-60s (SAM3D model loading) vs 15-20 min without snapshot"
+    }
+}
