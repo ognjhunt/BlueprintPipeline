@@ -31,6 +31,7 @@ class SimRole(str, Enum):
     STATIC = "static"
     INTERACTIVE = "interactive"
     MANIPULABLE_OBJECT = "manipulable_object"
+    DEFORMABLE_OBJECT = "deformable_object"
     ARTICULATED_FURNITURE = "articulated_furniture"
     ARTICULATED_APPLIANCE = "articulated_appliance"
     CLUTTER = "clutter"
@@ -249,6 +250,25 @@ class SceneObject(BaseModel):
             return v
         # Remove control characters
         return ''.join(c for c in v if c.isprintable())
+
+    @field_validator('sim_role', mode='before')
+    @classmethod
+    def normalize_sim_role(cls, v: Any) -> Any:
+        """Normalize legacy/alias sim_role strings before Enum parsing."""
+        if v is None:
+            return SimRole.UNKNOWN.value
+        if isinstance(v, SimRole):
+            return v
+        role = str(v).strip().lower()
+        if role in {"dynamic"}:
+            role = SimRole.INTERACTIVE.value
+        if role in {"deformable", "cloth", "soft_body"}:
+            role = SimRole.DEFORMABLE_OBJECT.value
+        try:
+            SimRole(role)
+        except Exception:
+            return SimRole.UNKNOWN.value
+        return role
 
 
 class RoomBounds(BaseModel):

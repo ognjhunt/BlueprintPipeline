@@ -3,12 +3,13 @@
 Interactive Asset Pipeline for 3D-RE-GEN Integration.
 
 This job processes 3D assets (GLB meshes) from 3D-RE-GEN to add articulation
-data using Particulate - a fast feed-forward mesh articulation model (~10s per object).
+data using a multi-backend articulation pipeline.
 
 The pipeline:
-1. Receives GLB meshes from 3D-RE-GEN (or crop images as fallback)
-2. Sends GLB directly to Particulate for articulation
-3. Outputs URDF with articulation data + segmented meshes
+1. Receives object meshes (GLB) and/or crop images from upstream stages
+2. Chooses an articulation backend per object (Infinigen, PhysX-Anything, Particulate)
+3. Runs an automatic simulation-backed "critic" to validate open/close + self-collision
+4. Retries with the next backend when the critic fails (quality + automation)
 
 Designed for the 3D-RE-GEN pipeline:
     3D-RE-GEN → interactive-job → simready-job → usd-assembly-job
@@ -22,7 +23,8 @@ Environment Variables:
     PARTICULATE_LOCAL_ENDPOINT: Optional local Particulate URL for PARTICULATE_MODE=local
     PARTICULATE_LOCAL_MODEL: Identifier for the locally hosted Particulate model (required in labs/prod)
     APPROVED_PARTICULATE_MODELS: Comma-separated allowlist for local Particulate models (default: pat_b)
-    ARTICULATION_BACKEND: "particulate", "heuristic", or "auto" (default)
+    PARTICULATE_UP_DIR: Optional coordinate frame hint passed through to Particulate (e.g. "Y" or "Z")
+    ARTICULATION_BACKEND: "infinigen", "physx_anything", "particulate", "heuristic", or "auto" (default)
     REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
     PIPELINE_ENV: Pipeline environment (e.g., "production") for production guardrails
@@ -31,17 +33,47 @@ Environment Variables:
     ARTICULATION_MULTIVIEW_ENABLED: "true" to generate experimental synthetic multiview references
     ARTICULATION_MULTIVIEW_COUNT: Number of synthetic scaffold views (default: 4)
     ARTICULATION_MULTIVIEW_MODEL: Gemini image model for scaffold generation
+
+    # Optional additional backends for "auto" selection:
+    INFINIGEN_ENABLED: "true" to enable Infinigen articulated asset generation backend
+    INFINIGEN_ROOT: Path to an Infinigen checkout (must contain scripts/spawn_asset.py)
+    INFINIGEN_ENDPOINT: Optional HTTP endpoint for an Infinigen backend service (POST JSON)
+    INFINIGEN_COLLISION: "true" to request collision-enabled exports (-c)
+
+    PHYSX_ANYTHING_ENABLED: "true" to enable PhysX-Anything backend
+    PHYSX_ANYTHING_ROOT: Path to a PhysX-Anything checkout (must contain 1_vlm_demo.py etc.)
+    PHYSX_ANYTHING_ENDPOINT: Optional HTTP endpoint for a PhysX-Anything backend service (POST JSON)
+    PHYSX_ANYTHING_CKPT: Path to PhysX-Anything VLM checkpoint directory (default: {PHYSX_ANYTHING_ROOT}/pretrain/vlm)
+    PHYSX_ANYTHING_REMOVE_BG: "true" to remove background in PhysX-Anything inference
+    PHYSX_ANYTHING_VOXEL_DEFINE: Voxel resolution for simready export (default: 32)
+    PHYSX_ANYTHING_FIXED_BASE: "1" to export fixed-base URDFs (default: 0)
+    PHYSX_ANYTHING_DEFORMABLE: "1" to enable deformables in simready export (default: 0)
+
+    # Automatic critic (simulation-backed) for retries:
+    ARTICULATION_CRITIC_ENABLED: "true" to run joint sweep + self-collision checks (default: true when pybullet is installed)
+    ARTICULATION_CRITIC_SWEEP_STEPS: Steps to simulate per target position (default: 120)
+    ARTICULATION_CRITIC_MAX_SELF_CONTACTS: Fail if self-contacts exceed this count at a target (default: 0)
+    ARTICULATION_RETRY_ENABLED: "true" to retry other backends on critic failure (default: true)
+    ARTICULATION_NONINFINIGEN_ORDER: "image_first" (default) or "mesh_first" when both PhysX-Anything and Particulate are available
+
+    INFINIGEN_TIMEOUT_S: HTTP timeout for INFINIGEN_ENDPOINT requests (default: 900)
+    PHYSX_ANYTHING_TIMEOUT_S: HTTP timeout for PHYSX_ANYTHING_ENDPOINT requests (default: 900)
 """
 import base64
+import hashlib
+import io
 import importlib.util
 import json
 import math
 import os
+import random
 import shutil
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
@@ -80,6 +112,31 @@ PARTICULATE_MODE_SKIP = "skip"
 ARTICULATION_BACKEND_PARTICULATE = "particulate"
 ARTICULATION_BACKEND_HEURISTIC = "heuristic"
 ARTICULATION_BACKEND_AUTO = "auto"
+ARTICULATION_BACKEND_INFINIGEN = "infinigen"
+ARTICULATION_BACKEND_PHYSX_ANYTHING = "physx_anything"
+
+# Infinigen articulated categories (from Infinigen release notes). Used as a
+# fallback when we can't import Infinigen's internal mapping.
+INFINIGEN_CATEGORY_HINTS = {
+    "doors",
+    "toasters",
+    "refrigerators",
+    "ovens",
+    "microwaves",
+    "cabinets",
+    "drawers",
+    "cooktops",
+    "lamps",
+    "trashcans",
+    "boxes",
+    "pepper_grinders",
+    "windows",
+    "dishwashers",
+    "faucets",
+    "soap_dispensers",
+    "door_handles",
+    "pliers",
+}
 
 
 # =============================================================================
@@ -118,6 +175,8 @@ def normalize_articulation_backend(value: str) -> str:
     """Normalize articulation backend env var to a supported value."""
     backend = value.strip().lower()
     if backend not in {
+        ARTICULATION_BACKEND_INFINIGEN,
+        ARTICULATION_BACKEND_PHYSX_ANYTHING,
         ARTICULATION_BACKEND_PARTICULATE,
         ARTICULATION_BACKEND_HEURISTIC,
         ARTICULATION_BACKEND_AUTO,
@@ -136,6 +195,8 @@ def resolve_articulation_backend(
     particulate_endpoint: str,
 ) -> str:
     """Resolve backend selection (explicit or auto)."""
+    if requested_backend in {ARTICULATION_BACKEND_INFINIGEN, ARTICULATION_BACKEND_PHYSX_ANYTHING}:
+        return requested_backend
     if requested_backend == ARTICULATION_BACKEND_PARTICULATE:
         return ARTICULATION_BACKEND_PARTICULATE
     if requested_backend == ARTICULATION_BACKEND_HEURISTIC:
@@ -146,6 +207,473 @@ def resolve_articulation_backend(
     if particulate_mode == PARTICULATE_MODE_REMOTE and particulate_endpoint:
         return ARTICULATION_BACKEND_PARTICULATE
     return ARTICULATION_BACKEND_HEURISTIC
+
+
+def _stable_int_from_str(text: str, modulo: int = 2**31 - 1) -> int:
+    """Deterministic int hash for seeding backend selection and generators."""
+    digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).digest()
+    return int.from_bytes(digest[:8], "big") % modulo
+
+
+def _normalize_token(text: str) -> str:
+    return "".join(ch.lower() for ch in (text or "") if ch.isalnum() or ch in {"_", "-"}).strip("_-")
+
+
+def _mesh_quality_hint(glb_path: Path) -> Dict[str, Any]:
+    """Cheap mesh quality signals to decide particulate vs physx-anything in auto mode."""
+    hint: Dict[str, Any] = {
+        "ok": False,
+        "components": None,
+        "watertight": None,
+        "faces": None,
+        "verts": None,
+        "good_for_particulate": False,
+        "error": None,
+    }
+    try:
+        import trimesh
+    except Exception as exc:
+        hint["error"] = f"trimesh_unavailable: {exc}"
+        return hint
+
+    try:
+        mesh = trimesh.load(str(glb_path), force="mesh")
+        if isinstance(mesh, trimesh.Scene):
+            geometries = list(mesh.geometry.values())
+            if not geometries:
+                hint["error"] = "no_geometry"
+                return hint
+            mesh = trimesh.util.concatenate(geometries)
+        hint["ok"] = True
+        hint["watertight"] = bool(getattr(mesh, "is_watertight", False))
+        hint["faces"] = int(getattr(mesh, "faces", []) and len(mesh.faces) or 0)
+        hint["verts"] = int(getattr(mesh, "vertices", []) and len(mesh.vertices) or 0)
+        try:
+            # Particulate often behaves better when the mesh has meaningful connected components.
+            comps = mesh.split(only_watertight=False)
+            hint["components"] = int(len(comps))
+        except Exception:
+            hint["components"] = None
+        hint["good_for_particulate"] = (hint["components"] is not None and hint["components"] >= 2)
+        return hint
+    except Exception as exc:
+        hint["error"] = f"mesh_load_failed: {exc}"
+        return hint
+
+
+def _resolve_infinigen_asset_name(obj_class: str) -> Optional[str]:
+    """
+    Map an object class name to an Infinigen sim-ready asset name, when possible.
+
+    We prefer Infinigen's OBJECT_CLASS_MAP if installed; otherwise fall back to
+    simple string matching against known category hints.
+    """
+    normalized = _normalize_token(obj_class)
+    if not normalized:
+        return None
+
+    # Fast path: try Infinigen mapping if available.
+    try:
+        import importlib
+
+        mapping = importlib.import_module("infinigen.assets.sim_objects.mapping")
+        obj_map = getattr(mapping, "OBJECT_CLASS_MAP", None)
+        if isinstance(obj_map, dict) and obj_map:
+            # Keys are the asset "names" accepted by scripts/spawn_asset.py.
+            key_map = {_normalize_token(k): k for k in obj_map.keys()}
+            if normalized in key_map:
+                return key_map[normalized]
+            # Common synonyms
+            synonyms = {
+                "fridge": "multifridge",
+                "refrigerator": "multifridge",
+                "doublefridge": "multidoublefridge",
+                "double_refrigerator": "multidoublefridge",
+            }
+            syn = synonyms.get(normalized)
+            if syn:
+                for cand in (syn, _normalize_token(syn)):
+                    if _normalize_token(cand) in key_map:
+                        return key_map[_normalize_token(cand)]
+            # Fuzzy: substring match
+            for nk, orig in key_map.items():
+                if normalized in nk or nk in normalized:
+                    return orig
+    except Exception:
+        pass
+
+    # Fallback: match against category hints (non-exhaustive).
+    hint_tokens = {_normalize_token(v) for v in INFINIGEN_CATEGORY_HINTS}
+    if normalized in hint_tokens:
+        return normalized
+    for token in hint_tokens:
+        if token and (token in normalized or normalized in token):
+            return token
+    return None
+
+
+def _copy_tree_contents(src_dir: Path, dst_dir: Path, ignore_names: Optional[set] = None) -> None:
+    """Copy the *contents* of src_dir into dst_dir (non-destructive merge)."""
+    ignore_names = ignore_names or set()
+    ensure_dir(dst_dir)
+    for item in src_dir.iterdir():
+        if item.name in ignore_names:
+            continue
+        dest = dst_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dest)
+
+
+def _pick_latest_file(root: Path, pattern: str) -> Optional[Path]:
+    candidates = list(root.rglob(pattern))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def _materialize_payload_dir(
+    payload_dir: Path,
+    attempt_dir: Path,
+    obj_name: str,
+    glb_path: Optional[Path] = None,
+) -> Tuple[Optional[Path], Optional[Path]]:
+    """
+    Copy a backend-produced directory (URDF + referenced meshes) into attempt_dir.
+
+    Ensures a root-level URDF exists (obj_name.urdf). Also copies the input mesh
+    to mesh.glb when provided for traceability/debugging.
+    """
+    ensure_dir(attempt_dir)
+    if glb_path and glb_path.is_file():
+        try:
+            shutil.copy2(glb_path, attempt_dir / "mesh.glb")
+        except Exception:
+            pass
+
+    _copy_tree_contents(payload_dir, attempt_dir)
+
+    urdf_candidates = list(attempt_dir.glob("*.urdf"))
+    if not urdf_candidates:
+        return None, None
+    urdf_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    src_urdf = urdf_candidates[0]
+    final_urdf = attempt_dir / f"{obj_name}.urdf"
+    if src_urdf != final_urdf:
+        try:
+            shutil.copy2(src_urdf, final_urdf)
+        except Exception:
+            final_urdf = src_urdf
+
+    # Prefer a segmented GLB if present; otherwise keep mesh.glb.
+    mesh_path = None
+    for name in ["part.glb", "mesh.glb", "model.glb"]:
+        cand = attempt_dir / name
+        if cand.is_file():
+            mesh_path = cand
+            break
+    if mesh_path is None:
+        glb_any = list(attempt_dir.glob("*.glb"))
+        if glb_any:
+            mesh_path = glb_any[0]
+    return mesh_path, final_urdf
+
+
+def _run_infinigen_backend(
+    infinigen_root: str,
+    obj_class: str,
+    attempt_dir: Path,
+    obj_name: str,
+    seed: int,
+    glb_path: Optional[Path] = None,
+) -> Tuple[Optional[Path], Optional[Path], Dict[str, Any]]:
+    meta: Dict[str, Any] = {"placeholder": False, "generator": "infinigen"}
+    infinigen_root_path = Path(infinigen_root).expanduser()
+    script = infinigen_root_path / "scripts" / "spawn_asset.py"
+    if not script.is_file():
+        meta["error"] = f"missing_infinigen_script: {script}"
+        return None, None, meta
+
+    asset_name = _resolve_infinigen_asset_name(obj_class)
+    if not asset_name:
+        meta["error"] = f"unsupported_category: {obj_class}"
+        return None, None, meta
+    meta["asset_name"] = asset_name
+
+    work_dir = attempt_dir / "_work_infinigen"
+    ensure_dir(work_dir)
+
+    cmd = [
+        sys.executable,
+        str(script),
+        "-exp",
+        "urdf",
+        "-n",
+        str(asset_name),
+        "-s",
+        str(int(seed)),
+        "-dir",
+        str(work_dir),
+    ]
+    if env_flag(os.getenv("INFINIGEN_COLLISION"), default=True):
+        cmd.append("-c")
+
+    env = os.environ.copy()
+    # Infinigen is typically used from its repo root; add to PYTHONPATH for imports.
+    env["PYTHONPATH"] = f"{infinigen_root_path}:{env.get('PYTHONPATH', '')}"
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True)
+    except subprocess.CalledProcessError as exc:
+        meta["error"] = f"infinigen_failed: {exc.returncode}"
+        meta["stdout"] = (exc.stdout or "")[:4000]
+        return None, None, meta
+
+    urdf_path = _pick_latest_file(work_dir, "*.urdf")
+    if urdf_path is None or not urdf_path.is_file():
+        meta["error"] = "infinigen_no_urdf"
+        return None, None, meta
+
+    payload_dir = urdf_path.parent
+    mesh_path, final_urdf = _materialize_payload_dir(payload_dir, attempt_dir, obj_name, glb_path=glb_path)
+    if not final_urdf or not final_urdf.is_file():
+        meta["error"] = "infinigen_materialize_failed"
+        return mesh_path, None, meta
+
+    meta["payload_dir"] = str(payload_dir)
+    return mesh_path, final_urdf, meta
+
+
+def _call_json_service(
+    endpoint: str,
+    payload: Dict[str, Any],
+    *,
+    timeout_s: int,
+    obj_id: str,
+    label: str,
+) -> Optional[Dict[str, Any]]:
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        log(f"POST {endpoint} (timeout={timeout_s}s) [{label}]", obj_id=obj_id)
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+            return json.loads(text)
+    except urllib.error.HTTPError as exc:
+        try:
+            preview = exc.read().decode("utf-8", errors="replace")[:1000]
+        except Exception:
+            preview = ""
+        log(f"{label} HTTP {exc.code}: {preview}", "ERROR", obj_id=obj_id)
+        return None
+    except Exception as exc:
+        log(f"{label} request failed: {type(exc).__name__}: {exc}", "ERROR", obj_id=obj_id)
+        return None
+
+
+def _materialize_payload_zip_base64(
+    payload_zip_b64: str,
+    attempt_dir: Path,
+    obj_name: str,
+    glb_path: Optional[Path] = None,
+) -> Tuple[Optional[Path], Optional[Path]]:
+    """Extract a base64 zip payload and materialize URDF + meshes into attempt_dir."""
+    try:
+        zip_bytes = base64.b64decode(payload_zip_b64)
+    except Exception:
+        return None, None
+
+    payload_root = attempt_dir / "_payload_zip"
+    ensure_dir(payload_root)
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            zf.extractall(payload_root)
+    except Exception:
+        return None, None
+
+    urdf_path = _pick_latest_file(payload_root, "*.urdf")
+    if urdf_path is None or not urdf_path.is_file():
+        return None, None
+
+    payload_dir = urdf_path.parent
+    mesh_path, final_urdf = _materialize_payload_dir(payload_dir, attempt_dir, obj_name, glb_path=glb_path)
+    return mesh_path, final_urdf
+
+
+def materialize_service_response(
+    response: Dict[str, Any],
+    output_dir: Path,
+    obj_id: str,
+    disallow_placeholder: bool = False,
+    glb_path: Optional[Path] = None,
+) -> Tuple[Optional[Path], Optional[Path], Dict[str, Any]]:
+    """
+    Materialize a backend service response to disk.
+
+    Supported schemas:
+    - {"payload_zip_base64": "...", "placeholder": bool, "generator": "..."}
+    - Particulate-style {"mesh_base64": "...", "urdf_base64": "...", ...}
+    """
+    ensure_dir(output_dir)
+    meta: Dict[str, Any] = {
+        "placeholder": bool(response.get("placeholder", False)),
+        "generator": response.get("generator", "service"),
+    }
+
+    if response.get("placeholder"):
+        if disallow_placeholder:
+            raise_placeholder_error(obj_id, "service_placeholder_response")
+        return None, None, meta
+
+    payload_zip_b64 = response.get("payload_zip_base64")
+    if isinstance(payload_zip_b64, str) and payload_zip_b64.strip():
+        mesh_path, urdf_path = _materialize_payload_zip_base64(
+            payload_zip_b64,
+            attempt_dir=output_dir,
+            obj_name=obj_id,
+            glb_path=glb_path,
+        )
+        if not urdf_path or not urdf_path.is_file():
+            meta["error"] = "payload_zip_materialize_failed"
+            return mesh_path, None, meta
+        meta["payload_zip"] = True
+        return mesh_path, urdf_path, meta
+
+    # Fallback: treat as Particulate-style response.
+    mesh_path, urdf_path, response_meta = materialize_articulation_response(
+        response,
+        output_dir,
+        obj_id,
+        disallow_placeholder=disallow_placeholder,
+    )
+    meta.update(response_meta)
+    return mesh_path, urdf_path, meta
+
+
+def _run_physx_anything_backend(
+    physx_root: str,
+    ckpt_dir: str,
+    image_path: Path,
+    attempt_dir: Path,
+    obj_name: str,
+    seed: int,
+    glb_path: Optional[Path] = None,
+) -> Tuple[Optional[Path], Optional[Path], Dict[str, Any]]:
+    meta: Dict[str, Any] = {"placeholder": False, "generator": "physx-anything"}
+    physx_root_path = Path(physx_root).expanduser()
+    demo_script = physx_root_path / "1_vlm_demo.py"
+    if not demo_script.is_file():
+        meta["error"] = f"missing_physx_anything: {demo_script}"
+        return None, None, meta
+
+    work_dir = attempt_dir / "_work_physx_anything"
+    ensure_dir(work_dir)
+
+    # Prepare demo input directory
+    demo_dir = work_dir / "demo"
+    ensure_dir(demo_dir)
+    demo_img = demo_dir / f"{obj_name}{image_path.suffix.lower() or '.png'}"
+    try:
+        shutil.copy2(image_path, demo_img)
+    except Exception as exc:
+        meta["error"] = f"copy_image_failed: {exc}"
+        return None, None, meta
+
+    # Symlink dataset folder for prompts if present
+    dataset_src = physx_root_path / "dataset"
+    if dataset_src.is_dir():
+        dataset_dst = work_dir / "dataset"
+        if not dataset_dst.exists():
+            try:
+                dataset_dst.symlink_to(dataset_src)
+            except Exception:
+                # Fall back to copying prompt file only
+                ensure_dir(dataset_dst)
+                prompt_src = dataset_src / "overall_prompt.txt"
+                if prompt_src.is_file():
+                    shutil.copy2(prompt_src, dataset_dst / "overall_prompt.txt")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{physx_root_path}:{env.get('PYTHONPATH', '')}"
+    # Make selection deterministic for any internal randomness.
+    env["PYTHONHASHSEED"] = str(int(seed))
+
+    remove_bg = env_flag(os.getenv("PHYSX_ANYTHING_REMOVE_BG"), default=False)
+    voxel_define = int(os.getenv("PHYSX_ANYTHING_VOXEL_DEFINE", "32") or "32")
+    fixed_base = int(os.getenv("PHYSX_ANYTHING_FIXED_BASE", "0") or "0")
+    deformable = int(os.getenv("PHYSX_ANYTHING_DEFORMABLE", "0") or "0")
+
+    try:
+        # Step 1: VLM inference + coarse info
+        step1 = [
+            sys.executable,
+            str(demo_script),
+            "--demo_path",
+            str(demo_dir),
+            "--save_part_ply",
+            "True",
+            "--remove_bg",
+            "True" if remove_bg else "False",
+            "--ckpt",
+            str(ckpt_dir),
+        ]
+        subprocess.run(step1, check=True, cwd=str(work_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True)
+
+        # Steps 2-3: decode + split (operate on work_dir/test_demo/*)
+        for script_name in ["2_decoder.py", "3_split.py"]:
+            script_path = physx_root_path / script_name
+            subprocess.run(
+                [sys.executable, str(script_path)],
+                check=True,
+                cwd=str(work_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+            )
+
+        # Step 4: simready export (URDF)
+        script4 = physx_root_path / "4_simready_gen.py"
+        step4 = [
+            sys.executable,
+            str(script4),
+            "--voxel_define",
+            str(voxel_define),
+            "--basepath",
+            str(work_dir / "test_demo"),
+            "--process",
+            "0",
+            "--fixed_base",
+            str(fixed_base),
+            "--deformable",
+            str(deformable),
+        ]
+        subprocess.run(step4, check=True, cwd=str(work_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True)
+    except subprocess.CalledProcessError as exc:
+        meta["error"] = f"physx_anything_failed: {exc.returncode}"
+        meta["stdout"] = (exc.stdout or "")[:4000]
+        return None, None, meta
+
+    urdf_path = _pick_latest_file(work_dir, "*.urdf")
+    if urdf_path is None or not urdf_path.is_file():
+        meta["error"] = "physx_anything_no_urdf"
+        return None, None, meta
+
+    payload_dir = urdf_path.parent
+    mesh_path, final_urdf = _materialize_payload_dir(payload_dir, attempt_dir, obj_name, glb_path=glb_path)
+    if not final_urdf or not final_urdf.is_file():
+        meta["error"] = "physx_anything_materialize_failed"
+        return mesh_path, None, meta
+
+    meta["payload_dir"] = str(payload_dir)
+    meta["input_image"] = str(image_path)
+    return mesh_path, final_urdf, meta
 
 
 def parse_csv_env(value: str) -> List[str]:
@@ -750,6 +1278,9 @@ def call_particulate_service(
     payload = {
         "glb_base64": base64.b64encode(glb_bytes).decode("utf-8")
     }
+    particulate_up_dir = (os.getenv("PARTICULATE_UP_DIR", "") or "").strip()
+    if particulate_up_dir:
+        payload["up_dir"] = particulate_up_dir
 
     body = json.dumps(payload).encode("utf-8")
     log(f"Request payload: glb={len(glb_bytes)} bytes", obj_id=obj_id)
@@ -953,15 +1484,26 @@ def validate_urdf_in_pybullet(
 
     client_id = p.connect(p.DIRECT)
     try:
+        # Conservative defaults for a fast "critic" pass.
+        p.setGravity(0, 0, -9.81, physicsClientId=client_id)
+        p.setTimeStep(1.0 / 240.0, physicsClientId=client_id)
+
         if mesh_dir:
             p.setAdditionalSearchPath(str(mesh_dir), physicsClientId=client_id)
 
         try:
+            critic_enabled = env_flag(os.getenv("ARTICULATION_CRITIC_ENABLED"), default=True)
+            flags = int(getattr(p, "URDF_USE_INERTIA_FROM_FILE", 0))
+            if critic_enabled:
+                flags |= int(getattr(p, "URDF_USE_SELF_COLLISION", 0))
+                # Reduce false positives from adjacent links that share boundaries.
+                flags |= int(getattr(p, "URDF_USE_SELF_COLLISION_EXCLUDE_PARENT", 0))
+
             body_id = p.loadURDF(
                 str(urdf_path),
                 basePosition=[0, 0, 0],
                 useFixedBase=True,
-                flags=p.URDF_USE_INERTIA_FROM_FILE,
+                flags=flags,
                 physicsClientId=client_id,
             )
         except Exception as exc:
@@ -973,6 +1515,7 @@ def validate_urdf_in_pybullet(
             return result
 
         joint_count = p.getNumJoints(body_id, physicsClientId=client_id)
+        movable_joints: List[Tuple[int, str, int, float, float]] = []
         for joint_index in range(joint_count):
             joint_info = p.getJointInfo(body_id, joint_index, physicsClientId=client_id)
             joint_name = joint_info[1].decode("utf-8", errors="ignore") if joint_info[1] else f"joint_{joint_index}"
@@ -1006,6 +1549,95 @@ def validate_urdf_in_pybullet(
                     )
                 except Exception as exc:
                     result.add_error(f"Joint '{joint_name}': not controllable in PyBullet ({exc})")
+                else:
+                    # Record for optional open/close sweep critic.
+                    if upper_limit > lower_limit and (upper_limit - lower_limit) > 1e-4:
+                        movable_joints.append(
+                            (joint_index, joint_name, joint_type, float(lower_limit), float(upper_limit))
+                        )
+
+        # Joint sweep critic: move each joint through its limits and check for
+        # uncontrollable joints, limit issues, and self-collision explosions.
+        if env_flag(os.getenv("ARTICULATION_CRITIC_ENABLED"), default=True) and movable_joints:
+            try:
+                sweep_steps = max(1, int(os.getenv("ARTICULATION_CRITIC_SWEEP_STEPS", "120") or "120"))
+            except ValueError:
+                sweep_steps = 120
+            try:
+                max_self_contacts = int(os.getenv("ARTICULATION_CRITIC_MAX_SELF_CONTACTS", "0") or "0")
+            except ValueError:
+                max_self_contacts = 0
+
+            # Limit how much work we do per object.
+            max_joints_to_sweep = max(1, int(os.getenv("ARTICULATION_CRITIC_MAX_JOINTS", "12") or "12"))
+            joints_to_sweep = movable_joints[:max_joints_to_sweep]
+
+            for joint_index, joint_name, joint_type, lower, upper in joints_to_sweep:
+                rng = upper - lower
+                margin = max(1e-4, 0.02 * rng)
+                targets = [lower + margin, (lower + upper) * 0.5, upper - margin]
+                tol = max(1e-3, 0.05 * rng)
+
+                for target in targets:
+                    try:
+                        p.setJointMotorControl2(
+                            bodyIndex=body_id,
+                            jointIndex=joint_index,
+                            controlMode=p.POSITION_CONTROL,
+                            targetPosition=float(target),
+                            force=200,
+                            physicsClientId=client_id,
+                        )
+                    except Exception as exc:
+                        result.add_error(f"Joint '{joint_name}': motor control failed ({exc})")
+                        continue
+
+                    # Step simulation to let the joint settle.
+                    for _ in range(sweep_steps):
+                        p.stepSimulation(physicsClientId=client_id)
+
+                    try:
+                        state = p.getJointState(body_id, joint_index, physicsClientId=client_id)
+                        pos = float(state[0])
+                        vel = float(state[1])
+                    except Exception as exc:
+                        result.add_error(f"Joint '{joint_name}': failed to read joint state ({exc})")
+                        continue
+
+                    if not (math.isfinite(pos) and math.isfinite(vel)):
+                        result.add_error(f"Joint '{joint_name}': non-finite state (pos={pos}, vel={vel})")
+                        continue
+
+                    if abs(pos - target) > tol:
+                        result.add_error(
+                            f"Joint '{joint_name}': failed to reach target {target:.4f} (pos={pos:.4f}, tol={tol:.4f})"
+                        )
+
+                    # Self-collision check: any penetrations beyond tolerance are failures.
+                    try:
+                        contacts = p.getContactPoints(
+                            bodyA=body_id,
+                            bodyB=body_id,
+                            physicsClientId=client_id,
+                        )
+                        penetrations = 0
+                        for cp in contacts:
+                            # cp[8] is contact distance (negative => penetration)
+                            dist = float(cp[8])
+                            if dist < -1e-3:
+                                penetrations += 1
+                                if penetrations > max_self_contacts:
+                                    break
+                        if penetrations > max_self_contacts:
+                            result.add_error(
+                                f"Joint '{joint_name}': self-collision penetrations {penetrations} > {max_self_contacts}"
+                            )
+                    except Exception as exc:
+                        result.add_warning(f"Self-collision check failed: {exc}")
+
+                    # Jitter/instability heuristic.
+                    if abs(vel) > 50.0:
+                        result.add_warning(f"Joint '{joint_name}': high velocity during sweep (vel={vel:.2f})")
 
     finally:
         p.disconnect(physicsClientId=client_id)
@@ -1623,6 +2255,109 @@ def materialize_articulation_response(
 
 
 # =============================================================================
+# Backend Selection (Multi-Backend Auto Mode)
+# =============================================================================
+
+def _resolve_backend_plan_for_object(
+    requested_backend: str,
+    obj_class: str,
+    glb_path: Optional[Path],
+    image_path: Optional[Path],
+    particulate_mode: str,
+    particulate_endpoint: Optional[str],
+    retry_enabled: bool,
+) -> List[str]:
+    """
+    Choose an ordered list of backends to try for a single object.
+
+    Policy:
+    1) If requested_backend is explicit, use that backend (optionally allow retry).
+    2) If auto:
+       - If Infinigen is enabled and supports the category, try it first.
+       - Otherwise pick between PhysX-Anything (image) and Particulate (mesh).
+       - Retry other available backends on critic failure.
+    """
+    explicit = requested_backend in {
+        ARTICULATION_BACKEND_INFINIGEN,
+        ARTICULATION_BACKEND_PHYSX_ANYTHING,
+        ARTICULATION_BACKEND_PARTICULATE,
+        ARTICULATION_BACKEND_HEURISTIC,
+    }
+
+    particulate_available = bool(glb_path and glb_path.is_file()) and (
+        particulate_mode == PARTICULATE_MODE_MOCK
+        or (particulate_mode == PARTICULATE_MODE_REMOTE and bool(particulate_endpoint))
+        or particulate_mode == PARTICULATE_MODE_LOCAL
+    )
+
+    infinigen_enabled = env_flag(os.getenv("INFINIGEN_ENABLED"), default=False)
+    infinigen_root = os.getenv("INFINIGEN_ROOT", "").strip()
+    infinigen_endpoint = os.getenv("INFINIGEN_ENDPOINT", "").strip()
+    infinigen_available = bool(infinigen_enabled and (infinigen_root or infinigen_endpoint))
+    infinigen_supported = bool(_resolve_infinigen_asset_name(obj_class)) if infinigen_available else False
+
+    physx_enabled = env_flag(os.getenv("PHYSX_ANYTHING_ENABLED"), default=False)
+    physx_root = os.getenv("PHYSX_ANYTHING_ROOT", "").strip()
+    physx_endpoint = os.getenv("PHYSX_ANYTHING_ENDPOINT", "").strip()
+    physx_available = bool(physx_enabled and (physx_root or physx_endpoint) and image_path and image_path.is_file())
+
+    allow_retry_on_explicit = env_flag(os.getenv("ARTICULATION_RETRY_ON_EXPLICIT"), default=False)
+
+    if explicit:
+        plan = [requested_backend]
+        if retry_enabled and allow_retry_on_explicit:
+            # Append fallbacks after the explicitly requested backend.
+            for cand in [ARTICULATION_BACKEND_INFINIGEN, ARTICULATION_BACKEND_PHYSX_ANYTHING, ARTICULATION_BACKEND_PARTICULATE]:
+                if cand not in plan:
+                    if cand == ARTICULATION_BACKEND_INFINIGEN and not (infinigen_available and infinigen_supported):
+                        continue
+                    if cand == ARTICULATION_BACKEND_PHYSX_ANYTHING and not physx_available:
+                        continue
+                    if cand == ARTICULATION_BACKEND_PARTICULATE and not particulate_available:
+                        continue
+                    plan.append(cand)
+        return plan
+
+    # Auto mode
+    plan: List[str] = []
+    if infinigen_available and infinigen_supported:
+        plan.append(ARTICULATION_BACKEND_INFINIGEN)
+
+    # Non-Infinigen ordering.
+    # Default: prefer PhysX-Anything when an image exists, otherwise Particulate.
+    non_infinigen_order = os.getenv("ARTICULATION_NONINFINIGEN_ORDER", "image_first").strip().lower()
+    if non_infinigen_order not in {"image_first", "mesh_first"}:
+        non_infinigen_order = "image_first"
+
+    non_infinigen: List[str] = []
+    if physx_available:
+        non_infinigen.append(ARTICULATION_BACKEND_PHYSX_ANYTHING)
+    if particulate_available:
+        non_infinigen.append(ARTICULATION_BACKEND_PARTICULATE)
+
+    if len(non_infinigen) == 2 and non_infinigen_order == "mesh_first":
+        non_infinigen = [ARTICULATION_BACKEND_PARTICULATE, ARTICULATION_BACKEND_PHYSX_ANYTHING]
+
+    for cand in non_infinigen:
+        if cand not in plan:
+            plan.append(cand)
+
+    # If retries disabled, only try the first viable backend (or heuristic).
+    if not retry_enabled and plan:
+        return [plan[0]]
+
+    # Deduplicate while preserving order.
+    seen = set()
+    deduped: List[str] = []
+    for b in plan:
+        if b in seen:
+            continue
+        seen.add(b)
+        deduped.append(b)
+    return deduped
+
+
+# =============================================================================
 # Object Processing
 # =============================================================================
 
@@ -1684,9 +2419,9 @@ def process_object(
 
     # Find GLB mesh from 3D-RE-GEN
     glb_path: Optional[Path] = None
+    regen3d_obj_dir = regen3d_root / obj_name
 
     if mode == MODE_GLB:
-        regen3d_obj_dir = regen3d_root / obj_name
         glb_path = find_glb_file(regen3d_obj_dir, obj_id)
 
         if glb_path:
@@ -1711,26 +2446,7 @@ def process_object(
                 break
 
     # If still no GLB, generate static URDF
-    if not glb_path or not glb_path.is_file():
-        log(f"No GLB mesh found, generating static URDF", "WARNING", obj_name)
-        result["status"] = "static"
-        result["error"] = "no_glb_found"
-
-        urdf_path = output_dir / f"{obj_name}.urdf"
-        urdf_path.write_text(
-            generate_placeholder_urdf(
-                obj_name,
-                "no_glb",
-                disallow_placeholder=disallow_placeholder_urdf,
-            ),
-            encoding="utf-8",
-        )
-        result["urdf_path"] = str(urdf_path)
-        result["placeholder"] = True
-        result["placeholder_reason"] = "no_glb"
-        return result
-
-    if multiview_enabled and (required_articulation or articulation_hint):
+    if multiview_enabled and glb_path and glb_path.is_file() and (required_articulation or articulation_hint):
         scaffold_metadata = generate_multiview_scaffold(
             obj_name=obj_name,
             obj_class=obj_class,
@@ -1741,150 +2457,340 @@ def process_object(
         )
         result["multiview_scaffold"] = scaffold_metadata
 
-    resolved_backend = resolve_articulation_backend(
-        requested_backend=articulation_backend,
-        particulate_mode=particulate_mode,
-        particulate_endpoint=particulate_endpoint or "",
-    )
-    result["backend"] = resolved_backend
-
-    mesh_path: Optional[Path] = None
-    urdf_path: Optional[Path] = None
-    meta: Dict[str, Any] = {}
-
-    if resolved_backend == ARTICULATION_BACKEND_HEURISTIC:
-        log("Using heuristic articulation backend", obj_id=obj_name)
-        try:
-            mesh_path, urdf_path, meta = materialize_heuristic_articulation(
-                obj=obj,
-                obj_name=obj_name,
-                obj_class=obj_class,
-                glb_path=glb_path,
-                output_dir=output_dir,
-            )
-            if meta.get("fallback_static"):
-                result["status"] = "static"
-        except Exception as e:
-            log(f"Heuristic articulation failed: {e}", "ERROR", obj_name)
-            result["status"] = "error"
-            result["error"] = "heuristic_failed"
-
-            mesh_out = output_dir / "mesh.glb"
-            shutil.copy(glb_path, mesh_out)
-            result["mesh_path"] = str(mesh_out)
-
-            fallback_urdf_path = output_dir / f"{obj_name}.urdf"
-            fallback_urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
-            result["urdf_path"] = str(fallback_urdf_path)
-            return result
+    # Determine best available reference image for PhysX-Anything (if enabled).
+    crop_image = None
+    try:
+        search_dir = glb_path.parent if glb_path and glb_path.is_file() else regen3d_obj_dir
+        crop_image = find_crop_image(search_dir, multiview_root, obj_id)
+    except Exception:
+        crop_image = None
+    if crop_image:
+        result["input_image"] = str(crop_image)
     else:
-        if not particulate_endpoint and particulate_mode != PARTICULATE_MODE_MOCK:
-            log("No Particulate endpoint configured, using static URDF", "WARNING", obj_name)
-            result["status"] = "static"
-            mesh_out = output_dir / "mesh.glb"
-            shutil.copy(glb_path, mesh_out)
-            result["mesh_path"] = str(mesh_out)
+        # Render a fallback view (best-effort) for PhysX-Anything.
+        if glb_path and glb_path.is_file():
+            render_out = output_dir / "_render" / f"{obj_name}_seed.png"
+            seed_view = render_mesh_to_single_view(glb_path, render_out)
+            if seed_view:
+                crop_image = seed_view
+                result["input_image"] = str(seed_view)
 
-            urdf_path = output_dir / f"{obj_name}.urdf"
-            urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
-            result["urdf_path"] = str(urdf_path)
-            return result
+    retry_enabled = env_flag(os.getenv("ARTICULATION_RETRY_ENABLED"), default=True)
+    backend_plan = _resolve_backend_plan_for_object(
+        requested_backend=articulation_backend,
+        obj_class=obj_class,
+        glb_path=glb_path,
+        image_path=crop_image,
+        particulate_mode=particulate_mode,
+        particulate_endpoint=particulate_endpoint,
+        retry_enabled=retry_enabled,
+    )
+    result["backend_plan"] = list(backend_plan)
 
-        if particulate_mode == PARTICULATE_MODE_MOCK:
-            mock_placeholder = env_flag(os.getenv("PARTICULATE_MOCK_PLACEHOLDER"), default=False)
-            log(f"Building mock Particulate response (placeholder={mock_placeholder})", obj_id=obj_name)
-            response = build_mock_particulate_response(glb_path, obj_name, mock_placeholder)
-        else:
-            log("Calling Particulate for articulation", obj_id=obj_name)
-            response = call_particulate_service(particulate_endpoint, glb_path, obj_name)
+    if (not glb_path or not glb_path.is_file()) and not backend_plan:
+        log("No GLB and no available backends; generating placeholder URDF", "WARNING", obj_name)
+        result["status"] = "static"
+        result["error"] = "no_inputs_for_backends"
+        urdf_path = output_dir / f"{obj_name}.urdf"
+        urdf_path.write_text(
+            generate_placeholder_urdf(
+                obj_name,
+                "no_inputs",
+                disallow_placeholder=disallow_placeholder_urdf,
+            ),
+            encoding="utf-8",
+        )
+        result["urdf_path"] = str(urdf_path)
+        result["placeholder"] = True
+        result["placeholder_reason"] = "no_inputs"
+        return result
 
-        if not response:
-            log("Particulate service call failed", "ERROR", obj_name)
-            result["status"] = "error"
-            result["error"] = "service_failed"
+    # Deterministic seed per object (use scene_id when available).
+    scene_id = os.environ.get("SCENE_ID", "unknown")
+    seed = _stable_int_from_str(f"{scene_id}:{obj_id}", modulo=10**9) % 100000 + 1001
 
-            mesh_out = output_dir / "mesh.glb"
-            shutil.copy(glb_path, mesh_out)
-            result["mesh_path"] = str(mesh_out)
+    attempts_dir = output_dir / "_attempts"
+    ensure_dir(attempts_dir)
 
-            urdf_path = output_dir / f"{obj_name}.urdf"
-            urdf_path.write_text(generate_static_urdf(obj_name), encoding="utf-8")
-            result["urdf_path"] = str(urdf_path)
-            return result
+    chosen_backend: Optional[str] = None
+    mesh_path = None
+    urdf_path = None
+    meta: Dict[str, Any] = {}
+    urdf_validation = URDFValidationResult()
+    sim_validation = SimulationValidationResult()
+    downgraded_to_static = False
 
-        mesh_path, urdf_path, meta = materialize_articulation_response(
-            response,
-            output_dir,
-            obj_name,
-            disallow_placeholder=disallow_placeholder_urdf,
+    attempt_records: List[Dict[str, Any]] = []
+
+    for attempt_idx, backend in enumerate(backend_plan):
+        attempt_dir = attempts_dir / f"{attempt_idx:02d}_{backend}"
+        if attempt_dir.exists():
+            shutil.rmtree(attempt_dir, ignore_errors=True)
+        ensure_dir(attempt_dir)
+
+        attempt_meta: Dict[str, Any] = {"backend": backend, "status": "pending"}
+        attempt_mesh = None
+        attempt_urdf = None
+
+        try:
+            if backend == ARTICULATION_BACKEND_INFINIGEN:
+                infinigen_root = os.getenv("INFINIGEN_ROOT", "").strip()
+                infinigen_endpoint = os.getenv("INFINIGEN_ENDPOINT", "").strip()
+                if infinigen_endpoint:
+                    asset_name = _resolve_infinigen_asset_name(obj_class)
+                    if not asset_name:
+                        attempt_meta["error"] = f"unsupported_category: {obj_class}"
+                    else:
+                        response = _call_json_service(
+                            infinigen_endpoint,
+                            {
+                                "asset_name": asset_name,
+                                "seed": int(seed),
+                                "collision": bool(env_flag(os.getenv("INFINIGEN_COLLISION"), default=True)),
+                                "export": "urdf",
+                            },
+                            timeout_s=int(os.getenv("INFINIGEN_TIMEOUT_S", "900") or "900"),
+                            obj_id=obj_name,
+                            label="infinigen",
+                        )
+                        if not response:
+                            attempt_meta["error"] = "infinigen_service_failed"
+                        else:
+                            attempt_mesh, attempt_urdf, backend_meta = materialize_service_response(
+                                response,
+                                attempt_dir,
+                                obj_name,
+                                disallow_placeholder=disallow_placeholder_urdf,
+                                glb_path=glb_path,
+                            )
+                            attempt_meta.update(backend_meta)
+                else:
+                    attempt_mesh, attempt_urdf, backend_meta = _run_infinigen_backend(
+                        infinigen_root=infinigen_root,
+                        obj_class=obj_class,
+                        attempt_dir=attempt_dir,
+                        obj_name=obj_name,
+                        seed=seed,
+                        glb_path=glb_path,
+                    )
+                    attempt_meta.update(backend_meta)
+            elif backend == ARTICULATION_BACKEND_PHYSX_ANYTHING:
+                physx_root = os.getenv("PHYSX_ANYTHING_ROOT", "").strip()
+                physx_endpoint = os.getenv("PHYSX_ANYTHING_ENDPOINT", "").strip()
+                ckpt_dir = os.getenv("PHYSX_ANYTHING_CKPT", "").strip()
+                if not ckpt_dir and physx_root:
+                    ckpt_dir = str(Path(physx_root) / "pretrain" / "vlm")
+                if not crop_image or not crop_image.is_file():
+                    attempt_meta["error"] = "missing_input_image"
+                elif physx_endpoint:
+                    img_bytes = crop_image.read_bytes()
+                    response = _call_json_service(
+                        physx_endpoint,
+                        {
+                            "image_base64": base64.b64encode(img_bytes).decode("ascii"),
+                            "seed": int(seed),
+                            "remove_bg": bool(env_flag(os.getenv("PHYSX_ANYTHING_REMOVE_BG"), default=False)),
+                            "voxel_define": int(os.getenv("PHYSX_ANYTHING_VOXEL_DEFINE", "32") or "32"),
+                            "fixed_base": int(os.getenv("PHYSX_ANYTHING_FIXED_BASE", "0") or "0"),
+                            "deformable": int(os.getenv("PHYSX_ANYTHING_DEFORMABLE", "0") or "0"),
+                        },
+                        timeout_s=int(os.getenv("PHYSX_ANYTHING_TIMEOUT_S", "900") or "900"),
+                        obj_id=obj_name,
+                        label="physx-anything",
+                    )
+                    if not response:
+                        attempt_meta["error"] = "physx_anything_service_failed"
+                    else:
+                        attempt_mesh, attempt_urdf, backend_meta = materialize_service_response(
+                            response,
+                            attempt_dir,
+                            obj_name,
+                            disallow_placeholder=disallow_placeholder_urdf,
+                            glb_path=glb_path,
+                        )
+                        attempt_meta.update(backend_meta)
+                else:
+                    attempt_mesh, attempt_urdf, backend_meta = _run_physx_anything_backend(
+                        physx_root=physx_root,
+                        ckpt_dir=ckpt_dir,
+                        image_path=crop_image,
+                        attempt_dir=attempt_dir,
+                        obj_name=obj_name,
+                        seed=seed,
+                        glb_path=glb_path,
+                    )
+                    attempt_meta.update(backend_meta)
+            elif backend == ARTICULATION_BACKEND_HEURISTIC:
+                attempt_mesh, attempt_urdf, backend_meta = materialize_heuristic_articulation(
+                    obj=obj,
+                    obj_name=obj_name,
+                    obj_class=obj_class,
+                    glb_path=glb_path,
+                    output_dir=attempt_dir,
+                )
+                attempt_meta.update(backend_meta)
+            else:
+                # Particulate backend (remote/local service).
+                if not glb_path or not glb_path.is_file():
+                    attempt_meta["error"] = "missing_input_glb"
+                elif not particulate_endpoint and particulate_mode != PARTICULATE_MODE_MOCK:
+                    attempt_meta["error"] = "missing_particulate_endpoint"
+                else:
+                    if particulate_mode == PARTICULATE_MODE_MOCK:
+                        mock_placeholder = env_flag(os.getenv("PARTICULATE_MOCK_PLACEHOLDER"), default=False)
+                        response = build_mock_particulate_response(glb_path, obj_name, mock_placeholder)
+                    else:
+                        response = call_particulate_service(particulate_endpoint or "", glb_path, obj_name)
+                    if not response:
+                        attempt_meta["error"] = "particulate_service_failed"
+                    else:
+                        attempt_mesh, attempt_urdf, backend_meta = materialize_articulation_response(
+                            response,
+                            attempt_dir,
+                            obj_name,
+                            disallow_placeholder=disallow_placeholder_urdf,
+                        )
+                        attempt_meta.update(backend_meta)
+        except Exception as exc:
+            attempt_meta["error"] = f"backend_exception: {exc}"
+
+        attempt_meta["mesh_path"] = str(attempt_mesh) if attempt_mesh else None
+        attempt_meta["urdf_path"] = str(attempt_urdf) if attempt_urdf else None
+
+        if not attempt_urdf or not attempt_urdf.is_file():
+            attempt_meta["status"] = "failed"
+            attempt_records.append(attempt_meta)
+            continue
+
+        # Validate and repair URDF in the attempt directory.
+        urdf_validation = validate_and_repair_urdf(
+            attempt_urdf,
+            mesh_dir=attempt_dir,
+            auto_repair=True,
+            obj_id=obj_name,
         )
 
-    if not mesh_path or not urdf_path:
-        log("Materialization failed, using fallback", "WARNING", obj_name)
-        result["status"] = "fallback"
+        sim_validation = validate_urdf_in_simulator(
+            attempt_urdf,
+            mesh_dir=attempt_dir,
+            obj_id=obj_name,
+        )
 
-        # Use original GLB if available
+        joint_summary = parse_urdf_summary(attempt_urdf)
+        joint_count = len(joint_summary.get("joints", []))
+        attempt_meta["joint_count"] = int(joint_count)
+        attempt_meta["urdf_valid"] = bool(urdf_validation.is_valid)
+        attempt_meta["sim_valid"] = bool(sim_validation.is_valid)
+        attempt_meta["sim_skipped"] = bool(sim_validation.skipped)
+        attempt_meta["sim_errors"] = list(sim_validation.errors)
+        attempt_meta["sim_warnings"] = list(sim_validation.warnings)
+
+        if required_articulation and joint_count <= 0:
+            attempt_meta["status"] = "failed"
+            attempt_meta["error"] = "required_articulation_no_joints"
+            attempt_records.append(attempt_meta)
+            continue
+
+        if not urdf_validation.is_valid:
+            attempt_meta["status"] = "failed"
+            attempt_meta["error"] = "urdf_invalid"
+            attempt_records.append(attempt_meta)
+            continue
+
+        if not sim_validation.skipped and not sim_validation.is_valid:
+            attempt_meta["status"] = "failed"
+            attempt_meta["error"] = "critic_failed"
+            attempt_records.append(attempt_meta)
+            continue
+
+        # Success: copy attempt payload into the final output_dir (exclude internal work dirs).
+        try:
+            for item in attempt_dir.iterdir():
+                if item.name.startswith("_work_"):
+                    continue
+                dest = output_dir / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, dest)
+        except Exception as exc:
+            attempt_meta["status"] = "failed"
+            attempt_meta["error"] = f"finalize_copy_failed: {exc}"
+            attempt_records.append(attempt_meta)
+            continue
+
+        chosen_backend = backend
+        # Resolve final paths inside output_dir.
+        final_urdf = output_dir / f"{obj_name}.urdf"
+        if not final_urdf.is_file():
+            # Fall back to any URDF copied.
+            urdf_any = list(output_dir.glob("*.urdf"))
+            if urdf_any:
+                final_urdf = urdf_any[0]
+        urdf_path = final_urdf
+        mesh_path = None
+        for name in ["part.glb", "mesh.glb", "model.glb"]:
+            cand = output_dir / name
+            if cand.is_file():
+                mesh_path = cand
+                break
+        if mesh_path is None:
+            glb_any = list(output_dir.glob("*.glb"))
+            if glb_any:
+                mesh_path = glb_any[0]
+
+        attempt_meta["status"] = "ok"
+        attempt_records.append(attempt_meta)
+        meta = attempt_meta
+        break
+
+    result["backend_attempts"] = attempt_records
+    if chosen_backend:
+        result["backend"] = chosen_backend
+
+    if not mesh_path or not urdf_path or not urdf_path.is_file():
+        log("All backends failed; using fallback static URDF", "WARNING", obj_name)
+        result["status"] = "fallback"
+        result["error"] = "all_backends_failed"
+
+        mesh_out = output_dir / "mesh.glb"
         if glb_path and glb_path.is_file():
-            mesh_out = output_dir / "mesh.glb"
             shutil.copy(glb_path, mesh_out)
             result["mesh_path"] = str(mesh_out)
             mesh_path = mesh_out
+        else:
+            mesh_path = None
 
         urdf_path = output_dir / f"{obj_name}.urdf"
-        urdf_path.write_text(generate_static_urdf(obj_name, mesh_path.name if mesh_path else "mesh.glb"), encoding="utf-8")
-        result["urdf_path"] = str(urdf_path)
-        return result
-
-    # Validate and repair URDF
-    urdf_validation = validate_and_repair_urdf(
-        urdf_path,
-        mesh_dir=output_dir,
-        auto_repair=True,
-        obj_id=obj_name
-    )
-
-    # Simulation-backed validation (PyBullet/Isaac Sim)
-    sim_validation = validate_urdf_in_simulator(
-        urdf_path,
-        mesh_dir=output_dir,
-        obj_id=obj_name,
-    )
-    if sim_validation.errors:
-        log(f"Simulation validation errors: {sim_validation.errors}", "ERROR", obj_id=obj_name)
-    if sim_validation.warnings:
-        log(f"Simulation validation warnings: {sim_validation.warnings}", "WARNING", obj_id=obj_name)
-
-    downgraded_to_static = False
-    if not sim_validation.skipped and not sim_validation.is_valid:
-        log(
-            "Invalid URDF in simulator; downgrading to static asset.",
-            "WARNING",
-            obj_id=obj_name,
-        )
         urdf_path.write_text(
-            generate_static_urdf(obj_name, mesh_path.name),
+            generate_static_urdf(obj_name, mesh_path.name if mesh_path else "mesh.glb"),
             encoding="utf-8",
         )
-        result["status"] = "static"
-        downgraded_to_static = True
-        urdf_validation = validate_urdf(urdf_path, mesh_dir=output_dir)
+        result["urdf_path"] = str(urdf_path)
+        result["placeholder"] = not (glb_path and glb_path.is_file())
+        return result
 
-    # Parse URDF for joint information
+    # Re-parse URDF for joint information (final output)
     joint_summary = parse_urdf_summary(urdf_path)
     joint_count = len(joint_summary.get("joints", []))
+
+    # Parse URDF for joint information
+    # (joint_summary/joint_count already computed above)
 
     # Build manifest
     manifest = {
         "object_id": obj_id,
         "object_name": obj_name,
         "class_name": obj_class,
-        "backend": resolved_backend,
+        "backend": chosen_backend or articulation_backend,
+        "backend_plan": backend_plan,
+        "backend_attempts": attempt_records,
         "required_articulation": required_articulation,
         "articulation_hint": articulation_hint,
         "generator": meta.get("generator", "particulate"),
         "endpoint": particulate_endpoint,
         "particulate_mode": particulate_mode,
-        "mesh_path": mesh_path.name,
+        "mesh_path": mesh_path.name if mesh_path else None,
         "urdf_path": urdf_path.name,
         "is_articulated": joint_count > 0,
         "joint_summary": joint_summary,
@@ -1917,7 +2823,7 @@ def process_object(
     # Update result
     if result["status"] == "pending":
         result["status"] = "ok"
-    result["mesh_path"] = str(mesh_path)
+    result["mesh_path"] = str(mesh_path) if mesh_path else None
     result["urdf_path"] = str(urdf_path)
     result["manifest_path"] = str(manifest_path)
     result["joint_count"] = joint_count
@@ -2023,9 +2929,21 @@ def main() -> None:
         "process_all_interactive": process_all_interactive,
     }
 
+    infinigen_enabled = env_flag(os.getenv("INFINIGEN_ENABLED"), default=False)
+    infinigen_root = os.getenv("INFINIGEN_ROOT", "").strip()
+    infinigen_endpoint = os.getenv("INFINIGEN_ENDPOINT", "").strip()
+    physx_enabled = env_flag(os.getenv("PHYSX_ANYTHING_ENABLED"), default=False)
+    physx_root = os.getenv("PHYSX_ANYTHING_ROOT", "").strip()
+    physx_endpoint = os.getenv("PHYSX_ANYTHING_ENDPOINT", "").strip()
+    physx_ckpt = os.getenv("PHYSX_ANYTHING_CKPT", "").strip()
+    if not physx_ckpt and physx_root:
+        physx_ckpt = str(Path(physx_root) / "pretrain" / "vlm")
+    critic_enabled = env_flag(os.getenv("ARTICULATION_CRITIC_ENABLED"), default=True)
+    retry_enabled = env_flag(os.getenv("ARTICULATION_RETRY_ENABLED"), default=True)
+
     # Print configuration
     log("=" * 60)
-    log("Interactive Asset Pipeline (Particulate)")
+    log("Interactive Asset Pipeline (Multi-Backend)")
     log("=" * 60)
     log(f"Bucket: {bucket}")
     log(f"Scene ID: {scene_id}")
@@ -2046,6 +2964,18 @@ def main() -> None:
     log(f"Labs mode: {labs_mode}")
     log(f"Disallow placeholder URDFs: {disallow_placeholder_urdf}")
     log(f"Articulation backend: {articulation_backend}")
+    log(f"Articulation retries enabled: {retry_enabled}")
+    log(f"Articulation critic enabled: {critic_enabled}")
+    log(
+        "Infinigen enabled: "
+        f"{infinigen_enabled} (root={infinigen_root or '(unset)'}, endpoint={infinigen_endpoint or '(unset)'})"
+    )
+    log(
+        "PhysX-Anything enabled: "
+        f"{physx_enabled} (root={physx_root or '(unset)'}, endpoint={physx_endpoint or '(unset)'})"
+    )
+    if physx_enabled:
+        log(f"PhysX-Anything ckpt: {physx_ckpt}")
     log(f"Multiview scaffold enabled: {multiview_enabled}")
     if multiview_enabled:
         log(f"Multiview scaffold config: count={multiview_count}, model={multiview_model}")
@@ -2084,8 +3014,39 @@ def main() -> None:
         particulate_endpoint,
     )
 
-    if guardrails_enabled and resolved_backend == ARTICULATION_BACKEND_HEURISTIC:
-        log("Heuristic articulation outputs are not allowed in labs/production mode", "ERROR")
+    any_non_heuristic_backend_available = bool(
+        (infinigen_enabled and (infinigen_root or infinigen_endpoint))
+        or (physx_enabled and (physx_root or physx_endpoint))
+        or (
+            particulate_mode != PARTICULATE_MODE_SKIP
+            and (
+                particulate_mode in {PARTICULATE_MODE_LOCAL, PARTICULATE_MODE_MOCK}
+                or bool(particulate_endpoint)
+            )
+        )
+    )
+
+    if guardrails_enabled and articulation_backend == ARTICULATION_BACKEND_HEURISTIC:
+        log("Heuristic articulation backend is not allowed in labs/production mode", "ERROR")
+        write_failure_marker(
+            assets_root,
+            failure_writer,
+            scene_id,
+            reason="heuristic_articulation_blocked",
+            details={
+                "articulation_backend": articulation_backend,
+                "resolved_articulation_backend": resolved_backend,
+            },
+            config_context=config_context,
+        )
+        sys.exit(1)
+
+    if guardrails_enabled and articulation_backend == ARTICULATION_BACKEND_AUTO and not any_non_heuristic_backend_available:
+        log(
+            "ARTICULATION_BACKEND=auto requires at least one non-heuristic backend "
+            "(Infinigen, PhysX-Anything, or Particulate) in labs/production mode",
+            "ERROR",
+        )
         write_failure_marker(
             assets_root,
             failure_writer,
@@ -2129,8 +3090,16 @@ def main() -> None:
             )
             sys.exit(1)
 
-    if guardrails_enabled and particulate_mode != PARTICULATE_MODE_LOCAL and not particulate_endpoint:
-        log("PARTICULATE_ENDPOINT is required in labs/production mode", "ERROR")
+    particulate_required = bool(
+        articulation_backend == ARTICULATION_BACKEND_PARTICULATE
+        or (
+            articulation_backend == ARTICULATION_BACKEND_AUTO
+            and not (infinigen_enabled and (infinigen_root or infinigen_endpoint))
+            and not (physx_enabled and (physx_root or physx_endpoint))
+        )
+    )
+    if guardrails_enabled and particulate_required and particulate_mode != PARTICULATE_MODE_LOCAL and not particulate_endpoint:
+        log("PARTICULATE_ENDPOINT is required in labs/production mode when Particulate is required", "ERROR")
         write_failure_marker(
             assets_root,
             failure_writer,
@@ -2144,7 +3113,13 @@ def main() -> None:
         )
         sys.exit(1)
 
-    if particulate_mode == PARTICULATE_MODE_SKIP:
+    skip_entire_job = bool(
+        particulate_mode == PARTICULATE_MODE_SKIP
+        and not (infinigen_enabled and (infinigen_root or infinigen_endpoint))
+        and not (physx_enabled and (physx_root or physx_endpoint))
+        and articulation_backend in {ARTICULATION_BACKEND_PARTICULATE, ARTICULATION_BACKEND_AUTO}
+    )
+    if skip_entire_job:
         if required_interactive_objects:
             details = {
                 "required_objects": [str(o.get("id")) for o in required_interactive_objects],
@@ -2160,7 +3135,7 @@ def main() -> None:
             )
             sys.exit(1)
 
-        log("PARTICULATE_MODE=skip set; skipping articulation", "WARNING")
+        log("PARTICULATE_MODE=skip set and no other backends enabled; skipping articulation", "WARNING")
         warnings = [{
             "code": "particulate_skipped",
             "message": "Particulate inference skipped by configuration (PARTICULATE_MODE=skip).",
@@ -2174,7 +3149,7 @@ def main() -> None:
             "class_name": obj.get("class_name", "unknown"),
             "status": "skipped",
             "mode": mode,
-            "backend": resolved_backend,
+            "backend": articulation_backend,
             "particulate_mode": particulate_mode,
             "error": "particulate_skipped",
         } for obj in interactive_objects]
@@ -2190,7 +3165,7 @@ def main() -> None:
             "fallback_count": 0,
             "skipped_count": len(interactive_objects),
             "mode": mode,
-            "backend": resolved_backend,
+            "backend": articulation_backend,
             "particulate_mode": particulate_mode,
             "particulate_endpoint": particulate_endpoint or None,
             "objects": results,
@@ -2204,7 +3179,7 @@ def main() -> None:
             "fallback_count": 0,
             "skipped_count": len(interactive_objects),
             "mode": mode,
-            "backend": resolved_backend,
+            "backend": articulation_backend,
             "particulate_mode": particulate_mode,
             "particulate_endpoint": particulate_endpoint or None,
             "required_interactive_count": len(required_interactive_objects),
@@ -2251,7 +3226,7 @@ def main() -> None:
             "fallback_count": 0,
             "skipped_count": 0,
             "mode": mode,
-            "backend": resolved_backend,
+            "backend": articulation_backend,
             "particulate_mode": particulate_mode,
             "particulate_endpoint": particulate_endpoint or None,
             "required_interactive_count": len(required_interactive_objects),
@@ -2278,8 +3253,8 @@ def main() -> None:
         log("Done (no objects)")
         return
 
-    # Wait for Particulate service to be ready
-    if resolved_backend == ARTICULATION_BACKEND_PARTICULATE and particulate_endpoint:
+    # Wait for Particulate service to be ready (only if we might use it).
+    if particulate_mode != PARTICULATE_MODE_SKIP and particulate_endpoint and articulation_backend in {ARTICULATION_BACKEND_AUTO, ARTICULATION_BACKEND_PARTICULATE}:
         log("Checking Particulate service health...")
         if not wait_for_particulate_ready(particulate_endpoint):
             if production_mode:
@@ -2372,7 +3347,7 @@ def main() -> None:
         "fallback_count": fallback_count,
         "skipped_count": skipped_count,
         "mode": mode,
-        "backend": resolved_backend,
+        "backend": articulation_backend,
         "particulate_mode": particulate_mode,
         "particulate_endpoint": particulate_endpoint or None,
         "objects": results,
@@ -2416,7 +3391,7 @@ def main() -> None:
         "fallback_count": fallback_count,
         "skipped_count": skipped_count,
         "mode": mode,
-        "backend": resolved_backend,
+        "backend": articulation_backend,
         "particulate_mode": particulate_mode,
         "particulate_endpoint": particulate_endpoint or None,
         "required_failures": required_failures,

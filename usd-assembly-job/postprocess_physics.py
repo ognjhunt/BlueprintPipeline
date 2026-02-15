@@ -9,7 +9,7 @@ import numpy as np
 from pxr import Gf, Usd, UsdGeom
 
 
-_DYNAMIC_ROLES = {"clutter", "manipulable_object", "interactive"}
+_DYNAMIC_ROLES = {"clutter", "manipulable_object", "interactive", "deformable_object"}
 
 
 def _gf_matrix_to_np(matrix: Gf.Matrix4d) -> np.ndarray:

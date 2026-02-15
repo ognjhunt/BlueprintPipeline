@@ -9,6 +9,7 @@
 #   6.   Trajectory planning (cuRobo / RRT)
 #   7.   Data collection (HDF5 demos)
 #   +    BP quality post-processing
+#   +    Interactive backends (PhysX-Anything, Infinigen) [opt: ENABLE_INTERACTIVE=1]
 #
 # Usage:
 #   ROOM_TYPE=kitchen \
@@ -32,6 +33,8 @@ SAGE_DIR="${WORKSPACE}/SAGE"
 BP_DIR="${WORKSPACE}/BlueprintPipeline"
 SAGE_SCRIPTS="${BP_DIR}/scripts/runpod_sage"
 
+SCENE_SOURCE="${SCENE_SOURCE:-sage}"  # sage|scenesmith
+
 ROOM_TYPE="${ROOM_TYPE:-kitchen}"
 ROBOT_TYPE="${ROBOT_TYPE:-mobile_franka}"
 TASK_DESC="${TASK_DESC:-Pick up the mug from the counter and place it on the dining table}"
@@ -41,17 +44,31 @@ SKIP_AUGMENTATION="${SKIP_AUGMENTATION:-0}"
 SKIP_GRASPS="${SKIP_GRASPS:-0}"
 SKIP_DATA_GEN="${SKIP_DATA_GEN:-0}"
 SKIP_BP_POSTPROCESS="${SKIP_BP_POSTPROCESS:-0}"
+ENABLE_INTERACTIVE="${ENABLE_INTERACTIVE:-0}"
 ENABLE_CAMERAS="${ENABLE_CAMERAS:-1}"
 STRICT_PIPELINE="${STRICT_PIPELINE:-1}"
+# Scene quality gates (SceneSmith-style repairs; CPU-only).
+SAGE_QUALITY_PROFILE="${SAGE_QUALITY_PROFILE:-standard}"  # standard|strict
+SAGE_QUALITY_FALLBACK_ENABLED="${SAGE_QUALITY_FALLBACK_ENABLED:-1}"  # 1|0
+SAGE_QUALITY_MAX_ITERS="${SAGE_QUALITY_MAX_ITERS:-6}"
+POSE_AUG_NAME="${POSE_AUG_NAME:-pose_aug_0}"
 # NOTE: SAGE's physics MCP server starts Isaac Sim (noisy stdout). If enabled, ensure your MCP stdio stack
 # is patched to ignore non-JSON stdout and Isaac Sim can run headless. Default off for robustness.
 PHYSICS_CRITIC_ENABLED="${PHYSICS_CRITIC_ENABLED:-false}"
 
 # Strict mode disallows skipping required stages.
 if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-    if [[ "${SKIP_AUGMENTATION}" == "1" || "${SKIP_GRASPS}" == "1" || "${SKIP_DATA_GEN}" == "1" ]]; then
-        log "ERROR: STRICT_PIPELINE=1 but one or more stages are skipped (SKIP_AUGMENTATION/SKIP_GRASPS/SKIP_DATA_GEN)."
-        exit 2
+    if [[ "${SCENE_SOURCE}" == "sage" ]]; then
+        if [[ "${SKIP_AUGMENTATION}" == "1" || "${SKIP_GRASPS}" == "1" || "${SKIP_DATA_GEN}" == "1" ]]; then
+            log "ERROR: STRICT_PIPELINE=1 but one or more stages are skipped (SKIP_AUGMENTATION/SKIP_GRASPS/SKIP_DATA_GEN)."
+            exit 2
+        fi
+    else
+        # SceneSmith mode provides its own pose_aug meta; Stage 4 augmentation is intentionally skipped.
+        if [[ "${SKIP_GRASPS}" == "1" || "${SKIP_DATA_GEN}" == "1" ]]; then
+            log "ERROR: STRICT_PIPELINE=1 but one or more stages are skipped (SKIP_GRASPS/SKIP_DATA_GEN)."
+            exit 2
+        fi
     fi
 fi
 
@@ -63,9 +80,18 @@ conda activate sage 2>/dev/null || true
 
 export SLURM_JOB_ID="${SLURM_JOB_ID:-12345}"
 
+# Prefer system Python for helper scripts (requests/trimesh live outside conda in the image).
+PY_SYS="${PY_SYS:-python3.11}"
+if ! command -v "${PY_SYS}" &>/dev/null; then
+    PY_SYS="python3"
+fi
+
 log "=========================================="
-log "SAGE Full Pipeline (7 Stages + BP)"
+log "SAGE Full Pipeline (7 Stages + BP + Interactive)"
 log "=========================================="
+log "Scene source: ${SCENE_SOURCE}"
+log "Quality: ${SAGE_QUALITY_PROFILE} (fallback=${SAGE_QUALITY_FALLBACK_ENABLED}, iters=${SAGE_QUALITY_MAX_ITERS})"
+log "Interactive: ${ENABLE_INTERACTIVE}"
 log "Room:  ${ROOM_TYPE}"
 log "Robot: ${ROBOT_TYPE}"
 log "Task:  ${TASK_DESC}"
@@ -74,50 +100,84 @@ log ""
 
 PIPELINE_START=$(date +%s)
 
-# ── STAGES 1-3: Scene Generation (robot-aware) ─────────────────────────────
-log "════ STAGES 1-3: Scene Generation ════"
-cd "${SAGE_DIR}/client"
+# ── SCENE GENERATION ───────────────────────────────────────────────────────
+if [[ "${SCENE_SOURCE}" == "scenesmith" ]]; then
+    log "════ SCENE GENERATION: SceneSmith → SAGE Layout Dir ════"
+    STAGE13_LOG="/tmp/scenesmith_stage1_$(date +%s).log"
+    log "Running SceneSmith paper stack bridge... (log: ${STAGE13_LOG})"
 
-STAGE13_LOG="/tmp/sage_stage13_$(date +%s).log"
-log "Running robot task client... (log: ${STAGE13_LOG})"
+    SCENESMITH_TO_SAGE="${SAGE_SCRIPTS}/scenesmith_to_sage_layout.py"
+    if [[ ! -f "${SCENESMITH_TO_SAGE}" ]]; then
+        log "ERROR: Missing ${SCENESMITH_TO_SAGE}"
+        exit 1
+    fi
 
-export PHYSICS_CRITIC_ENABLED
-SERVER_PATHS=(../server/layout.py)
-if [[ "${PHYSICS_CRITIC_ENABLED}" == "1" || "${PHYSICS_CRITIC_ENABLED}" == "true" ]]; then
-    SERVER_PATHS+=(../server/physics/physics.py)
+    # SceneSmith mode intentionally skips SAGE Stage 4 augmentation.
+    SKIP_AUGMENTATION=1
+
+    LAYOUT_ID="$("${PY_SYS}" "${SCENESMITH_TO_SAGE}" \
+        --results_dir "${SAGE_DIR}/server/results" \
+        --room_type "${ROOM_TYPE}" \
+        --task_desc "${TASK_DESC}" \
+        --pose_aug_name "${POSE_AUG_NAME}" \
+        2> >(tee "${STAGE13_LOG}" >&2))"
+    echo "${LAYOUT_ID}" >> "${STAGE13_LOG}"
+    if [[ -z "${LAYOUT_ID}" ]]; then
+        log "ERROR: SceneSmith->SAGE bridge did not return a layout_id"
+        exit 1
+    fi
+    LAYOUT_DIR="${SAGE_DIR}/server/results/${LAYOUT_ID}"
+else
+    log "════ STAGES 1-3: Scene Generation (SAGE) ════"
+    cd "${SAGE_DIR}/client"
+
+    STAGE13_LOG="/tmp/sage_stage13_$(date +%s).log"
+    log "Running robot task client... (log: ${STAGE13_LOG})"
+
+    export PHYSICS_CRITIC_ENABLED
+    SERVER_PATHS=(../server/layout.py)
+    if [[ "${PHYSICS_CRITIC_ENABLED}" == "1" || "${PHYSICS_CRITIC_ENABLED}" == "true" ]]; then
+        SERVER_PATHS+=(../server/physics/physics.py)
+    fi
+
+    python client_generation_robot_task.py \
+        --room_type "${ROOM_TYPE}" \
+        --robot_type "${ROBOT_TYPE}" \
+        --task_description "${TASK_DESC}" \
+        --server_paths "${SERVER_PATHS[@]}" \
+        2>&1 | tee "${STAGE13_LOG}"
+
+    # Find the latest layout directory
+    LAYOUT_ID=$(ls -td "${SAGE_DIR}/server/results/layout_"* 2>/dev/null | head -1 | xargs basename)
+    if [[ -z "${LAYOUT_ID}" ]]; then
+        log "ERROR: No layout directory found after scene generation"
+        exit 1
+    fi
+    LAYOUT_DIR="${SAGE_DIR}/server/results/${LAYOUT_ID}"
 fi
 
-python client_generation_robot_task.py \
-    --room_type "${ROOM_TYPE}" \
-    --robot_type "${ROBOT_TYPE}" \
-    --task_description "${TASK_DESC}" \
-    --server_paths "${SERVER_PATHS[@]}" \
-    2>&1 | tee "${STAGE13_LOG}"
-
-# Find the latest layout directory
-LAYOUT_ID=$(ls -td "${SAGE_DIR}/server/results/layout_"* 2>/dev/null | head -1 | xargs basename)
-if [[ -z "${LAYOUT_ID}" ]]; then
-    log "ERROR: No layout directory found after scene generation"
-    exit 1
-fi
-LAYOUT_DIR="${SAGE_DIR}/server/results/${LAYOUT_ID}"
 log "Layout: ${LAYOUT_ID}"
 log "Directory: ${LAYOUT_DIR}"
+
+if [[ ! -d "${LAYOUT_DIR}" ]]; then
+    log "ERROR: Layout directory does not exist: ${LAYOUT_DIR}"
+    exit 1
+fi
 
 # Count generated objects
 NUM_OBJECTS=$(ls "${LAYOUT_DIR}/generation/"*.obj 2>/dev/null | wc -l || echo "0")
 log "Objects generated: ${NUM_OBJECTS}"
 
-STAGE13_END=$(date +%s)
-log "Stages 1-3 completed in $(( STAGE13_END - PIPELINE_START ))s"
+if [[ "${NUM_OBJECTS}" -eq 0 ]]; then
+    if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+        log "ERROR: Zero objects generated in ${LAYOUT_DIR}/generation/. Aborting (STRICT_PIPELINE=1)."
+        exit 1
+    fi
+    log "WARNING: Zero objects generated. Downstream stages may fail."
+fi
 
-# ── Unload SAM3D (free ~13GB VRAM for stages 5-7) ──────────────────────────
-log ""
-log "Unloading SAM3D to free VRAM..."
-curl -sf -X POST http://localhost:8080/shutdown 2>/dev/null || \
-    pkill -f sam3d_server.py 2>/dev/null || true
-sleep 3
-log "SAM3D unloaded"
+STAGE13_END=$(date +%s)
+log "Scene generation completed in $(( STAGE13_END - PIPELINE_START ))s"
 
 # ── STAGE 4: Scene Augmentation ─────────────────────────────────────────────
 if [[ "${SKIP_AUGMENTATION}" != "1" ]]; then
@@ -149,14 +209,13 @@ if [[ "${SKIP_AUGMENTATION}" != "1" ]]; then
 
     # 4b: Pose augmentation
     log "4b: Pose augmentation (${NUM_POSE_SAMPLES} samples)..."
-    cd "${SAGE_DIR}/server"
-    POSE_AUG_SCRIPT="augment/pose_aug_mm_from_layout_with_task.py"
+    POSE_AUG_SCRIPT="${SAGE_DIR}/server/augment/pose_aug_mm_from_layout_with_task.py"
     if [[ -f "${POSE_AUG_SCRIPT}" ]]; then
-        if ! python "${POSE_AUG_SCRIPT}" \
+        if ! (cd "${SAGE_DIR}/server" && python "${POSE_AUG_SCRIPT}" \
             --layout_id "${LAYOUT_ID}" \
-            --save_dir_name pose_aug_0 \
+            --save_dir_name "${POSE_AUG_NAME}" \
             --num_samples "${NUM_POSE_SAMPLES}" \
-            2>&1 | tee "/tmp/sage_stage4b.log"; then
+            2>&1 | tee "/tmp/sage_stage4b.log"); then
             if [[ "${STRICT_PIPELINE}" == "1" ]]; then
                 log "ERROR: Pose augmentation failed in strict mode."
                 exit 1
@@ -171,14 +230,23 @@ if [[ "${SKIP_AUGMENTATION}" != "1" ]]; then
         log "SKIP: pose augmentation script not found"
     fi
 
-    # Stage 4 MUST produce pose_aug meta with at least 1 layout.
-    POSE_META="${LAYOUT_DIR}/pose_aug_0/meta.json"
+    STAGE4_END=$(date +%s)
+    log "Stage 4 completed in $(( STAGE4_END - STAGE13_END ))s"
+else
+    log ""
+    log "════ STAGE 4: SKIPPED (SKIP_AUGMENTATION=1) ════"
+    STAGE4_END=$(date +%s)
+fi
+
+# ── Validate pose-aug meta (required for stages 5-7) ───────────────────────
+if [[ "${SKIP_GRASPS}" != "1" && "${SKIP_DATA_GEN}" != "1" ]]; then
+    POSE_META="${LAYOUT_DIR}/${POSE_AUG_NAME}/meta.json"
     if [[ ! -f "${POSE_META}" ]]; then
-        log "ERROR: Stage 4 failed — missing ${POSE_META}"
+        log "ERROR: Missing pose augmentation meta: ${POSE_META}"
         exit 1
     fi
-    NUM_LAYOUTS_IN_META="$(python3 - <<PY
-import json, sys
+    NUM_LAYOUTS_IN_META="$("${PY_SYS}" - <<PY
+import json
 path = "${POSE_META}"
 data = json.load(open(path, "r"))
 count = 0
@@ -193,17 +261,90 @@ print(count)
 PY
 )"
     if [[ "${NUM_LAYOUTS_IN_META}" -lt 1 ]]; then
-        log "ERROR: Stage 4 failed — ${POSE_META} contains 0 layouts"
+        log "ERROR: ${POSE_META} contains 0 layouts"
         exit 1
     fi
-    log "Stage 4 meta OK: ${NUM_LAYOUTS_IN_META} pose-aug layouts"
+    log "Pose meta OK: ${NUM_LAYOUTS_IN_META} variants (${POSE_META})"
+fi
 
-    STAGE4_END=$(date +%s)
-    log "Stage 4 completed in $(( STAGE4_END - STAGE13_END ))s"
-else
+# ── Quality gates + bounded repairs (SceneSmith-style) ─────────────────────
+if [[ "${SKIP_GRASPS}" != "1" && "${SKIP_DATA_GEN}" != "1" ]]; then
     log ""
-    log "════ STAGE 4: SKIPPED (SKIP_AUGMENTATION=1) ════"
-    STAGE4_END=$(date +%s)
+    log "════ QUALITY: Scene Repair + Gates ════"
+    QUALITY_LOG="/tmp/sage_scene_quality_$(date +%s).log"
+    QUALITY_SCRIPT="${SAGE_SCRIPTS}/sage_scene_quality.py"
+    if [[ ! -f "${QUALITY_SCRIPT}" ]]; then
+        log "ERROR: Missing quality script: ${QUALITY_SCRIPT}"
+        exit 1
+    fi
+
+    if "${PY_SYS}" "${QUALITY_SCRIPT}" \
+        --layout_dir "${LAYOUT_DIR}" \
+        --pose_aug_name "${POSE_AUG_NAME}" \
+        --profile "${SAGE_QUALITY_PROFILE}" \
+        --max_iters "${SAGE_QUALITY_MAX_ITERS}" \
+        2>&1 | tee "${QUALITY_LOG}"; then
+        log "Quality gates: PASS"
+    else
+        log "Quality gates: FAIL (log: ${QUALITY_LOG})"
+
+        if [[ "${SAGE_QUALITY_FALLBACK_ENABLED}" == "1" && "${SCENE_SOURCE}" == "sage" ]]; then
+            log "Falling back to SceneSmith → SAGE for this scene..."
+            FALLBACK_LOG="/tmp/scenesmith_fallback_$(date +%s).log"
+            SCENESMITH_TO_SAGE="${SAGE_SCRIPTS}/scenesmith_to_sage_layout.py"
+            LAYOUT_ID="$("${PY_SYS}" "${SCENESMITH_TO_SAGE}" \
+                --results_dir "${SAGE_DIR}/server/results" \
+                --room_type "${ROOM_TYPE}" \
+                --task_desc "${TASK_DESC}" \
+                --pose_aug_name "${POSE_AUG_NAME}" \
+                2> >(tee "${FALLBACK_LOG}" >&2))"
+            echo "${LAYOUT_ID}" >> "${FALLBACK_LOG}"
+            if [[ -z "${LAYOUT_ID}" ]]; then
+                log "ERROR: SceneSmith fallback did not return a layout_id"
+                exit 1
+            fi
+            LAYOUT_DIR="${SAGE_DIR}/server/results/${LAYOUT_ID}"
+            SCENE_SOURCE="scenesmith"
+
+            NUM_OBJECTS=$(ls "${LAYOUT_DIR}/generation/"*.obj 2>/dev/null | wc -l || echo "0")
+            log "Fallback layout: ${LAYOUT_ID} (objects=${NUM_OBJECTS})"
+
+            # Validate meta again.
+            POSE_META="${LAYOUT_DIR}/${POSE_AUG_NAME}/meta.json"
+            if [[ ! -f "${POSE_META}" ]]; then
+                log "ERROR: Fallback missing pose meta: ${POSE_META}"
+                exit 1
+            fi
+
+            # Re-run quality on fallback.
+            if ! "${PY_SYS}" "${QUALITY_SCRIPT}" \
+                --layout_dir "${LAYOUT_DIR}" \
+                --pose_aug_name "${POSE_AUG_NAME}" \
+                --profile "${SAGE_QUALITY_PROFILE}" \
+                --max_iters "${SAGE_QUALITY_MAX_ITERS}" \
+                2>&1 | tee "/tmp/sage_scene_quality_fallback.log"; then
+                log "ERROR: Quality gates still failing after SceneSmith fallback."
+                exit 1
+            fi
+            log "Quality gates: PASS after fallback"
+        else
+            if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+                log "ERROR: Strict mode and quality gates failed (fallback disabled or unavailable)."
+                exit 1
+            fi
+            log "WARNING: Quality gates failed (non-fatal; STRICT_PIPELINE=0)."
+        fi
+    fi
+fi
+
+# ── Unload SAM3D (free ~13GB VRAM for stages 5-7) ──────────────────────────
+if [[ "${SKIP_GRASPS}" != "1" && "${SKIP_DATA_GEN}" != "1" ]]; then
+    log ""
+    log "Unloading SAM3D to free VRAM..."
+    curl -sf -X POST http://localhost:8080/shutdown 2>/dev/null || \
+        pkill -f sam3d_server.py 2>/dev/null || true
+    sleep 3
+    log "SAM3D unloaded"
 fi
 
 # ── STAGES 5-7: Grasp + Planning + Data Collection (STRICT) ────────────────
@@ -241,7 +382,7 @@ else
         exit 1
     fi
 
-    STAGE567_ARGS=(--layout_id "${LAYOUT_ID}" --results_dir "${SAGE_DIR}/server/results" --pose_aug_name pose_aug_0 --num_demos "${NUM_DEMOS}")
+    STAGE567_ARGS=(--layout_id "${LAYOUT_ID}" --results_dir "${SAGE_DIR}/server/results" --pose_aug_name "${POSE_AUG_NAME}" --num_demos "${NUM_DEMOS}")
     [[ "${ENABLE_CAMERAS}" == "1" ]] && STAGE567_ARGS+=(--enable_cameras)
     STAGE567_ARGS+=(--headless)
     [[ "${STRICT_PIPELINE}" == "1" ]] && STAGE567_ARGS+=(--strict)
@@ -292,6 +433,58 @@ else
     BP_END=$(date +%s)
 fi
 
+# ── Interactive Backends (optional) ───────────────────────────────────────
+if [[ "${ENABLE_INTERACTIVE}" == "1" ]]; then
+    log ""
+    log "════ INTERACTIVE BACKENDS ════"
+
+    BACKENDS_SCRIPT="${SAGE_SCRIPTS}/start_interactive_backends.sh"
+    if [[ ! -f "${BACKENDS_SCRIPT}" ]]; then
+        log "ERROR: Missing ${BACKENDS_SCRIPT}"
+        log "  Run install_interactive_backends.sh first to set up backends."
+        exit 1
+    fi
+
+    bash "${BACKENDS_SCRIPT}" all 2>&1 | tee "/tmp/interactive_backends.log"
+
+    # Wait for backends to become healthy (up to 60s)
+    log "Waiting for backends to become healthy..."
+    BACKEND_READY=0
+    for _i in $(seq 1 12); do
+        PHYSX_OK=0
+        INFIN_OK=0
+        if curl -sf http://localhost:8083/ >/dev/null 2>&1; then PHYSX_OK=1; fi
+        if curl -sf http://localhost:8084/ >/dev/null 2>&1; then INFIN_OK=1; fi
+
+        if [[ ${PHYSX_OK} -eq 1 || ${INFIN_OK} -eq 1 ]]; then
+            BACKEND_READY=1
+            break
+        fi
+        sleep 5
+    done
+
+    if [[ ${BACKEND_READY} -eq 1 ]]; then
+        log "Interactive backends ready:"
+        [[ ${PHYSX_OK:-0} -eq 1 ]] && log "  PhysX-Anything: http://localhost:8083"
+        [[ ${INFIN_OK:-0} -eq 1 ]] && log "  Infinigen:      http://localhost:8084"
+
+        # Export env vars for downstream tools
+        export ARTICULATION_BACKEND=auto
+        export PHYSX_ANYTHING_ENABLED=true
+        export PHYSX_ANYTHING_ENDPOINT=http://localhost:8083
+        export INFINIGEN_ENABLED=true
+        export INFINIGEN_ENDPOINT=http://localhost:8084
+    else
+        log "WARNING: No interactive backends responded within 60s"
+        log "  Check logs: /tmp/physx_anything_service.log, /tmp/infinigen_service.log"
+    fi
+
+    INTERACTIVE_END=$(date +%s)
+    log "Interactive backends stage completed in $(( INTERACTIVE_END - BP_END ))s"
+else
+    INTERACTIVE_END=$(date +%s)
+fi
+
 # ── Summary ────────────────────────────────────────────────────────────────
 PIPELINE_END=$(date +%s)
 TOTAL_TIME=$(( PIPELINE_END - PIPELINE_START ))
@@ -310,9 +503,22 @@ log "  Grasps:   ${LAYOUT_DIR}/grasps/"
 log "  Demos:    ${LAYOUT_DIR}/demos/"
 [[ "${SKIP_BP_POSTPROCESS}" != "1" ]] && log "  Quality:  ${WORKSPACE}/outputs/${LAYOUT_ID}_bp/"
 log ""
+if [[ "${ENABLE_INTERACTIVE}" == "1" ]] && [[ ${BACKEND_READY:-0} -eq 1 ]]; then
+    log "Interactive backends:"
+    log "  ARTICULATION_BACKEND=auto"
+    log "  PHYSX_ANYTHING_ENDPOINT=http://localhost:8083"
+    log "  INFINIGEN_ENDPOINT=http://localhost:8084"
+    log ""
+fi
 log "Logs:"
 log "  Stages 1-3: ${STAGE13_LOG}"
 log "  Stage 4:    /tmp/sage_stage4a.log, /tmp/sage_stage4b.log"
+log "  Quality:    ${QUALITY_LOG:-}"
 log "  Stages 5-7: /tmp/sage_stage567.log"
 log "  BP:         /tmp/sage_bp_postprocess.log"
+if [[ "${ENABLE_INTERACTIVE}" == "1" ]]; then
+    log "  Backends:   /tmp/interactive_backends.log"
+    log "  PhysX-Any:  /tmp/physx_anything_service.log"
+    log "  Infinigen:  /tmp/infinigen_service.log"
+fi
 log "=========================================="

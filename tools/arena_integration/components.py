@@ -168,6 +168,8 @@ class ArenaObject:
         affordances: list[AffordanceType]
     ) -> ObjectCategory:
         """Infer object category from sim_role and affordances."""
+        if sim_role == "deformable_object":
+            return ObjectCategory.DEFORMABLE
         if sim_role in ["articulated_appliance", "articulated_furniture"]:
             return ObjectCategory.ARTICULATED
         if sim_role == "interactive":

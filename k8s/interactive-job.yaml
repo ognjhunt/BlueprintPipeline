@@ -37,7 +37,7 @@ spec:
           image: ghcr.io/${PROJECT_ID}/blueprint-interactive:${IMAGE_TAG}
           imagePullPolicy: Always
 
-          command: ["python", "run_interactive_assets.py"]
+          command: ["python", "interactive-job/run_interactive_assets.py"]
           workingDir: /app
 
           envFrom:
@@ -55,8 +55,6 @@ spec:
               value: "scenes/$(SCENE_ID)/regen3d"
             - name: MULTIVIEW_PREFIX
               value: "${MULTIVIEW_PREFIX}"
-            - name: PIPELINE_ENV
-              value: "${PIPELINE_ENV}"
             - name: PIPELINE_ENV
               value: "${PIPELINE_ENV}"
             - name: DISALLOW_PLACEHOLDER_URDF

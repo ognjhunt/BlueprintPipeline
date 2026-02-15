@@ -25,8 +25,52 @@ set -euo pipefail
 log() { echo "[snapshot $(date -u +%FT%TZ)] $*"; }
 
 DOCKER_USER="${1:-}"
-IMAGE_NAME="sage-sam3d"
+IMAGE_NAME="${IMAGE_NAME:-sage-sam3d-hybrid}"
 TAG="$(date +%Y%m%d-%H%M%S)"
+
+# ── Helper: tar archive from inside container ────────────────────────────────
+create_tar_snapshot() {
+    log "Creating tar archive of /workspace..."
+    ARCHIVE="/tmp/sage-sam3d-snapshot-$(date +%Y%m%d).tar.gz"
+
+    # Estimate size
+    log "Estimating size..."
+    TOTAL_SIZE=$(du -sh /workspace 2>/dev/null | cut -f1)
+    log "  /workspace total: ${TOTAL_SIZE}"
+    log "  Archive will be ~60% of this (gzip compression)"
+    log ""
+
+    tar czf "${ARCHIVE}" \
+        --exclude='*.log' \
+        --exclude='__pycache__' \
+        --exclude='.cache/pip' \
+        --ignore-failed-read \
+        -C / \
+        workspace/SAGE \
+        workspace/sam3d \
+        workspace/miniconda3 \
+        workspace/isaacsim_env \
+        workspace/BlueprintPipeline/scripts/runpod_sage \
+        workspace/BlueprintPipeline/configs \
+        opt/scenesmith \
+        workspace/entrypoint.sh \
+        workspace/apply_sage_patches.sh \
+        workspace/.isaacsim_path \
+        2>/dev/null
+
+    ARCHIVE_SIZE=$(du -sh "${ARCHIVE}" | cut -f1)
+    SHA=$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)
+    echo "${SHA}  ${ARCHIVE}" > "${ARCHIVE}.sha256"
+
+    log ""
+    log "Archive created: ${ARCHIVE} (${ARCHIVE_SIZE})"
+    log "SHA256: ${SHA}"
+    log ""
+    log "To import on a new machine:"
+    log "  1. Copy archive: scp ${ARCHIVE} newmachine:/tmp/"
+    log "  2. Extract:      tar xzf /tmp/$(basename ${ARCHIVE}) -C /"
+    log "  3. Run:          bash /workspace/entrypoint.sh"
+}
 
 # ── 1. Detect environment ────────────────────────────────────────────────────
 log "Detecting environment..."
@@ -83,6 +127,8 @@ docker exec "${CONTAINER_ID}" du -sh /workspace/sam3d 2>/dev/null || true
 docker exec "${CONTAINER_ID}" du -sh /workspace/miniconda3 2>/dev/null || true
 docker exec "${CONTAINER_ID}" du -sh /workspace/isaacsim_env 2>/dev/null || true
 docker exec "${CONTAINER_ID}" du -sh /workspace/BlueprintPipeline 2>/dev/null || true
+docker exec "${CONTAINER_ID}" du -sh /opt/scenesmith 2>/dev/null || true
+docker exec "${CONTAINER_ID}" du -sh /workspace/scenesmith 2>/dev/null || true
 log ""
 
 # ── 4. Docker commit ────────────────────────────────────────────────────────
@@ -147,45 +193,3 @@ log "       -e OPENAI_API_KEY=sk-... \\"
 log "       -e GEMINI_API_KEY=AIza... \\"
 log "       -p 8080:8080 \\"
 log "       ${LATEST_TAG}"
-
-# ── Helper: tar archive from inside container ────────────────────────────────
-create_tar_snapshot() {
-    log "Creating tar archive of /workspace..."
-    ARCHIVE="/tmp/sage-sam3d-snapshot-$(date +%Y%m%d).tar.gz"
-
-    # Estimate size
-    log "Estimating size..."
-    TOTAL_SIZE=$(du -sh /workspace 2>/dev/null | cut -f1)
-    log "  /workspace total: ${TOTAL_SIZE}"
-    log "  Archive will be ~60% of this (gzip compression)"
-    log ""
-
-    tar czf "${ARCHIVE}" \
-        --exclude='*.log' \
-        --exclude='__pycache__' \
-        --exclude='.cache/pip' \
-        -C / \
-        workspace/SAGE \
-        workspace/sam3d \
-        workspace/miniconda3 \
-        workspace/isaacsim_env \
-        workspace/BlueprintPipeline/scripts/runpod_sage \
-        workspace/BlueprintPipeline/configs \
-        workspace/entrypoint.sh \
-        workspace/apply_sage_patches.sh \
-        workspace/.isaacsim_path \
-        2>/dev/null
-
-    ARCHIVE_SIZE=$(du -sh "${ARCHIVE}" | cut -f1)
-    SHA=$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)
-    echo "${SHA}  ${ARCHIVE}" > "${ARCHIVE}.sha256"
-
-    log ""
-    log "Archive created: ${ARCHIVE} (${ARCHIVE_SIZE})"
-    log "SHA256: ${SHA}"
-    log ""
-    log "To import on a new machine:"
-    log "  1. Copy archive: scp ${ARCHIVE} newmachine:/tmp/"
-    log "  2. Extract:      tar xzf /tmp/$(basename ${ARCHIVE}) -C /"
-    log "  3. Run:          bash /workspace/entrypoint.sh"
-}

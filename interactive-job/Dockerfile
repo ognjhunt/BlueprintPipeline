@@ -1,30 +1,25 @@
 # interactive-job/Dockerfile
 #
-# Interactive Asset Pipeline for 3D-RE-GEN Integration
+# Interactive Asset Pipeline (Multi-Backend) for BlueprintPipeline.
 #
-# This job processes 3D assets from 3D-RE-GEN to add articulation data
-# using the Particulate service (~10s per object).
+# This image runs the interactive-job entrypoint:
+#   python interactive-job/run_interactive_assets.py
 #
-# Particulate: Fast feed-forward mesh articulation detection
+# It is intentionally lightweight and can be paired with GPU backend services:
+# - particulate-service (mesh -> URDF)
+# - physx-anything-service (image -> URDF)
+# - (optional) infinigen-service (category -> URDF)
 #
-# CLOUD RUN JOB SETTINGS:
-# ----------------------------------------------------------
-# gcloud run jobs create interactive-job \
-#   --image gcr.io/PROJECT/interactive-job:latest \
-#   --memory 4Gi \
-#   --cpu 2 \
-#   --timeout 3600 \
-#   --max-retries 1 \
-#   --region us-central1
-# ----------------------------------------------------------
+# Build from repo root:
+#   docker build -f interactive-job/Dockerfile -t blueprint-interactive:latest .
 
 FROM python:3.11-slim
 
-# Install system dependencies for trimesh rendering
+# System deps for trimesh offscreen rendering + pybullet
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -35,25 +30,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python dependencies
-# - trimesh: Mesh loading and rendering
-# - numpy: Numerical operations
-# - Pillow: Image processing for rendering
-# - pyglet: Backend for trimesh rendering (optional, helps with offscreen rendering)
-RUN pip install --no-cache-dir \
-    trimesh[easy] \
-    numpy \
-    Pillow \
-    pyglet
+COPY interactive-job/requirements.txt ./interactive-job/requirements.txt
+RUN pip install --no-cache-dir -r interactive-job/requirements.txt
 
-# Copy application files
-COPY run_interactive_assets.py /app/run_interactive_assets.py
+# Copy job + shared tools (keep image self-contained; no runtime git pulls)
+COPY interactive-job/ ./interactive-job/
+COPY tools/ ./tools/
+COPY monitoring/ ./monitoring/
 
-# Create temp directory for mesh rendering
-RUN mkdir -p /tmp/interactive && chmod 777 /tmp/interactive
-
-# Environment configuration
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 ENV INTERACTIVE_MODE=glb
 
-# Default command
-CMD ["python", "run_interactive_assets.py"]
+RUN mkdir -p /tmp/interactive && chmod 777 /tmp/interactive
+
+CMD ["python", "interactive-job/run_interactive_assets.py"]
+

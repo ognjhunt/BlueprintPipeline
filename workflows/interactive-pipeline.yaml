@@ -53,13 +53,16 @@ main:
           - interactiveOutputPrefix: ${"scenes/" + sceneId + "/assets/interactive"}
           - layoutPrefix: ${"scenes/" + sceneId + "/layout"}
           # Backend routing:
-          # - ARTICULATION_BACKEND=particulate|heuristic enforces explicit backend.
-          # - ARTICULATION_BACKEND=auto (default) uses particulate when endpoint is set,
-          #   otherwise heuristic.
+          # - ARTICULATION_BACKEND=particulate|physx_anything|infinigen enforces explicit backend.
+          # - ARTICULATION_BACKEND=auto lets interactive-job choose among enabled backends.
           - particulateEndpoint: ${default(sys.get_env("PARTICULATE_ENDPOINT"), "")}
           - requestedArticulationBackend: ${default(sys.get_env("ARTICULATION_BACKEND"), "auto")}
           - disallowPlaceholderUrdf: ${default(sys.get_env("DISALLOW_PLACEHOLDER_URDF"), "false")}
-          - articulationBackend: ${if(requestedArticulationBackend != "auto", requestedArticulationBackend, if(particulateEndpoint != "", "particulate", "heuristic"))}
+          - articulationBackend: ${requestedArticulationBackend}
+          - infinigenEnabled: ${default(sys.get_env("INFINIGEN_ENABLED"), "false")}
+          - infinigenEndpoint: ${default(sys.get_env("INFINIGEN_ENDPOINT"), "")}
+          - physxEnabled: ${default(sys.get_env("PHYSX_ANYTHING_ENABLED"), "false")}
+          - physxEndpoint: ${default(sys.get_env("PHYSX_ANYTHING_ENDPOINT"), "")}
           - jobName: "interactive-job"
           - simreadyJobName: "simready-job"
           # Explicit override: 30 minutes for interactive processing.
@@ -123,6 +126,14 @@ main:
                         value: ${particulateEndpoint}
                       - name: DISALLOW_PLACEHOLDER_URDF
                         value: ${disallowPlaceholderUrdf}
+                      - name: INFINIGEN_ENABLED
+                        value: ${infinigenEnabled}
+                      - name: INFINIGEN_ENDPOINT
+                        value: ${infinigenEndpoint}
+                      - name: PHYSX_ANYTHING_ENABLED
+                        value: ${physxEnabled}
+                      - name: PHYSX_ANYTHING_ENDPOINT
+                        value: ${physxEndpoint}
                 timeout: '${string(interactiveTimeoutSeconds) + "s"}'
           result: interactiveJobExecution
         retry:

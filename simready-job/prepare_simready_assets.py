@@ -59,6 +59,16 @@ else:  # pragma: no cover
         "[SIMREADY] Material transfer module unavailable; falling back to generic physics defaults."
     )
 
+# Soft body physics for deformable objects
+try:
+    from tools.physics.soft_body import SoftBodyPhysics
+    _SOFT_BODY_PHYSICS = SoftBodyPhysics(enable_logging=True)
+    HAVE_SOFT_BODY = True
+except ImportError:
+    _SOFT_BODY_PHYSICS = None
+    HAVE_SOFT_BODY = False
+    logger.warning("[SIMREADY] soft_body module unavailable; deformable objects will use rigid body physics.")
+
 # Secret Manager for secure API key storage
 try:
     from tools.secret_store import get_secret_or_env, SecretIds
@@ -1773,6 +1783,31 @@ def build_physics_config(
     if bool((obj.get("articulation") or {}).get("required")) and "link_physics" not in physics_cfg:
         physics_cfg["link_physics"] = []
 
+    # Enrich deformable objects with soft body properties.
+    if HAVE_SOFT_BODY and _SOFT_BODY_PHYSICS is not None:
+        # Check physics_hints from upstream generator first, then auto-detect.
+        hints = obj.get("physics_hints") or {}
+        is_deformable = hints.get("is_deformable", False)
+        if not is_deformable:
+            is_deformable = (
+                obj.get("sim_role") == "deformable_object"
+                or _SOFT_BODY_PHYSICS.is_soft_body(obj)
+            )
+        if is_deformable:
+            sb_props = _SOFT_BODY_PHYSICS.generate_soft_body_properties(obj, bounds)
+            usd_schema = _SOFT_BODY_PHYSICS.export_to_usd_schema(sb_props, "")
+            physics_cfg["is_deformable"] = True
+            physics_cfg["soft_body_type"] = sb_props.soft_body_type.value
+            physics_cfg["soft_body_material"] = sb_props.material.value
+            physics_cfg["deformable_schema"] = usd_schema
+            physics_cfg["soft_body_properties"] = sb_props.to_dict()
+            # Cloth uses particle self-collision, not convex decomposition.
+            physics_cfg["collision_shape"] = "none"
+            logger.info(
+                "[SIMREADY] obj %s detected as deformable: type=%s, material=%s",
+                obj.get("id"), sb_props.soft_body_type.value, sb_props.material.value,
+            )
+
     return physics_cfg
 
 
@@ -1890,20 +1925,30 @@ def _validate_simready_usd(usd_path: Path, physics: Dict[str, Any]) -> None:
     if mass <= 0:
         raise ValueError(f"Invalid mass {mass} in physics config for {usd_path}")
 
-    if physics.get("dynamic", True):
+    is_deformable = bool(physics.get("is_deformable", False))
+
+    # Rigid-body checks (skip for deformables).
+    if physics.get("dynamic", True) and not is_deformable:
         if "PhysicsRigidBodyAPI" not in content:
             logger.warning(f"[SIMREADY] Dynamic object missing PhysicsRigidBodyAPI: {usd_path}")
         if "physics:mass" not in content:
             logger.warning(f"[SIMREADY] Dynamic object missing physics:mass: {usd_path}")
         if "PhysicsMassAPI" not in content:
             logger.warning(f"[SIMREADY] Dynamic object missing PhysicsMassAPI: {usd_path}")
+    elif is_deformable:
+        # Deformables intentionally skip RigidBodyAPI; they should still author mass.
+        if "physics:mass" not in content:
+            logger.warning(f"[SIMREADY] Deformable object missing physics:mass: {usd_path}")
+        if "PhysicsMassAPI" not in content:
+            logger.warning(f"[SIMREADY] Deformable object missing PhysicsMassAPI: {usd_path}")
 
     # Check for physics material
     if "PhysicsMaterialAPI" not in content:
         logger.warning(f"[SIMREADY] Missing PhysicsMaterialAPI: {usd_path}")
 
     # Check for collision API
-    if "PhysicsCollisionAPI" not in content:
+    # Deformables typically do not use rigid collision proxies in the simready wrapper.
+    if not is_deformable and "PhysicsCollisionAPI" not in content:
         logger.warning(f"[SIMREADY] Missing PhysicsCollisionAPI: {usd_path}")
 
     logger.debug(f"[SIMREADY] USD validation passed: {usd_path}")
@@ -1966,8 +2011,17 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
     lines.append("(\n    metersPerUnit = 1\n    kilogramsPerUnit = 1\n)")
     lines.append("")
 
+    # Deformable objects: skip RigidBodyAPI, write deformable metadata instead.
+    is_deformable = bool(physics.get("is_deformable", False))
+
     # Asset root
-    if dynamic:
+    if is_deformable:
+        # Deformable objects only need MassAPI; the DeformableBodyAPI/SurfaceAPI
+        # is applied in build_scene_usd.py where we have the full scene context.
+        lines.append('def Xform "Asset" (')
+        lines.append('    prepend apiSchemas = ["PhysicsMassAPI"]')
+        lines.append(")")
+    elif dynamic:
         lines.append('def Xform "Asset" (')
         lines.append('    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]')
         lines.append(")")
@@ -1976,7 +2030,14 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
         lines.append('def Xform "Asset"')
     lines.append("{")
 
-    if dynamic:
+    if is_deformable:
+        lines.append(f"    float physics:mass = {mass:.6f}")
+        lines.append("    bool simready:isDeformable = true")
+        soft_body_type = str(physics.get("soft_body_type", "cloth"))
+        lines.append(f'    string simready:softBodyType = "{soft_body_type}"')
+        soft_body_material = str(physics.get("soft_body_material", "cotton"))
+        lines.append(f'    string simready:softBodyMaterial = "{soft_body_material}"')
+    elif dynamic:
         lines.append("    bool physics:rigidBodyEnabled = 1")
         lines.append(f"    float physics:mass = {mass:.6f}")
         # Center of mass for accurate manipulation dynamics
@@ -2014,8 +2075,8 @@ def write_simready_usd(out_path: Path, asset_rel: str, physics: Dict[str, Any], 
     lines.append("        }")
     lines.append("    }")
 
-    # Collision proxy
-    if add_proxy:
+    # Collision proxy — skip for deformable objects (cloth uses particle self-collision).
+    if add_proxy and not is_deformable:
         lines.append("")
         lines.append('    def Xform "Collision"')
         lines.append("    {")
@@ -2407,6 +2468,7 @@ def prepare_simready_assets_job(
 
     simready_paths: Dict[Any, str] = {}
     computed_bounds_map: Dict[str, Dict[str, Any]] = {}  # oid -> bounds dict from compute_bounds()
+    computed_physics_map: Dict[str, Dict[str, Any]] = {}  # oid -> full physics_cfg for downstream jobs
     simready_physics_summary: Dict[str, Dict[str, Any]] = {}
     fallback_stats = {"total": 0, "covered": 0}
     quality_stats = {"total": 0, "passed": 0}
@@ -2417,7 +2479,7 @@ def prepare_simready_assets_job(
     def process_single_object(
         obj: Dict[str, Any],
     ) -> Optional[
-        Tuple[str, str, str, bool, Optional[bool], str, Dict[str, Any], Dict[str, Any]]
+        Tuple[str, str, str, bool, Optional[bool], str, Dict[str, Any], Dict[str, Any], Dict[str, Any]]
     ]:
         """
         Process a single object. Returns (oid, sim_rel, sim_path, fallback_covered, quality_passed, profile_used)
@@ -2568,6 +2630,7 @@ def prepare_simready_assets_job(
                 profile_used,
                 bounds,
                 physics_summary,
+                physics_cfg,
             )
 
         except Exception as e:
@@ -2599,10 +2662,12 @@ def prepare_simready_assets_job(
                     profile_used,
                     bounds,
                     physics_summary,
+                    physics_cfg,
                 ) = success_item
                 simready_paths[oid] = sim_rel
                 computed_bounds_map[str(oid)] = bounds
                 simready_physics_summary[str(oid)] = physics_summary
+                computed_physics_map[str(oid)] = physics_cfg
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
                 profiles_used.add(profile_used)
                 if fallback_mode:
@@ -2639,10 +2704,12 @@ def prepare_simready_assets_job(
                     profile_used,
                     bounds,
                     physics_summary,
+                    physics_cfg,
                 ) = result
                 simready_paths[oid] = sim_rel
                 computed_bounds_map[str(oid)] = bounds
                 simready_physics_summary[str(oid)] = physics_summary
+                computed_physics_map[str(oid)] = physics_cfg
                 print(f"[SIMREADY] Wrote simready asset for obj {oid} -> {sim_path}")
                 profiles_used.add(profile_used)
                 if fallback_mode:
@@ -2760,10 +2827,11 @@ def prepare_simready_assets_job(
     # Write computed dimensions back to scene_manifest.json so downstream jobs
     # (geniesim adapter, episode generation) have real object sizes instead of
     # placeholder [0.1, 0.1, 0.1] defaults.
-    if computed_bounds_map and manifest_path.exists():
+    if (computed_bounds_map or computed_physics_map) and manifest_path.exists():
         try:
             manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
             updated_count = 0
+            physics_updated_count = 0
             for manifest_obj in manifest_data.get("objects", []):
                 oid = manifest_obj.get("id", "")
                 bounds_info = computed_bounds_map.get(oid)
@@ -2776,18 +2844,23 @@ def prepare_simready_assets_job(
                     }
                     manifest_obj["dimensions_source"] = bounds_info.get("source", "unknown")
                     updated_count += 1
+                physics_info = computed_physics_map.get(oid)
+                if physics_info is not None:
+                    manifest_obj["physics"] = physics_info
+                    physics_updated_count += 1
             manifest_path.write_text(
                 json.dumps(manifest_data, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
             print(
                 f"[SIMREADY] Wrote dimensions_est back to scene_manifest.json "
-                f"for {updated_count}/{len(computed_bounds_map)} objects"
+                f"for {updated_count}/{len(computed_bounds_map)} objects; "
+                f"wrote physics for {physics_updated_count}/{len(computed_physics_map)} objects"
             )
         except Exception as exc:
             logger.warning(
-                "[SIMREADY] Failed to write dimensions back to scene_manifest: %s; "
-                "downstream jobs will use fallback dimensions.",
+                "[SIMREADY] Failed to write dimensions/physics back to scene_manifest: %s; "
+                "downstream jobs will use manifest defaults.",
                 exc,
             )
 

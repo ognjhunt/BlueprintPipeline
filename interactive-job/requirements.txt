@@ -1,0 +1,6 @@
+numpy
+Pillow
+pybullet
+pyglet
+trimesh[easy]
+

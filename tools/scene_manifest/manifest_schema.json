@@ -114,6 +114,7 @@
               "static",
               "interactive",
               "manipulable_object",
+              "deformable_object",
               "articulated_furniture",
               "articulated_appliance",
               "clutter",

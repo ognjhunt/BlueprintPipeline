@@ -17,8 +17,8 @@ set -euo pipefail
 log() { echo "[push $(date -u +%FT%TZ)] $*"; }
 
 REGISTRY="${1:-}"
-IMAGE_NAME="sage-sam3d"
 TAG="${2:-latest}"
+IMAGE_NAME="${IMAGE_NAME:-sage-sam3d-hybrid}"
 
 if [[ -z "${REGISTRY}" ]]; then
     echo "Usage: $0 <registry/username> [tag]"
@@ -26,6 +26,9 @@ if [[ -z "${REGISTRY}" ]]; then
     echo "Examples:"
     echo "  $0 yourusername              # Docker Hub"
     echo "  $0 ghcr.io/yourusername      # GitHub Container Registry"
+    echo ""
+    echo "Override image name (default: sage-sam3d-hybrid):"
+    echo "  IMAGE_NAME=sage-sam3d $0 yourusername"
     exit 1
 fi
 

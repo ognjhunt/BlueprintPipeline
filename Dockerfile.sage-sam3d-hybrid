@@ -1,0 +1,132 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# SAGE + SAM3D + Isaac Sim + SceneSmith (Paper Stack) — Hybrid Image
+# =============================================================================
+#
+# Goal:
+#   - Keep SAGE as the default "factory" pipeline.
+#   - Bake SceneSmith (official repo + venv) into the same image for:
+#       - SCENE_SOURCE=scenesmith runs
+#       - quality-driven fallback when SAGE scenes can't be repaired quickly
+#
+# This Dockerfile EXTENDS a prebuilt SAGE+SAM3D+IsaacSim image.
+#
+# Build:
+#   docker build --platform linux/amd64 \
+#     -f Dockerfile.sage-sam3d-hybrid \
+#     --build-arg BASE_IMAGE=<registry>/sage-sam3d:latest \
+#     -t <registry>/sage-sam3d-hybrid:latest .
+#
+# Notes:
+#   - SceneSmith venv lives at /opt/scenesmith/.venv (isolated from SAGE conda env).
+#   - Checkpoints are unified under /workspace/sam3d/checkpoints/hf.
+# =============================================================================
+
+ARG BASE_IMAGE=sage-sam3d:latest
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_LINK_MODE=copy \
+    LIDRA_SKIP_INIT=1 \
+    SCENESMITH_PAPER_REPO_DIR=/opt/scenesmith \
+    SCENESMITH_PAPER_PYTHON_BIN=/opt/scenesmith/.venv/bin/python \
+    SCENESMITH_PAPER_ALL_SAM3D=true
+
+# =============================================================================
+# Phase 1: Install uv (SceneSmith dependency manager)
+# =============================================================================
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+# =============================================================================
+# Phase 2: Clone SceneSmith repo + submodules
+# =============================================================================
+WORKDIR /opt
+RUN git clone --depth 1 https://github.com/nepfaff/scenesmith.git /opt/scenesmith && \
+    cd /opt/scenesmith && \
+    git submodule update --init --recursive
+
+# =============================================================================
+# Phase 3: SceneSmith Python deps (venv) + GPU packages
+# =============================================================================
+WORKDIR /opt/scenesmith
+RUN uv sync --no-dev
+
+# Activate venv for subsequent RUN steps
+ENV VIRTUAL_ENV=/opt/scenesmith/.venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# GPU packages from source (match Dockerfile.scenesmith-runpod)
+RUN uv pip install --no-build-isolation \
+    "git+https://github.com/nerfstudio-project/gsplat.git@2323de5905d5e90e035f792fe65bad0fedd413e7"
+
+RUN uv pip install --no-build-isolation \
+    "git+https://github.com/NVlabs/nvdiffrast.git"
+
+RUN FORCE_CUDA=1 uv pip install --no-build-isolation \
+    "git+https://github.com/facebookresearch/pytorch3d.git"
+
+RUN uv pip install kaolin \
+    -f "https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu124.html"
+
+# Pin xformers + torch inside the SceneSmith venv
+RUN uv pip install 'xformers==0.0.28.post3' \
+    --index-url https://download.pytorch.org/whl/cu124 && \
+    uv pip install 'torch==2.5.1+cu124' 'torchvision==0.20.1+cu124' \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# SceneSmith's bundled SAM3D repo + misc deps
+RUN uv pip install -e external/sam-3d-objects/ --no-deps
+
+RUN uv pip install \
+    open3d optree roma loguru \
+    astor einops-exts point-cloud-utils scikit-image trimesh \
+    easydict einops fvcore \
+    plyfile spconv-cu120 timm \
+    lightning pyvista pymeshfix igraph
+
+RUN uv pip install \
+    'MoGe @ git+https://github.com/microsoft/MoGe.git@a8c37341bc0325ca99b9d57981cc3bb2bd3e255b'
+
+# =============================================================================
+# Phase 4: Unify checkpoints to avoid duplicate downloads
+# =============================================================================
+#  - SAGE image already includes: /workspace/sam3d/checkpoints/hf (facebook/sam-3d-objects)
+#  - SceneSmith paper stack expects: external/checkpoints/sam3.pt (facebook/sam3)
+RUN mkdir -p /workspace/sam3d/checkpoints/hf && \
+    mkdir -p /opt/scenesmith/external && \
+    ln -sf /workspace/sam3d/checkpoints/hf /opt/scenesmith/external/checkpoints
+
+# Best-effort download of sam3.pt into the shared checkpoint dir.
+# If the repo becomes gated, pass HF_TOKEN at build time.
+RUN python3.11 - <<'PY' || true
+from huggingface_hub import hf_hub_download
+import os
+
+dst_dir = "/workspace/sam3d/checkpoints/hf"
+os.makedirs(dst_dir, exist_ok=True)
+try:
+    path = hf_hub_download(
+        repo_id="facebook/sam3",
+        filename="sam3.pt",
+        local_dir=dst_dir,
+        local_dir_use_symlinks=False,
+    )
+    print("Downloaded", path)
+except Exception as exc:
+    print("WARNING: sam3.pt download failed:", exc)
+PY
+
+# Convenience symlink (some scripts expect /workspace/scenesmith)
+RUN mkdir -p /workspace && ln -sf /opt/scenesmith /workspace/scenesmith
+
+# =============================================================================
+# Phase 5: Refresh BlueprintPipeline repo in the derived image
+# =============================================================================
+WORKDIR /workspace
+COPY . /workspace/BlueprintPipeline
+
+# Keep the base image entrypoint (/workspace/entrypoint.sh) and CMD.
+

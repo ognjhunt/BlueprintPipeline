@@ -71,6 +71,9 @@ components = {
     "blueprint_scripts": "/workspace/BlueprintPipeline/scripts/runpod_sage",
     "entrypoint": "/workspace/entrypoint.sh",
     "patches": "/workspace/apply_sage_patches.sh",
+    "physx_anything": "/workspace/PhysX-Anything",
+    "physx_anything_weights": "/workspace/PhysX-Anything/pretrain/vlm",
+    "infinigen": "/workspace/infinigen",
 }
 
 for name, path in components.items():
@@ -131,6 +134,8 @@ check_component "/workspace/miniconda3/envs/sage" "Conda env: sage"
 check_component "/workspace/isaacsim_env" "Isaac Sim venv"
 check_component "/workspace/BlueprintPipeline/scripts/runpod_sage/sam3d_server.py" "SAM3D server"
 check_component "/workspace/BlueprintPipeline/scripts/runpod_sage/entrypoint_sage_sam3d.sh" "Entrypoint script"
+check_component "/workspace/PhysX-Anything/pretrain/vlm" "PhysX-Anything weights"
+check_component "/workspace/infinigen/scripts/spawn_asset.py" "Infinigen"
 
 # ── Special check: Isaac Sim ────────────────────────────────────────────────
 ISAACSIM_IMPORTABLE=0
@@ -189,7 +194,7 @@ fi
 log ""
 log "Estimating archive size..."
 TOTAL_BYTES=0
-for d in /workspace/SAGE /workspace/sam3d /workspace/miniconda3 /workspace/isaacsim_env; do
+for d in /workspace/SAGE /workspace/sam3d /workspace/miniconda3 /workspace/isaacsim_env /workspace/PhysX-Anything /workspace/infinigen; do
     if [[ -d "$d" ]]; then
         SIZE=$(du -sb "$d" 2>/dev/null | cut -f1)
         TOTAL_BYTES=$((TOTAL_BYTES + SIZE))
@@ -263,6 +268,8 @@ tar czf "${ARCHIVE}" \
     --exclude='workspace/BlueprintPipeline/downloaded_episodes' \
     --exclude='workspace/BlueprintPipeline/dead_letter' \
     --exclude='workspace/.sage_runpod_secrets.env' \
+    --exclude='workspace/PhysX-Anything/.git' \
+    --exclude='workspace/infinigen/.git' \
     --warning=no-file-changed \
     -C / \
     workspace/SAGE \
@@ -273,6 +280,10 @@ tar czf "${ARCHIVE}" \
     workspace/entrypoint.sh \
     workspace/apply_sage_patches.sh \
     workspace/.isaacsim_path \
+    workspace/PhysX-Anything \
+    workspace/infinigen \
+    workspace/infinigen_service.py \
+    workspace/physx_anything_service.py \
     "${MANIFEST}" \
     2>/dev/null || true
 

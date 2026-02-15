@@ -188,6 +188,7 @@ class SoftBodyPhysics:
             "towel", "cloth", "fabric", "shirt", "t-shirt", "tshirt",
             "pants", "jeans", "jacket", "coat", "blanket", "sheet",
             "tablecloth", "napkin", "curtain", "flag", "banner",
+            "sock", "scarf", "gloves", "apron", "washcloth",
         ],
         SoftBodyType.ROPE: [
             "rope", "cable", "cord", "string", "wire", "chain",
@@ -225,8 +226,19 @@ class SoftBodyPhysics:
         Returns:
             True if object should be soft body
         """
-        category = (obj_data.get("category") or "").lower()
-        material = (obj_data.get("material_name") or "").lower()
+        # Prefer canonical `category`, but many downstream jobs operate on legacy
+        # scene_assets-like dicts where the category is stored in `class_name`.
+        category = (
+            obj_data.get("category")
+            or obj_data.get("class_name")
+            or obj_data.get("name")
+            or ""
+        ).lower()
+        material = (
+            obj_data.get("material_name")
+            or obj_data.get("material")
+            or ""
+        ).lower()
 
         # Check category
         for soft_type, categories in self.SOFT_BODY_CATEGORIES.items():
@@ -254,7 +266,12 @@ class SoftBodyPhysics:
         if not self.is_soft_body(obj_data):
             return None
 
-        category = (obj_data.get("category") or "").lower()
+        category = (
+            obj_data.get("category")
+            or obj_data.get("class_name")
+            or obj_data.get("name")
+            or ""
+        ).lower()
 
         # Match category to soft body type
         for soft_type, categories in self.SOFT_BODY_CATEGORIES.items():
@@ -274,8 +291,17 @@ class SoftBodyPhysics:
         Returns:
             DeformableMaterial
         """
-        material = (obj_data.get("material_name") or "").lower()
-        category = (obj_data.get("category") or "").lower()
+        material = (
+            obj_data.get("material_name")
+            or obj_data.get("material")
+            or ""
+        ).lower()
+        category = (
+            obj_data.get("category")
+            or obj_data.get("class_name")
+            or obj_data.get("name")
+            or ""
+        ).lower()
 
         # Material keyword matching
         if "cotton" in material or "towel" in category:

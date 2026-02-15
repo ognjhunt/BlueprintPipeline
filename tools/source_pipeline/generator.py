@@ -18,6 +18,12 @@ from .placement_tools import detect_support_surfaces
 from .scene_observer import summarize_scene
 from .request import QualityTier, TextBackend
 
+try:
+    from tools.physics.soft_body import SoftBodyPhysics
+    _SOFT_BODY_PHYSICS = SoftBodyPhysics(enable_logging=False)
+except ImportError:
+    _SOFT_BODY_PHYSICS = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -425,7 +431,48 @@ def _asset_source_hint(sim_role: str) -> str:
     return "generated"
 
 
+def _is_deformable(category: str) -> bool:
+    """Check if a category should use soft body / deformable physics."""
+    if _SOFT_BODY_PHYSICS is None:
+        return False
+    return _SOFT_BODY_PHYSICS.is_soft_body({"category": category})
+
+
 def _physics_hints(category: str, sim_role: str) -> Dict[str, Any]:
+    # Deformable objects get soft-body-specific physics hints.
+    if sim_role == "deformable_object" or (
+        sim_role == "manipulable_object" and _is_deformable(category)
+    ):
+        if _SOFT_BODY_PHYSICS is not None:
+            dims = _default_dims_for_category(category)
+            bounds = {
+                "size_m": [dims["width"], dims["height"], dims["depth"]],
+                "volume_m3": dims["width"] * dims["height"] * dims["depth"],
+            }
+            props = _SOFT_BODY_PHYSICS.generate_soft_body_properties(
+                {"category": category}, bounds,
+            )
+            return {
+                "dynamic": True,
+                "is_deformable": True,
+                "soft_body_type": props.soft_body_type.value,
+                "soft_body_material": props.material.value,
+                "mass_kg": props.total_mass or 0.3,
+                "friction_static": 0.70,
+                "friction_dynamic": 0.55,
+                "restitution": 0.05,
+                "material_name": props.material.value,
+                "stiffness": props.stiffness,
+                "damping": props.damping,
+                "bend_resistance": props.bend_resistance,
+                "stretch_resistance": props.stretch_resistance,
+                "thickness": props.thickness,
+                "self_collision_enabled": props.self_collision_enabled,
+                "particle_resolution": props.particle_resolution,
+                "solver_iterations": props.solver_iterations,
+                "mass_per_area": props.mass_per_area,
+            }
+
     dynamic = sim_role in {"manipulable_object", "clutter"}
     mass = {
         "mug": 0.35,
@@ -874,7 +921,8 @@ def _try_llm_plan(
         "Return compact JSON: {room_type, room_dimensions:{width,depth,height}, objects:[...]}. "
         "Each object: {name, category, sim_role, position:{x,y,z}, rotation_y_deg, "
         "support_surfaces:[{name,y_offset,area:[w,d]}]}. "
-        "Allowed sim_role: static, articulated_furniture, articulated_appliance, manipulable_object. "
+        "Allowed sim_role: static, articulated_furniture, articulated_appliance, manipulable_object, deformable_object. "
+        "Use deformable_object for cloth/fabric items like towels, shirts, socks, curtains, blankets. "
         "PLACEMENT RULES: "
         "1. Large furniture (static, articulated_*) along walls or room center. "
         "2. Tables, desks, counters must declare support_surfaces with their top surface y_offset and area. "
@@ -989,8 +1037,12 @@ def _generate_internal_scene_package(
                 "articulated_furniture",
                 "articulated_appliance",
                 "manipulable_object",
+                "deformable_object",
             }:
                 sim_role = "manipulable_object"
+            # Auto-detect deformable objects from category.
+            if sim_role == "manipulable_object" and _is_deformable(category):
+                sim_role = "deformable_object"
             template.append((name, category, sim_role))
         if not template:
             template = _compose_fallback_template(
@@ -1028,7 +1080,10 @@ def _generate_internal_scene_package(
             )
             object_name = f"{name}_{idx:03d}" if idx > len(template) else name
             dims = _default_dims_for_category(category)
-            placement_stage = "manipulands" if sim_role == "manipulable_object" else "furniture"
+            # Auto-detect deformable objects from template categories.
+            if sim_role == "manipulable_object" and _is_deformable(category):
+                sim_role = "deformable_object"
+            placement_stage = "manipulands" if sim_role in {"manipulable_object", "deformable_object"} else "furniture"
             objects.append(
                 {
                     "id": oid,
@@ -1072,10 +1127,11 @@ def _generate_internal_scene_package(
             max_iterations=max(2, max_agent_iterations),
         )
     else:
-        support_surfaces = detect_support_surfaces([obj for obj in objects if obj.get("sim_role") != "manipulable_object"])
+        _SMALL_DYNAMIC_ROLES = {"manipulable_object", "deformable_object"}
+        support_surfaces = detect_support_surfaces([obj for obj in objects if obj.get("sim_role") not in _SMALL_DYNAMIC_ROLES])
         anchor_id = support_surfaces[0]["owner_object_id"] if support_surfaces else None
         for obj in objects:
-            if obj.get("sim_role") == "manipulable_object":
+            if obj.get("sim_role") in _SMALL_DYNAMIC_ROLES:
                 obj.setdefault("placement_stage", "manipulands")
                 obj.setdefault("parent_support_id", anchor_id)
                 obj.setdefault("surface_local_se2", {"x": 0.0, "z": 0.0, "yaw_rad": 0.0})

@@ -236,6 +236,7 @@ def _load_debug_token() -> Optional[str]:
 
 
 DEBUG_TOKEN = _load_debug_token()
+ENVIRONMENT = os.environ.get("PIPELINE_ENV", "")
 PARTICULATE_MAX_GLB_BYTES = int(os.environ.get("PARTICULATE_MAX_GLB_BYTES", "52428800"))
 PARTICULATE_MAX_GLB_B64_CHARS = ((PARTICULATE_MAX_GLB_BYTES + 2) // 3) * 4
 
@@ -729,7 +730,7 @@ def generate_static_urdf(output_dir: Path, mesh_path: Path, robot_name: str = "r
 # Particulate Pipeline
 # =============================================================================
 
-def run_particulate(glb_bytes: bytes, request_id: str) -> Tuple[bytes, bytes, Dict[str, Any]]:
+def run_particulate(glb_bytes: bytes, request_id: str, *, up_dir: str = "Y") -> Tuple[bytes, bytes, Dict[str, Any]]:
     """
     Run the Particulate inference pipeline.
 
@@ -767,7 +768,7 @@ def run_particulate(glb_bytes: bytes, request_id: str) -> Tuple[bytes, bytes, Di
             str(PARTICULATE_INFER),
             "--input_mesh", str(input_path),
             "--output_dir", str(out_dir),
-            "--up_dir", "Y",  # Our meshes typically use Y-up
+            "--up_dir", str(up_dir),  # Coordinate frame hint for normalization
             "--export_urdf",  # Enable URDF export
             "--export_glb",   # Export segmented GLB
         ]
@@ -1089,7 +1090,15 @@ def handle_request():
 
     try:
         log(f"[{request_id}] GPU lock acquired, running pipeline")
-        mesh_bytes, urdf_bytes, metadata = run_particulate(glb_bytes, request_id)
+        up_dir = data.get("up_dir") or os.getenv("PARTICULATE_UP_DIR", "Y")
+        if not isinstance(up_dir, str):
+            up_dir = "Y"
+        up_dir = up_dir.strip().upper()
+        allowed = {"X", "Y", "Z", "-X", "-Y", "-Z"}
+        if up_dir not in allowed:
+            return jsonify({"error": f"Invalid up_dir '{up_dir}' (allowed: {sorted(allowed)})"}), 400
+
+        mesh_bytes, urdf_bytes, metadata = run_particulate(glb_bytes, request_id, up_dir=up_dir)
         log(f"[{request_id}] Pipeline completed")
     except ParticulateError as e:
         log(f"[{request_id}] Pipeline error: {e}", "ERROR")

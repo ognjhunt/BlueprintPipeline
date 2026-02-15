@@ -187,7 +187,7 @@ def _coerce_float(value: Any) -> Optional[float]:
         return None
 
 
-def _extract_physics_fields(obj: Dict[str, Any]) -> Dict[str, Optional[float]]:
+def _extract_physics_fields(obj: Dict[str, Any]) -> Dict[str, Any]:
     physics = dict(obj.get("physics") or {})
     for key in (
         "mass_kg",
@@ -223,12 +223,24 @@ def _extract_physics_fields(obj: Dict[str, Any]) -> Dict[str, Optional[float]]:
         if dynamic_friction is None:
             dynamic_friction = friction
 
-    return {
+    result = {
         "mass_kg": mass,
         "static_friction": static_friction,
         "dynamic_friction": dynamic_friction,
         "restitution": restitution,
     }
+
+    # Pass through deformable data if present (from generator/simready).
+    hints = obj.get("physics_hints") or {}
+    phys = obj.get("physics") or {}
+    if hints.get("is_deformable") or phys.get("is_deformable"):
+        src = phys if phys.get("is_deformable") else hints
+        result["is_deformable"] = True
+        result["deformable_schema"] = src.get("deformable_schema", {})
+        result["soft_body_type"] = src.get("soft_body_type", "cloth")
+        result["soft_body_properties"] = src.get("soft_body_properties", {})
+
+    return result
 
 
 # Default mass (kg) by object category for objects missing explicit physics.
@@ -829,6 +841,60 @@ class SceneBuilder:
 
         # Create world root
         self.world = UsdGeom.Xform.Define(stage, "/World")
+        try:
+            stage.SetDefaultPrim(self.world.GetPrim())
+        except Exception:
+            # Some USD builds may restrict default prim edits; best-effort only.
+            pass
+
+    def ensure_physics_scene(self) -> None:
+        """Ensure a /World/PhysicsScene exists so USD Physics and PhysX simulation run."""
+        scene_path = "/World/PhysicsScene"
+        existing = self.stage.GetPrimAtPath(scene_path)
+        if existing and existing.IsValid():
+            return
+
+        scene = UsdPhysics.Scene.Define(self.stage, scene_path)
+        up_axis = UsdGeom.GetStageUpAxis(self.stage)
+        if up_axis == UsdGeom.Tokens.z:
+            scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(0.0, 0.0, -1.0))
+        else:
+            scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(0.0, -1.0, 0.0))
+        scene.CreateGravityMagnitudeAttr().Set(9.81)
+
+        logger.info("[USD] Created PhysicsScene at %s", scene_path)
+
+    def ensure_ground_plane(self, *, half_size_m: float = 500.0, y_m: float = 0.0) -> None:
+        """Create a simple kinematic ground plane when room geometry is unavailable."""
+        ground_path = "/World/GroundPlane"
+        existing = self.stage.GetPrimAtPath(ground_path)
+        if existing and existing.IsValid():
+            return
+
+        mesh = UsdGeom.Mesh.Define(self.stage, ground_path)
+        prim = mesh.GetPrim()
+        prim.CreateAttribute("isGroundPlane", Sdf.ValueTypeNames.Bool).Set(True)
+
+        # Quad on the XZ plane at y=y_m.
+        points = [
+            (-half_size_m, y_m, -half_size_m),
+            (half_size_m, y_m, -half_size_m),
+            (half_size_m, y_m, half_size_m),
+            (-half_size_m, y_m, half_size_m),
+        ]
+        mesh.GetPointsAttr().Set([Gf.Vec3f(*p) for p in points])
+        mesh.GetFaceVertexCountsAttr().Set([4])
+        mesh.GetFaceVertexIndicesAttr().Set([0, 1, 2, 3])
+        mesh.GetSubdivisionSchemeAttr().Set("none")
+
+        col_api = UsdPhysics.CollisionAPI.Apply(prim)
+        col_api.CreateCollisionEnabledAttr().Set(True)
+
+        rb_api = UsdPhysics.RigidBodyAPI.Apply(prim)
+        rb_api.CreateRigidBodyEnabledAttr().Set(True)
+        rb_api.CreateKinematicEnabledAttr().Set(True)
+
+        logger.info("[USD] Created GroundPlane at %s", ground_path)
 
     def add_room_planes(self, room_planes: Dict, room_box: Optional[Dict] = None) -> None:
         """Add room plane definitions for physics."""
@@ -1023,7 +1089,8 @@ class SceneBuilder:
             physx_material_api.CreateDynamicFrictionAttr().Set(dynamic_friction)
             physx_material_api.CreateRestitutionAttr().Set(restitution)
 
-        UsdShade.MaterialBindingAPI(prim).Bind(material, UsdShade.Tokens.physics)
+        # Author physics-purpose binding; use string token for usd-core compatibility.
+        UsdShade.MaterialBindingAPI(prim).Bind(material, materialPurpose="physics")
 
         contact_sensor_enabled = os.getenv("SCENE_SHELL_CONTACT_SENSOR_ENABLED", "").lower() in (
             "1",
@@ -1297,8 +1364,8 @@ class SceneBuilder:
         physics_fields = _extract_physics_fields(obj)
         has_physics_fields = any(value is not None for value in physics_fields.values())
 
-        # Dynamic objects MUST have mass for RigidBodyAPI. Provide a default
-        # when the manifest/physics_hints don't supply one.
+        # Dynamic objects MUST have mass. Provide a default when the manifest/physics_hints
+        # don't supply one.
         if physics_fields.get("mass_kg") is None and sim_role in self._DYNAMIC_SIM_ROLES:
             default_mass = _estimate_mass_from_category(obj)
             physics_fields["mass_kg"] = default_mass
@@ -1310,15 +1377,8 @@ class SceneBuilder:
                 default_mass,
             )
 
-        if has_physics_fields:
-            self._apply_physics_fields(prim, physics_fields, oid, sim_role=sim_role)
-        else:
-            logger.warning(
-                "[USD] obj_%s: no physics fields found in manifest; skipping physics setup",
-                oid,
-            )
-
-        # Add geometry reference
+        # Add geometry reference before applying physics so deformables can bind
+        # to the referenced Mesh prim(s) under /Geom.
         if oid in self.prefetched_usdz:
             usdz_rel = self.prefetched_usdz[oid]
         else:
@@ -1335,11 +1395,14 @@ class SceneBuilder:
             geom_path = f"{obj_path}/Geom"
             geom_xform = UsdGeom.Xform.Define(self.stage, geom_path)
             geom_prim = geom_xform.GetPrim()
-            # Add reference with explicit prim path "/Root" as fallback.
-            # This ensures the reference works even if the USDZ file doesn't have
-            # a default prim set (which is required for prim-less references to work).
-            # The glb_to_usd converter creates all geometry under /Root.
-            geom_prim.GetReferences().AddReference(usdz_rel, primPath=Sdf.Path("/Root"))
+            # Add reference with explicit prim path as fallback.
+            # - glb_to_usd converter creates all geometry under /Root.
+            # - simready.usda wrappers define their root at /Asset.
+            rel_lower = str(usdz_rel).lower()
+            prim_path = Sdf.Path("/Root")
+            if rel_lower.endswith(("simready.usda", "simready.usd", "simready.usdc")):
+                prim_path = Sdf.Path("/Asset")
+            geom_prim.GetReferences().AddReference(usdz_rel, primPath=prim_path)
             logger.info("[USD] obj_%s: referenced %s", oid, usdz_rel)
         else:
             # No USDZ found - try to discover a GLB candidate so we can flag it
@@ -1372,6 +1435,14 @@ class SceneBuilder:
                     oid,
                     asset_path,
                 )
+
+        if has_physics_fields:
+            self._apply_physics_fields(prim, physics_fields, oid, sim_role=sim_role)
+        else:
+            logger.warning(
+                "[USD] obj_%s: no physics fields found in manifest; skipping physics setup",
+                oid,
+            )
 
     def add_objects(
         self,
@@ -1406,14 +1477,59 @@ class SceneBuilder:
         "clutter",
         "manipulable_object",
         "interactive",
+        "deformable_object",
     })
 
-    def _apply_physics_fields(
+    def _apply_physics_material(
         self,
         prim: Usd.Prim,
-        physics_fields: Dict[str, Optional[float]],
+        *,
+        static_friction: Optional[float],
+        dynamic_friction: Optional[float],
+        restitution: Optional[float],
+    ) -> None:
+        if (
+            static_friction is None
+            and dynamic_friction is None
+            and restitution is None
+        ):
+            return
+
+        material_path = f"{prim.GetPath()}/PhysicsMaterial"
+        material = UsdShade.Material.Define(self.stage, material_path)
+        material_prim = material.GetPrim()
+
+        physics_material_api = UsdPhysics.MaterialAPI.Apply(material_prim)
+        if static_friction is not None:
+            physics_material_api.CreateStaticFrictionAttr().Set(float(static_friction))
+        if dynamic_friction is not None:
+            physics_material_api.CreateDynamicFrictionAttr().Set(float(dynamic_friction))
+        if restitution is not None:
+            physics_material_api.CreateRestitutionAttr().Set(float(restitution))
+
+        if PHYSX_SCHEMA:
+            try:
+                physx_material_api = PHYSX_SCHEMA.PhysxMaterialAPI.Apply(material_prim)
+                if static_friction is not None:
+                    physx_material_api.CreateStaticFrictionAttr().Set(float(static_friction))
+                if dynamic_friction is not None:
+                    physx_material_api.CreateDynamicFrictionAttr().Set(float(dynamic_friction))
+                if restitution is not None:
+                    physx_material_api.CreateRestitutionAttr().Set(float(restitution))
+            except Exception:
+                # PhysxMaterialAPI may not be available in all USD builds.
+                pass
+
+        # Author physics-purpose binding; use string token for usd-core compatibility.
+        UsdShade.MaterialBindingAPI(prim).Bind(material, materialPurpose="physics")
+
+    def _apply_rigid_physics_fields(
+        self,
+        prim: Usd.Prim,
+        physics_fields: Dict[str, Any],
         oid: Any,
-        sim_role: Optional[str] = None,
+        *,
+        sim_role: Optional[str],
     ) -> None:
         mass = physics_fields.get("mass_kg")
         static_friction = physics_fields.get("static_friction")
@@ -1434,6 +1550,7 @@ class SceneBuilder:
         # kinematic surfaces (tables, counters, etc.) and vice versa.
         collision_api = UsdPhysics.CollisionAPI.Apply(prim)
         collision_api.CreateCollisionEnabledAttr().Set(True)
+
         # Dynamic objects use convexDecomposition for accurate collision;
         # kinematic objects use convexHull which is cheaper and sufficient
         # since they don't deform.
@@ -1462,33 +1579,12 @@ class SceneBuilder:
                 # PhysxCollisionAPI may not be available in all USD builds
                 pass
 
-        if (
-            static_friction is not None
-            or dynamic_friction is not None
-            or restitution is not None
-        ):
-            material_path = f"{prim.GetPath()}/PhysicsMaterial"
-            material = UsdShade.Material.Define(self.stage, material_path)
-            material_prim = material.GetPrim()
-
-            physics_material_api = UsdPhysics.MaterialAPI.Apply(material_prim)
-            if static_friction is not None:
-                physics_material_api.CreateStaticFrictionAttr().Set(float(static_friction))
-            if dynamic_friction is not None:
-                physics_material_api.CreateDynamicFrictionAttr().Set(float(dynamic_friction))
-            if restitution is not None:
-                physics_material_api.CreateRestitutionAttr().Set(float(restitution))
-
-            if PHYSX_SCHEMA:
-                physx_material_api = PHYSX_SCHEMA.PhysxMaterialAPI.Apply(material_prim)
-                if static_friction is not None:
-                    physx_material_api.CreateStaticFrictionAttr().Set(float(static_friction))
-                if dynamic_friction is not None:
-                    physx_material_api.CreateDynamicFrictionAttr().Set(float(dynamic_friction))
-                if restitution is not None:
-                    physx_material_api.CreateRestitutionAttr().Set(float(restitution))
-
-            UsdShade.MaterialBindingAPI(prim).Bind(material, UsdShade.Tokens.physics)
+        self._apply_physics_material(
+            prim,
+            static_friction=static_friction,
+            dynamic_friction=dynamic_friction,
+            restitution=restitution,
+        )
 
         logger.info(
             "[USD] obj_%s: physics applied (mass=%s, static_friction=%s, dynamic_friction=%s, restitution=%s, sim_role=%s, dynamic=%s)",
@@ -1500,6 +1596,242 @@ class SceneBuilder:
             sim_role,
             is_dynamic,
         )
+
+    def _apply_physics_fields(
+        self,
+        prim: Usd.Prim,
+        physics_fields: Dict[str, Any],
+        oid: Any,
+        sim_role: Optional[str] = None,
+    ) -> None:
+        # Route deformable objects to the dedicated handler.
+        if sim_role == "deformable_object" or physics_fields.get("is_deformable"):
+            self._apply_deformable_physics(prim, physics_fields, oid)
+            return
+
+        self._apply_rigid_physics_fields(prim, physics_fields, oid, sim_role=sim_role)
+
+    def _apply_deformable_physics(
+        self,
+        prim: Usd.Prim,
+        physics_fields: Dict[str, Any],
+        oid: Any,
+    ) -> None:
+        """Author PhysX deformable cloth/soft-body schema on the referenced Mesh prims.
+
+        This job image typically runs with OpenUSD (usd-core) bindings and *without*
+        pxr.PhysxSchema, so we author schema tokens + attributes directly. Isaac Sim
+        will interpret these when the stage is loaded there.
+        """
+        deformable_schema = dict(physics_fields.get("deformable_schema") or {})
+        soft_body_type = str(physics_fields.get("soft_body_type") or "cloth").strip().lower()
+
+        # Mass — deformable objects still need mass metadata for downstream reporting.
+        mass = physics_fields.get("mass_kg")
+        if mass is not None:
+            try:
+                mass_api = UsdPhysics.MassAPI.Apply(prim)
+                mass_api.CreateMassAttr().Set(float(mass))
+            except Exception:
+                prim.CreateAttribute("physics:mass", Sdf.ValueTypeNames.Float).Set(float(mass))
+
+        # Physics material — friction still matters for cloth-surface contact.
+        self._apply_physics_material(
+            prim,
+            static_friction=physics_fields.get("static_friction"),
+            dynamic_friction=physics_fields.get("dynamic_friction"),
+            restitution=physics_fields.get("restitution"),
+        )
+
+        schema_type = str(deformable_schema.get("type") or "").strip()
+        if not schema_type:
+            schema_type = (
+                "PhysxDeformableSurfaceAPI"
+                if soft_body_type in {"cloth", "rope"}
+                else "PhysxDeformableBodyAPI"
+            )
+
+        base_prefix = "physxDeformable"
+        derived_prefix = (
+            "physxDeformableSurface"
+            if schema_type == "PhysxDeformableSurfaceAPI"
+            else "physxDeformableBody"
+        )
+
+        # Apply deformable schema to all Mesh prims under the referenced /Geom scope.
+        geom_prim = self.stage.GetPrimAtPath(f"{prim.GetPath()}/Geom")
+        search_root = geom_prim if geom_prim and geom_prim.IsValid() else prim
+        mesh_prims: List[Usd.Prim] = []
+        for desc in Usd.PrimRange(search_root):
+            if desc.IsA(UsdGeom.Mesh):
+                mesh_prims.append(desc)
+
+        if not mesh_prims:
+            logger.warning(
+                "[USD] obj_%s: deformable object has no Mesh prims under %s; skipping deformable schema authoring",
+                oid,
+                search_root.GetPath(),
+            )
+            return
+
+        particle_system_path = "/World/PhysxParticleSystem"
+        owner_targets = [Sdf.Path(particle_system_path)]
+
+        def _ensure_api_schema(usd_prim: Usd.Prim, api_schema: str) -> None:
+            existing = usd_prim.GetMetadata("apiSchemas")
+            items: List[str] = []
+            if isinstance(existing, Sdf.TokenListOp):
+                items = list(existing.GetAppliedItems())
+            elif isinstance(existing, (list, tuple)):
+                items = [str(x) for x in existing]
+            elif isinstance(existing, str) and existing:
+                items = [existing]
+            if api_schema in items:
+                return
+            items.append(api_schema)
+            op = Sdf.TokenListOp()
+            op.explicitItems = items
+            usd_prim.SetMetadata("apiSchemas", op)
+
+        def _set_attr(
+            usd_prim: Usd.Prim,
+            name: str,
+            type_name: Any,
+            value: Any,
+        ) -> None:
+            attr = usd_prim.GetAttribute(name)
+            if not attr or not attr.IsValid():
+                attr = usd_prim.CreateAttribute(name, type_name)
+            attr.Set(value)
+
+        def _set_rel(usd_prim: Usd.Prim, name: str, targets: List[Sdf.Path]) -> None:
+            rel = usd_prim.GetRelationship(name)
+            if not rel or not rel.IsValid():
+                rel = usd_prim.CreateRelationship(name)
+            rel.SetTargets(targets)
+
+        # Apply API schema + author attributes.
+        for mesh_prim in mesh_prims:
+            _ensure_api_schema(mesh_prim, schema_type)
+
+            # Simulation owner relationship (author both base+derived namespaces for robustness).
+            _set_rel(mesh_prim, f"{base_prefix}:simulationOwner", owner_targets)
+            _set_rel(mesh_prim, f"{derived_prefix}:simulationOwner", owner_targets)
+
+            # Core/common properties.
+            if "solverPositionIterationCount" in deformable_schema:
+                solver_iters = int(deformable_schema["solverPositionIterationCount"])
+                _set_attr(mesh_prim, f"{base_prefix}:solverPositionIterationCount", Sdf.ValueTypeNames.Int, solver_iters)
+                _set_attr(mesh_prim, f"{derived_prefix}:solverPositionIterationCount", Sdf.ValueTypeNames.Int, solver_iters)
+
+            if "selfCollision" in deformable_schema:
+                self_col = bool(deformable_schema["selfCollision"])
+                _set_attr(mesh_prim, f"{base_prefix}:selfCollision", Sdf.ValueTypeNames.Bool, self_col)
+                _set_attr(mesh_prim, f"{derived_prefix}:selfCollision", Sdf.ValueTypeNames.Bool, self_col)
+
+            float_props = (
+                "collisionRestOffset",
+                "collisionContactOffset",
+                "deformableRestOffset",
+                "selfCollisionFilterDistance",
+                "sleepThreshold",
+                "youngsModulus",
+                "poissonsRatio",
+                "dampingScale",
+                "bendingStiffnessScale",
+                "stretchStiffnessScale",
+            )
+            for prop in float_props:
+                if prop not in deformable_schema or deformable_schema[prop] is None:
+                    continue
+                try:
+                    value_f = float(deformable_schema[prop])
+                except (TypeError, ValueError):
+                    continue
+                _set_attr(mesh_prim, f"{base_prefix}:{prop}", Sdf.ValueTypeNames.Float, value_f)
+                _set_attr(mesh_prim, f"{derived_prefix}:{prop}", Sdf.ValueTypeNames.Float, value_f)
+
+        logger.info(
+            "[USD] obj_%s: deformable physics authored (soft_body_type=%s schema=%s meshes=%d mass=%s)",
+            oid,
+            soft_body_type,
+            schema_type,
+            len(mesh_prims),
+            mass,
+        )
+
+    def ensure_particle_system(self, objects: List[Dict[str, Any]]) -> None:
+        """Create a PhysxParticleSystem prim if any deformable objects exist.
+
+        Isaac Sim requires a particle system as the simulation owner for all
+        deformable surfaces/bodies. One system serves the entire scene.
+        """
+        has_deformable = any(
+            obj.get("sim_role") == "deformable_object"
+            or (obj.get("physics_hints") or {}).get("is_deformable")
+            or (obj.get("physics") or {}).get("is_deformable")
+            for obj in objects
+        )
+        if not has_deformable:
+            return
+
+        particle_path = "/World/PhysxParticleSystem"
+        if self.stage.GetPrimAtPath(particle_path).IsValid():
+            return  # Already exists
+
+        # Load solver settings from deformable physics profile.
+        solver_iters = 16
+        contact_offset = 0.005
+        rest_offset = 0.002
+        try:
+            config_path = REPO_ROOT / "tools" / "config" / "pipeline_config.json"
+            if config_path.is_file():
+                with open(config_path) as f:
+                    config = json.load(f)
+                profile = config.get("physics_profiles", {}).get("deformable", {})
+                solver_iters = int(profile.get("solver_iterations", 16))
+                physics_cfg = config.get("physics", {}) or {}
+                contact_offset = float(physics_cfg.get("contact_offset", contact_offset))
+                rest_offset = float(physics_cfg.get("rest_offset", rest_offset))
+        except Exception:
+            pass
+
+        try:
+            # Author as a typed prim even if usd-core doesn't have PhysxSchema registered.
+            psys_prim = self.stage.DefinePrim(particle_path, "PhysxParticleSystem")
+            psys_prim.CreateAttribute(
+                "physxParticleSystem:solverPositionIterationCount",
+                Sdf.ValueTypeNames.Int,
+            ).Set(int(solver_iters))
+            psys_prim.CreateAttribute(
+                "physxParticleSystem:maxDepenetrationVelocity",
+                Sdf.ValueTypeNames.Float,
+            ).Set(100.0)
+            psys_prim.CreateAttribute(
+                "physxParticleSystem:wind",
+                Sdf.ValueTypeNames.Vector3f,
+            ).Set(Gf.Vec3f(0.0, 0.0, 0.0))
+            psys_prim.CreateAttribute(
+                "physxParticleSystem:particleContactOffset",
+                Sdf.ValueTypeNames.Float,
+            ).Set(float(contact_offset))
+            psys_prim.CreateAttribute(
+                "physxParticleSystem:contactOffset",
+                Sdf.ValueTypeNames.Float,
+            ).Set(float(contact_offset))
+            psys_prim.CreateAttribute(
+                "physxParticleSystem:restOffset",
+                Sdf.ValueTypeNames.Float,
+            ).Set(float(rest_offset))
+            logger.info(
+                "[USD] Created PhysxParticleSystem at %s (solver_iters=%d contact_offset=%.6f rest_offset=%.6f)",
+                particle_path,
+                int(solver_iters),
+                float(contact_offset),
+                float(rest_offset),
+            )
+        except Exception as exc:
+            logger.warning("[USD] Failed to create PhysxParticleSystem: %s", exc)
 
     def fix_internal_physics_conflicts(self) -> int:
         """Override internal RigidBodyAPI settings in referenced assets.
@@ -1617,8 +1949,8 @@ def _validate_usd_stage(stage: Usd.Stage, output_path: Path, objects: List[Dict]
             if obj_prim and obj_prim.IsValid():
                 geom_prim = stage.GetPrimAtPath(f"/World/Objects/obj_{oid}/Geom")
                 if geom_prim and geom_prim.IsValid():
-                    refs = geom_prim.GetReferences()
-                    if refs.GetAddedOrExplicitItems():
+                    # Use a stable API across USD builds.
+                    if geom_prim.HasAuthoredReferences():
                         objects_with_refs += 1
 
     if len(objects) > 0 and objects_with_refs == 0:
@@ -1675,6 +2007,15 @@ def _bake_scene_collision_validity(stage: Usd.Stage) -> Dict[str, Any]:
 
     object_prims = _iter_scene_object_prims(stage)
     for obj_prim in object_prims:
+        role_attr = obj_prim.GetAttribute("sim_role")
+        role = ""
+        if role_attr and role_attr.HasValue():
+            role = str(role_attr.Get() or "")
+        if role.strip().lower() == "deformable_object":
+            # Deformables author PhysX-specific schemas; do not force rigid collision
+            # approximation/collision APIs onto their visual meshes here.
+            continue
+
         kin_attr = obj_prim.GetAttribute("physics:kinematicEnabled")
         is_dynamic = bool(kin_attr and kin_attr.Get() is False)
 
@@ -1766,7 +2107,7 @@ def _validate_physics_coverage(
 
     def _get_physics_material_prim(prim: Usd.Prim) -> Optional[Usd.Prim]:
         binding_api = UsdShade.MaterialBindingAPI(prim)
-        binding = binding_api.GetDirectBinding(UsdShade.Tokens.physics)
+        binding = binding_api.GetDirectBinding(materialPurpose="physics")
         material = binding.GetMaterial()
         if material and material.GetPrim().IsValid():
             return material.GetPrim()
@@ -2224,6 +2565,7 @@ def build_scene(
         prefetched_usdz=prefetched_usdz,
     )
     with timed_phase("physics setup"):
+        builder.ensure_physics_scene()
         builder.add_room_planes(room_planes, room_box)
 
         # Create scene shell geometry from room_box if available
@@ -2233,6 +2575,7 @@ def build_scene(
             logger.warning(
                 "[USD] WARNING: No room_box data in layout, skipping scene shell geometry"
             )
+            builder.ensure_ground_plane()
 
         # Add default dome light for camera rendering
         builder.add_default_lighting()
@@ -2240,6 +2583,9 @@ def build_scene(
     with timed_phase("prim creation"):
         builder.add_cameras(cameras)
         builder.add_objects(objects, layout_objects, room_box)
+
+    with timed_phase("deformable particle system"):
+        builder.ensure_particle_system(objects)
 
     with timed_phase("post-reference physics fixups"):
         physics_conflicts_fixed = builder.fix_internal_physics_conflicts()

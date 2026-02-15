@@ -49,6 +49,7 @@ def normalize_sim_role(role: str | None) -> str:
         "scene_shell",
         "background",
         "clutter",
+        "deformable_object",
         "unknown",
     }
     if not role:
@@ -59,6 +60,8 @@ def normalize_sim_role(role: str | None) -> str:
     # Graceful downgrade for legacy labels
     if role in {"interactive", "dynamic"}:
         return "interactive"
+    if role in {"deformable", "cloth", "soft_body"}:
+        return "deformable_object"
     return "unknown"
 
 

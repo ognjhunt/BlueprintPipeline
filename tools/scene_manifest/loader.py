@@ -15,6 +15,7 @@ from typing import Dict, Optional
 
 SIM_ROLE_TO_TYPE = {
     "manipulable_object": "interactive",
+    "deformable_object": "interactive",
     "articulated_furniture": "interactive",
     "articulated_appliance": "interactive",
     "scene_shell": "static",
@@ -98,6 +99,9 @@ def _canonical_to_legacy_object(obj: Dict) -> Dict:
             or from_scene_assets.get("articulation_required")
         ),
         "articulation": combined_articulation or None,
+        # Downstream jobs (simready/usd-assembly) consume these for physics wiring.
+        "physics": obj.get("physics") or from_scene_assets.get("physics"),
+        "physics_hints": obj.get("physics_hints") or from_scene_assets.get("physics_hints"),
         "polygon": (obj.get("placement") or {}).get("polygon")
         or from_scene_assets.get("polygon"),
     }

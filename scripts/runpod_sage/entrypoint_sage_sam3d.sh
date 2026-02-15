@@ -42,6 +42,12 @@ SAM3D_TEXTURE_BAKING="${SAM3D_TEXTURE_BAKING:-1}"
 SKIP_PATCH_PULL="${SKIP_PATCH_PULL:-1}"
 RUN_MODE="${RUN_MODE:-services}"  # services|full_pipeline
 
+# Full pipeline launches its own headless SimulationApp in Stage 7; the MCP service
+# only wastes VRAM and can destabilize stdio. Default to skipping Isaac Sim here.
+if [[ "${RUN_MODE}" == "full_pipeline" ]] && [[ -z "${SKIP_ISAAC_SIM:-}" ]]; then
+    SKIP_ISAAC_SIM=1
+fi
+
 export SLURM_JOB_ID
 export SAM3D_TEXTURE_BAKING
 export SAM3D_PORT
@@ -284,7 +290,21 @@ else
     log "Skipping Isaac Sim startup (SKIP_ISAAC_SIM=1)"
 fi
 
-# ── 6. Final status ─────────────────────────────────────────────────────────
+# ── 6. Start interactive backends (if installed) ─────────────────────────────
+INTERACTIVE_BACKENDS_SCRIPT="${WORKSPACE}/BlueprintPipeline/scripts/runpod_sage/start_interactive_backends.sh"
+if [[ "${SKIP_INTERACTIVE_BACKENDS:-0}" != "1" ]] && [[ -f "${INTERACTIVE_BACKENDS_SCRIPT}" ]]; then
+    # Only start if weights are actually baked in (install_interactive_backends.sh was run)
+    if [[ -d "${WORKSPACE}/PhysX-Anything/pretrain/vlm" ]] || [[ -d "${WORKSPACE}/infinigen" ]]; then
+        log "Starting interactive asset backends..."
+        bash "${INTERACTIVE_BACKENDS_SCRIPT}" all 2>&1 || log "WARNING: Some interactive backends failed to start (non-fatal)"
+    else
+        log "Interactive backends not installed (run install_interactive_backends.sh to add them)"
+    fi
+else
+    log "Skipping interactive backends (SKIP_INTERACTIVE_BACKENDS=1 or script missing)"
+fi
+
+# ── 7. Final status ─────────────────────────────────────────────────────────
 log "=========================================="
 log "Startup complete."
 log ""
@@ -293,6 +313,12 @@ SAM3D_HEALTH=$(curl -sf "http://127.0.0.1:${SAM3D_PORT}/health" 2>/dev/null || e
 log "  SAM3D:    http://0.0.0.0:${SAM3D_PORT} (${SAM3D_HEALTH})"
 if [[ "${SKIP_ISAAC_SIM:-0}" != "1" ]]; then
     log "  Isaac Sim: MCP port ${MCP_PORT:-unknown}"
+fi
+if [[ -f /tmp/physx_anything.pid ]] && kill -0 "$(cat /tmp/physx_anything.pid 2>/dev/null)" 2>/dev/null; then
+    log "  PhysX-Anything: http://localhost:8083"
+fi
+if [[ -f /tmp/infinigen.pid ]] && kill -0 "$(cat /tmp/infinigen.pid 2>/dev/null)" 2>/dev/null; then
+    log "  Infinigen:      http://localhost:8084"
 fi
 log ""
 log "To run SAGE (scene-only mode):"
@@ -315,8 +341,10 @@ log "Smoke test (1 pose sample, 1 demo, strict):"
 log "  bash /workspace/BlueprintPipeline/scripts/runpod_sage/smoke_full_pipeline.sh"
 log ""
 log "Logs:"
-log "  SAM3D:     tail -f /tmp/sam3d_server.log"
-log "  Isaac Sim: tail -f /tmp/isaacsim.log"
+log "  SAM3D:          tail -f /tmp/sam3d_server.log"
+log "  Isaac Sim:      tail -f /tmp/isaacsim.log"
+log "  PhysX-Anything: tail -f /tmp/physx_anything_service.log"
+log "  Infinigen:      tail -f /tmp/infinigen_service.log"
 log "=========================================="
 
 if [[ "${RUN_MODE}" == "services" ]]; then
