@@ -103,7 +103,7 @@ else
     if [[ -d "${PHYSX_ANYTHING_DIR}" ]]; then
         log "  Repo exists but weights missing; downloading weights..."
     else
-        git clone https://github.com/VictorTao1998/PhysX-Anything.git "${PHYSX_ANYTHING_DIR}"
+        git clone https://github.com/ziangcao0312/PhysX-Anything.git "${PHYSX_ANYTHING_DIR}"
     fi
 
     log "Installing PhysX-Anything Python dependencies..."

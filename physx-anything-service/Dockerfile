@@ -2,7 +2,7 @@
 # physx-anything-service/Dockerfile
 #
 # PhysX-Anything: Turning a Single Image into a Physics Simulation Ready World
-# Repo: https://github.com/VictorTao1998/PhysX-Anything
+# Repo: https://github.com/ziangcao0312/PhysX-Anything
 #
 # This is a GPU container that exposes a small HTTP API returning a zip payload
 # (URDF + referenced meshes) for use by interactive-job.
@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir \
 
 ENV PHYSX_ANYTHING_ROOT=/opt/physx-anything
 WORKDIR /opt
-RUN git clone https://github.com/VictorTao1998/PhysX-Anything.git "${PHYSX_ANYTHING_ROOT}"
+RUN git clone https://github.com/ziangcao0312/PhysX-Anything.git "${PHYSX_ANYTHING_ROOT}"
 
 WORKDIR ${PHYSX_ANYTHING_ROOT}
 

@@ -117,12 +117,19 @@ start_infinigen() {
         return 1
     fi
 
+    # Infinigen requires Python 3.11 (separate conda env)
+    local INFINIGEN_PYTHON="${CONDA_DIR}/envs/infinigen/bin/python"
+    if [[ ! -x "${INFINIGEN_PYTHON}" ]]; then
+        log "WARNING: Infinigen conda env not found, falling back to ${PYTHON}"
+        INFINIGEN_PYTHON="${PYTHON}"
+    fi
+
     stop_backend "Infinigen" /tmp/infinigen.pid
 
-    log "Starting Infinigen on :${INFINIGEN_PORT}..."
+    log "Starting Infinigen on :${INFINIGEN_PORT} (python: ${INFINIGEN_PYTHON})..."
     INFINIGEN_ROOT="${INFINIGEN_DIR}" \
     PORT="${INFINIGEN_PORT}" \
-    nohup "${PYTHON}" "${svc}" > /tmp/infinigen_service.log 2>&1 &
+    nohup "${INFINIGEN_PYTHON}" "${svc}" > /tmp/infinigen_service.log 2>&1 &
     echo $! > /tmp/infinigen.pid
     log "Infinigen PID: $(cat /tmp/infinigen.pid)"
 }
