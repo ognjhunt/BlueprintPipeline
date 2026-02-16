@@ -71,3 +71,4 @@ test_scenes/scenes/*/replicator/
 
 # Analysis outputs (per-run image/segmentation artifacts)
 analysis_outputs/
+smoke_test_results/
