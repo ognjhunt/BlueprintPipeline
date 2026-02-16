@@ -1,0 +1,1243 @@
+{
+    "id": "layout_568ca64c",
+    "rooms": [
+        {
+            "id": "room_09af56a9",
+            "room_type": "kitchen",
+            "position": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0
+            },
+            "dimensions": {
+                "width": 4.0,
+                "length": 5.0,
+                "height": 2.7
+            },
+            "walls": [
+                {
+                    "id": "wall_room_09af56a9_north_3b1e9c44",
+                    "start_point": {
+                        "x": 0.0,
+                        "y": 5.0,
+                        "z": 0.0
+                    },
+                    "end_point": {
+                        "x": 4.0,
+                        "y": 5.0,
+                        "z": 0.0
+                    },
+                    "height": 2.7,
+                    "thickness": 0.1,
+                    "material": "drywall"
+                },
+                {
+                    "id": "wall_room_09af56a9_south_7eb265c4",
+                    "start_point": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    },
+                    "end_point": {
+                        "x": 4.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    },
+                    "height": 2.7,
+                    "thickness": 0.1,
+                    "material": "drywall"
+                },
+                {
+                    "id": "wall_room_09af56a9_east_e9a77995",
+                    "start_point": {
+                        "x": 4.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    },
+                    "end_point": {
+                        "x": 4.0,
+                        "y": 5.0,
+                        "z": 0.0
+                    },
+                    "height": 2.7,
+                    "thickness": 0.1,
+                    "material": "drywall"
+                },
+                {
+                    "id": "wall_room_09af56a9_west_ddf8fe73",
+                    "start_point": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 0.0
+                    },
+                    "end_point": {
+                        "x": 0.0,
+                        "y": 5.0,
+                        "z": 0.0
+                    },
+                    "height": 2.7,
+                    "thickness": 0.1,
+                    "material": "drywall"
+                }
+            ],
+            "doors": [
+                {
+                    "id": "door_a67b3891",
+                    "wall_id": "wall_room_09af56a9_north_3b1e9c44",
+                    "position_on_wall": 0.4159664244783784,
+                    "width": 0.9,
+                    "height": 2.05,
+                    "door_type": "entry/main/front",
+                    "opens_inward": true,
+                    "opening": false,
+                    "door_material": "standard"
+                }
+            ],
+            "objects": [
+                {
+                    "id": "room_09af56a9_counter_548b35f9",
+                    "room_id": "room_09af56a9",
+                    "type": "counter",
+                    "description": "A modern light-wood base cabinet run with a long rectangular shape, flat gray stone counter surface, and smooth handleless doors, featuring an inset rectangular stainless steel sink basin slightly left of center with a thin flush rim and a continuous straight-edged plinth for a streamlined contemporary look.",
+                    "position": {
+                        "x": 3.483012429888043,
+                        "y": 2.25,
+                        "z": 0.0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 90
+                    },
+                    "dimensions": {
+                        "width": 1.4971215147674963,
+                        "length": 0.8989751402239142,
+                        "height": 0.966409252008335
+                    },
+                    "source": "generation",
+                    "source_id": "42af86b2",
+                    "place_id": "floor",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            348.3012429888043,
+                            225.0
+                        ],
+                        90,
+                        [
+                            [
+                                395.0,
+                                148.3939242616252
+                            ],
+                            [
+                                395.0,
+                                301.6060757383748
+                            ],
+                            [
+                                301.6024859776086,
+                                301.6060757383748
+                            ],
+                            [
+                                301.6024859776086,
+                                148.3939242616252
+                            ]
+                        ],
+                        [
+                            {
+                                "type": "global",
+                                "constraint": "edge"
+                            }
+                        ]
+                    ],
+                    "mass": 100.0
+                },
+                {
+                    "id": "room_09af56a9_stove_158f5d13",
+                    "room_id": "room_09af56a9",
+                    "type": "stove",
+                    "description": "A freestanding modern stainless steel stove with a rectangular boxy form, a flat black ceramic cooktop, a front glass oven door framed in brushed metal, and minimalistic straight-edged control knobs along a narrow front control panel.",
+                    "position": {
+                        "x": 3.629736548913791,
+                        "y": 1.05,
+                        "z": 0.0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 90
+                    },
+                    "dimensions": {
+                        "width": 0.7154178938105893,
+                        "length": 0.6055269021724174,
+                        "height": 0.8245986091276674
+                    },
+                    "source": "generation",
+                    "source_id": "d0eaa0bc",
+                    "place_id": "floor",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            362.9736548913791,
+                            105.0
+                        ],
+                        90,
+                        [
+                            [
+                                395.0,
+                                67.47910530947053
+                            ],
+                            [
+                                395.0,
+                                142.52089469052947
+                            ],
+                            [
+                                330.9473097827582,
+                                142.52089469052947
+                            ],
+                            [
+                                330.9473097827582,
+                                67.47910530947053
+                            ]
+                        ],
+                        [
+                            {
+                                "type": "global",
+                                "constraint": "edge"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "close to",
+                                "target": "room_09af56a9_counter_548b35f9"
+                            },
+                            {
+                                "type": "relative",
+                                "constraint": "side of",
+                                "target": "room_09af56a9_counter_548b35f9"
+                            },
+                            {
+                                "type": "direction",
+                                "constraint": "face same as",
+                                "target": "room_09af56a9_counter_548b35f9"
+                            }
+                        ]
+                    ],
+                    "mass": 60.0
+                },
+                {
+                    "id": "room_09af56a9_table_ac4abec2",
+                    "room_id": "room_09af56a9",
+                    "type": "table",
+                    "description": "A rectangular modern light-wood dining table with a flat straight-edged top, slender square legs at the corners, and a smooth matte finish that highlights a subtle linear wood grain.",
+                    "position": {
+                        "x": 2.25,
+                        "y": 2.25,
+                        "z": 0.0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "dimensions": {
+                        "width": 0.7877155112020492,
+                        "length": 0.704444510827004,
+                        "height": 0.5756438807807691
+                    },
+                    "source": "generation",
+                    "source_id": "afe3058e",
+                    "place_id": "floor",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            225,
+                            225
+                        ],
+                        0,
+                        [
+                            [
+                                266.13577556010245,
+                                188.0277744586498
+                            ],
+                            [
+                                266.13577556010245,
+                                261.9722255413502
+                            ],
+                            [
+                                183.86422443989755,
+                                261.9722255413502
+                            ],
+                            [
+                                183.86422443989755,
+                                188.0277744586498
+                            ],
+                            [
+                                266.13577556010245,
+                                188.0277744586498
+                            ]
+                        ],
+                        [
+                            {
+                                "type": "global",
+                                "constraint": "middle"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "near",
+                                "target": "room_09af56a9_counter_548b35f9"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "near",
+                                "target": "room_09af56a9_stove_158f5d13"
+                            },
+                            {
+                                "type": "relative",
+                                "constraint": "in front of",
+                                "target": "room_09af56a9_counter_548b35f9"
+                            },
+                            {
+                                "type": "alignment",
+                                "constraint": "center aligned",
+                                "target": "room_09af56a9_counter_548b35f9"
+                            }
+                        ]
+                    ],
+                    "mass": 12.0
+                },
+                {
+                    "id": "room_09af56a9_chair_9098067f",
+                    "room_id": "room_09af56a9",
+                    "type": "chair",
+                    "description": "A modern wooden dining chair with a slender rectangular seat, four straight legs, and a slightly curved vertical slat backrest, finished in light wood with a smooth matte surface and clean minimal lines.",
+                    "position": {
+                        "x": 1.45,
+                        "y": 2.25,
+                        "z": 0.0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 270
+                    },
+                    "dimensions": {
+                        "width": 0.5461277050315152,
+                        "length": 0.5462610980095238,
+                        "height": 0.336373689017685
+                    },
+                    "source": "generation",
+                    "source_id": "e45a28df",
+                    "place_id": "floor",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            145,
+                            225
+                        ],
+                        270,
+                        [
+                            [
+                                174.0630549004762,
+                                195.94361474842424
+                            ],
+                            [
+                                174.0630549004762,
+                                254.05638525157576
+                            ],
+                            [
+                                115.93694509952381,
+                                254.05638525157576
+                            ],
+                            [
+                                115.93694509952381,
+                                195.94361474842424
+                            ],
+                            [
+                                174.0630549004762,
+                                195.94361474842424
+                            ]
+                        ],
+                        [
+                            {
+                                "type": "global",
+                                "constraint": "middle"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "close to",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            },
+                            {
+                                "type": "direction",
+                                "constraint": "face to",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            }
+                        ]
+                    ],
+                    "mass": 4.0
+                },
+                {
+                    "id": "room_09af56a9_chair_4f03d1b2",
+                    "room_id": "room_09af56a9",
+                    "type": "chair",
+                    "description": "A modern wooden dining chair with a slender rectangular seat, four straight legs, and a slightly curved vertical slat backrest, finished in light wood with a smooth matte surface and clean minimal lines.",
+                    "position": {
+                        "x": 2.05,
+                        "y": 1.45,
+                        "z": 0.0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 0
+                    },
+                    "dimensions": {
+                        "width": 0.5461277050315152,
+                        "length": 0.5462610980095238,
+                        "height": 0.336373689017685
+                    },
+                    "source": "generation",
+                    "source_id": "e45a28df",
+                    "place_id": "floor",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            205,
+                            145
+                        ],
+                        0,
+                        [
+                            [
+                                234.05638525157576,
+                                115.93694509952381
+                            ],
+                            [
+                                234.05638525157576,
+                                174.0630549004762
+                            ],
+                            [
+                                175.94361474842424,
+                                174.0630549004762
+                            ],
+                            [
+                                175.94361474842424,
+                                115.93694509952381
+                            ],
+                            [
+                                234.05638525157576,
+                                115.93694509952381
+                            ]
+                        ],
+                        [
+                            {
+                                "type": "global",
+                                "constraint": "middle"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "close to",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            },
+                            {
+                                "type": "direction",
+                                "constraint": "face to",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            }
+                        ]
+                    ],
+                    "mass": 4.0
+                },
+                {
+                    "id": "room_09af56a9_chair_b04e85dc",
+                    "room_id": "room_09af56a9",
+                    "type": "chair",
+                    "description": "A modern wooden dining chair with a slender rectangular seat, four straight legs, and a slightly curved vertical slat backrest, finished in light wood with a smooth matte surface and clean minimal lines.",
+                    "position": {
+                        "x": 1.85,
+                        "y": 3.05,
+                        "z": 0.0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 180
+                    },
+                    "dimensions": {
+                        "width": 0.5461277050315152,
+                        "length": 0.5462610980095238,
+                        "height": 0.336373689017685
+                    },
+                    "source": "generation",
+                    "source_id": "e45a28df",
+                    "place_id": "floor",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            185,
+                            305
+                        ],
+                        180,
+                        [
+                            [
+                                214.05638525157576,
+                                275.9369450995238
+                            ],
+                            [
+                                214.05638525157576,
+                                334.0630549004762
+                            ],
+                            [
+                                155.94361474842424,
+                                334.0630549004762
+                            ],
+                            [
+                                155.94361474842424,
+                                275.9369450995238
+                            ],
+                            [
+                                214.05638525157576,
+                                275.9369450995238
+                            ]
+                        ],
+                        [
+                            {
+                                "type": "global",
+                                "constraint": "middle"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "close to",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            },
+                            {
+                                "type": "direction",
+                                "constraint": "face to",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            }
+                        ]
+                    ],
+                    "mass": 4.0
+                },
+                {
+                    "id": "room_09af56a9_chair_678c1d6a",
+                    "room_id": "room_09af56a9",
+                    "type": "chair",
+                    "description": "A modern wooden dining chair with a slender rectangular seat, four straight legs, and a slightly curved vertical slat backrest, finished in light wood with a smooth matte surface and clean minimal lines.",
+                    "position": {
+                        "x": 2.65,
+                        "y": 3.05,
+                        "z": 0.0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 180
+                    },
+                    "dimensions": {
+                        "width": 0.5461277050315152,
+                        "length": 0.5462610980095238,
+                        "height": 0.336373689017685
+                    },
+                    "source": "generation",
+                    "source_id": "e45a28df",
+                    "place_id": "floor",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            265,
+                            305
+                        ],
+                        180,
+                        [
+                            [
+                                294.05638525157576,
+                                275.9369450995238
+                            ],
+                            [
+                                294.05638525157576,
+                                334.0630549004762
+                            ],
+                            [
+                                235.94361474842424,
+                                334.0630549004762
+                            ],
+                            [
+                                235.94361474842424,
+                                275.9369450995238
+                            ],
+                            [
+                                294.05638525157576,
+                                275.9369450995238
+                            ]
+                        ],
+                        [
+                            {
+                                "type": "global",
+                                "constraint": "middle"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "close to",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            },
+                            {
+                                "type": "direction",
+                                "constraint": "face to",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            }
+                        ]
+                    ],
+                    "mass": 4.0
+                },
+                {
+                    "id": "room_09af56a9_refrigerator_487b14fa",
+                    "room_id": "room_09af56a9",
+                    "type": "refrigerator",
+                    "description": "A tall modern white refrigerator with a smooth rectangular tower shape, flat front doors, a subtle vertical recessed handle strip, and a matte finish that slightly rounds at the front edges for a softened contemporary look.",
+                    "position": {
+                        "x": 3.45,
+                        "y": 4.556525017522953,
+                        "z": 0.0
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 180
+                    },
+                    "dimensions": {
+                        "width": 0.8322496012988502,
+                        "length": 0.7519499649540952,
+                        "height": 1.3066899121353661
+                    },
+                    "source": "generation",
+                    "source_id": "91893341",
+                    "place_id": "floor",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            345.0,
+                            455.6525017522952
+                        ],
+                        180,
+                        [
+                            [
+                                388.36248006494253,
+                                416.30500350459045
+                            ],
+                            [
+                                388.36248006494253,
+                                495.0
+                            ],
+                            [
+                                301.63751993505747,
+                                495.0
+                            ],
+                            [
+                                301.63751993505747,
+                                416.30500350459045
+                            ]
+                        ],
+                        [
+                            {
+                                "type": "global",
+                                "constraint": "edge"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "far",
+                                "target": "room_09af56a9_counter_548b35f9"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "far",
+                                "target": "room_09af56a9_stove_158f5d13"
+                            },
+                            {
+                                "type": "distance",
+                                "constraint": "far",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            },
+                            {
+                                "type": "direction",
+                                "constraint": "face to",
+                                "target": "room_09af56a9_counter_548b35f9"
+                            }
+                        ]
+                    ],
+                    "mass": 65.0
+                },
+                {
+                    "id": "room_09af56a9_block_0d201a1f",
+                    "room_id": "room_09af56a9",
+                    "type": "block",
+                    "description": "A wood knife block with a compact upright rectangular prism shape, a slightly angled top surface featuring slim parallel slots, and a natural light-wood finish with visible grain on its smooth faces.",
+                    "position": {
+                        "x": 3.5555687332834567,
+                        "y": 2.290098444238556,
+                        "z": 0.976773013024511
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 117.85171353805583
+                    },
+                    "dimensions": {
+                        "width": 0.42727199610110866,
+                        "length": 0.4279649779667866,
+                        "height": 0.1978280500709523
+                    },
+                    "source": "generation",
+                    "source_id": "03f929ab",
+                    "place_id": "room_09af56a9_counter_548b35f9",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 3.0
+                },
+                {
+                    "id": "room_09af56a9_kettle_29ed819f",
+                    "room_id": "room_09af56a9",
+                    "type": "kettle",
+                    "description": "An electric kettle with a rounded cylindrical body tapering slightly toward the top, a smooth matte gray finish, a simple curved handle, and a short spout that projects cleanly from the side.",
+                    "position": {
+                        "x": 3.761421792020409,
+                        "y": 1.972723944925511,
+                        "z": 0.9766069202047941
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 78.81518074600571
+                    },
+                    "dimensions": {
+                        "width": 0.14183284370083893,
+                        "length": 0.26475134646579235,
+                        "height": 0.19509416881100694
+                    },
+                    "source": "generation",
+                    "source_id": "694d31e8",
+                    "place_id": "room_09af56a9_counter_548b35f9",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.8
+                },
+                {
+                    "id": "room_09af56a9_holder_d48ec8c9",
+                    "room_id": "room_09af56a9",
+                    "type": "holder",
+                    "description": "A cylindrical utensil holder with straight vertical sides, a flat base, a smooth matte white finish, and a slightly thickened rim that forms a subtle lip around the open top.",
+                    "position": {
+                        "x": 3.1068809683686816,
+                        "y": 2.8766922795122922,
+                        "z": 0.9764934808592759
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 84.38264327929899
+                    },
+                    "dimensions": {
+                        "width": 0.12365237841193776,
+                        "length": 0.16238462178442048,
+                        "height": 0.12741104955739807
+                    },
+                    "source": "generation",
+                    "source_id": "0daf1a72",
+                    "place_id": "room_09af56a9_counter_548b35f9",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.35
+                },
+                {
+                    "id": "room_09af56a9_plant_f167a2d5",
+                    "room_id": "room_09af56a9",
+                    "type": "plant",
+                    "description": "A small herb plant with a cluster of fine green stems and leaves emerging from a compact cylindrical pot in a neutral light gray color, with a smooth matte surface and a slightly flared rim.",
+                    "position": {
+                        "x": 3.467610684096236,
+                        "y": 1.8450504623602801,
+                        "z": 0.8386411578868135
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 186.7043988123804
+                    },
+                    "dimensions": {
+                        "width": 0.13131688302931427,
+                        "length": 0.11134973124435638,
+                        "height": 0.1895777478503616
+                    },
+                    "source": "generation",
+                    "source_id": "70ce115c",
+                    "place_id": "room_09af56a9_counter_548b35f9",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.4
+                },
+                {
+                    "id": "room_09af56a9_mug_ec2fb852",
+                    "room_id": "room_09af56a9",
+                    "type": "mug",
+                    "description": "A white ceramic mug with a straight-sided cylindrical body, a flat circular base, a gently rounded lip, and a simple C-shaped handle that curves smoothly from the side.",
+                    "position": {
+                        "x": 3.594148155520635,
+                        "y": 2.771529676444618,
+                        "z": 0.9764550842386751
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 275.49399263190526
+                    },
+                    "dimensions": {
+                        "width": 0.11348548931769012,
+                        "length": 0.09143281684968171,
+                        "height": 0.08573666741595652
+                    },
+                    "source": "generation",
+                    "source_id": "5bae152b",
+                    "place_id": "room_09af56a9_counter_548b35f9",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.3
+                },
+                {
+                    "id": "room_09af56a9_mug_fa90adf9",
+                    "room_id": "room_09af56a9",
+                    "type": "mug",
+                    "description": "A white ceramic mug with a straight-sided cylindrical body, a flat circular base, a gently rounded lip, and a simple C-shaped handle that curves smoothly from the side.",
+                    "position": {
+                        "x": 3.1361166419762383,
+                        "y": 2.7502955107982445,
+                        "z": 0.9764433410750974
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 244.25578164151096
+                    },
+                    "dimensions": {
+                        "width": 0.11348548931769012,
+                        "length": 0.09143281684968171,
+                        "height": 0.08573666741595652
+                    },
+                    "source": "generation",
+                    "source_id": "5bae152b",
+                    "place_id": "room_09af56a9_counter_548b35f9",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.3
+                },
+                {
+                    "id": "room_09af56a9_plate_3a70af93",
+                    "room_id": "room_09af56a9",
+                    "type": "plate",
+                    "description": "A white ceramic plate with a round flat center, a gently raised rim forming a shallow well, and a smooth glossy finish that catches light softly around the edge.",
+                    "position": {
+                        "x": 2.3684841711686517,
+                        "y": 2.1524277135240517,
+                        "z": 0.5864916853721202
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 85.84848166213132
+                    },
+                    "dimensions": {
+                        "width": 0.32246640324117876,
+                        "length": 0.3224015302750764,
+                        "height": 0.015909290746089794
+                    },
+                    "source": "generation",
+                    "source_id": "302948ad",
+                    "place_id": "room_09af56a9_table_ac4abec2",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.9
+                },
+                {
+                    "id": "room_09af56a9_plate_e7d7ca65",
+                    "room_id": "room_09af56a9",
+                    "type": "plate",
+                    "description": "A white ceramic plate with a round flat center, a gently raised rim forming a shallow well, and a smooth glossy finish that catches light softly around the edge.",
+                    "position": {
+                        "x": 2.0736794200627724,
+                        "y": 2.194798938866331,
+                        "z": 0.02826110917809037
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 133.74928976934393
+                    },
+                    "dimensions": {
+                        "width": 0.32246640324117876,
+                        "length": 0.3224015302750764,
+                        "height": 0.015909290746089794
+                    },
+                    "source": "generation",
+                    "source_id": "302948ad",
+                    "place_id": "room_09af56a9_table_ac4abec2",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.9
+                },
+                {
+                    "id": "room_09af56a9_salt_baa7f3ce",
+                    "room_id": "room_09af56a9",
+                    "type": "salt",
+                    "description": "A salt shaker with a short cylindrical glass body, a smooth transparent surface showing a fine white fill, and a small brushed metal cap perforated with neat round holes.",
+                    "position": {
+                        "x": 2.0902928045926785,
+                        "y": 2.206735192468539,
+                        "z": 0.5862056573660106
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 62.045777589348866
+                    },
+                    "dimensions": {
+                        "width": 0.2709130827620444,
+                        "length": 0.27056532407692685,
+                        "height": 0.08973926179637211
+                    },
+                    "source": "generation",
+                    "source_id": "a723e5ea",
+                    "place_id": "room_09af56a9_table_ac4abec2",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.3
+                },
+                {
+                    "id": "room_09af56a9_pepper_30a4392b",
+                    "room_id": "room_09af56a9",
+                    "type": "pepper",
+                    "description": "A pepper shaker with a short cylindrical glass body, a clear surface showing darker granules inside, and a matching small perforated metal cap that pairs visually with the salt shaker.",
+                    "position": {
+                        "x": 2.405942412767821,
+                        "y": 2.4234604285309036,
+                        "z": 0.029250262864678987
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 11.91998662597938
+                    },
+                    "dimensions": {
+                        "width": 0.30188570522531544,
+                        "length": 0.3019396711305327,
+                        "height": 0.09076655389919024
+                    },
+                    "source": "generation",
+                    "source_id": "3593b140",
+                    "place_id": "room_09af56a9_table_ac4abec2",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 3.2
+                },
+                {
+                    "id": "room_09af56a9_cabinet_9b7701f0",
+                    "room_id": "room_09af56a9",
+                    "type": "cabinet",
+                    "description": "A row of simple modern white wall cabinets forming a long horizontal rectangular block, with flat handleless doors, a smooth matte finish, and a continuous underside that is perfectly straight for a clean linear look.",
+                    "position": {
+                        "x": 0.31711812878001955,
+                        "y": 1.2074999999999998,
+                        "z": 0.8543888733289761
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 270
+                    },
+                    "dimensions": {
+                        "width": 1.6169921957108815,
+                        "length": 0.47423625756003895,
+                        "height": 1.616222253342048
+                    },
+                    "source": "generation",
+                    "source_id": "afa96ca2",
+                    "place_id": "wall",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            {
+                                "type": "alignment",
+                                "constraint": "on_top_of",
+                                "target": "room_09af56a9_counter_548b35f9"
+                            }
+                        ]
+                    ],
+                    "mass": 55.0
+                },
+                {
+                    "id": "room_09af56a9_shelf_09636980",
+                    "room_id": "room_09af56a9",
+                    "type": "shelf",
+                    "description": "A simple modern floating wall shelf with a long narrow rectangular plank, straight clean edges, a light neutral finish, and concealed supports so it appears as a thin horizontal slab projecting from the wall.",
+                    "position": {
+                        "x": 3.809629390218796,
+                        "y": 1.4425,
+                        "z": 1.1874352245389246
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 90
+                    },
+                    "dimensions": {
+                        "width": 0.9498342263623533,
+                        "length": 0.22074121956240783,
+                        "height": 0.9501295509221508
+                    },
+                    "source": "generation",
+                    "source_id": "f9fd08d5",
+                    "place_id": "wall",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            {
+                                "type": "alignment",
+                                "constraint": "on_top_of",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            }
+                        ]
+                    ],
+                    "mass": 12.0
+                },
+                {
+                    "id": "room_09af56a9_clock_33c46724",
+                    "room_id": "room_09af56a9",
+                    "type": "clock",
+                    "description": "A single piece of thin and upright round wall clock with a flat circular face, a slim metallic bezel in a muted gray tone, minimalist tick marks, and simple contrasting hands on a light neutral background.",
+                    "position": {
+                        "x": 3.913645889487179,
+                        "y": 3.5575,
+                        "z": 0.5125000000000001
+                    },
+                    "rotation": {
+                        "x": 0,
+                        "y": 0,
+                        "z": 90
+                    },
+                    "dimensions": {
+                        "width": 0.2998142782708254,
+                        "length": 0.012708221025642487,
+                        "height": 0.3
+                    },
+                    "source": "generation",
+                    "source_id": "b16cbe00",
+                    "place_id": "wall",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": [
+                        [
+                            {
+                                "type": "alignment",
+                                "constraint": "on_top_of",
+                                "target": "room_09af56a9_table_ac4abec2"
+                            }
+                        ]
+                    ],
+                    "mass": 0.7
+                },
+                {
+                    "id": "room_09af56a9_jar_a9aa58d8",
+                    "room_id": "room_09af56a9",
+                    "type": "jar",
+                    "description": "A compact cylindrical glass jar with clear straight sides, a flat circular base, and a smooth matte beige lid with a low rounded profile and a small centered ridge for visual detail, giving it a clean minimal appearance.",
+                    "position": {
+                        "x": 3.8259166678264425,
+                        "y": 1.260078992065397,
+                        "z": 2.1480475496739997
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 315.6367222439149
+                    },
+                    "dimensions": {
+                        "width": 0.14287453363896033,
+                        "length": 0.1431105797670176,
+                        "height": 0.06424912867279015
+                    },
+                    "source": "generation",
+                    "source_id": "d26dec80",
+                    "place_id": "room_09af56a9_shelf_09636980",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.4
+                },
+                {
+                    "id": "room_09af56a9_jar_84fcea26",
+                    "room_id": "room_09af56a9",
+                    "type": "jar",
+                    "description": "A compact cylindrical glass jar with clear straight sides, a flat circular base, and a smooth matte beige lid with a low rounded profile and a small centered ridge for visual detail, giving it a clean minimal appearance.",
+                    "position": {
+                        "x": 3.8320541407910613,
+                        "y": 1.515576210502251,
+                        "z": 2.148025206530259
+                    },
+                    "rotation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 133.59100730753468
+                    },
+                    "dimensions": {
+                        "width": 0.14287453363896033,
+                        "length": 0.1431105797670176,
+                        "height": 0.06424912867279015
+                    },
+                    "source": "generation",
+                    "source_id": "d26dec80",
+                    "place_id": "room_09af56a9_shelf_09636980",
+                    "place_guidance": "Standard placement for the object",
+                    "placement_constraints": null,
+                    "mass": 0.4
+                }
+            ],
+            "windows": [
+                {
+                    "id": "window_cec364a5",
+                    "wall_id": "wall_room_09af56a9_east_e9a77995",
+                    "position_on_wall": 0.61,
+                    "width": 1.4,
+                    "height": 1.0,
+                    "sill_height": 1.1,
+                    "window_type": "standard",
+                    "window_material": "standard"
+                },
+                {
+                    "id": "window_d4db5246",
+                    "wall_id": "wall_room_09af56a9_south_7eb265c4",
+                    "position_on_wall": 0.28,
+                    "width": 1.2,
+                    "height": 1.2,
+                    "sill_height": 0.85,
+                    "window_type": "standard",
+                    "window_material": "standard"
+                }
+            ],
+            "floor_material": "hardwood",
+            "ceiling_height": 2.7
+        }
+    ],
+    "total_area": 20.0,
+    "building_style": "Modern residential, clean minimal family kitchen",
+    "description": "Complete layout with doors/windows: Generate a complete layout for a single, medium-sized modern kitchen room measuring approximately 4 meters by 5 meters. The style is clean, modern, everyday family kitchen with neutral colors: white or light-wood base and wall cabinets, gray countertops, and minimal decorative clutter. The layout must be optimized for a mobile base with a mounted Franka arm to navigate and manipulate objects. Ensure at least 0.9-meter-wide clear corridors between major furniture pieces.\n\nRoom structure: A single rectangular kitchen room (no other rooms) with four walls, one main entry door on one of the 4m walls, and 1\u20132 medium-sized windows on external walls that do not conflict with tall appliances. Keep windows away from corners used by tall cabinets or the refrigerator.\n\nKey fixed furniture and appliances on the floor:\n- One continuous base cabinet + kitchen counter run (kitchen_counter) of about 2.5\u20133m length along the longer 5m wall, placed on the floor, with gray countertop at ~90cm height. Include an integrated steel sink basin in one section, leaving at least 0.6\u20130.8m of clear counter space suitable for placing and grasping a mug.\n- One freestanding stove/oven unit placed on the floor, aligned flush with the counter run and against the same or adjacent wall.\n- One tall refrigerator placed on the floor against a wall near but not blocking the door; leave at least 0.9m walking space between the fridge and any opposing furniture.\n- One rectangular dining table for 2\u20134 people placed on the floor away from the main counter run so a mobile robot can navigate between counter and table. Orient the table so its long side faces an open area, with space for the robot to approach one long side.\n- 2\u20134 dining chairs placed on the floor around the dining table, facing the table, with at least one long side of the table left relatively open for robot access.\n\nWall-mounted elements:\n- A row of simple wall cabinets (wall-mounted) directly above part of the counter run (but not directly over the sink) at a realistic height, leaving vertical clearance for the robot arm to operate near the counter edge.\n- One small simple wall shelf on another wall or near the dining area, at a reachable height for the robot.\n- One round wall clock mounted on a free wall area, not directly above the stove.\n\nSupporter surfaces and small objects (respecting a hard total object budget of 25 including all furniture, appliances, and small items):\n- On the counter: place 1 integrated steel sink basin object, 2 white ceramic mugs (one of these will be the task mug), 1 electric kettle, 1 wood knife block, 1 utensil holder, 1 small herb plant, and optionally 1 fruit bowl, arranged neatly with at least one mug in a clear, graspable area.\n- On the dining table: place 1\u20132 white plates, salt and pepper shakers, and optionally 1 small decorative item such as a low vase, while keeping a clear area for placing the mug.\n- On the wall shelf: place 1\u20132 cookbooks and 1\u20132 small jars or containers.\n\nEnsure that:\n- All objects follow the modern, minimal, neutral style and reasonable sizes.\n- Every supporter surface (counter run, dining table, wall shelf) has at least 2\u20133 meaningful items but do not exceed the overall object budget of 25 total objects.\n- There is a clear, collision-free navigation path from the entry door to the counter and from the counter to the dining table, with no large obstacles blocking these routes.\n- The mug on the counter is reachable by the Franka arm from at least one feasible base pose, and the dining table top has a clear placement region reachable from a feasible base pose.",
+    "created_from_text": "Generate a complete layout for a single, medium-sized modern kitchen room measuring approximately 4 meters by 5 meters. The style is clean, modern, everyday family kitchen with neutral colors: white or light-wood base and wall cabinets, gray countertops, and minimal decorative clutter. The layout must be optimized for a mobile base with a mounted Franka arm to navigate and manipulate objects. Ensure at least 0.9-meter-wide clear corridors between major furniture pieces.\n\nRoom structure: A single rectangular kitchen room (no other rooms) with four walls, one main entry door on one of the 4m walls, and 1\u20132 medium-sized windows on external walls that do not conflict with tall appliances. Keep windows away from corners used by tall cabinets or the refrigerator.\n\nKey fixed furniture and appliances on the floor:\n- One continuous base cabinet + kitchen counter run (kitchen_counter) of about 2.5\u20133m length along the longer 5m wall, placed on the floor, with gray countertop at ~90cm height. Include an integrated steel sink basin in one section, leaving at least 0.6\u20130.8m of clear counter space suitable for placing and grasping a mug.\n- One freestanding stove/oven unit placed on the floor, aligned flush with the counter run and against the same or adjacent wall.\n- One tall refrigerator placed on the floor against a wall near but not blocking the door; leave at least 0.9m walking space between the fridge and any opposing furniture.\n- One rectangular dining table for 2\u20134 people placed on the floor away from the main counter run so a mobile robot can navigate between counter and table. Orient the table so its long side faces an open area, with space for the robot to approach one long side.\n- 2\u20134 dining chairs placed on the floor around the dining table, facing the table, with at least one long side of the table left relatively open for robot access.\n\nWall-mounted elements:\n- A row of simple wall cabinets (wall-mounted) directly above part of the counter run (but not directly over the sink) at a realistic height, leaving vertical clearance for the robot arm to operate near the counter edge.\n- One small simple wall shelf on another wall or near the dining area, at a reachable height for the robot.\n- One round wall clock mounted on a free wall area, not directly above the stove.\n\nSupporter surfaces and small objects (respecting a hard total object budget of 25 including all furniture, appliances, and small items):\n- On the counter: place 1 integrated steel sink basin object, 2 white ceramic mugs (one of these will be the task mug), 1 electric kettle, 1 wood knife block, 1 utensil holder, 1 small herb plant, and optionally 1 fruit bowl, arranged neatly with at least one mug in a clear, graspable area.\n- On the dining table: place 1\u20132 white plates, salt and pepper shakers, and optionally 1 small decorative item such as a low vase, while keeping a clear area for placing the mug.\n- On the wall shelf: place 1\u20132 cookbooks and 1\u20132 small jars or containers.\n\nEnsure that:\n- All objects follow the modern, minimal, neutral style and reasonable sizes.\n- Every supporter surface (counter run, dining table, wall shelf) has at least 2\u20133 meaningful items but do not exceed the overall object budget of 25 total objects.\n- There is a clear, collision-free navigation path from the entry door to the counter and from the counter to the dining table, with no large obstacles blocking these routes.\n- The mug on the counter is reachable by the Franka arm from at least one feasible base pose, and the dining table top has a clear placement region reachable from a feasible base pose.",
+    "policy_analysis": {
+        "success": true,
+        "robot_type": "mobile_franka",
+        "room_type": "kitchen",
+        "minimum_required_objects": [
+            {
+                "object_type": "kitchen_counter",
+                "quantity": 1,
+                "placement_guidance": "floor",
+                "matched_object_ids": [
+                    "room_09af56a9_counter_548b35f9"
+                ],
+                "matched_object_types": [
+                    "counter"
+                ]
+            },
+            {
+                "object_type": "dining_table",
+                "quantity": 1,
+                "placement_guidance": "floor",
+                "matched_object_ids": [
+                    "room_09af56a9_table_ac4abec2"
+                ],
+                "matched_object_types": [
+                    "table"
+                ]
+            },
+            {
+                "object_type": "mug",
+                "quantity": 1,
+                "placement_guidance": "kitchen_counter",
+                "matched_object_ids": [
+                    "room_09af56a9_mug_ec2fb852"
+                ],
+                "matched_object_types": [
+                    "mug"
+                ]
+            }
+        ],
+        "task_decomposition": [
+            {
+                "step": 1,
+                "action": "navigate",
+                "target_object": "kitchen_counter",
+                "location": "to a base position in front of the kitchen counter where the mug is reachable"
+            },
+            {
+                "step": 2,
+                "action": "pick",
+                "target_object": "mug",
+                "location": "from the clear section of the kitchen counter"
+            },
+            {
+                "step": 3,
+                "action": "navigate",
+                "target_object": "dining_table",
+                "location": "to a base position beside the dining table with a clear placement area"
+            },
+            {
+                "step": 4,
+                "action": "place",
+                "target_object": "mug",
+                "location": "on the top surface of the dining table"
+            }
+        ],
+        "scene_requirements": "The scene requires a 4.0m x 5.0m kitchen designed in modern and bright style. The room should include 5 floor-placed furniture and background objects: Long base counter placed on floor; Steel gas stove placed on floor; Tall white fridge placed on floor; Rectangular table placed on floor; 4 Wooden chairs placed on floor. Wall decorations consist of 3 items: Wall cabinet row mounted on wall; Simple wall shelf mounted on wall; Round wall clock mounted on wall. Furniture surfaces should be decorated with 12 functional and decorative objects: Steel sink basin placed on counter; 2 White ceramic mugs placed on counter; Electric kettle placed on counter; Wood knife block placed on counter; Fruit bowl placed on counter; Utensil holder placed on counter; White plate placed on table; Salt shaker placed on table; Pepper shaker placed on table; Small glass vase placed on shelf; Cookbook placed on shelf; Small herb plant placed on counter. Each furniture surface such as tables, desks, shelves, and cabinets should have at least 2 or more decorative or functional objects placed on top to create a lived-in, realistic environment. Important constraints: Do not add rugs, mats, carpets, curtains, blankets, ceiling-hanging objects, or ceiling objects to the scene as these are either already installed or restricted. The complete scene must contain a minimum of 20 objects total following the placement proposals described above to achieve a complete, diverse, and realistic room environment.Must ensure that: i. The layout (position, rotation, and size) is believable, and common daily objects make the room feel lived-in. Rich of daily furniture and objects.ii. Contains the necessary furniture and setup for the specified function.iii. Each objects is in **reasonable size**, neatly placed, objects of the same category are well aglined, relationships are reasonable (e.g., chairs face desks), sufficient space exists for walking, and **orientations must** be correct. iv. All necessary large and small items are present. Has rich details. Each shelf is full of objects (>5) inside. Each supporter (e.g. table, desk, and shelf) has small objects on it. The room feels done.Must avoid that: i. Unusual objects or strange placements make the room unrealistic.ii. Missing key objects or contains mismatched furniture (e.g., no bed in a bedroom).iii. Floating objects, crowded floor, **abnormal size**, objects with collision, incorrect **orientation**, or large items placed oddly (e.g., sofa not against the wall). Large empty space. Blocker in front of furniture.iv. Room is sparse or empty, lacks decor or key elements.",
+        "generalization": {
+            "pose_generalization": {
+                "required": true,
+                "reason": "The mug's position on the counter and the exact placement location on the dining table should vary, and the robot base poses relative to the counter and table will change across episodes."
+            },
+            "type_generalization": {
+                "required": true,
+                "reason": "The policy should handle different mug geometries and minor variations in counter and dining table designs within the same functional categories."
+            },
+            "scene_generalization": {
+                "required": true,
+                "reason": "Navigation between the counter and dining table must adapt to different feasible kitchen layouts, furniture placements, and obstacle configurations within similar medium-sized kitchens."
+            }
+        },
+        "updated_task_decomposition": [
+            {
+                "step": 1,
+                "action": "navigate",
+                "target_object": "kitchen_counter",
+                "location": "to a base position in front of the kitchen counter where the mug is reachable",
+                "target_object_id": "room_09af56a9_counter_548b35f9",
+                "location_object_id": "room_09af56a9_counter_548b35f9"
+            },
+            {
+                "step": 2,
+                "action": "pick",
+                "target_object": "mug",
+                "location": "from the clear section of the kitchen counter",
+                "target_object_id": "room_09af56a9_mug_ec2fb852",
+                "location_object_id": "room_09af56a9_counter_548b35f9"
+            },
+            {
+                "step": 3,
+                "action": "navigate",
+                "target_object": "dining_table",
+                "location": "to a base position beside the dining table with a clear placement area",
+                "target_object_id": "room_09af56a9_table_ac4abec2",
+                "location_object_id": "room_09af56a9_table_ac4abec2"
+            },
+            {
+                "step": 4,
+                "action": "place",
+                "target_object": "mug",
+                "location": "on the top surface of the dining table",
+                "target_object_id": "room_09af56a9_mug_ec2fb852",
+                "location_object_id": "room_09af56a9_table_ac4abec2"
+            }
+        ]
+    }
+}

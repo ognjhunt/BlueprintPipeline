@@ -17,11 +17,13 @@ and post-collection scoring (handled elsewhere).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import inspect
 import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -52,6 +54,119 @@ def _load_json(path: Path) -> Any:
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _sanitize_pythonpath_for_isaacsim(env: Dict[str, str]) -> None:
+    raw = env.get("PYTHONPATH", "")
+    if not raw:
+        return
+    blocked = os.path.realpath(SAGE_SERVER_DIR)
+    cleaned: List[str] = []
+    for part in raw.split(os.pathsep):
+        if not part:
+            continue
+        real = os.path.realpath(part)
+        if real == blocked:
+            continue
+        cleaned.append(part)
+    if cleaned:
+        env["PYTHONPATH"] = os.pathsep.join(cleaned)
+    else:
+        env.pop("PYTHONPATH", None)
+
+
+def _configure_vulkan_icd_env(env: Dict[str, str]) -> None:
+    if not env.get("VK_ICD_FILENAMES") and not env.get("VK_DRIVER_FILES"):
+        for candidate in ("/usr/share/vulkan/icd.d/nvidia_icd.json", "/etc/vulkan/icd.d/nvidia_icd.json"):
+            if Path(candidate).exists():
+                env["VK_ICD_FILENAMES"] = candidate
+                env["VK_DRIVER_FILES"] = candidate
+                _log(f"Using NVIDIA Vulkan ICD: {candidate}")
+                break
+    if env.get("VK_ICD_FILENAMES") and not env.get("VK_DRIVER_FILES"):
+        env["VK_DRIVER_FILES"] = env["VK_ICD_FILENAMES"]
+    if env.get("VK_DRIVER_FILES") and not env.get("VK_ICD_FILENAMES"):
+        env["VK_ICD_FILENAMES"] = env["VK_DRIVER_FILES"]
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git_commit_sha(repo_root: Path) -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _build_stage7_command_and_env(
+    *,
+    args: argparse.Namespace,
+    collector: Path,
+    plan_path: Path,
+    output_dir: Path,
+) -> Tuple[List[str], Dict[str, str]]:
+    cmd = [
+        args.isaacsim_py,
+        "-P",
+        str(collector),
+        "--plan_bundle",
+        str(plan_path),
+        "--output_dir",
+        str(output_dir),
+    ]
+    cmd.append("--headless" if args.headless else "--no-headless")
+    cmd.append("--enable_cameras" if args.enable_cameras else "--disable_cameras")
+    cmd.append("--strict" if args.strict else "--no-strict")
+
+    env = os.environ.copy()
+    env["OMNI_KIT_ACCEPT_EULA"] = "yes"
+    env.setdefault("ISAAC_ASSETS_ROOT", "/workspace/isaacsim_assets/Assets/Isaac/5.1")
+    env.setdefault("SAGE_ALLOW_REMOTE_ISAAC_ASSETS", "0")
+    env.setdefault("SAGE_SENSOR_FAILURE_POLICY", "fail" if bool(args.strict) else "warn")
+    env.setdefault("SAGE_RENDER_WARMUP_FRAMES", "100")
+    env.setdefault("SAGE_SENSOR_MIN_RGB_STD", "0.01")
+    env["PYTHONSAFEPATH"] = "1"
+    _sanitize_pythonpath_for_isaacsim(env)
+    _configure_vulkan_icd_env(env)
+    return cmd, env
+
+
+def _run_stage7_collector_with_tee(*, cmd: Sequence[str], env: Dict[str, str], cwd: Path, log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log_f:
+        log_f.write(f"# cmd: {' '.join(cmd)}\n")
+        log_f.write(f"# cwd: {cwd}\n")
+        log_f.flush()
+        proc = subprocess.Popen(
+            list(cmd),
+            env=env,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            log_f.write(line)
+        ret = proc.wait()
+    if ret != 0:
+        raise subprocess.CalledProcessError(ret, list(cmd))
 
 
 def _room_json_for_layout_dir(layout_dir: Path) -> Path:
@@ -124,6 +239,75 @@ def _normalize_type(s: str) -> str:
     return (s or "").strip().lower().replace(" ", "_")
 
 
+def _extract_place_surface_token(task: str, surface_tokens: Sequence[str]) -> Optional[str]:
+    # Normalize to space-separated tokens so word boundaries work in regex.
+    task_n = re.sub(r"[^a-z0-9]+", " ", str(task or "").lower()).strip()
+    if not task_n:
+        return None
+    # Prefer explicit place intent ("place/put/set/move ... on/to <surface>").
+    for tok in surface_tokens:
+        pat = rf"\b(?:place|put|set|move|drop)\b.*?\b(?:on|onto|to|into)\b.*?\b{re.escape(tok)}\b"
+        if re.search(pat, task_n):
+            return tok
+    # Fallback: any place-intent mention of a surface token.
+    for tok in surface_tokens:
+        pat = rf"\b(?:place|put|set|move|drop)\b[^.]*\b{re.escape(tok)}\b"
+        if re.search(pat, task_n):
+            return tok
+    return None
+
+
+def _type_tokens(raw_type: str) -> List[str]:
+    toks = [t for t in re.split(r"[^a-z0-9]+", _normalize_type(raw_type)) if t]
+    stop = {
+        "object",
+        "item",
+        "small",
+        "large",
+        "kitchen",
+        "dining",
+        "table",
+        "counter",
+        "desk",
+        "island",
+        "bench",
+        "surface",
+    }
+    return [t for t in toks if len(t) >= 3 and t not in stop]
+
+
+def _is_object_on_surface(obj: Dict[str, Any], surface: Dict[str, Any]) -> bool:
+    """Heuristic support check in XY + top-height proximity."""
+    op = obj.get("position", {}) or {}
+    od = obj.get("dimensions", {}) or {}
+    sp = surface.get("position", {}) or {}
+    sd = surface.get("dimensions", {}) or {}
+
+    ox = float(op.get("x", 0.0))
+    oy = float(op.get("y", 0.0))
+    oz = float(op.get("z", 0.0))  # object bottom in SAGE convention
+    ow = max(0.0, float(od.get("width", 0.0)))
+    ol = max(0.0, float(od.get("length", 0.0)))
+    oh = max(0.0, float(od.get("height", 0.0)))
+
+    sx = float(sp.get("x", 0.0))
+    sy = float(sp.get("y", 0.0))
+    sz = float(sp.get("z", 0.0))
+    sw = max(0.0, float(sd.get("width", 0.0)))
+    sl = max(0.0, float(sd.get("length", 0.0)))
+    sh = max(0.0, float(sd.get("height", 0.0)))
+
+    xy_tol = max(0.10, min(0.30, 0.15 + 0.25 * max(ow, ol)))
+    on_x = abs(ox - sx) <= (0.5 * sw + xy_tol)
+    on_y = abs(oy - sy) <= (0.5 * sl + xy_tol)
+    if not (on_x and on_y):
+        return False
+
+    surface_top = sz + sh
+    z_tol = max(0.08, min(0.25, 0.08 + 0.5 * oh))
+    return abs(oz - surface_top) <= z_tol
+
+
 def _select_pick_and_place(
     room: Dict[str, Any],
     *,
@@ -143,7 +327,7 @@ def _select_pick_and_place(
     manipulable: List[Dict[str, Any]] = []
     for obj in objects:
         w, l, h = dims(obj)
-        if min(w, l) <= 0.20 and obj.get("source_id"):
+        if min(w, l) <= 0.35 and obj.get("source_id"):
             manipulable.append(obj)
 
     if not manipulable:
@@ -168,6 +352,10 @@ def _select_pick_and_place(
         if t and t in task:
             pick = obj
             break
+        ttoks = _type_tokens(t)
+        if any(tok in task for tok in ttoks):
+            pick = obj
+            break
         if "mug" in task and "mug" in t:
             pick = obj
             break
@@ -178,12 +366,25 @@ def _select_pick_and_place(
         pick = manipulable[0]
 
     place = None
-    for obj in surfaces:
-        t = _normalize_type(obj.get("type", ""))
-        if any(tok in task for tok in surface_tokens) and any(tok in t for tok in surface_tokens):
-            place = obj
-            break
+    explicit_place_tok = _extract_place_surface_token(task, surface_tokens)
+    if explicit_place_tok is not None:
+        for obj in surfaces:
+            t = _normalize_type(obj.get("type", ""))
+            if explicit_place_tok in t:
+                place = obj
+                break
+    # Fallback: prefer any surface whose type keyword appears in the task.
     if place is None:
+        for obj in surfaces:
+            t = _normalize_type(obj.get("type", ""))
+            for tok in surface_tokens:
+                if tok in t and tok in task:
+                    place = obj
+                    break
+            if place is not None:
+                break
+    if place is None:
+        # Fallback: first surface
         place = surfaces[0]
 
     return pick, place
@@ -193,8 +394,11 @@ def _build_occupancy_grid(
     room: Dict[str, Any],
     *,
     resolution_m: float = 0.05,
-    margin_m: float = 0.35,
+    margin_m: float = 0.15,
+    min_footprint_for_obstacle: float = 0.25,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Build 2D occupancy grid.  Only objects with min(w,l) > min_footprint_for_obstacle
+    are treated as obstacles.  Small / manipulable objects (cups, salt, etc.) are excluded."""
     dims = room.get("dimensions", {}) or {}
     width = float(dims.get("width", 6.0))
     length = float(dims.get("length", 6.0))
@@ -216,7 +420,7 @@ def _build_occupancy_grid(
         cy = float(pos.get("y", 0.0))
         w = float(d.get("width", 0.0))
         l = float(d.get("length", 0.0))
-        if w > 0.0 and l > 0.0:
+        if w > 0.0 and l > 0.0 and min(w, l) > min_footprint_for_obstacle:
             mark_rect(cx, cy, w, l)
 
     return grid, {"resolution_m": resolution_m, "width_m": width, "length_m": length}
@@ -398,7 +602,8 @@ def _plan_arm_segments_with_curobo(
         target = Pose(position=pos, quaternion=quat)
         q_pos = torch.tensor(start_q, dtype=torch.float32).unsqueeze(0).cuda()
         q_vel = torch.zeros_like(q_pos)
-        start_state = JointState(position=q_pos, velocity=q_vel)
+        q_acc = torch.zeros_like(q_pos)
+        start_state = JointState(position=q_pos, velocity=q_vel, acceleration=q_acc)
         result = motion_gen.plan_single(start_state, target)
         success = getattr(result, "success", None)
         if success is not None and hasattr(success, "item"):
@@ -624,7 +829,7 @@ def main() -> None:
     parser.add_argument("--no-headless", dest="headless", action="store_false")
     parser.add_argument("--enable_cameras", dest="enable_cameras", action="store_true", default=True)
     parser.add_argument("--disable_cameras", dest="enable_cameras", action="store_false")
-    parser.add_argument("--strict", dest="strict", action="store_true", default=True)
+    parser.add_argument("--strict", dest="strict", action="store_true", default=False)
     parser.add_argument("--no-strict", dest="strict", action="store_false")
 
     parser.add_argument("--m2t2_weights", default=M2T2_WEIGHTS_DEFAULT)
@@ -703,6 +908,16 @@ def main() -> None:
             target_xy=place_xy, room_dims=room_dims, grid=grid, grid_meta=grid_meta
         )
 
+        # If placing back on the same support (e.g. "pick salt and place on table"),
+        # keep a single base pose and skip mobile-base navigation entirely.
+        same_support = _is_object_on_surface(pick_obj, place_surface)
+        base_dist = math.sqrt((base_pick[0] - base_place[0]) ** 2 + (base_pick[1] - base_place[1]) ** 2)
+        skip_nav = same_support or (base_dist < 0.5)
+        if skip_nav:
+            reason = "same_support" if same_support else f"bases_within_{base_dist:.2f}m"
+            _log(f"demo={demo_idx}: skipping base navigation ({reason})")
+            base_place = base_pick
+
         _log(f"demo={demo_idx}: variant={variant_json.name} pick={pick_obj.get('type')} place={place_surface.get('type')}")
 
         grasps_world, contacts = _infer_grasps_for_variant(
@@ -779,13 +994,35 @@ def main() -> None:
         all_contacts_for_report.append((contacts[chosen_idx : chosen_idx + 1] if contacts.shape[0] else np.zeros((1, 3), dtype=np.float32)))
 
         # Base path (A*), yaw fixed to face forward.
-        base_path = _plan_base_traj(
-            grid=grid,
-            grid_meta=grid_meta,
-            start_xy=(base_pick[0], base_pick[1]),
-            goal_xy=(base_place[0], base_place[1]),
-            fixed_yaw=float(base_pick[2]),
-        )
+        if skip_nav:
+            _log(f"demo={demo_idx}: skipping base navigation (same base pose)")
+            base_path = np.array([[base_pick[0], base_pick[1], base_pick[2]]], dtype=np.float32)
+        else:
+            try:
+                base_path = _plan_base_traj(
+                    grid=grid,
+                    grid_meta=grid_meta,
+                    start_xy=(base_pick[0], base_pick[1]),
+                    goal_xy=(base_place[0], base_place[1]),
+                    fixed_yaw=float(base_pick[2]),
+                )
+            except RuntimeError as exc:
+                # Retry once with a relaxed occupancy model to reduce false negatives
+                # in narrow kitchens where chairs/props make the conservative grid disconnected.
+                _log(f"demo={demo_idx}: base A* failed on primary grid ({exc}); retrying with relaxed grid")
+                grid_relaxed, meta_relaxed = _build_occupancy_grid(
+                    room,
+                    resolution_m=0.05,
+                    margin_m=0.08,
+                    min_footprint_for_obstacle=0.35,
+                )
+                base_path = _plan_base_traj(
+                    grid=grid_relaxed,
+                    grid_meta=meta_relaxed,
+                    start_xy=(base_pick[0], base_pick[1]),
+                    goal_xy=(base_place[0], base_place[1]),
+                    fixed_yaw=float(base_pick[2]),
+                )
 
         # Build a single timeline.
         step_labels: List[str] = []
@@ -881,6 +1118,21 @@ def main() -> None:
         "strict": bool(args.strict),
         "task_desc": args.task_desc,
         "demos": [p.__dict__ for p in plans],
+        "provenance": {
+            "stage567_script": str(Path(__file__).resolve()),
+            "stage567_script_sha256": _file_sha256(Path(__file__).resolve()),
+            "bp_git_commit": _git_commit_sha(Path(__file__).resolve().parents[2]),
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "stage7_log_path": str(layout_dir / "stage7_output" / "stage7.log"),
+            "policy_env": {
+                "ISAAC_ASSETS_ROOT": os.environ.get("ISAAC_ASSETS_ROOT", ""),
+                "REQUIRE_LOCAL_ROBOT_ASSET": os.environ.get("REQUIRE_LOCAL_ROBOT_ASSET", ""),
+                "SAGE_ALLOW_REMOTE_ISAAC_ASSETS": os.environ.get("SAGE_ALLOW_REMOTE_ISAAC_ASSETS", "0"),
+                "SAGE_SENSOR_FAILURE_POLICY": os.environ.get("SAGE_SENSOR_FAILURE_POLICY", "auto"),
+                "SAGE_RENDER_WARMUP_FRAMES": os.environ.get("SAGE_RENDER_WARMUP_FRAMES", ""),
+                "SAGE_SENSOR_MIN_RGB_STD": os.environ.get("SAGE_SENSOR_MIN_RGB_STD", ""),
+            },
+        },
     }
     plan_dir = layout_dir / "plans"
     plan_path = plan_dir / "plan_bundle.json"
@@ -895,25 +1147,22 @@ def main() -> None:
     collector = Path(__file__).with_name("isaacsim_collect_mobile_franka.py")
     if not collector.exists():
         raise FileNotFoundError(f"Missing collector script: {collector}")
-
-    cmd = [
-        args.isaacsim_py,
-        str(collector),
-        "--plan_bundle",
-        str(plan_path),
-        "--output_dir",
-        str(args.output_dir),
-    ]
-    if args.headless:
-        cmd.append("--headless")
-    if args.enable_cameras:
-        cmd.append("--enable_cameras")
-    if args.strict:
-        cmd.append("--strict")
-
+    stage7_log_path = layout_dir / "stage7_output" / "stage7.log"
+    cmd, env = _build_stage7_command_and_env(
+        args=args,
+        collector=collector,
+        plan_path=plan_path,
+        output_dir=Path(args.output_dir),
+    )
     _log("Launching Stage 7 Isaac Sim collector...")
     _log(" ".join(cmd))
-    subprocess.check_call(cmd)
+    _log(f"Stage 7 log path: {stage7_log_path}")
+    _run_stage7_collector_with_tee(
+        cmd=cmd,
+        env=env,
+        cwd=Path(__file__).resolve().parents[2],
+        log_path=stage7_log_path,
+    )
 
     # Final checks (strict).
     demos_h5 = Path(args.output_dir) / "dataset.hdf5"

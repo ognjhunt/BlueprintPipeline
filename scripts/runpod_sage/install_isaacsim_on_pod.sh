@@ -24,6 +24,33 @@ log() { echo "[isaacsim-install $(date -u +%FT%TZ)] $*"; }
 WORKSPACE=${WORKSPACE:-/workspace}
 SAGE_DIR="${WORKSPACE}/SAGE"
 VENV_DIR="${WORKSPACE}/isaacsim_env"
+BP_DIR="${WORKSPACE}/BlueprintPipeline"
+PREFLIGHT_SCRIPT="${BP_DIR}/scripts/runpod_sage/isaacsim_runtime_preflight.sh"
+MCP_RESOLVER="${BP_DIR}/scripts/runpod_sage/mcp_extension_paths.py"
+
+resolve_mcp_extension_src() {
+    if [[ -f "${MCP_RESOLVER}" ]]; then
+        local resolved=""
+        resolved="$(python3 "${MCP_RESOLVER}" --sage-dir "${SAGE_DIR}" || true)"
+        if [[ -n "${resolved}" ]]; then
+            echo "${resolved}"
+            return 0
+        fi
+    fi
+    local candidate
+    for candidate in \
+        "${SAGE_DIR}/server/isaacsim_mcp_ext/isaac.sim.mcp_extension" \
+        "${SAGE_DIR}/server/isaacsim/isaac.sim.mcp_extension"; do
+        if [[ -d "${candidate}" ]]; then
+            if [[ "${candidate}" == "${SAGE_DIR}/server/isaacsim/isaac.sim.mcp_extension" ]]; then
+                log "WARNING: Using deprecated MCP extension path: ${candidate}"
+            fi
+            echo "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
 
 log "=========================================="
 log "Isaac Sim 5.1.0 Installation"
@@ -78,11 +105,32 @@ apt-get update -qq
 apt-get install -y -qq \
     libgl1 libglib2.0-0 libxrender1 libxi6 libxxf86vm1 \
     libxfixes3 libxkbcommon0 libsm6 libice6 libxext6 \
-    libxrandr2 libxcursor1 libxinerama1 libepoxy0 \
+    libxrandr2 libxcursor1 libxinerama1 libepoxy0 libxt6 \
     libglu1-mesa libegl1 libegl-mesa0 libgles2-mesa \
-    libopengl0 libglx-mesa0 \
+    libopengl0 libglx-mesa0 libvulkan1 vulkan-tools \
     psmisc iproute2 >/dev/null
 log "  System deps: OK"
+
+if [[ -x "${PREFLIGHT_SCRIPT}" ]]; then
+    log "Running Isaac Sim runtime preflight (Vulkan + import safety)..."
+    ISAACSIM_PY="${VENV_DIR}/bin/python3" REQUIRE_LOCAL_ROBOT_ASSET="${REQUIRE_LOCAL_ROBOT_ASSET:-0}" "${PREFLIGHT_SCRIPT}"
+fi
+if [[ -z "${VK_ICD_FILENAMES:-}" && -z "${VK_DRIVER_FILES:-}" ]]; then
+    for candidate in /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json; do
+        if [[ -f "${candidate}" ]]; then
+            export VK_ICD_FILENAMES="${candidate}"
+            export VK_DRIVER_FILES="${candidate}"
+            log "Using NVIDIA Vulkan ICD: ${candidate}"
+            break
+        fi
+    done
+fi
+if [[ -n "${VK_ICD_FILENAMES:-}" && -z "${VK_DRIVER_FILES:-}" ]]; then
+    export VK_DRIVER_FILES="${VK_ICD_FILENAMES}"
+fi
+if [[ -n "${VK_DRIVER_FILES:-}" && -z "${VK_ICD_FILENAMES:-}" ]]; then
+    export VK_ICD_FILENAMES="${VK_DRIVER_FILES}"
+fi
 
 # ── 2. Create venv and install Isaac Sim ─────────────────────────────────────
 if [[ -d "${VENV_DIR}" ]]; then
@@ -117,15 +165,15 @@ fi
 
 # ── 3. Get Isaac Sim path and symlink MCP extension ─────────────────────────
 log "Resolving Isaac Sim path..."
-ISAACSIM_PATH=$("${VENV_DIR}/bin/python3" -c \
-    "import isaacsim; import os; print(os.path.dirname(isaacsim.__file__))")
+ISAACSIM_PATH=$("${VENV_DIR}/bin/python3" -P -c \
+    "import os, pathlib, sys; blocked=pathlib.Path('${SAGE_DIR}/server').resolve(); sys.path=[p for p in sys.path if p and pathlib.Path(p).resolve()!=blocked]; import isaacsim; print(os.path.dirname(isaacsim.__file__))")
 log "  Path: ${ISAACSIM_PATH}"
 
 # Save path for entrypoint
 echo "ISAACSIM_PATH=${ISAACSIM_PATH}" > "${WORKSPACE}/.isaacsim_path"
 
 # Symlink SAGE MCP extension
-MCP_EXT_SRC="${SAGE_DIR}/server/isaacsim/isaac.sim.mcp_extension"
+MCP_EXT_SRC="$(resolve_mcp_extension_src || true)"
 MCP_EXT_DST="${ISAACSIM_PATH}/exts/isaac.sim.mcp_extension"
 
 if [[ -d "${MCP_EXT_SRC}" ]]; then
@@ -165,7 +213,7 @@ fi
 # ── 5. Verify install ───────────────────────────────────────────────────────
 log ""
 log "Verifying installation..."
-"${VENV_DIR}/bin/python3" -c "
+"${VENV_DIR}/bin/python3" -P -c "
 import isaacsim
 import os
 path = os.path.dirname(isaacsim.__file__)

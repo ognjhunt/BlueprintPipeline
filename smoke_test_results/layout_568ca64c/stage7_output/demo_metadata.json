@@ -1,0 +1,54 @@
+{
+  "layout_id": "layout_568ca64c",
+  "num_demos": 8,
+  "demos": [
+    {
+      "demo_name": "demo_0",
+      "demo_idx": 0,
+      "num_steps": 187,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_568ca64c/pose_aug_0/00.json"
+    },
+    {
+      "demo_name": "demo_1",
+      "demo_idx": 1,
+      "num_steps": 187,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_568ca64c/pose_aug_0/01.json"
+    },
+    {
+      "demo_name": "demo_2",
+      "demo_idx": 2,
+      "num_steps": 187,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_568ca64c/pose_aug_0/02.json"
+    },
+    {
+      "demo_name": "demo_3",
+      "demo_idx": 3,
+      "num_steps": 188,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_568ca64c/pose_aug_0/03.json"
+    },
+    {
+      "demo_name": "demo_4",
+      "demo_idx": 4,
+      "num_steps": 187,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_568ca64c/pose_aug_0/04.json"
+    },
+    {
+      "demo_name": "demo_5",
+      "demo_idx": 5,
+      "num_steps": 187,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_568ca64c/pose_aug_0/05.json"
+    },
+    {
+      "demo_name": "demo_6",
+      "demo_idx": 6,
+      "num_steps": 187,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_568ca64c/pose_aug_0/06.json"
+    },
+    {
+      "demo_name": "demo_7",
+      "demo_idx": 7,
+      "num_steps": 187,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_568ca64c/pose_aug_0/07.json"
+    }
+  ]
+}

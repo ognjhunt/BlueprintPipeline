@@ -6,9 +6,36 @@ log() { echo "[sage-isaac-bootstrap $(date -u +%FT%TZ)] $*"; }
 WORKSPACE=${WORKSPACE:-/workspace}
 SAGE_DIR="${WORKSPACE}/SAGE"
 MINICONDA_DIR="${WORKSPACE}/miniconda3"
+BP_DIR="${WORKSPACE}/BlueprintPipeline"
+PREFLIGHT_SCRIPT="${BP_DIR}/scripts/runpod_sage/isaacsim_runtime_preflight.sh"
 SECRETS_ENV_PATH="${WORKSPACE}/.sage_runpod_secrets.env"
 ISAAC_SIM_IMAGE="${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:5.1.0}"
 ISAAC_CONTAINER_NAME="${ISAAC_CONTAINER_NAME:-sage-isaacsim}"
+MCP_RESOLVER="${BP_DIR}/scripts/runpod_sage/mcp_extension_paths.py"
+
+resolve_mcp_extension_src() {
+  if [[ -f "${MCP_RESOLVER}" ]]; then
+    local resolved=""
+    resolved="$(python3 "${MCP_RESOLVER}" --sage-dir "${SAGE_DIR}" || true)"
+    if [[ -n "${resolved}" ]]; then
+      echo "${resolved}"
+      return 0
+    fi
+  fi
+  local candidate
+  for candidate in \
+    "${SAGE_DIR}/server/isaacsim_mcp_ext/isaac.sim.mcp_extension" \
+    "${SAGE_DIR}/server/isaacsim/isaac.sim.mcp_extension"; do
+    if [[ -d "${candidate}" ]]; then
+      if [[ "${candidate}" == "${SAGE_DIR}/server/isaacsim/isaac.sim.mcp_extension" ]]; then
+        log "WARNING: Using deprecated MCP extension path: ${candidate}"
+      fi
+      echo "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
 
 if [[ -f "${SECRETS_ENV_PATH}" ]]; then
   # shellcheck disable=SC1090
@@ -47,7 +74,12 @@ log "Installing base packages"
 apt-get update -qq
 apt-get install -y -qq \
   ca-certificates curl wget git jq gnupg lsb-release \
-  iproute2 psmisc >/dev/null
+  iproute2 psmisc libvulkan1 vulkan-tools >/dev/null
+
+if [[ -x "${PREFLIGHT_SCRIPT}" ]]; then
+  log "Running host Vulkan preflight before Isaac Sim container launch..."
+  REQUIRE_LOCAL_ROBOT_ASSET="${REQUIRE_LOCAL_ROBOT_ASSET:-0}" "${PREFLIGHT_SCRIPT}"
+fi
 
 log "Installing / starting Docker (dockerd) if needed"
 if ! command -v docker >/dev/null 2>&1; then
@@ -169,6 +201,7 @@ PY
 log "Starting Isaac Sim container (${ISAAC_SIM_IMAGE}) with MCP extension enabled"
 docker rm -f "${ISAAC_CONTAINER_NAME}" >/dev/null 2>&1 || true
 mkdir -p "${WORKSPACE}/isaac-sim-cache" "${WORKSPACE}/isaac-sim-data"
+MCP_EXT_SRC="$(resolve_mcp_extension_src || true)"
 
 docker run -d --name "${ISAAC_CONTAINER_NAME}" \
   --gpus all \
@@ -176,11 +209,12 @@ docker run -d --name "${ISAAC_CONTAINER_NAME}" \
   -e ACCEPT_EULA=Y \
   -e PRIVACY_CONSENT=Y \
   -e SLURM_JOB_ID="${SLURM_JOB_ID}" \
+  -e MCP_EXT_SRC="${MCP_EXT_SRC}" \
   -v "${SAGE_DIR}:/workspace/SAGE:rw" \
   -v "${WORKSPACE}/isaac-sim-cache:/root/.cache/ov:rw" \
   -v "${WORKSPACE}/isaac-sim-data:/root/.local/share/ov:rw" \
   "${ISAAC_SIM_IMAGE}" \
-  bash -lc "set -euo pipefail; ln -sf /workspace/SAGE/server/isaacsim/isaac.sim.mcp_extension /isaac-sim/exts/isaac.sim.mcp_extension; /isaac-sim/kit/kit /isaac-sim/apps/omni.isaac.sim.kit --no-window --enable isaac.sim.mcp_extension"
+  bash -lc "set -euo pipefail; if [[ -z \"\${VK_ICD_FILENAMES:-}\" && -z \"\${VK_DRIVER_FILES:-}\" ]]; then for c in /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json; do if [[ -f \"\${c}\" ]]; then export VK_ICD_FILENAMES=\"\${c}\"; export VK_DRIVER_FILES=\"\${c}\"; break; fi; done; fi; if [[ -n \"\${MCP_EXT_SRC:-}\" && -d \"\${MCP_EXT_SRC}\" ]]; then ln -sf \"\${MCP_EXT_SRC}\" /isaac-sim/exts/isaac.sim.mcp_extension; else echo '[bootstrap] WARN: MCP extension path missing'; fi; /isaac-sim/kit/kit /isaac-sim/apps/omni.isaac.sim.kit --no-window --enable isaac.sim.mcp_extension"
 
 log "Waiting for MCP socket port to be listening (derived from SLURM_JOB_ID=${SLURM_JOB_ID})"
 MCP_PORT="$(python3 - <<'PY'

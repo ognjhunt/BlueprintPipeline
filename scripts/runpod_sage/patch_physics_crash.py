@@ -17,6 +17,17 @@ This patch is idempotent — safe to run multiple times.
 import re
 import sys
 import os
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from scripts.runpod_sage.mcp_extension_paths import resolve_mcp_extension_path
+except Exception:
+    resolve_mcp_extension_path = None  # type: ignore
 
 def patch_object_placement_planner(filepath):
     """Patch the 3 physics check blocks in object_placement_planner.py"""
@@ -183,12 +194,26 @@ def main():
     print()
 
     # Patch 2: isaac_mcp/server.py
-    mcp_path = os.path.join(sage_dir, 'server/isaacsim/isaac_mcp/server.py')
-    if os.path.exists(mcp_path):
+    mcp_path = ""
+    mcp_candidates = []
+    if callable(resolve_mcp_extension_path):
+        resolution = resolve_mcp_extension_path(Path(sage_dir), migrate_legacy=True)
+        if resolution.message:
+            print(f"[INFO] {resolution.message}")
+        if resolution.resolved_path is not None:
+            mcp_candidates.append(str(resolution.resolved_path.parent / "isaac_mcp" / "server.py"))
+    mcp_candidates.extend(
+        [
+            os.path.join(sage_dir, "server/isaacsim_mcp_ext/isaac_mcp/server.py"),
+            os.path.join(sage_dir, "server/isaacsim/isaac_mcp/server.py"),
+        ]
+    )
+    mcp_path = next((p for p in mcp_candidates if os.path.exists(p)), "")
+    if mcp_path:
         print(f"Patching {mcp_path}...")
         patch_isaac_mcp_server(mcp_path)
     else:
-        print(f"[WARN] Not found: {mcp_path} — skipping MCP server fix")
+        print(f"[WARN] Not found: {mcp_candidates[0]} or {mcp_candidates[1]} — skipping MCP server fix")
 
     print()
     print("Done. Physics checks will now gracefully skip when Isaac Sim is unavailable.")

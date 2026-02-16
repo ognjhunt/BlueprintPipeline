@@ -33,6 +33,8 @@ log() { echo "[sage-entrypoint $(date -u +%FT%TZ)] $*"; }
 
 WORKSPACE=${WORKSPACE:-/workspace}
 SAGE_DIR="${WORKSPACE}/SAGE"
+BP_DIR="${WORKSPACE}/BlueprintPipeline"
+MCP_RESOLVER="${BP_DIR}/scripts/runpod_sage/mcp_extension_paths.py"
 SAM3D_PORT=${SAM3D_PORT:-8080}
 SLURM_JOB_ID=${SLURM_JOB_ID:-12345}
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.1}"
@@ -54,6 +56,30 @@ is_placeholder() {
     [[ "${v}" == "PLACEHOLDER" || "${v}" == "CHANGEME" || "${v}" == "TODO" ]]
 }
 
+resolve_mcp_extension_src() {
+    if [[ -f "${MCP_RESOLVER}" ]]; then
+        local resolved=""
+        resolved="$(python3 "${MCP_RESOLVER}" --sage-dir "${SAGE_DIR}" || true)"
+        if [[ -n "${resolved}" ]]; then
+            echo "${resolved}"
+            return 0
+        fi
+    fi
+    local candidate
+    for candidate in \
+        "${SAGE_DIR}/server/isaacsim_mcp_ext/isaac.sim.mcp_extension" \
+        "${SAGE_DIR}/server/isaacsim/isaac.sim.mcp_extension"; do
+        if [[ -d "${candidate}" ]]; then
+            if [[ "${candidate}" == "${SAGE_DIR}/server/isaacsim/isaac.sim.mcp_extension" ]]; then
+                log "WARNING: Using deprecated MCP extension path: ${candidate}"
+            fi
+            echo "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Full pipeline launches its own headless SimulationApp in Stage 7; the MCP service
 # only wastes VRAM and can destabilize stdio. Default to skipping Isaac Sim here.
 if [[ "${RUN_MODE}" == "full_pipeline" ]] && [[ -z "${SKIP_ISAAC_SIM:-}" ]]; then
@@ -63,6 +89,11 @@ fi
 export SLURM_JOB_ID
 export SAM3D_TEXTURE_BAKING
 export SAM3D_PORT
+export REQUIRE_LOCAL_ROBOT_ASSET="${REQUIRE_LOCAL_ROBOT_ASSET:-1}"
+export SAGE_ALLOW_REMOTE_ISAAC_ASSETS="${SAGE_ALLOW_REMOTE_ISAAC_ASSETS:-0}"
+export SAGE_SENSOR_FAILURE_POLICY="${SAGE_SENSOR_FAILURE_POLICY:-fail}"
+export SAGE_RENDER_WARMUP_FRAMES="${SAGE_RENDER_WARMUP_FRAMES:-100}"
+export SAGE_SENSOR_MIN_RGB_STD="${SAGE_SENSOR_MIN_RGB_STD:-0.01}"
 
 log "=========================================="
 log "SAGE + SAM3D — Instant Start Entrypoint"
@@ -248,6 +279,33 @@ else
 fi
 
 # ── 5. Start Isaac Sim ──────────────────────────────────────────────────────
+export ISAAC_ASSETS_ROOT="${ISAAC_ASSETS_ROOT:-/workspace/isaacsim_assets/Assets/Isaac/5.1}"
+if [[ -z "${VK_ICD_FILENAMES:-}" && -z "${VK_DRIVER_FILES:-}" ]]; then
+    for candidate in /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json; do
+        if [[ -f "${candidate}" ]]; then
+            export VK_ICD_FILENAMES="${candidate}"
+            export VK_DRIVER_FILES="${candidate}"
+            log "Using NVIDIA Vulkan ICD: ${candidate}"
+            break
+        fi
+    done
+fi
+if [[ -n "${VK_ICD_FILENAMES:-}" && -z "${VK_DRIVER_FILES:-}" ]]; then
+    export VK_DRIVER_FILES="${VK_ICD_FILENAMES}"
+fi
+if [[ -n "${VK_DRIVER_FILES:-}" && -z "${VK_ICD_FILENAMES:-}" ]]; then
+    export VK_ICD_FILENAMES="${VK_DRIVER_FILES}"
+fi
+
+ISAAC_PREFLIGHT="${WORKSPACE}/BlueprintPipeline/scripts/runpod_sage/isaacsim_runtime_preflight.sh"
+if [[ "${SKIP_ISAAC_SIM:-0}" != "1" ]] && [[ -x "${ISAAC_PREFLIGHT}" ]]; then
+    log "Running Isaac Sim runtime preflight..."
+    if ! ISAACSIM_PY="/workspace/isaacsim_env/bin/python3" "${ISAAC_PREFLIGHT}"; then
+        log "WARNING: Isaac Sim runtime preflight failed; skipping Isaac Sim startup."
+        SKIP_ISAAC_SIM=1
+    fi
+fi
+
 if [[ "${SKIP_ISAAC_SIM:-0}" != "1" ]]; then
     log "Starting Isaac Sim headless with MCP extension..."
     export OMNI_KIT_ACCEPT_EULA=YES
@@ -292,6 +350,13 @@ if [[ "${SKIP_ISAAC_SIM:-0}" != "1" ]]; then
             log "  Isaac Sim path: ${ISAACSIM_PATH}"
             log "  Kit file: ${KIT_FILE}"
             log "  SLURM_JOB_ID: ${SLURM_JOB_ID}"
+            MCP_EXT_SRC="$(resolve_mcp_extension_src || true)"
+            if [[ -n "${MCP_EXT_SRC}" ]]; then
+                ln -sf "${MCP_EXT_SRC}" "${ISAACSIM_PATH}/exts/isaac.sim.mcp_extension"
+                log "  MCP extension: ${MCP_EXT_SRC}"
+            else
+                log "WARNING: MCP extension not found under ${SAGE_DIR}/server/{isaacsim_mcp_ext,isaacsim}"
+            fi
 
             # Determine launch method: pip install uses 'python -m isaacsim', Docker uses kit/kit binary
             if [[ -x "${ISAACSIM_PATH}/kit/kit" ]]; then
@@ -303,7 +368,7 @@ if [[ "${SKIP_ISAAC_SIM:-0}" != "1" ]]; then
                     > /tmp/isaacsim.log 2>&1 &
             else
                 log "  Launch: python -m isaacsim (pip install)"
-                nohup /workspace/isaacsim_env/bin/python3 -m isaacsim \
+                nohup /workspace/isaacsim_env/bin/python3 -P -m isaacsim \
                     "${KIT_FILE}" \
                     --no-window \
                     --enable isaac.sim.mcp_extension \

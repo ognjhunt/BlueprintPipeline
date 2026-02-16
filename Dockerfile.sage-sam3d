@@ -39,11 +39,20 @@
 # =============================================================================
 
 FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+ARG PREBAKE_RIDGEBACK_ASSETS=1
+ARG ISAACSIM_ASSETS_ROBOTS_URL=https://download.isaacsim.omniverse.nvidia.com/isaac-sim-assets-robots_and_sensors-5.1.0.zip
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     LIDRA_SKIP_INIT=1 \
+    NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility,video \
+    ISAAC_ASSETS_ROOT=/workspace/isaacsim_assets/Assets/Isaac/5.1 \
+    REQUIRE_LOCAL_ROBOT_ASSET=1 \
+    SAGE_ALLOW_REMOTE_ISAAC_ASSETS=0 \
+    SAGE_SENSOR_FAILURE_POLICY=fail \
+    SAGE_RENDER_WARMUP_FRAMES=100 \
+    SAGE_SENSOR_MIN_RGB_STD=0.01 \
     WORKSPACE=/workspace
 
 # =============================================================================
@@ -55,10 +64,10 @@ RUN apt-get update -qq && \
         build-essential ninja-build cmake pkg-config \
         libgl1 libglib2.0-0 libxrender1 libxi6 libxxf86vm1 \
         libxfixes3 libxkbcommon0 libsm6 libice6 libxext6 \
-        libxrandr2 libxcursor1 libxinerama1 libepoxy0 \
+        libxrandr2 libxcursor1 libxinerama1 libepoxy0 libxt6 \
         libglu1-mesa libegl1 libegl-mesa0 libgles2-mesa \
-        libopengl0 libglx-mesa0 libpython3.11-dev \
-        psmisc iproute2 git-lfs && \
+        libopengl0 libglx-mesa0 libpython3.11-dev libvulkan1 vulkan-tools \
+        psmisc iproute2 git-lfs unzip && \
     apt-get remove -y bubblewrap 2>/dev/null || true && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -188,13 +197,49 @@ RUN python3.11 -m venv /workspace/isaacsim_env && \
 
 # HDF5 writer for Stage 7 data collection (robomimic format).
 RUN /workspace/isaacsim_env/bin/pip install --no-cache-dir h5py
+COPY scripts/runpod_sage/validate_ridgeback_usd_assets.py /workspace/validate_ridgeback_usd_assets.py
 
 # Symlink SAGE MCP extension into Isaac Sim
 RUN ISAACSIM_PATH=$(/workspace/isaacsim_env/bin/python3 -c \
       "import isaacsim; import os; print(os.path.dirname(isaacsim.__file__))") && \
-    ln -sf /workspace/SAGE/server/isaacsim/isaac.sim.mcp_extension \
-           "${ISAACSIM_PATH}/exts/isaac.sim.mcp_extension" && \
+    MCP_EXT_SRC="" && \
+    if [ -d /workspace/SAGE/server/isaacsim_mcp_ext/isaac.sim.mcp_extension ]; then \
+      MCP_EXT_SRC=/workspace/SAGE/server/isaacsim_mcp_ext/isaac.sim.mcp_extension; \
+    elif [ -d /workspace/SAGE/server/isaacsim/isaac.sim.mcp_extension ]; then \
+      echo "WARNING: legacy MCP extension path detected; migrating to isaacsim_mcp_ext"; \
+      mkdir -p /workspace/SAGE/server/isaacsim_mcp_ext && \
+      mv /workspace/SAGE/server/isaacsim/isaac.sim.mcp_extension /workspace/SAGE/server/isaacsim_mcp_ext/isaac.sim.mcp_extension && \
+      ln -sfn /workspace/SAGE/server/isaacsim_mcp_ext/isaac.sim.mcp_extension /workspace/SAGE/server/isaacsim/isaac.sim.mcp_extension && \
+      MCP_EXT_SRC=/workspace/SAGE/server/isaacsim_mcp_ext/isaac.sim.mcp_extension; \
+    fi && \
+    if [ -n "${MCP_EXT_SRC}" ]; then \
+      ln -sf "${MCP_EXT_SRC}" "${ISAACSIM_PATH}/exts/isaac.sim.mcp_extension"; \
+    else \
+      echo "WARNING: MCP extension directory not found under /workspace/SAGE/server"; \
+    fi && \
     echo "ISAACSIM_PATH=${ISAACSIM_PATH}" > /workspace/.isaacsim_path
+
+# Pre-bake robot assets required by Stage 7 collector so no runtime download is needed.
+RUN if [ "${PREBAKE_RIDGEBACK_ASSETS}" = "1" ]; then \
+      mkdir -p /workspace/isaacsim_assets && \
+      curl -L --retry 5 --retry-delay 5 --fail \
+        -o /tmp/isaacsim-assets-robots.zip "${ISAACSIM_ASSETS_ROBOTS_URL}" && \
+      if ! unzip -q /tmp/isaacsim-assets-robots.zip "Assets/Isaac/5.1/Isaac/Robots/*" -d /workspace/isaacsim_assets; then \
+        unzip -q /tmp/isaacsim-assets-robots.zip "Isaac/Robots/*" -d /workspace/isaacsim_assets; \
+        mkdir -p /workspace/isaacsim_assets/Assets/Isaac/5.1 && \
+        if [ -d /workspace/isaacsim_assets/Isaac ]; then \
+          ln -sfn /workspace/isaacsim_assets/Isaac /workspace/isaacsim_assets/Assets/Isaac/5.1/Isaac; \
+        fi; \
+      fi && \
+      rm -f /tmp/isaacsim-assets-robots.zip && \
+      test -f /workspace/isaacsim_assets/Assets/Isaac/5.1/Isaac/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd && \
+      /workspace/isaacsim_env/bin/python3 /workspace/validate_ridgeback_usd_assets.py \
+        --root-usd /workspace/isaacsim_assets/Assets/Isaac/5.1/Isaac/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd \
+        --assets-root /workspace/isaacsim_assets/Assets/Isaac/5.1 && \
+      echo "Pre-baked RidgebackFranka robot assets into ${ISAAC_ASSETS_ROOT}"; \
+    else \
+      echo "Skipping RidgebackFranka asset pre-bake (PREBAKE_RIDGEBACK_ASSETS=${PREBAKE_RIDGEBACK_ASSETS})."; \
+    fi
 
 # =============================================================================
 # Phase 8: Copy full BlueprintPipeline repo (self-contained image)

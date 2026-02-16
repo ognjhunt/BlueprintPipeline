@@ -1,0 +1,126 @@
+{
+  "num_demos": 8,
+  "phase_labels": [
+    "approach_pick",
+    "grasp",
+    "lift",
+    "navigate",
+    "approach_place",
+    "place",
+    "retreat_place"
+  ],
+  "demos": [
+    {
+      "demo_name": "demo_0",
+      "demo_idx": 0,
+      "total_steps": 187,
+      "phase_labels": [
+        "approach_pick",
+        "approach_place",
+        "grasp",
+        "lift",
+        "navigate",
+        "place",
+        "retreat_place"
+      ]
+    },
+    {
+      "demo_name": "demo_1",
+      "demo_idx": 1,
+      "total_steps": 187,
+      "phase_labels": [
+        "approach_pick",
+        "approach_place",
+        "grasp",
+        "lift",
+        "navigate",
+        "place",
+        "retreat_place"
+      ]
+    },
+    {
+      "demo_name": "demo_2",
+      "demo_idx": 2,
+      "total_steps": 187,
+      "phase_labels": [
+        "approach_pick",
+        "approach_place",
+        "grasp",
+        "lift",
+        "navigate",
+        "place",
+        "retreat_place"
+      ]
+    },
+    {
+      "demo_name": "demo_3",
+      "demo_idx": 3,
+      "total_steps": 188,
+      "phase_labels": [
+        "approach_pick",
+        "approach_place",
+        "grasp",
+        "lift",
+        "navigate",
+        "place",
+        "retreat_place"
+      ]
+    },
+    {
+      "demo_name": "demo_4",
+      "demo_idx": 4,
+      "total_steps": 187,
+      "phase_labels": [
+        "approach_pick",
+        "approach_place",
+        "grasp",
+        "lift",
+        "navigate",
+        "place",
+        "retreat_place"
+      ]
+    },
+    {
+      "demo_name": "demo_5",
+      "demo_idx": 5,
+      "total_steps": 187,
+      "phase_labels": [
+        "approach_pick",
+        "approach_place",
+        "grasp",
+        "lift",
+        "navigate",
+        "place",
+        "retreat_place"
+      ]
+    },
+    {
+      "demo_name": "demo_6",
+      "demo_idx": 6,
+      "total_steps": 187,
+      "phase_labels": [
+        "approach_pick",
+        "approach_place",
+        "grasp",
+        "lift",
+        "navigate",
+        "place",
+        "retreat_place"
+      ]
+    },
+    {
+      "demo_name": "demo_7",
+      "demo_idx": 7,
+      "total_steps": 187,
+      "phase_labels": [
+        "approach_pick",
+        "approach_place",
+        "grasp",
+        "lift",
+        "navigate",
+        "place",
+        "retreat_place"
+      ]
+    }
+  ]
+}

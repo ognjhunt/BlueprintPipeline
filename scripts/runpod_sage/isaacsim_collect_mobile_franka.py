@@ -16,15 +16,39 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+
+def _sanitize_sys_path_for_isaacsim() -> None:
+    blocked = Path(os.environ.get("SAGE_SERVER_DIR", "/workspace/SAGE/server")).resolve()
+    cleaned: List[str] = []
+    for entry in sys.path:
+        # Drop implicit CWD entry to avoid importing /workspace/SAGE/server/isaacsim by accident.
+        if not entry:
+            continue
+        try:
+            real = Path(entry).resolve()
+        except Exception:
+            cleaned.append(entry)
+            continue
+        if real == blocked:
+            continue
+        cleaned.append(entry)
+    sys.path[:] = cleaned
+
+
+_sanitize_sys_path_for_isaacsim()
 
 # Make BlueprintPipeline helpers importable (SimReady Lite presets).
 BP_DIR = os.environ.get("BP_DIR", "/workspace/BlueprintPipeline")
@@ -46,6 +70,188 @@ def _load_json(path: Path) -> Any:
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.environ.get(name, "1" if default else "0")).strip().lower()
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_sensor_failure_policy(*, strict: bool, requested: str) -> str:
+    policy = str(requested or "").strip().lower()
+    if policy in {"fail", "warn"}:
+        return policy
+    # Auto policy: strict mode fails closed, non-strict warns.
+    return "fail" if strict else "warn"
+
+
+def _resolve_variant_json_path(raw_path: str, *, layout_dir: Path) -> Path:
+    p = Path(raw_path)
+    if p.exists():
+        return p
+    if not p.is_absolute():
+        candidate = layout_dir / p
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"Variant layout JSON not found: {raw_path}")
+
+
+def _extract_room_dict(layout_or_room: Dict[str, Any], *, demo: Dict[str, Any], variant_path: Path) -> Dict[str, Any]:
+    # Already a room payload.
+    if isinstance(layout_or_room, dict) and isinstance(layout_or_room.get("objects"), list):
+        return layout_or_room
+
+    rooms = layout_or_room.get("rooms") if isinstance(layout_or_room, dict) else None
+    if not isinstance(rooms, list) or len(rooms) == 0:
+        raise RuntimeError(
+            f"Unsupported variant payload shape in {variant_path}; expected room dict or layout with non-empty 'rooms'"
+        )
+
+    if len(rooms) == 1:
+        return rooms[0]
+
+    # Multi-room fallback: pick room containing pick/place object ids.
+    pick_source_id = str((demo.get("pick_object") or {}).get("source_id", "") or "")
+    place_source_id = str((demo.get("place_surface") or {}).get("source_id", "") or "")
+    wanted_ids = {x for x in (pick_source_id, place_source_id) if x}
+    if wanted_ids:
+        for room in rooms:
+            objects = room.get("objects") or []
+            room_ids = {str((obj or {}).get("source_id", "") or "") for obj in objects}
+            if wanted_ids & room_ids:
+                return room
+
+    # Last resort.
+    return rooms[0]
+
+
+def _resolve_ridgeback_franka_usd() -> str:
+    local_root = Path(os.environ.get("ISAAC_ASSETS_ROOT", "/workspace/isaacsim_assets/Assets/Isaac/5.1"))
+    local_usd = local_root / "Isaac/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd"
+    if local_usd.exists():
+        _log(f"Using local robot USD: {local_usd}")
+        return str(local_usd)
+    allow_remote = _env_bool("SAGE_ALLOW_REMOTE_ISAAC_ASSETS", default=False)
+    if not allow_remote:
+        raise FileNotFoundError(
+            "Local RidgebackFranka USD missing and remote fallback disabled. "
+            f"Set SAGE_ALLOW_REMOTE_ISAAC_ASSETS=1 to allow fallback. Missing: {local_usd}"
+        )
+    remote_usd = "/Isaac/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd"
+    _log(
+        "WARNING: Local robot USD missing "
+        f"({local_usd}); falling back to remote path due to SAGE_ALLOW_REMOTE_ISAAC_ASSETS=1: {remote_usd}"
+    )
+    return remote_usd
+
+
+def _has_nvidia_marker(path: Path) -> bool:
+    if str(path) == "/NVIDIA":
+        return True
+    if any(part == "NVIDIA" for part in path.parts):
+        return True
+    return (path / "NVIDIA").exists()
+
+
+def _pick_assets_root_with_marker(local_root: Path) -> Path:
+    """
+    Keep local ISAAC_ASSETS_ROOT for deterministic assets, but emit marker sanity
+    diagnostics for Nucleus-style roots where '/NVIDIA' should be present.
+    """
+    if _has_nvidia_marker(local_root):
+        _log(f"Asset root marker check: found '/NVIDIA' marker for {local_root}")
+        return local_root
+
+    _log(
+        "WARNING: Asset root marker check did not find '/NVIDIA' marker under "
+        f"{local_root}. Continuing with explicit local root."
+    )
+    return local_root
+
+
+def _configure_local_assets_root() -> None:
+    local_root = Path(os.environ.get("ISAAC_ASSETS_ROOT", "/workspace/isaacsim_assets/Assets/Isaac/5.1"))
+    if not local_root.exists():
+        _log(f"WARNING: local ISAAC_ASSETS_ROOT does not exist: {local_root}")
+        return
+    selected_root = _pick_assets_root_with_marker(local_root)
+    try:
+        import carb
+
+        carb.settings.get_settings().set("/persistent/isaac/asset_root/default", str(selected_root))
+    except BaseException as exc:
+        _log(f"WARNING: failed to set carb asset_root to local path ({type(exc).__name__}: {exc})")
+    if os.getenv("SAGE_ENABLE_NUCLEUS_ASSET_ROOT", "0") == "1":
+        try:
+            from omni.isaac.core.utils import nucleus as nucleus_utils
+
+            set_root = getattr(nucleus_utils, "set_assets_root_path", None)
+            if callable(set_root):
+                set_root(str(selected_root))
+        except BaseException as exc:
+            _log(f"WARNING: failed to set nucleus asset root to local path ({type(exc).__name__}: {exc})")
+    _log(f"Configured local Isaac assets root: {selected_root}")
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git_commit_sha(repo_root: Path) -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _runtime_provenance(
+    *,
+    bp_root: Path,
+    sensor_failure_policy: str,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    script_path = Path(__file__).resolve()
+    env_snapshot = {
+        "ISAAC_ASSETS_ROOT": os.environ.get("ISAAC_ASSETS_ROOT", ""),
+        "SAGE_ALLOW_REMOTE_ISAAC_ASSETS": os.environ.get("SAGE_ALLOW_REMOTE_ISAAC_ASSETS", "0"),
+        "SAGE_SENSOR_FAILURE_POLICY": os.environ.get("SAGE_SENSOR_FAILURE_POLICY", "auto"),
+        "SAGE_RENDER_WARMUP_FRAMES": os.environ.get("SAGE_RENDER_WARMUP_FRAMES", ""),
+        "SAGE_SENSOR_MIN_RGB_STD": os.environ.get("SAGE_SENSOR_MIN_RGB_STD", ""),
+        "SAGE_SENSOR_MIN_DEPTH_STD": os.environ.get("SAGE_SENSOR_MIN_DEPTH_STD", ""),
+        "SAGE_MIN_VALID_DEPTH_PX": os.environ.get("SAGE_MIN_VALID_DEPTH_PX", ""),
+    }
+    return {
+        "collector_script": str(script_path),
+        "collector_script_sha256": _file_sha256(script_path),
+        "bp_git_commit": _git_commit_sha(bp_root),
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "sensor_failure_policy_effective": sensor_failure_policy,
+        "args": {
+            "headless": bool(args.headless),
+            "enable_cameras": bool(args.enable_cameras),
+            "strict": bool(args.strict),
+            "render_warmup_frames": int(args.render_warmup_frames),
+            "sensor_min_rgb_std": float(args.sensor_min_rgb_std),
+            "sensor_min_depth_std": float(args.sensor_min_depth_std),
+            "min_valid_depth_px": int(args.min_valid_depth_px),
+            "camera_retry_steps": int(args.camera_retry_steps),
+            "dome_light_intensity": float(args.dome_light_intensity),
+            "sun_light_intensity": float(args.sun_light_intensity),
+        },
+        "env": env_snapshot,
+    }
 
 
 def _ensure_extension(ext_name: str) -> None:
@@ -94,10 +300,13 @@ def _run_async(coro) -> Any:
         asyncio.set_event_loop(loop)
 
     if not loop.is_running():
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         return loop.run_until_complete(coro)
 
     # Loop is already running: schedule and poll.
-    fut = asyncio.ensure_future(coro)
+    fut = asyncio.ensure_future(coro, loop=loop)
     import omni.kit.app
 
     app = omni.kit.app.get_app()
@@ -106,6 +315,100 @@ def _run_async(coro) -> Any:
         app.update()
         time.sleep(0.01)
     return fut.result()
+
+
+def _annotator_data(annotator, *, name: str):
+    """Get data from a Replicator annotator, handling API differences."""
+    result = annotator.get_data()
+    if result is None:
+        raise RuntimeError(f"Annotator '{name}' returned None")
+    if isinstance(result, dict):
+        if "data" in result:
+            return result["data"]
+        # Some builds may return dict payloads with alternate keys. Prefer any ndarray-like value.
+        for v in result.values():
+            if hasattr(v, "shape"):
+                return v
+        raise RuntimeError(f"Annotator '{name}' returned dict without usable data keys: {list(result.keys())}")
+    return result
+
+
+def _add_default_lighting(stage, *, dome_intensity: float, distant_intensity: float) -> None:
+    """
+    Add explicit scene lighting so headless captures do not depend on renderer defaults.
+    Safe to call repeatedly; reuses existing prim paths.
+    """
+    from pxr import Gf, UsdGeom, UsdLux
+
+    UsdGeom.Scope.Define(stage, "/World/Lights")
+
+    dome = UsdLux.DomeLight.Define(stage, "/World/Lights/Dome")
+    dome.CreateIntensityAttr().Set(float(max(0.0, dome_intensity)))
+    dome.CreateColorAttr().Set(Gf.Vec3f(1.0, 1.0, 1.0))
+
+    sun = UsdLux.DistantLight.Define(stage, "/World/Lights/Sun")
+    sun.CreateIntensityAttr().Set(float(max(0.0, distant_intensity)))
+    sun.CreateColorAttr().Set(Gf.Vec3f(1.0, 1.0, 1.0))
+    # Gentle elevation so horizontal surfaces receive light.
+    sun_xf = np.eye(4, dtype=np.float64)
+    c = math.cos(-math.pi * 0.25)
+    s = math.sin(-math.pi * 0.25)
+    sun_xf[:3, :3] = np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]], dtype=np.float64)
+    _apply_xform(stage, "/World/Lights/Sun", sun_xf)
+
+
+def _capture_camera_frames(
+    *,
+    annotators: Dict[str, Dict[str, Any]],
+    world: Any,
+    max_extra_steps: int,
+    width: int,
+    height: int,
+    min_valid_depth_px: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Capture one frame from both cameras, retrying a few simulation steps until
+    shapes are valid, RGB is not fully black, and depth has enough valid pixels.
+    """
+    last_reason = "unknown"
+    for _ in range(max(1, int(max_extra_steps) + 1)):
+        a_rgb = _annotator_data(annotators["agentview"]["rgb"], name="agentview_rgb")
+        a_d = _annotator_data(annotators["agentview"]["depth"], name="agentview_depth")
+        b_rgb = _annotator_data(annotators["agentview_2"]["rgb"], name="agentview_2_rgb")
+        b_d = _annotator_data(annotators["agentview_2"]["depth"], name="agentview_2_depth")
+
+        a_rgb_np = np.asarray(a_rgb)[..., :3].astype(np.uint8)
+        a_d_raw = np.asarray(a_d, dtype=np.float32)
+        a_d_np = np.nan_to_num(a_d_raw, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float16)
+        b_rgb_np = np.asarray(b_rgb)[..., :3].astype(np.uint8)
+        b_d_raw = np.asarray(b_d, dtype=np.float32)
+        b_d_np = np.nan_to_num(b_d_raw, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float16)
+
+        rgb_ok = a_rgb_np.shape == (height, width, 3) and b_rgb_np.shape == (height, width, 3)
+        depth_shape_ok = a_d_np.shape == (height, width) and b_d_np.shape == (height, width)
+        a_valid_depth_px = int(np.logical_and(np.isfinite(a_d_raw), a_d_raw > 0.0).sum())
+        b_valid_depth_px = int(np.logical_and(np.isfinite(b_d_raw), b_d_raw > 0.0).sum())
+        depth_ok = (
+            depth_shape_ok
+            and a_valid_depth_px >= int(min_valid_depth_px)
+            and b_valid_depth_px >= int(min_valid_depth_px)
+        )
+        not_black = bool(a_rgb_np.size > 0 and float(a_rgb_np.max()) > 0.0)
+
+        if rgb_ok and depth_ok and not_black:
+            return a_rgb_np, a_d_np, b_rgb_np, b_d_np
+
+        last_reason = (
+            f"rgb_shapes={a_rgb_np.shape}/{b_rgb_np.shape} "
+            f"depth_shapes={a_d_np.shape}/{b_d_np.shape} "
+            f"rgb_max={float(a_rgb_np.max()) if a_rgb_np.size else -1.0:.3f} "
+            f"valid_depth_px={a_valid_depth_px}/{b_valid_depth_px} "
+            f"depth_minmax={float(np.nanmin(a_d_raw)) if a_d_raw.size else float('nan'):.4f}/"
+            f"{float(np.nanmax(a_d_raw)) if a_d_raw.size else float('nan'):.4f}"
+        )
+        world.step(render=True)
+
+    raise RuntimeError(f"Camera capture did not become valid after retries: {last_reason}")
 
 
 def _read_obj_bounds(obj_path: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -161,6 +464,7 @@ def _define_camera(stage, prim_path: str, *, pos: np.ndarray, look_at: np.ndarra
 
     cam = UsdGeom.Camera.Define(stage, prim_path)
     cam.GetFocalLengthAttr().Set(35.0)
+    cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 100.0))
 
     forward = (look_at - pos).astype(np.float64)
     forward = forward / max(np.linalg.norm(forward), 1e-9)
@@ -241,7 +545,7 @@ def _apply_simready_lite_physics(stage, prim_path: str, *, category: str, dims: 
         except Exception:
             pass
 
-    UsdShade.MaterialBindingAPI(prim).Bind(material, UsdShade.Tokens.physics)
+    UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)
 
     return {
         "mass_kg": preset.mass_kg,
@@ -327,10 +631,27 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Isaac Sim collector (mobile_franka)")
     parser.add_argument("--plan_bundle", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--headless", action="store_true", default=True)
-    parser.add_argument("--enable_cameras", action="store_true", default=True)
-    parser.add_argument("--strict", action="store_true", default=True)
-    args = parser.parse_args()
+    parser.add_argument("--headless", dest="headless", action="store_true", default=True)
+    parser.add_argument("--no-headless", dest="headless", action="store_false")
+    parser.add_argument("--enable_cameras", dest="enable_cameras", action="store_true", default=True)
+    parser.add_argument("--disable_cameras", dest="enable_cameras", action="store_false")
+    parser.add_argument("--strict", dest="strict", action="store_true", default=False)
+    parser.add_argument("--no-strict", dest="strict", action="store_false")
+    parser.add_argument("--render_warmup_frames", type=int, default=int(os.getenv("SAGE_RENDER_WARMUP_FRAMES", "100")))
+    parser.add_argument("--sensor_check_frame", type=int, default=int(os.getenv("SAGE_SENSOR_CHECK_FRAME", "5")))
+    parser.add_argument("--camera_retry_steps", type=int, default=int(os.getenv("SAGE_CAMERA_RETRY_STEPS", "90")))
+    parser.add_argument("--sensor_min_rgb_std", type=float, default=float(os.getenv("SAGE_SENSOR_MIN_RGB_STD", "0.01")))
+    parser.add_argument("--sensor_min_depth_std", type=float, default=float(os.getenv("SAGE_SENSOR_MIN_DEPTH_STD", "0.0001")))
+    parser.add_argument("--min_valid_depth_px", type=int, default=int(os.getenv("SAGE_MIN_VALID_DEPTH_PX", "128")))
+    parser.add_argument("--dome_light_intensity", type=float, default=float(os.getenv("SAGE_DOME_LIGHT_INTENSITY", "3000")))
+    parser.add_argument("--sun_light_intensity", type=float, default=float(os.getenv("SAGE_SUN_LIGHT_INTENSITY", "600")))
+    parser.add_argument(
+        "--sensor_failure_policy",
+        choices=["auto", "fail", "warn"],
+        default=os.getenv("SAGE_SENSOR_FAILURE_POLICY", "auto"),
+    )
+    args, unknown_args = parser.parse_known_args()
+    sensor_failure_policy = _resolve_sensor_failure_policy(strict=bool(args.strict), requested=args.sensor_failure_policy)
 
     os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
     os.environ.setdefault("ACCEPT_EULA", "Y")
@@ -345,8 +666,17 @@ def main() -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    final_h5_path = output_dir / "dataset.hdf5"
+    h5_tmp_path = output_dir / "dataset.tmp.hdf5"
+    h5 = None
+    if final_h5_path.exists():
+        final_h5_path.unlink()
 
     # Isaac Sim initialization MUST come before omni imports.
+    # Prevent Kit from interpreting application-specific CLI args.
+    if unknown_args:
+        _log(f"Ignoring unknown CLI args for collector: {unknown_args}")
+    sys.argv = [sys.argv[0]]
     from isaacsim.simulation_app import SimulationApp
 
     sim_app = SimulationApp({"headless": bool(args.headless)})
@@ -361,22 +691,41 @@ def main() -> None:
         from omni.isaac.core import World
         from omni.isaac.core.utils.stage import add_reference_to_stage
 
+        _configure_local_assets_root()
+
         # Camera config
         res_env = os.getenv("SAGE_CAPTURE_RES", "640,480")
         width, height = [int(x) for x in res_env.split(",")]
 
-        # HDF5 output
-        h5_path = output_dir / "dataset.hdf5"
-        h5 = _create_or_open_hdf5(h5_path)
+        # HDF5 output (atomic: write temp then rename).
+        if h5_tmp_path.exists():
+            h5_tmp_path.unlink()
+        h5 = _create_or_open_hdf5(h5_tmp_path)
 
-        demo_metadata: Dict[str, Any] = {"layout_id": layout_id, "num_demos": 0, "demos": []}
-        step_decomp: Dict[str, Any] = {"num_demos": 0, "phase_labels": [], "demos": []}
+        runtime_provenance = _runtime_provenance(
+            bp_root=Path(BP_DIR).resolve(),
+            sensor_failure_policy=sensor_failure_policy,
+            args=args,
+        )
+        demo_metadata: Dict[str, Any] = {
+            "layout_id": layout_id,
+            "num_demos": 0,
+            "demos": [],
+            "provenance": runtime_provenance,
+        }
+        step_decomp: Dict[str, Any] = {
+            "num_demos": 0,
+            "phase_labels": [],
+            "demos": [],
+            "provenance": runtime_provenance,
+        }
 
         cameras_manifest: Dict[str, Any] = {
             "layout_id": layout_id,
             "resolution": [width, height],
             "modalities": ["rgb", "depth"] if args.enable_cameras else [],
             "cameras": [],
+            "provenance": runtime_provenance,
         }
 
         # Cache OBJ->USD conversions per source_id.
@@ -398,6 +747,13 @@ def main() -> None:
             # Default ground plane (stable collisions)
             objs_scope = UsdGeom.Scope.Define(stage, "/World/Objects")
 
+            # Ensure scene has stable lighting for headless rendering.
+            _add_default_lighting(
+                stage,
+                dome_intensity=float(args.dome_light_intensity),
+                distant_intensity=float(args.sun_light_intensity),
+            )
+
             physics_report: Dict[str, Any] = {"objects": []}
             source_to_prim: Dict[str, str] = {}
 
@@ -413,7 +769,13 @@ def main() -> None:
                 usd_out = usd_cache / f"{source_id}.usd"
                 if not usd_out.exists():
                     _log(f"Converting OBJ -> USD: {obj_path.name}")
-                    _run_async(_convert_mesh_to_usd(str(obj_path), str(usd_out), load_materials=True))
+                    try:
+                        _run_async(_convert_mesh_to_usd(str(obj_path), str(usd_out), load_materials=True))
+                    except Exception as exc:
+                        # Material references are occasionally incomplete. Retry geometry-only conversion.
+                        _log(f"WARNING: material-aware conversion failed for {obj_path.name}: {exc}")
+                        _log(f"Retrying geometry-only OBJ -> USD: {obj_path.name}")
+                        _run_async(_convert_mesh_to_usd(str(obj_path), str(usd_out), load_materials=False))
 
                 prim_path = f"/World/Objects/obj_{idx:03d}"
                 UsdGeom.Xform.Define(stage, prim_path)
@@ -460,10 +822,7 @@ def main() -> None:
             robot_xform = "/World/Robot"
             robot_articulation = "/World/Robot/RidgebackFranka"
             UsdGeom.Xform.Define(stage, robot_xform)
-            add_reference_to_stage(
-                "/Isaac/Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd",
-                robot_articulation,
-            )
+            add_reference_to_stage(_resolve_ridgeback_franka_usd(), robot_articulation)
 
             return robot_xform, robot_articulation, physics_report, source_to_prim
 
@@ -514,9 +873,21 @@ def main() -> None:
             render_b = rep.create.render_product(cam_b, resolution=(width, height))
 
             rgb_a = rep.AnnotatorRegistry.get_annotator("rgb")
-            depth_a = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
             rgb_b = rep.AnnotatorRegistry.get_annotator("rgb")
-            depth_b = rep.AnnotatorRegistry.get_annotator("distance_to_camera")
+            depth_name = None
+            depth_a = None
+            depth_b = None
+            for candidate in ("distance_to_camera", "distance_to_image_plane"):
+                try:
+                    depth_a = rep.AnnotatorRegistry.get_annotator(candidate)
+                    depth_b = rep.AnnotatorRegistry.get_annotator(candidate)
+                    depth_name = candidate
+                    break
+                except Exception:
+                    continue
+            if depth_a is None or depth_b is None or depth_name is None:
+                raise RuntimeError("Could not initialize depth annotator (distance_to_image_plane/camera)")
+            _log(f"Using depth annotator: {depth_name}")
 
             rgb_a.attach([render_a])
             depth_a.attach([render_a])
@@ -533,6 +904,16 @@ def main() -> None:
             }
 
         demos = bundle.get("demos", []) or []
+        _log(
+            f"collector start: layout_id={layout_id} demos={len(demos)} "
+            f"headless={args.headless} cameras={args.enable_cameras} strict={args.strict} "
+            f"warmup={args.render_warmup_frames} retry={args.camera_retry_steps} "
+            f"rgb_std_min={args.sensor_min_rgb_std} depth_std_min={args.sensor_min_depth_std} "
+            f"min_depth_px={args.min_valid_depth_px} "
+            f"dome_light={args.dome_light_intensity} sun_light={args.sun_light_intensity} "
+            f"sensor_policy={sensor_failure_policy} "
+            f"remote_assets={os.environ.get('SAGE_ALLOW_REMOTE_ISAAC_ASSETS', '0')}"
+        )
         if args.strict and len(demos) < 1:
             raise RuntimeError("plan_bundle contains 0 demos")
 
@@ -543,7 +924,15 @@ def main() -> None:
 
         demo_global_idx = 0
         for variant_json, demo_list in by_variant.items():
-            room = _load_json(Path(variant_json))
+            variant_path = _resolve_variant_json_path(variant_json, layout_dir=layout_dir)
+            layout_payload = _load_json(variant_path)
+            room = _extract_room_dict(layout_payload, demo=demo_list[0], variant_path=variant_path)
+            if args.strict and not (room.get("objects") or []):
+                raise RuntimeError(
+                    f"Resolved room has 0 objects in strict mode: {variant_path}. "
+                    "This usually means variant JSON room extraction is wrong."
+                )
+            _log(f"Building scene for variant: {variant_path} (demos={len(demo_list)})")
             robot_xform, robot_articulation, physics_report, source_to_prim = build_scene_from_room(room)
             stage = omni.usd.get_context().get_stage()
             ee_prim_path = find_end_effector_prim(stage, robot_articulation)
@@ -552,17 +941,28 @@ def main() -> None:
 
             annotators = setup_cameras(room) if args.enable_cameras else {}
 
+            # Add a simple ground plane (avoids Nucleus asset download).
+            from pxr import UsdPhysics
+            ground_xform = UsdGeom.Xform.Define(stage, "/World/GroundPlane")
+            ground_plane = UsdGeom.Mesh.Define(stage, "/World/GroundPlane/Mesh")
+            ground_plane.GetPointsAttr().Set(
+                [(-50, -50, 0), (50, -50, 0), (50, 50, 0), (-50, 50, 0)]
+            )
+            ground_plane.GetFaceVertexCountsAttr().Set([4])
+            ground_plane.GetFaceVertexIndicesAttr().Set([0, 1, 2, 3])
+            UsdPhysics.CollisionAPI.Apply(ground_plane.GetPrim())
+
             # Let the stage settle a few frames.
             world = World(stage_units_in_meters=1.0)
-            world.scene.add_default_ground_plane()
             world.reset()
-            for _ in range(10):
+            for _ in range(max(0, int(args.render_warmup_frames))):
                 world.step(render=True)
 
             dc, art, dof_names = _init_dynamic_control(robot_articulation)
 
             for demo in demo_list:
                 demo_idx = int(demo["demo_idx"])
+                _log(f"Capturing demo {demo_idx} for variant {variant_path.name}")
                 base = np.asarray(demo["trajectory_base"], dtype=np.float32)
                 arm = np.asarray(demo["trajectory_arm"], dtype=np.float32)
                 grip = np.asarray(demo["trajectory_gripper"], dtype=np.float32).reshape(-1)
@@ -747,14 +1147,14 @@ def main() -> None:
                                 pass
 
                     if args.enable_cameras:
-                        a_rgb = annotators["agentview"]["rgb"].get_data()["data"]
-                        a_d = annotators["agentview"]["depth"].get_data()["data"]
-                        b_rgb = annotators["agentview_2"]["rgb"].get_data()["data"]
-                        b_d = annotators["agentview_2"]["depth"].get_data()["data"]
-                        a_rgb_np = np.asarray(a_rgb)[..., :3].astype(np.uint8)
-                        a_d_np = np.asarray(a_d, dtype=np.float32).astype(np.float16)
-                        b_rgb_np = np.asarray(b_rgb)[..., :3].astype(np.uint8)
-                        b_d_np = np.asarray(b_d, dtype=np.float32).astype(np.float16)
+                        a_rgb_np, a_d_np, b_rgb_np, b_d_np = _capture_camera_frames(
+                            annotators=annotators,
+                            world=world,
+                            max_extra_steps=int(args.camera_retry_steps),
+                            width=width,
+                            height=height,
+                            min_valid_depth_px=int(args.min_valid_depth_px),
+                        )
 
                         cam_dsets["agentview_rgb"][t] = a_rgb_np
                         cam_dsets["agentview_depth"][t] = a_d_np
@@ -771,13 +1171,35 @@ def main() -> None:
                         last_a_rgb, last_a_d = a_rgb_np, a_d_np
                         last_b_rgb, last_b_d = b_rgb_np, b_d_np
 
-                        # Strict sensor sanity on first frame only.
-                        if args.strict and t == 0:
-                            if float(a_rgb_np.std()) <= 1.0:
-                                raise RuntimeError(f"Degenerate RGB for demo {demo_idx} (std={float(a_rgb_np.std()):.3f})")
-                            finite = np.isfinite(a_d_np)
-                            if not bool(finite.any()) or float(a_d_np[finite].std()) <= 1e-4:
-                                raise RuntimeError("Degenerate depth for demo %d" % demo_idx)
+                        # Strict sensor sanity after render warm-up frame (bounded by trajectory length).
+                        check_t = max(0, min(int(args.sensor_check_frame), T - 1))
+                        if args.strict and t == check_t:
+                            rgb_std = float(a_rgb_np.std())
+                            rgb_max = float(a_rgb_np.max()) if a_rgb_np.size else 0.0
+                            if rgb_std <= float(args.sensor_min_rgb_std) and rgb_max <= 2.0:
+                                raise RuntimeError(
+                                    f"Degenerate RGB for demo {demo_idx} (std={rgb_std:.3f}, max={rgb_max:.3f})"
+                                )
+                            valid_depth = np.logical_and(np.isfinite(a_d_np), a_d_np > 0.0)
+                            valid_depth_px = int(valid_depth.sum())
+                            if valid_depth_px < int(args.min_valid_depth_px):
+                                msg = (
+                                    f"Degenerate depth for demo {demo_idx} "
+                                    f"(valid_px={valid_depth_px} < {int(args.min_valid_depth_px)})"
+                                )
+                                if sensor_failure_policy == "fail":
+                                    raise RuntimeError(msg)
+                                _log(f"WARNING: {msg} — continuing")
+                            else:
+                                dvals = a_d_np[valid_depth]
+                                if float(dvals.std()) <= float(args.sensor_min_depth_std):
+                                    msg = (
+                                        f"Low-variance depth for demo {demo_idx} "
+                                        f"(std={float(dvals.std()):.6f}, valid_px={valid_depth_px})"
+                                    )
+                                    if sensor_failure_policy == "fail":
+                                        raise RuntimeError(msg)
+                                    _log(f"WARNING: {msg} — continuing")
 
                 if args.enable_cameras:
                     # Last next_obs repeats last obs.
@@ -788,7 +1210,7 @@ def main() -> None:
 
                 # attrs
                 grp.attrs["layout_id"] = layout_id
-                grp.attrs["variant_layout_json"] = str(variant_json)
+                grp.attrs["variant_layout_json"] = str(variant_path)
                 grp.attrs["pick_object_type"] = str(demo.get("pick_object", {}).get("type", ""))
                 grp.attrs["place_surface_type"] = str(demo.get("place_surface", {}).get("type", ""))
 
@@ -797,7 +1219,7 @@ def main() -> None:
                         "demo_name": demo_name,
                         "demo_idx": demo_idx,
                         "num_steps": T,
-                        "variant_layout_json": str(variant_json),
+                        "variant_layout_json": str(variant_path),
                     }
                 )
                 step_decomp["demos"].append(
@@ -810,6 +1232,7 @@ def main() -> None:
                 )
 
                 demo_global_idx += 1
+                h5.flush()
 
         demo_metadata["num_demos"] = demo_global_idx
         step_decomp["num_demos"] = demo_global_idx
@@ -831,19 +1254,37 @@ def main() -> None:
 
         h5.flush()
         h5.close()
+        h5 = None
+        os.replace(str(h5_tmp_path), str(final_h5_path))
 
         _write_json(output_dir / "demo_metadata.json", demo_metadata)
         _write_json(output_dir / "step_decomposition.json", step_decomp)
         _write_json(output_dir / "capture_manifest.json", cameras_manifest)
 
-        _log(f"Wrote {demo_global_idx} demos to {h5_path}")
+        _log(f"Wrote {demo_global_idx} demos to {final_h5_path}")
 
         if args.strict:
             expected = len(demos)
             if demo_global_idx < expected:
                 raise RuntimeError(f"Only {demo_global_idx}/{expected} demos captured")
 
+    except Exception as exc:
+        _log(f"ERROR: Stage 7 collector failed: {exc}")
+        _log(traceback.format_exc())
+        raise
     finally:
+        try:
+            if "h5" in locals() and h5 is not None:
+                h5.flush()
+                h5.close()
+        except Exception:
+            pass
+        try:
+            tmp = output_dir / "dataset.tmp.hdf5"
+            if tmp.exists() and not (output_dir / "dataset.hdf5").exists():
+                tmp.unlink()
+        except Exception:
+            pass
         sim_app.close()
 
 

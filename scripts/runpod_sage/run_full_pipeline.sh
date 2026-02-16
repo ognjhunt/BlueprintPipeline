@@ -68,6 +68,14 @@ ROBOT_TYPE="${ROBOT_TYPE:-mobile_franka}"
 TASK_DESC="${TASK_DESC:-Pick up the mug from the counter and place it on the dining table}"
 NUM_POSE_SAMPLES="${NUM_POSE_SAMPLES:-8}"
 NUM_DEMOS="${NUM_DEMOS:-16}"
+STAGE567_GRASP_TOP_K="${STAGE567_GRASP_TOP_K:-24}"
+ISAACSIM_PY_STAGE7="${ISAACSIM_PY_STAGE7:-/workspace/isaacsim_env/bin/python3}"
+ISAAC_ASSETS_ROOT="${ISAAC_ASSETS_ROOT:-/workspace/isaacsim_assets/Assets/Isaac/5.1}"
+REQUIRE_LOCAL_ROBOT_ASSET="${REQUIRE_LOCAL_ROBOT_ASSET:-1}"
+SAGE_ALLOW_REMOTE_ISAAC_ASSETS="${SAGE_ALLOW_REMOTE_ISAAC_ASSETS:-0}"
+SAGE_SENSOR_FAILURE_POLICY="${SAGE_SENSOR_FAILURE_POLICY:-fail}"
+SAGE_RENDER_WARMUP_FRAMES="${SAGE_RENDER_WARMUP_FRAMES:-100}"
+SAGE_SENSOR_MIN_RGB_STD="${SAGE_SENSOR_MIN_RGB_STD:-0.01}"
 SKIP_AUGMENTATION="${SKIP_AUGMENTATION:-0}"
 SKIP_GRASPS="${SKIP_GRASPS:-0}"
 SKIP_DATA_GEN="${SKIP_DATA_GEN:-0}"
@@ -126,6 +134,12 @@ if [[ ! "${SAGE_MAX_OBJECTS}" =~ ^[0-9]+$ ]]; then
     SAGE_MAX_OBJECTS=0
 fi
 export SAGE_MAX_OBJECTS
+export ISAAC_ASSETS_ROOT
+export REQUIRE_LOCAL_ROBOT_ASSET
+export SAGE_ALLOW_REMOTE_ISAAC_ASSETS
+export SAGE_SENSOR_FAILURE_POLICY
+export SAGE_RENDER_WARMUP_FRAMES
+export SAGE_SENSOR_MIN_RGB_STD
 
 TASK_DESC_CAPPED="${TASK_DESC}"
 if [[ "${SAGE_MAX_OBJECTS}" -gt 0 ]]; then
@@ -176,6 +190,13 @@ log "Robot: ${ROBOT_TYPE}"
 log "Task:  ${TASK_DESC}"
 log "Max objects: ${SAGE_MAX_OBJECTS} (override with SAGE_MAX_OBJECTS=..., set 0 to disable)"
 log "Demos: ${NUM_DEMOS}"
+log "Stage5 grasp top-k: ${STAGE567_GRASP_TOP_K}"
+log "Stage7 python: ${ISAACSIM_PY_STAGE7}"
+log "Stage7 assets root: ${ISAAC_ASSETS_ROOT}"
+log "Stage7 local robot asset required: ${REQUIRE_LOCAL_ROBOT_ASSET}"
+log "Stage7 remote assets allowed: ${SAGE_ALLOW_REMOTE_ISAAC_ASSETS}"
+log "Stage7 sensor failure policy: ${SAGE_SENSOR_FAILURE_POLICY}"
+log "Stage7 warmup/rgb_std defaults: ${SAGE_RENDER_WARMUP_FRAMES}/${SAGE_SENSOR_MIN_RGB_STD}"
 log ""
 
 PIPELINE_START=$(date +%s)
@@ -931,12 +952,40 @@ else
         exit 1
     fi
 
-    STAGE567_ARGS=(--layout_id "${LAYOUT_ID}" --results_dir "${SAGE_DIR}/server/results" --pose_aug_name "${POSE_AUG_NAME}" --num_demos "${NUM_DEMOS}")
-    [[ "${ENABLE_CAMERAS}" == "1" ]] && STAGE567_ARGS+=(--enable_cameras)
+    ISAAC_PREFLIGHT="${SAGE_SCRIPTS}/isaacsim_runtime_preflight.sh"
+    if [[ -x "${ISAAC_PREFLIGHT}" ]]; then
+        log "Running Isaac Sim runtime preflight..."
+        if ! ISAACSIM_PY="${ISAACSIM_PY_STAGE7}" ISAAC_ASSETS_ROOT="${ISAAC_ASSETS_ROOT}" REQUIRE_LOCAL_ROBOT_ASSET="${REQUIRE_LOCAL_ROBOT_ASSET}" "${ISAAC_PREFLIGHT}"; then
+            if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+                log "ERROR: Isaac Sim runtime preflight failed."
+                exit 1
+            fi
+            log "WARNING: Isaac Sim runtime preflight failed (continuing; STRICT_PIPELINE=0)."
+        fi
+    fi
+
+    STAGE567_ARGS=(--layout_id "${LAYOUT_ID}" --results_dir "${SAGE_DIR}/server/results" --pose_aug_name "${POSE_AUG_NAME}" --num_demos "${NUM_DEMOS}" --task_desc "${TASK_DESC}" --grasp_top_k "${STAGE567_GRASP_TOP_K}" --isaacsim_py "${ISAACSIM_PY_STAGE7}")
+    if [[ "${ENABLE_CAMERAS}" == "1" ]]; then
+        STAGE567_ARGS+=(--enable_cameras)
+    else
+        STAGE567_ARGS+=(--disable_cameras)
+    fi
     STAGE567_ARGS+=(--headless)
-    [[ "${STRICT_PIPELINE}" == "1" ]] && STAGE567_ARGS+=(--strict)
+    if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+        STAGE567_ARGS+=(--strict)
+    else
+        STAGE567_ARGS+=(--no-strict)
+    fi
 
     python "${STAGE567_SCRIPT}" "${STAGE567_ARGS[@]}" 2>&1 | tee "/tmp/sage_stage567.log"
+    mkdir -p "${LAYOUT_DIR}/stage7_output"
+    cp -f "/tmp/sage_stage567.log" "${LAYOUT_DIR}/stage567.log" 2>/dev/null || true
+    if [[ -f "${LAYOUT_DIR}/demos/stage7.log" ]]; then
+        cp -f "${LAYOUT_DIR}/demos/stage7.log" "${LAYOUT_DIR}/stage7_output/stage7.log" 2>/dev/null || true
+    fi
+    if [[ ! -f "${LAYOUT_DIR}/stage7_output/stage7.log" ]]; then
+        log "WARNING: Missing Stage 7 log at ${LAYOUT_DIR}/stage7_output/stage7.log"
+    fi
 
     # Required artifacts
     if [[ ! -f "${LAYOUT_DIR}/grasps/grasp_transforms.json" ]]; then
@@ -945,6 +994,29 @@ else
     fi
     if [[ ! -f "${LAYOUT_DIR}/demos/dataset.hdf5" ]]; then
         log "ERROR: Missing demos output: ${LAYOUT_DIR}/demos/dataset.hdf5"
+        exit 1
+    fi
+    # Validate HDF5 integrity to avoid accepting truncated/corrupt files.
+    H5_CHECK_PY="${ISAACSIM_PY_STAGE7}"
+    if [[ ! -x "${H5_CHECK_PY}" ]]; then
+        H5_CHECK_PY="${PY_SYS}"
+    fi
+    if ! "${H5_CHECK_PY}" - "${LAYOUT_DIR}/demos/dataset.hdf5" "${STRICT_PIPELINE}" <<'PY'
+import sys
+import h5py
+
+path = sys.argv[1]
+strict = sys.argv[2] == "1"
+with h5py.File(path, "r") as f:
+    if "data" not in f:
+        raise RuntimeError("missing /data group")
+    n = len(f["data"].keys())
+    if strict and n < 1:
+        raise RuntimeError("strict mode requires at least 1 demo in /data")
+print("hdf5_ok")
+PY
+    then
+        log "ERROR: Corrupt/invalid HDF5 demos output: ${LAYOUT_DIR}/demos/dataset.hdf5"
         exit 1
     fi
 
