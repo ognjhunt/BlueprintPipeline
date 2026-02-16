@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,14 @@ import pytest
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 @pytest.mark.unit
@@ -27,6 +36,9 @@ def test_validate_stage7_contract_pass(tmp_path, monkeypatch):
     with h5py.File(str(demos_dir / "dataset.hdf5"), "w") as f:
         data = f.create_group("data")
         data.create_group("demo_0")
+        metadata = f.create_group("metadata")
+        provenance = metadata.create_group("provenance")
+        provenance.attrs["run_id"] = "run_abc"
 
     (demos_dir / "scene_variant_000.usd").write_text("#usda 1.0\n", encoding="utf-8")
     (demos_dir / "videos" / "demo_0.mp4").write_bytes(b"mp4")
@@ -35,7 +47,23 @@ def test_validate_stage7_contract_pass(tmp_path, monkeypatch):
     _write_json(plans_dir / "plan_bundle.json", {"run_id": run_id})
     _write_json(demos_dir / "demo_metadata.json", {"run_id": run_id})
     _write_json(demos_dir / "quality_report.json", {"run_id": run_id, "status": "pass"})
-    _write_json(demos_dir / "artifact_manifest.json", {"run_id": run_id, "status": "ok"})
+    entries = []
+    for rel in [
+        "dataset.hdf5",
+        "demo_metadata.json",
+        "quality_report.json",
+        "scene_variant_000.usd",
+        "videos/demo_0.mp4",
+    ]:
+        abs_path = demos_dir / rel
+        entries.append(
+            {
+                "path": rel,
+                "size_bytes": int(abs_path.stat().st_size),
+                "sha256": _sha256(abs_path),
+            }
+        )
+    _write_json(demos_dir / "artifact_manifest.json", {"run_id": run_id, "status": "ok", "files": entries})
 
     report_path = layout_dir / "quality" / "contract_report.json"
     monkeypatch.setattr(
@@ -85,3 +113,76 @@ def test_aggregate_run_quality_fail_on_missing_reports(tmp_path, monkeypatch):
     assert agg.main() == 3
     payload = json.loads(out_path.read_text(encoding="utf-8"))
     assert payload["status"] == "fail"
+
+
+@pytest.mark.unit
+def test_validate_stage7_contract_fails_on_unexpected_video(tmp_path, monkeypatch):
+    from scripts.runpod_sage import validate_stage7_contract as v
+    h5py = pytest.importorskip("h5py")
+
+    run_id = "run_mismatch"
+    layout_dir = tmp_path / "layout_3"
+    (layout_dir / "generation").mkdir(parents=True, exist_ok=True)
+    (layout_dir / "usd_cache").mkdir(parents=True, exist_ok=True)
+    demos_dir = layout_dir / "demos"
+    (demos_dir / "videos").mkdir(parents=True, exist_ok=True)
+    plans_dir = layout_dir / "plans"
+    (layout_dir / "quality").mkdir(parents=True, exist_ok=True)
+    plans_dir.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(str(demos_dir / "dataset.hdf5"), "w") as f:
+        data = f.create_group("data")
+        data.create_group("demo_0")
+        metadata = f.create_group("metadata")
+        provenance = metadata.create_group("provenance")
+        provenance.attrs["run_id"] = run_id
+
+    (demos_dir / "scene_variant_000.usd").write_text("#usda 1.0\n", encoding="utf-8")
+    (demos_dir / "videos" / "demo_0.mp4").write_bytes(b"mp4")
+    (demos_dir / "videos" / "demo_1.mp4").write_bytes(b"stale")
+
+    _write_json(plans_dir / "plan_bundle.json", {"run_id": run_id})
+    _write_json(demos_dir / "demo_metadata.json", {"run_id": run_id})
+    _write_json(demos_dir / "quality_report.json", {"run_id": run_id, "status": "pass"})
+    entries = []
+    for rel in [
+        "dataset.hdf5",
+        "demo_metadata.json",
+        "quality_report.json",
+        "scene_variant_000.usd",
+        "videos/demo_0.mp4",
+        "videos/demo_1.mp4",
+    ]:
+        abs_path = demos_dir / rel
+        entries.append(
+            {
+                "path": rel,
+                "size_bytes": int(abs_path.stat().st_size),
+                "sha256": _sha256(abs_path),
+            }
+        )
+    _write_json(demos_dir / "artifact_manifest.json", {"run_id": run_id, "status": "ok", "files": entries})
+
+    report_path = layout_dir / "quality" / "contract_report.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "validate_stage7_contract.py",
+            "--layout-dir",
+            str(layout_dir),
+            "--run-id",
+            run_id,
+            "--expected-demos",
+            "1",
+            "--strict-artifact-contract",
+            "1",
+            "--strict-provenance",
+            "1",
+            "--report-path",
+            str(report_path),
+        ],
+    )
+    assert v.main() == 3
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "fail"
+    assert any("video set mismatch" in err for err in report["errors"])

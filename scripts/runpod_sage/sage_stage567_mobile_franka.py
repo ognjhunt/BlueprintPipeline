@@ -150,6 +150,14 @@ def _build_stage7_command_and_env(
     cmd.extend(["--min-rgb-std", os.environ.get("SAGE_SENSOR_MIN_RGB_STD", "5.0")])
     cmd.extend(["--max-rgb-saturation-ratio", os.environ.get("SAGE_MAX_RGB_SATURATION_RATIO", "0.85")])
     cmd.extend(["--quality-report-path", quality_report_path])
+    cmd.extend(["--carry-mode", os.environ.get("SAGE_CARRY_MODE", "physics")])
+    cmd.extend(["--min-gripper-contact-force", os.environ.get("SAGE_MIN_GRIPPER_CONTACT_FORCE", "0.5")])
+    cmd.extend(
+        [
+            "--gripper-closed-width-threshold",
+            os.environ.get("SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD", "0.01"),
+        ]
+    )
     cmd.append("--export-scene-usd" if export_scene_usd_default else "--no-export-scene-usd")
     cmd.append("--export-demo-videos" if export_demo_videos_default else "--no-export-demo-videos")
 
@@ -170,7 +178,11 @@ def _build_stage7_command_and_env(
     env.setdefault("SAGE_EXPORT_SCENE_USD", "1")
     env.setdefault("SAGE_EXPORT_DEMO_VIDEOS", "1")
     env.setdefault("SAGE_QUALITY_REPORT_PATH", quality_report_path)
+    env.setdefault("SAGE_CARRY_MODE", "physics")
+    env.setdefault("SAGE_MIN_GRIPPER_CONTACT_FORCE", "0.5")
+    env.setdefault("SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD", "0.01")
     env.setdefault("SAGE_ENFORCE_BUNDLE_STRICT", "1")
+    env.setdefault("SAGE_DOMAIN_RAND", "0")
     if run_id:
         env.setdefault("SAGE_RUN_ID", run_id)
     env["PYTHONSAFEPATH"] = "1"
@@ -318,12 +330,16 @@ def _resolve_pose_aug_variants(meta_path: Path, layout_dir: Path) -> List[Path]:
     if not out:
         all_variants = sorted(meta_path.parent.glob("variant_*.json"))
         if all_variants:
-            preferred = meta_path.parent / "variant_000.json"
-            out = [preferred] if preferred.exists() else [all_variants[0]]
+            # Include ALL available variants (not just variant_000) to maximise diversity.
+            out = list(all_variants)
+            _log("=" * 70)
             _log(
-                f"WARNING: pose meta resolved to 0 layouts; using fallback variant "
-                f"{out[0].name} from {meta_path.parent}"
+                f"WARNING: pose meta resolved to 0 layouts; using ALL {len(out)} "
+                f"fallback variant(s) from {meta_path.parent}"
             )
+            for v in out:
+                _log(f"  fallback variant: {v.name}")
+            _log("=" * 70)
     return out
 
 
@@ -1014,6 +1030,20 @@ def main() -> None:
     if args.strict and not variants:
         raise RuntimeError(f"Pose augmentation meta contains 0 resolvable layouts: {meta_path}")
 
+    # Warn prominently if variant diversity is low relative to demo count.
+    min_recommended = min(4, int(args.num_demos))
+    if len(variants) < min_recommended:
+        _log("=" * 70)
+        _log(
+            f"WARNING: LOW VARIANT DIVERSITY — {len(variants)} variant(s) for "
+            f"{args.num_demos} demos (recommended >= {min_recommended})"
+        )
+        _log(
+            "  All demos will share the same or very few scene layouts. "
+            "Consider running more pose augmentation samples."
+        )
+        _log("=" * 70)
+
     weights_path = Path(args.m2t2_weights)
     if args.strict and not weights_path.exists():
         raise FileNotFoundError(f"M2T2 weights missing: {weights_path}")
@@ -1371,6 +1401,16 @@ def main() -> None:
     plan_path = plan_dir / "plan_bundle.json"
     _write_json(plan_path, plan_bundle)
     _log(f"Wrote plan bundle: {plan_path}")
+
+    # Log variant usage distribution for observability.
+    variant_usage: Dict[str, int] = {}
+    for p in plans:
+        vname = Path(p.variant_layout_json).name
+        variant_usage[vname] = variant_usage.get(vname, 0) + 1
+    if variant_usage:
+        _log(f"Variant usage distribution ({len(plans)} demos across {len(variant_usage)} variant(s)):")
+        for vname, count in sorted(variant_usage.items()):
+            _log(f"  {vname}: {count} demo(s)")
 
     if not plans:
         _log("WARNING: No successful demo plans. Skipping Stage 7 (Isaac Sim collection).")

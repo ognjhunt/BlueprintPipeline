@@ -6,10 +6,10 @@ Validate Stage 7 artifact/provenance contract for runpod SAGE pipeline outputs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -38,6 +38,50 @@ def _hdf5_demo_count(path: Path) -> int:
         return int(len(data.keys()))
 
 
+def _hdf5_run_id(path: Path) -> str:
+    import h5py
+
+    with h5py.File(str(path), "r") as f:
+        metadata = f.get("metadata")
+        if metadata is None:
+            return ""
+        provenance = metadata.get("provenance")
+        if provenance is None:
+            return ""
+        attr_run_id = str(provenance.attrs.get("run_id", "")).strip()
+        if attr_run_id:
+            return attr_run_id
+        ds = provenance.get("run_id")
+        if ds is None:
+            return ""
+        try:
+            value = ds[()]
+        except Exception:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore").strip()
+        return str(value).strip()
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _manifest_file_entries(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in files:
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate Stage 7 artifact and provenance contract")
     parser.add_argument("--layout-dir", required=True)
@@ -61,8 +105,6 @@ def main() -> int:
 
     demos_dir = layout_dir / "demos"
     plans_dir = layout_dir / "plans"
-    quality_dir = layout_dir / "quality"
-
     checks: List[Dict[str, Any]] = []
     errors: List[str] = []
 
@@ -87,11 +129,21 @@ def main() -> int:
         errors.append("missing scene_*.usd in demos output")
 
     video_files = sorted((demos_dir / "videos").glob("demo_*.mp4")) if (demos_dir / "videos").exists() else []
-    videos_ok = len(video_files) >= expected_demos
-    _record(checks, "video_count", videos_ok, f"expected>={expected_demos}, actual={len(video_files)}")
-    if strict_artifacts and not videos_ok:
+    expected_video_names = {f"demo_{i}.mp4" for i in range(expected_demos)}
+    actual_video_names = {p.name for p in video_files}
+    missing_videos = sorted(expected_video_names - actual_video_names)
+    unexpected_videos = sorted(actual_video_names - expected_video_names)
+    videos_exact = (not missing_videos) and (not unexpected_videos)
+    _record(
+        checks,
+        "video_set_exact",
+        videos_exact,
+        f"expected={sorted(expected_video_names)} actual={sorted(actual_video_names)}",
+    )
+    if strict_artifacts and not videos_exact:
         errors.append(
-            f"video count below expectation (expected>={expected_demos}, actual={len(video_files)})"
+            "video set mismatch "
+            f"(missing={missing_videos} unexpected={unexpected_videos})"
         )
 
     dataset_path = required_paths["dataset_hdf5"]
@@ -104,6 +156,15 @@ def main() -> int:
         _record(checks, "hdf5_demo_count", demo_count >= expected_demos, f"expected>={expected_demos}, actual={demo_count}")
         if strict_artifacts and demo_count < expected_demos:
             errors.append(f"hdf5 demo count below expectation (expected>={expected_demos}, actual={demo_count})")
+        try:
+            h5_run_id = _hdf5_run_id(dataset_path)
+        except Exception as exc:
+            h5_run_id = ""
+            errors.append(f"failed reading hdf5 run_id from {dataset_path}: {exc}")
+        h5_run_id_ok = str(h5_run_id).strip() == run_id
+        _record(checks, "hdf5_run_id_match", h5_run_id_ok, f"expected={run_id} actual={h5_run_id}")
+        if strict_provenance and not h5_run_id_ok:
+            errors.append(f"hdf5 run_id mismatch: expected={run_id} actual={h5_run_id}")
 
     if strict_provenance:
         provenance_sources = [
@@ -125,6 +186,80 @@ def main() -> int:
             _record(checks, f"run_id_match:{path.name}", ok, f"expected={run_id} actual={payload_run_id}")
             if not ok:
                 errors.append(f"run_id mismatch in {path}: expected={run_id} actual={payload_run_id}")
+
+        manifest_payload: Optional[Dict[str, Any]] = None
+        manifest_path = required_paths["artifact_manifest"]
+        if manifest_path.exists():
+            try:
+                manifest_payload = _load_json(manifest_path)
+            except Exception as exc:
+                errors.append(f"failed to parse JSON {manifest_path}: {exc}")
+        if manifest_payload is not None:
+            entries = _manifest_file_entries(manifest_payload)
+            if not entries:
+                errors.append(f"artifact manifest contains no files: {manifest_path}")
+            manifest_video_rel = set()
+            manifest_scene_rel = set()
+            for item in entries:
+                rel = str(item.get("path", "")).strip()
+                if not rel:
+                    continue
+                abs_path = demos_dir / rel
+                ok_exists = abs_path.exists() and abs_path.is_file()
+                _record(checks, f"manifest_exists:{rel}", ok_exists, str(abs_path))
+                if not ok_exists:
+                    errors.append(f"manifest references missing file: {abs_path}")
+                    continue
+                expected_size = item.get("size_bytes")
+                if isinstance(expected_size, int):
+                    size_ok = int(abs_path.stat().st_size) == int(expected_size)
+                    _record(
+                        checks,
+                        f"manifest_size:{rel}",
+                        size_ok,
+                        f"expected={expected_size} actual={int(abs_path.stat().st_size)}",
+                    )
+                    if not size_ok:
+                        errors.append(f"size mismatch for {abs_path}: expected={expected_size} actual={int(abs_path.stat().st_size)}")
+                expected_sha = str(item.get("sha256", "")).strip().lower()
+                if expected_sha:
+                    actual_sha = _sha256(abs_path)
+                    sha_ok = actual_sha.lower() == expected_sha
+                    _record(checks, f"manifest_sha256:{rel}", sha_ok, f"expected={expected_sha} actual={actual_sha}")
+                    if not sha_ok:
+                        errors.append(f"sha256 mismatch for {abs_path}: expected={expected_sha} actual={actual_sha}")
+                rel_norm = rel.replace("\\", "/")
+                if rel_norm.startswith("videos/") and rel_norm.endswith(".mp4"):
+                    manifest_video_rel.add(rel_norm)
+                if rel_norm.startswith("scene_") and rel_norm.endswith(".usd"):
+                    manifest_scene_rel.add(rel_norm)
+
+            actual_video_rel = {f"videos/{name}" for name in actual_video_names}
+            actual_scene_rel = {p.name for p in scene_usds}
+            video_manifest_ok = actual_video_rel == manifest_video_rel
+            scene_manifest_ok = actual_scene_rel == manifest_scene_rel
+            _record(
+                checks,
+                "manifest_video_set_exact",
+                video_manifest_ok,
+                f"manifest={sorted(manifest_video_rel)} actual={sorted(actual_video_rel)}",
+            )
+            _record(
+                checks,
+                "manifest_scene_set_exact",
+                scene_manifest_ok,
+                f"manifest={sorted(manifest_scene_rel)} actual={sorted(actual_scene_rel)}",
+            )
+            if strict_artifacts and not video_manifest_ok:
+                errors.append(
+                    "artifact manifest video set mismatch "
+                    f"(manifest={sorted(manifest_video_rel)} actual={sorted(actual_video_rel)})"
+                )
+            if strict_artifacts and not scene_manifest_ok:
+                errors.append(
+                    "artifact manifest scene set mismatch "
+                    f"(manifest={sorted(manifest_scene_rel)} actual={sorted(actual_scene_rel)})"
+                )
 
     report: Dict[str, Any] = {
         "layout_dir": str(layout_dir),

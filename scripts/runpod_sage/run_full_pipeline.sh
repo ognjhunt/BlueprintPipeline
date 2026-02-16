@@ -95,7 +95,11 @@ SAGE_MIN_VALID_DEPTH_PX="${SAGE_MIN_VALID_DEPTH_PX:-1024}"
 SAGE_SENSOR_CHECK_FRAME="${SAGE_SENSOR_CHECK_FRAME:-10}"
 SAGE_EXPORT_SCENE_USD="${SAGE_EXPORT_SCENE_USD:-1}"
 SAGE_EXPORT_DEMO_VIDEOS="${SAGE_EXPORT_DEMO_VIDEOS:-1}"
+SAGE_CARRY_MODE="${SAGE_CARRY_MODE:-physics}"
+SAGE_MIN_GRIPPER_CONTACT_FORCE="${SAGE_MIN_GRIPPER_CONTACT_FORCE:-0.5}"
+SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD="${SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD:-0.01}"
 SAGE_ENFORCE_BUNDLE_STRICT="${SAGE_ENFORCE_BUNDLE_STRICT:-1}"
+SAGE_DOMAIN_RAND="${SAGE_DOMAIN_RAND:-0}"  # 1=enable per-demo lighting+camera jitter, 0=off (default)
 STRICT_ARTIFACT_CONTRACT="${STRICT_ARTIFACT_CONTRACT:-1}"
 STRICT_PROVENANCE="${STRICT_PROVENANCE:-1}"
 AUTO_FIX_LAYOUT="${AUTO_FIX_LAYOUT:-1}"
@@ -119,8 +123,8 @@ NAV_REPAIR_MAX_MOVES="${NAV_REPAIR_MAX_MOVES:-8}"               # objects
 NAV_GATE_ENABLED="${NAV_GATE_ENABLED:-1}"                       # 1|0
 NAV_GATE_HARD_FAIL="${NAV_GATE_HARD_FAIL:-1}"                   # 1|0
 NAV_GATE_GRID_RES_M="${NAV_GATE_GRID_RES_M:-0.05}"              # meters
-NAV_GATE_PICK_RADIUS_MIN_M="${NAV_GATE_PICK_RADIUS_MIN_M:-0.55}"# meters
-NAV_GATE_PICK_RADIUS_MAX_M="${NAV_GATE_PICK_RADIUS_MAX_M:-1.40}"# meters
+NAV_GATE_PICK_RADIUS_MIN_M="${NAV_GATE_PICK_RADIUS_MIN_M:-0.55}" # meters
+NAV_GATE_PICK_RADIUS_MAX_M="${NAV_GATE_PICK_RADIUS_MAX_M:-1.40}" # meters
 # SceneSmith critic-loop acceptance gate (pre-mesh, bounded retries).
 SCENESMITH_CRITIC_LOOP_ENABLED="${SCENESMITH_CRITIC_LOOP_ENABLED:-1}"             # 1|0
 SCENESMITH_CRITIC_MAX_ATTEMPTS="${SCENESMITH_CRITIC_MAX_ATTEMPTS:-4}"              # attempts
@@ -213,7 +217,11 @@ export SAGE_MIN_VALID_DEPTH_PX
 export SAGE_SENSOR_CHECK_FRAME
 export SAGE_EXPORT_SCENE_USD
 export SAGE_EXPORT_DEMO_VIDEOS
+export SAGE_CARRY_MODE
+export SAGE_MIN_GRIPPER_CONTACT_FORCE
+export SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD
 export SAGE_ENFORCE_BUNDLE_STRICT
+export SAGE_DOMAIN_RAND
 
 SAGE_RUN_ID="${SAGE_RUN_ID:-sage_$(date -u +%Y%m%dT%H%M%SZ)_${RANDOM}_$$}"
 export SAGE_RUN_ID
@@ -277,7 +285,9 @@ log "Stage7 remote assets allowed: ${SAGE_ALLOW_REMOTE_ISAAC_ASSETS}"
 log "Stage7 sensor failure policy: ${SAGE_SENSOR_FAILURE_POLICY} (strict=${SAGE_STRICT_SENSORS})"
 log "Stage7 sensor defaults: warmup=${SAGE_RENDER_WARMUP_FRAMES} rgb_std=${SAGE_SENSOR_MIN_RGB_STD} depth_std=${SAGE_SENSOR_MIN_DEPTH_STD} min_depth_ratio=${SAGE_MIN_DEPTH_FINITE_RATIO} min_depth_range=${SAGE_MIN_DEPTH_RANGE_M} max_rgb_sat=${SAGE_MAX_RGB_SATURATION_RATIO} min_depth_px=${SAGE_MIN_VALID_DEPTH_PX} check_frame=${SAGE_SENSOR_CHECK_FRAME}"
 log "Stage7 exports: scene_usd=${SAGE_EXPORT_SCENE_USD} demo_videos=${SAGE_EXPORT_DEMO_VIDEOS}"
+log "Stage7 carry defaults: mode=${SAGE_CARRY_MODE} min_gripper_force=${SAGE_MIN_GRIPPER_CONTACT_FORCE} closed_width=${SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD}"
 log "Stage7 bundle strict enforcement: ${SAGE_ENFORCE_BUNDLE_STRICT}"
+log "Stage7 domain randomization: ${SAGE_DOMAIN_RAND}"
 log "Contracts: strict_artifact=${STRICT_ARTIFACT_CONTRACT} strict_provenance=${STRICT_PROVENANCE} auto_fix_layout=${AUTO_FIX_LAYOUT}"
 log ""
 
@@ -869,13 +879,12 @@ import os
 pose_dir = "${LAYOUT_DIR}/${POSE_AUG_NAME}"
 variant_paths = sorted(glob.glob(os.path.join(pose_dir, "variant_*.json")))
 variant_names = [os.path.basename(p) for p in variant_paths]
-# Use one canonical variant to keep strict Stage 5-7 deterministic/retryable.
-pick = "variant_000.json" if "variant_000.json" in variant_names else (variant_names[0] if variant_names else None)
-variants = [pick] if pick else []
+# Preserve all discovered variants to avoid visual diversity collapse.
+variants = variant_names
 out_path = os.path.join(pose_dir, "meta.json")
 with open(out_path, "w") as f:
     json.dump(variants, f, indent=2)
-print(f"[bp] wrote {out_path} ({len(variants)} variant, selected={pick})")
+print(f"[bp] wrote {out_path} ({len(variants)} variants)")
 PY
 		            fi
 		        fi

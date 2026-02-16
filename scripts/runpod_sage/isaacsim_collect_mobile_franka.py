@@ -413,6 +413,10 @@ def _runtime_provenance(
         "SAGE_EXPORT_SCENE_USD": os.environ.get("SAGE_EXPORT_SCENE_USD", ""),
         "SAGE_EXPORT_DEMO_VIDEOS": os.environ.get("SAGE_EXPORT_DEMO_VIDEOS", ""),
         "SAGE_QUALITY_REPORT_PATH": os.environ.get("SAGE_QUALITY_REPORT_PATH", ""),
+        "SAGE_CARRY_MODE": os.environ.get("SAGE_CARRY_MODE", ""),
+        "SAGE_MIN_GRIPPER_CONTACT_FORCE": os.environ.get("SAGE_MIN_GRIPPER_CONTACT_FORCE", ""),
+        "SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD": os.environ.get("SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD", ""),
+        "SAGE_DOMAIN_RAND": os.environ.get("SAGE_DOMAIN_RAND", "0"),
         "SAGE_RUN_ID": os.environ.get("SAGE_RUN_ID", ""),
     }
     return {
@@ -443,6 +447,10 @@ def _runtime_provenance(
             "camera_retry_steps": int(args.camera_retry_steps),
             "dome_light_intensity": float(args.dome_light_intensity),
             "sun_light_intensity": float(args.sun_light_intensity),
+            "carry_mode": str(getattr(args, "carry_mode", "physics")),
+            "min_gripper_contact_force": float(getattr(args, "min_gripper_contact_force", 0.5)),
+            "gripper_closed_width_threshold": float(getattr(args, "gripper_closed_width_threshold", 0.01)),
+            "domain_rand_enabled": _env_bool("SAGE_DOMAIN_RAND", default=False),
         },
         "env": env_snapshot,
     }
@@ -551,6 +559,96 @@ def _add_default_lighting(stage, *, dome_intensity: float, distant_intensity: fl
     _apply_xform(stage, "/World/Lights/Sun", sun_xf)
 
 
+def _jitter_lighting_for_demo(
+    stage,
+    *,
+    dome_base: float,
+    sun_base: float,
+    demo_idx: int,
+    base_seed: int,
+) -> Dict[str, Any]:
+    """
+    Randomize dome and sun lighting for visual diversity across demos.
+
+    Dome intensity jittered +-30%, sun intensity +-40%, sun elevation +-15 deg.
+    Uses a seeded RNG for reproducibility.
+    """
+    rng = np.random.RandomState(base_seed + demo_idx)
+    dome_factor = 1.0 + rng.uniform(-0.30, 0.30)
+    sun_factor = 1.0 + rng.uniform(-0.40, 0.40)
+    dome_intensity = max(0.0, dome_base * dome_factor)
+    sun_intensity = max(0.0, sun_base * sun_factor)
+
+    from pxr import UsdLux
+
+    dome = UsdLux.DomeLight.Define(stage, "/World/Lights/Dome")
+    dome.CreateIntensityAttr().Set(float(dome_intensity))
+
+    sun = UsdLux.DistantLight.Define(stage, "/World/Lights/Sun")
+    sun.CreateIntensityAttr().Set(float(sun_intensity))
+
+    # Jitter sun elevation +-15 degrees from the base -45 degree elevation.
+    base_elev = -math.pi * 0.25
+    elev_jitter = rng.uniform(-math.radians(15), math.radians(15))
+    elev = base_elev + elev_jitter
+    sun_xf = np.eye(4, dtype=np.float64)
+    c = math.cos(elev)
+    s = math.sin(elev)
+    sun_xf[:3, :3] = np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]], dtype=np.float64)
+    _apply_xform(stage, "/World/Lights/Sun", sun_xf)
+
+    return {
+        "dome_intensity": float(dome_intensity),
+        "dome_factor": float(dome_factor),
+        "sun_intensity": float(sun_intensity),
+        "sun_factor": float(sun_factor),
+        "sun_elevation_deg": float(math.degrees(elev)),
+    }
+
+
+def _jitter_cameras_for_demo(
+    stage,
+    *,
+    cam_a_base_pos: np.ndarray,
+    cam_b_base_pos: np.ndarray,
+    center_base: np.ndarray,
+    demo_idx: int,
+    base_seed: int,
+) -> Dict[str, Any]:
+    """
+    Randomize camera positions for visual diversity across demos.
+
+    XY jitter +-0.15m, Z jitter +-0.10m, look-at jitter +-0.10m.
+    Uses a seeded RNG (offset from lighting seed) for reproducibility.
+    """
+    rng = np.random.RandomState(base_seed + demo_idx + 10000)
+
+    xy_jitter_a = rng.uniform(-0.15, 0.15, size=2)
+    z_jitter_a = rng.uniform(-0.10, 0.10)
+    xy_jitter_b = rng.uniform(-0.15, 0.15, size=2)
+    z_jitter_b = rng.uniform(-0.10, 0.10)
+    look_jitter = rng.uniform(-0.10, 0.10, size=3)
+
+    pos_a = cam_a_base_pos.copy()
+    pos_a[:2] += xy_jitter_a
+    pos_a[2] += z_jitter_a
+
+    pos_b = cam_b_base_pos.copy()
+    pos_b[:2] += xy_jitter_b
+    pos_b[2] += z_jitter_b
+
+    look_at = center_base.copy() + look_jitter
+
+    _define_camera(stage, "/World/Cameras/agentview", pos=pos_a, look_at=look_at)
+    _define_camera(stage, "/World/Cameras/agentview_2", pos=pos_b, look_at=look_at)
+
+    return {
+        "cam_a_offset": [float(xy_jitter_a[0]), float(xy_jitter_a[1]), float(z_jitter_a)],
+        "cam_b_offset": [float(xy_jitter_b[0]), float(xy_jitter_b[1]), float(z_jitter_b)],
+        "look_at_offset": [float(look_jitter[0]), float(look_jitter[1]), float(look_jitter[2])],
+    }
+
+
 def _capture_camera_frames(
     *,
     annotators: Dict[str, Dict[str, Any]],
@@ -653,7 +751,10 @@ def _enforce_render_resolution_contract(
 ) -> None:
     actual = _read_render_product_resolution(stage, render_product_path)
     if actual is None:
-        _log(f"WARNING: Could not read render product resolution for {render_product_path}")
+        msg = f"Could not read render product resolution for {render_product_path}"
+        if strict_sensors:
+            raise RuntimeError(msg)
+        _log(f"WARNING: {msg}")
         return
     if actual == (int(expected_width), int(expected_height)):
         return
@@ -664,6 +765,207 @@ def _enforce_render_resolution_contract(
     if strict_sensors:
         raise RuntimeError(msg)
     _log(f"WARNING: {msg}")
+
+
+def _prepare_stage7_output_dir(output_dir: Path) -> Dict[str, Any]:
+    """
+    Remove stale files from prior runs so strict contract checks cannot be
+    satisfied by mixed-run leftovers.
+    """
+    removed: List[str] = []
+
+    def _unlink(path: Path) -> None:
+        try:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+                removed.append(str(path))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to remove stale artifact {path}: {exc}") from exc
+
+    singleton_files = [
+        output_dir / "dataset.hdf5",
+        output_dir / "dataset.tmp.hdf5",
+        output_dir / "demo_metadata.json",
+        output_dir / "step_decomposition.json",
+        output_dir / "capture_manifest.json",
+        output_dir / "quality_report.json",
+        output_dir / "artifact_manifest.json",
+    ]
+    for path in singleton_files:
+        if path.exists():
+            _unlink(path)
+
+    for scene_path in sorted(output_dir.glob("scene_*.usd")):
+        _unlink(scene_path)
+
+    videos_dir = output_dir / "videos"
+    if videos_dir.exists() and videos_dir.is_dir():
+        for mp4 in sorted(videos_dir.glob("demo_*.mp4")):
+            _unlink(mp4)
+        # Remove now-empty videos dir to avoid stale directory-only manifests.
+        try:
+            if not any(videos_dir.iterdir()):
+                videos_dir.rmdir()
+        except Exception:
+            pass
+
+    return {"removed_count": int(len(removed)), "removed_paths": removed}
+
+
+def _resolve_dof_groups(dof_names: List[str]) -> Tuple[List[int], List[int]]:
+    arm_idx = [
+        i
+        for i, n in enumerate(dof_names)
+        if ("joint" in (n or "").lower()) and ("finger" not in (n or "").lower()) and ("wheel" not in (n or "").lower())
+    ]
+    if len(arm_idx) < 7:
+        arm_idx = list(range(min(7, len(dof_names))))
+    arm_idx = arm_idx[:7]
+
+    finger_idx = [i for i, n in enumerate(dof_names) if "finger" in (n or "").lower()]
+    if not finger_idx and len(dof_names) >= 2:
+        finger_idx = [len(dof_names) - 2, len(dof_names) - 1]
+    return arm_idx, finger_idx[:2]
+
+
+def _extract_state_vector(states: Any, *keys: str) -> Optional[np.ndarray]:
+    if states is None:
+        return None
+    if isinstance(states, dict):
+        for key in keys:
+            if key in states:
+                return np.asarray(states[key], dtype=np.float32).reshape(-1)
+    dtype_names = getattr(getattr(states, "dtype", None), "names", None)
+    if dtype_names:
+        for key in keys:
+            if key in dtype_names:
+                return np.asarray(states[key], dtype=np.float32).reshape(-1)
+    return None
+
+
+def _read_robot_dof_observation(
+    dc: Any,
+    art: Any,
+    dof_names: List[str],
+    arm_idx: List[int],
+    finger_idx: List[int],
+) -> Dict[str, Any]:
+    from omni.isaac.dynamic_control import _dynamic_control
+
+    n = len(dof_names)
+    zeros = np.zeros((max(1, len(arm_idx)),), dtype=np.float32)
+    try:
+        state_flags = int(getattr(_dynamic_control, "STATE_ALL", 0))
+        states = dc.get_articulation_dof_states(art, state_flags)
+    except Exception:
+        return {
+            "arm_vel": zeros.copy(),
+            "arm_effort": zeros.copy(),
+            "gripper_force": 0.0,
+            "source": "missing",
+        }
+
+    vel_full = _extract_state_vector(states, "vel", "velocity")
+    eff_full = _extract_state_vector(states, "effort", "tau", "force")
+    had_effort_signal = eff_full is not None
+    if vel_full is None:
+        vel_full = np.zeros((n,), dtype=np.float32)
+    if eff_full is None:
+        eff_full = np.zeros((n,), dtype=np.float32)
+
+    def _slice_with_bounds(vec: np.ndarray, idxs: List[int], width: int) -> np.ndarray:
+        out = np.zeros((max(1, width),), dtype=np.float32)
+        for j, idx in enumerate(idxs[:width]):
+            if 0 <= int(idx) < int(vec.shape[0]):
+                out[j] = float(vec[int(idx)])
+        return out
+
+    arm_width = max(1, len(arm_idx))
+    arm_vel = _slice_with_bounds(vel_full, arm_idx, arm_width)
+    arm_eff = _slice_with_bounds(eff_full, arm_idx, arm_width)
+    grip_eff = [abs(float(eff_full[i])) for i in finger_idx if 0 <= int(i) < int(eff_full.shape[0])]
+    gripper_force = float(sum(grip_eff))
+    source = "physx" if had_effort_signal else "missing_effort_signal"
+    return {
+        "arm_vel": arm_vel,
+        "arm_effort": arm_eff,
+        "gripper_force": gripper_force,
+        "source": source,
+    }
+
+
+def _quat_wxyz_from_rot(R: np.ndarray) -> Tuple[float, float, float, float]:
+    m = np.asarray(R, dtype=np.float64).reshape(3, 3)
+    t = float(np.trace(m))
+    if t > 0.0:
+        s = math.sqrt(t + 1.0) * 2.0
+        w = 0.25 * s
+        x = (m[2, 1] - m[1, 2]) / s
+        y = (m[0, 2] - m[2, 0]) / s
+        z = (m[1, 0] - m[0, 1]) / s
+    else:
+        if m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+            s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+            w = (m[2, 1] - m[1, 2]) / s
+            x = 0.25 * s
+            y = (m[0, 1] + m[1, 0]) / s
+            z = (m[0, 2] + m[2, 0]) / s
+        elif m[1, 1] > m[2, 2]:
+            s = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+            w = (m[0, 2] - m[2, 0]) / s
+            x = (m[0, 1] + m[1, 0]) / s
+            y = 0.25 * s
+            z = (m[1, 2] + m[2, 1]) / s
+        else:
+            s = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+            w = (m[1, 0] - m[0, 1]) / s
+            x = (m[0, 2] + m[2, 0]) / s
+            y = (m[1, 2] + m[2, 1]) / s
+            z = 0.25 * s
+    return float(w), float(x), float(y), float(z)
+
+
+def _remove_prim_if_exists(stage: Any, prim_path: str) -> None:
+    prim = stage.GetPrimAtPath(prim_path)
+    if prim and prim.IsValid():
+        stage.RemovePrim(prim_path)
+
+
+def _create_fixed_carry_joint(
+    *,
+    stage: Any,
+    joint_path: str,
+    ee_prim_path: str,
+    obj_prim_path: str,
+    z_offset_m: float = 0.02,
+) -> None:
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
+
+    ee_prim = stage.GetPrimAtPath(ee_prim_path)
+    obj_prim = stage.GetPrimAtPath(obj_prim_path)
+    if not (ee_prim and ee_prim.IsValid() and obj_prim and obj_prim.IsValid()):
+        raise RuntimeError(f"Cannot create carry joint; invalid prims ee={ee_prim_path} obj={obj_prim_path}")
+
+    ee_xf = UsdGeom.Xformable(ee_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    obj_xf = UsdGeom.Xformable(obj_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    ee_m = np.array([[float(ee_xf[i][j]) for j in range(4)] for i in range(4)], dtype=np.float64)
+    obj_m = np.array([[float(obj_xf[i][j]) for j in range(4)] for i in range(4)], dtype=np.float64)
+    rel = np.linalg.inv(ee_m) @ obj_m
+    rel[2, 3] += float(z_offset_m)
+    qw, qx, qy, qz = _quat_wxyz_from_rot(rel[:3, :3])
+
+    constraints_root = stage.GetPrimAtPath("/World/CarryConstraints")
+    if not (constraints_root and constraints_root.IsValid()):
+        UsdGeom.Scope.Define(stage, "/World/CarryConstraints")
+
+    _remove_prim_if_exists(stage, joint_path)
+    joint = UsdPhysics.FixedJoint.Define(stage, joint_path)
+    joint.CreateBody0Rel().SetTargets([Sdf.Path(ee_prim_path)])
+    joint.CreateBody1Rel().SetTargets([Sdf.Path(obj_prim_path)])
+    joint.CreateLocalPos0Attr().Set(Gf.Vec3f(float(rel[0, 3]), float(rel[1, 3]), float(rel[2, 3])))
+    joint.CreateLocalRot0Attr().Set(Gf.Quatf(float(qw), Gf.Vec3f(float(qx), float(qy), float(qz))))
+    joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    joint.CreateLocalRot1Attr().Set(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
 
 
 def _read_obj_bounds(obj_path: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -899,14 +1201,7 @@ def _apply_joint_targets(dc, art, dof_names: List[str], arm_q: np.ndarray, gripp
     # - Arm joints: first 7 dofs whose name contains 'joint' and not 'finger'/'wheel'.
     # - Gripper: dofs with 'finger' in name (set to width/2)
     # If we can't detect, fallback to first 7 and last 2.
-    arm_idx = [i for i, n in enumerate(dof_names) if ("joint" in (n or "").lower()) and ("finger" not in (n or "").lower()) and ("wheel" not in (n or "").lower())]
-    if len(arm_idx) < 7:
-        arm_idx = list(range(min(7, len(dof_names))))
-    arm_idx = arm_idx[:7]
-
-    finger_idx = [i for i, n in enumerate(dof_names) if "finger" in (n or "").lower()]
-    if not finger_idx and len(dof_names) >= 2:
-        finger_idx = [len(dof_names) - 2, len(dof_names) - 1]
+    arm_idx, finger_idx = _resolve_dof_groups(dof_names)
 
     # Build full target vector.
     targets = np.zeros((len(dof_names),), dtype=np.float32)
@@ -923,7 +1218,7 @@ def _apply_joint_targets(dc, art, dof_names: List[str], arm_q: np.ndarray, gripp
             targets[i] = float(arm_q[j])
 
     finger_pos = float(max(gripper_width, 0.0) * 0.5)
-    for i in finger_idx[:2]:
+    for i in finger_idx:
         targets[i] = finger_pos
 
     dc.set_articulation_dof_position_targets(art, targets)
@@ -1105,7 +1400,7 @@ def main() -> None:
         "--strict-sensors",
         dest="strict_sensors",
         action="store_true",
-        default=_env_bool("SAGE_STRICT_SENSORS", default=False),
+        default=_env_bool("SAGE_STRICT_SENSORS", default=True),
     )
     parser.add_argument("--no-strict-sensors", dest="strict_sensors", action="store_false")
     parser.add_argument("--render_warmup_frames", type=int, default=int(os.getenv("SAGE_RENDER_WARMUP_FRAMES", "100")))
@@ -1133,6 +1428,21 @@ def main() -> None:
     )
     parser.add_argument("--no-export-demo-videos", dest="export_demo_videos", action="store_false")
     parser.add_argument("--quality-report-path", default=os.getenv("SAGE_QUALITY_REPORT_PATH", ""))
+    parser.add_argument(
+        "--carry-mode",
+        choices=["physics", "kinematic", "auto"],
+        default=os.getenv("SAGE_CARRY_MODE", "physics"),
+    )
+    parser.add_argument(
+        "--min-gripper-contact-force",
+        type=float,
+        default=float(os.getenv("SAGE_MIN_GRIPPER_CONTACT_FORCE", "0.5")),
+    )
+    parser.add_argument(
+        "--gripper-closed-width-threshold",
+        type=float,
+        default=float(os.getenv("SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD", "0.01")),
+    )
     parser.add_argument("--dome_light_intensity", type=float, default=float(os.getenv("SAGE_DOME_LIGHT_INTENSITY", "3000")))
     parser.add_argument("--sun_light_intensity", type=float, default=float(os.getenv("SAGE_SUN_LIGHT_INTENSITY", "600")))
     parser.add_argument(
@@ -1174,7 +1484,17 @@ def main() -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_report = _prepare_stage7_output_dir(output_dir)
+    if int(cleanup_report.get("removed_count", 0)) > 0:
+        _log(
+            f"Cleared {cleanup_report['removed_count']} stale Stage 7 artifacts from {output_dir} "
+            "before collection"
+        )
     quality_report_path = Path(args.quality_report_path) if args.quality_report_path else (output_dir / "quality_report.json")
+    if quality_report_path.exists() and quality_report_path.is_file():
+        quality_report_path.unlink()
+        cleanup_report["removed_count"] = int(cleanup_report.get("removed_count", 0)) + 1
+        cleanup_report.setdefault("removed_paths", []).append(str(quality_report_path))
     artifact_manifest_path = output_dir / "artifact_manifest.json"
     final_h5_path = output_dir / "dataset.hdf5"
     h5_tmp_path = output_dir / "dataset.tmp.hdf5"
@@ -1532,6 +1852,8 @@ def main() -> None:
             f"export_scene_usd={args.export_scene_usd} export_demo_videos={args.export_demo_videos} "
             f"quality_report_path={quality_report_path} "
             f"dome_light={args.dome_light_intensity} sun_light={args.sun_light_intensity} "
+            f"carry_mode={args.carry_mode} min_gripper_contact_force={args.min_gripper_contact_force} "
+            f"gripper_closed_width_threshold={args.gripper_closed_width_threshold} "
             f"sensor_policy={sensor_failure_policy} "
             f"enforce_bundle_strict={os.environ.get('SAGE_ENFORCE_BUNDLE_STRICT', '1')} "
             f"remote_assets={os.environ.get('SAGE_ALLOW_REMOTE_ISAAC_ASSETS', '0')}"
@@ -1545,10 +1867,11 @@ def main() -> None:
             by_variant.setdefault(str(d["variant_layout_json"]), []).append(d)
 
         demo_global_idx = 0
-        exported_scene_paths: List[Path] = []
         warmup_sensor_checks: List[Dict[str, Any]] = []
+        expected_scene_names: List[str] = []
         for variant_json, demo_list in by_variant.items():
             variant_path = _resolve_variant_json_path(variant_json, layout_dir=layout_dir)
+            expected_scene_names.append(f"scene_{variant_path.stem}.usd")
             layout_payload = _load_json(variant_path)
             room = _extract_room_dict(layout_payload, demo=demo_list[0], variant_path=variant_path)
             if args.strict and not (room.get("objects") or []):
@@ -1562,12 +1885,28 @@ def main() -> None:
             ee_prim_path = find_end_effector_prim(stage, robot_articulation)
             if args.strict and ee_prim_path is None:
                 _log("WARNING: could not auto-detect end-effector prim; object carry will be disabled.")
+            if args.strict and str(args.carry_mode) == "physics" and ee_prim_path is None:
+                raise RuntimeError(
+                    "carry_mode=physics requires a valid end-effector prim, but none was discovered"
+                )
 
             annotators: Dict[str, Any] = {}
             render_products: Dict[str, Any] = {}
             depth_name = ""
             if args.enable_cameras:
                 annotators, render_products, _render_paths, depth_name = setup_cameras(room)
+
+            # Store base camera positions for domain randomization reset.
+            _room_dims = room.get("dimensions", {}) or {}
+            _rw = float(_room_dims.get("width", 6.0))
+            _rl = float(_room_dims.get("length", 6.0))
+            _rh = float(_room_dims.get("height", 3.0))
+            _cam_a_base_pos = np.array([_rw * 0.5, 0.5, _rh * 0.85], dtype=np.float64)
+            _cam_b_base_pos = np.array([_rw * 0.5, _rl - 0.5, _rh * 0.85], dtype=np.float64)
+            _center_base = np.array([_rw * 0.5, _rl * 0.5, 0.8], dtype=np.float64)
+            _domain_rand_enabled = _env_bool("SAGE_DOMAIN_RAND", default=False)
+            # Use stable SHA-derived seed (Python's hash() is process-randomized).
+            _domain_rand_seed = int(hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:8], 16)
 
             # Add a simple ground plane (avoids Nucleus asset download).
             from pxr import UsdPhysics
@@ -1611,9 +1950,19 @@ def main() -> None:
                             cameras_manifest["depth_fallback_reason"] = "headless_rtx_failure"
                             _log(f"Switched to rasterized 'depth' annotator successfully")
                         except Exception as fb_err:
-                            _log(f"WARNING: Rasterized depth fallback also failed: {fb_err}")
+                            msg = (
+                                "Rasterized depth fallback also failed. "
+                                "This runtime/GPU mode cannot provide valid depth capture "
+                                f"(original={depth_name}, error={fb_err})"
+                            )
+                            if bool(args.strict_sensors) or sensor_failure_policy == "fail":
+                                raise RuntimeError(msg)
+                            _log(f"WARNING: {msg}")
                 except Exception as probe_err:
-                    _log(f"WARNING: Depth probe failed: {probe_err}")
+                    msg = f"Depth probe failed: {probe_err}"
+                    if bool(args.strict_sensors) or sensor_failure_policy == "fail":
+                        raise RuntimeError(msg)
+                    _log(f"WARNING: {msg}")
 
             if args.enable_cameras:
                 try:
@@ -1664,7 +2013,6 @@ def main() -> None:
                         raise RuntimeError("scene USD export did not create a file")
                     if not _validate_usd_loadable(scene_usd_path):
                         raise RuntimeError(f"scene USD is not loadable: {scene_usd_path}")
-                    exported_scene_paths.append(scene_usd_path)
                     _log(f"Exported assembled scene to {scene_usd_path}")
                 except Exception as e:
                     msg = f"Failed to export scene USD: {e}"
@@ -1677,6 +2025,29 @@ def main() -> None:
             for demo in demo_list:
                 demo_idx = int(demo["demo_idx"])
                 _log(f"Capturing demo {demo_idx} for variant {variant_path.name}")
+
+                # Per-demo domain randomization (lighting + camera jitter).
+                lighting_jitter_info: Optional[Dict[str, Any]] = None
+                camera_jitter_info: Optional[Dict[str, Any]] = None
+                if _domain_rand_enabled:
+                    lighting_jitter_info = _jitter_lighting_for_demo(
+                        stage,
+                        dome_base=float(args.dome_light_intensity),
+                        sun_base=float(args.sun_light_intensity),
+                        demo_idx=demo_idx,
+                        base_seed=_domain_rand_seed,
+                    )
+                    _log(f"  lighting jitter: dome={lighting_jitter_info['dome_intensity']:.0f} sun={lighting_jitter_info['sun_intensity']:.0f} elev={lighting_jitter_info['sun_elevation_deg']:.1f}deg")
+                    camera_jitter_info = _jitter_cameras_for_demo(
+                        stage,
+                        cam_a_base_pos=_cam_a_base_pos,
+                        cam_b_base_pos=_cam_b_base_pos,
+                        center_base=_center_base,
+                        demo_idx=demo_idx,
+                        base_seed=_domain_rand_seed,
+                    )
+                    _log(f"  camera jitter: a={camera_jitter_info['cam_a_offset']} b={camera_jitter_info['cam_b_offset']}")
+
                 base = np.asarray(demo["trajectory_base"], dtype=np.float32)
                 arm = np.asarray(demo["trajectory_arm"], dtype=np.float32)
                 grip = np.asarray(demo["trajectory_gripper"], dtype=np.float32).reshape(-1)
@@ -1684,6 +2055,9 @@ def main() -> None:
                 pick_source_id = str(demo.get("pick_object", {}).get("source_id", ""))
                 pick_prim_path = source_to_prim.get(pick_source_id) if pick_source_id else None
                 carrying = False
+                carry_mode_active = ""
+                carry_modes_used: List[str] = []
+                carry_joint_path = f"/World/CarryConstraints/demo_{demo_global_idx:04d}_joint"
                 carry_R = None  # rotation+scale to preserve object size while carrying
 
                 if args.strict and (base.shape[0] == 0 or arm.shape[0] == 0):
@@ -1692,6 +2066,13 @@ def main() -> None:
                     raise RuntimeError(f"Trajectory length mismatch for demo {demo_idx}: base={base.shape[0]} arm={arm.shape[0]}")
 
                 T = int(base.shape[0])
+                arm_idx, finger_idx = _resolve_dof_groups(dof_names)
+                arm_width = int(arm.shape[1]) if (arm.ndim == 2 and int(arm.shape[1]) > 0) else max(1, len(arm_idx))
+                arm_vel_hist = np.zeros((T, arm_width), dtype=np.float32)
+                arm_eff_hist = np.zeros((T, arm_width), dtype=np.float32)
+                gripper_force_hist = np.zeros((T, 1), dtype=np.float32)
+                gripper_contact_hist = np.zeros((T, 1), dtype=np.float32)
+                dynamics_source_counts: Dict[str, int] = {}
 
                 actions = np.concatenate([arm, base, grip.reshape(T, 1)], axis=1).astype(np.float32)
                 states = actions.copy()
@@ -1825,6 +2206,7 @@ def main() -> None:
                 last_a_d = None
                 last_b_rgb = None
                 last_b_d = None
+                sensor_frame_failures = 0
                 check_t = max(0, min(int(args.sensor_check_frame), T - 1))
                 sensor_qc: Dict[str, Any] = {
                     "enabled": bool(args.enable_cameras),
@@ -1849,18 +2231,54 @@ def main() -> None:
                     # Step once so robot joints update.
                     world.step(render=True)
 
-                    # Kinematic carry: when gripper closes during grasp/lift/navigate, move pick object with EE.
+                    # Carry logic for object transport:
+                    # - physics: attach a fixed joint between EE and object
+                    # - kinematic: legacy _apply_xform fallback
                     if ee_prim_path and pick_prim_path:
                         label = labels[t] if t < len(labels) else ""
                         g = float(grip[t])
-                        if (label in {"grasp", "lift", "navigate", "approach_place", "place", "retreat_place"}) and g <= 0.005:
-                            carrying = True
-                        if label == "place" and g >= 0.02:
-                            carrying = False
+                        close_thresh = float(args.gripper_closed_width_threshold)
+                        carry_labels = {"grasp", "lift", "navigate", "approach_place", "place", "retreat_place"}
+                        should_grasp = (label in carry_labels) and (g <= close_thresh)
+                        should_release = (label == "place") and (g >= max(0.02, close_thresh * 2.0))
 
-                        if carrying:
+                        if should_grasp and not carrying:
+                            requested_mode = str(args.carry_mode)
+                            if requested_mode in {"physics", "auto"}:
+                                try:
+                                    _create_fixed_carry_joint(
+                                        stage=stage,
+                                        joint_path=carry_joint_path,
+                                        ee_prim_path=ee_prim_path,
+                                        obj_prim_path=pick_prim_path,
+                                        z_offset_m=0.02,
+                                    )
+                                    carrying = True
+                                    carry_mode_active = "physics_joint"
+                                except Exception as carry_exc:
+                                    msg = (
+                                        f"Failed to enable physics carry joint for demo={demo_idx} frame={t}: {carry_exc}"
+                                    )
+                                    if requested_mode == "physics":
+                                        raise RuntimeError(msg)
+                                    _log(f"WARNING: {msg}; falling back to kinematic carry")
+                                    carrying = True
+                                    carry_mode_active = "kinematic"
+                            else:
+                                carrying = True
+                                carry_mode_active = "kinematic"
+                            if carry_mode_active and carry_mode_active not in carry_modes_used:
+                                carry_modes_used.append(carry_mode_active)
+
+                        if should_release and carrying:
+                            if carry_mode_active == "physics_joint":
+                                _remove_prim_if_exists(stage, carry_joint_path)
+                            carrying = False
+                            carry_mode_active = ""
+
+                        if carrying and carry_mode_active == "kinematic":
                             try:
-                                from pxr import Usd, UsdGeom, Gf
+                                from pxr import Usd, UsdGeom
 
                                 ee_prim = stage.GetPrimAtPath(ee_prim_path)
                                 obj_prim = stage.GetPrimAtPath(pick_prim_path)
@@ -1875,18 +2293,64 @@ def main() -> None:
                                     _apply_xform(stage, pick_prim_path, M)
                                     # Step again so render products see updated object pose this frame.
                                     world.step(render=True)
-                            except Exception:
-                                pass
+                            except Exception as carry_exc:
+                                if args.strict and str(args.carry_mode) in {"kinematic", "auto"}:
+                                    raise RuntimeError(
+                                        f"Kinematic carry failed for demo={demo_idx} frame={t}: {carry_exc}"
+                                    )
+                                _log(f"WARNING: kinematic carry failed for demo={demo_idx} frame={t}: {carry_exc}")
+
+                    dyn_obs = _read_robot_dof_observation(dc, art, dof_names, arm_idx, finger_idx)
+                    dyn_source = str(dyn_obs.get("source", "unknown"))
+                    dynamics_source_counts[dyn_source] = int(dynamics_source_counts.get(dyn_source, 0)) + 1
+                    arm_vel = np.asarray(dyn_obs.get("arm_vel", []), dtype=np.float32).reshape(-1)
+                    arm_eff = np.asarray(dyn_obs.get("arm_effort", []), dtype=np.float32).reshape(-1)
+                    if arm_vel.size > 0:
+                        w = min(int(arm_vel.size), int(arm_width))
+                        arm_vel_hist[t, :w] = arm_vel[:w]
+                    if arm_eff.size > 0:
+                        w = min(int(arm_eff.size), int(arm_width))
+                        arm_eff_hist[t, :w] = arm_eff[:w]
+                    grip_force = float(dyn_obs.get("gripper_force", 0.0))
+                    gripper_force_hist[t, 0] = grip_force
+                    contact_from_force = (
+                        grip_force >= float(args.min_gripper_contact_force)
+                        and float(grip[t]) <= float(args.gripper_closed_width_threshold)
+                    )
+                    contact_from_carry = bool(carrying)
+                    gripper_contact_hist[t, 0] = 1.0 if (contact_from_force or contact_from_carry) else 0.0
 
                     if args.enable_cameras:
-                        a_rgb_np, a_d_np, a_d_raw, b_rgb_np, b_d_np, b_d_raw = _capture_camera_frames(
-                            annotators=annotators,
-                            world=world,
-                            max_extra_steps=int(args.camera_retry_steps),
-                            width=width,
-                            height=height,
-                            min_valid_depth_px=int(args.min_valid_depth_px),
-                        )
+                        frame_capture_repeated = False
+                        frame_capture_error = ""
+                        try:
+                            a_rgb_np, a_d_np, a_d_raw, b_rgb_np, b_d_np, b_d_raw = _capture_camera_frames(
+                                annotators=annotators,
+                                world=world,
+                                max_extra_steps=int(args.camera_retry_steps),
+                                width=width,
+                                height=height,
+                                min_valid_depth_px=int(args.min_valid_depth_px),
+                            )
+                        except RuntimeError as sensor_exc:
+                            sensor_frame_failures += 1
+                            frame_capture_repeated = True
+                            frame_capture_error = str(sensor_exc)
+                            _log(
+                                f"WARNING: sensor capture failed demo={demo_idx} frame={t}: "
+                                f"{sensor_exc}; repeating previous frame "
+                                f"(failures={sensor_frame_failures}/{T})"
+                            )
+                            if last_a_rgb is not None:
+                                a_rgb_np, a_d_np = last_a_rgb, last_a_d
+                                b_rgb_np, b_d_np = last_b_rgb, last_b_d
+                            else:
+                                a_rgb_np = np.zeros((height, width, 3), dtype=np.uint8)
+                                a_d_np = np.zeros((height, width), dtype=np.float32)
+                                b_rgb_np = np.zeros((height, width, 3), dtype=np.uint8)
+                                b_d_np = np.zeros((height, width), dtype=np.float32)
+                            a_d_raw = np.zeros((height, width), dtype=np.float32)
+                            b_d_raw = np.zeros((height, width), dtype=np.float32)
 
                         cam_dsets["agentview_rgb"][t] = a_rgb_np
                         cam_dsets["agentview_depth"][t] = a_d_np
@@ -1916,17 +2380,43 @@ def main() -> None:
                             min_depth_range_m=float(args.min_depth_range_m),
                         )
                         qc["frame_idx"] = int(t)
+                        qc["capture_repeated"] = bool(frame_capture_repeated)
+                        if frame_capture_error:
+                            qc["capture_error"] = frame_capture_error
                         frame_qc_records.append(qc)
                         if t == check_t:
                             sensor_qc["check_frame_qc"] = qc
 
                         if qc["status"] != "pass":
                             reason = f"frame={t} failures={','.join(qc.get('failures', []))}"
-                            sensor_qc["failures"].append(reason)
-                            msg = f"Sensor QC failed for demo {demo_idx}: {reason}"
-                            if bool(args.strict_sensors) or sensor_failure_policy == "fail":
-                                raise RuntimeError(msg)
-                            _log(f"WARNING: {msg}")
+                            if bool(frame_capture_repeated):
+                                sensor_qc.setdefault("warnings", []).append(
+                                    f"frame={t} repeated_capture:{frame_capture_error or 'capture_failed'}"
+                                )
+                            else:
+                                sensor_qc["failures"].append(reason)
+                                msg = f"Sensor QC failed for demo {demo_idx}: {reason}"
+                                if bool(args.strict_sensors) or sensor_failure_policy == "fail":
+                                    raise RuntimeError(msg)
+                                _log(f"WARNING: {msg}")
+
+                if carry_mode_active == "physics_joint":
+                    _remove_prim_if_exists(stage, carry_joint_path)
+                    carry_mode_active = ""
+                    carrying = False
+
+                # Check sensor frame failure ratio for this demo.
+                if sensor_frame_failures > 0:
+                    failure_ratio = sensor_frame_failures / max(1, T)
+                    if failure_ratio > 0.5:
+                        raise RuntimeError(
+                            f"Demo {demo_idx} unsalvageable: {sensor_frame_failures}/{T} "
+                            f"({failure_ratio:.0%}) sensor frames failed"
+                        )
+                    _log(
+                        f"Demo {demo_idx}: {sensor_frame_failures}/{T} "
+                        f"({failure_ratio:.1%}) sensor frames repeated from previous frame"
+                    )
 
                 if args.enable_cameras:
                     # Last next_obs repeats last obs.
@@ -1959,6 +2449,7 @@ def main() -> None:
                             {
                                 "status": "pass" if not sensor_qc["failures"] else "fail",
                                 "frames_checked": int(len(frame_qc_records)),
+                                "repeated_frames": int(sensor_frame_failures),
                                 "depth_finite_ratio_min": float(min(depth_ratios)),
                                 "depth_finite_ratio_mean": float(np.mean(depth_ratios)),
                                 "rgb_std_min": float(min(rgb_stds)),
@@ -1968,21 +2459,65 @@ def main() -> None:
                             }
                         )
 
+                # Additional dynamics/contact observations (non-breaking extra keys).
+                obs_grp.create_dataset("robot_joint_vel", data=arm_vel_hist.astype(np.float32), compression="gzip", compression_opts=4)
+                obs_grp.create_dataset("robot_joint_effort", data=arm_eff_hist.astype(np.float32), compression="gzip", compression_opts=4)
+                obs_grp.create_dataset("gripper_force", data=gripper_force_hist.astype(np.float32), compression="gzip", compression_opts=4)
+                obs_grp.create_dataset("gripper_contact", data=gripper_contact_hist.astype(np.float32), compression="gzip", compression_opts=4)
+
+                next_grp.create_dataset(
+                    "robot_joint_vel",
+                    data=np.concatenate([arm_vel_hist[1:], arm_vel_hist[-1:]], axis=0).astype(np.float32),
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                next_grp.create_dataset(
+                    "robot_joint_effort",
+                    data=np.concatenate([arm_eff_hist[1:], arm_eff_hist[-1:]], axis=0).astype(np.float32),
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                next_grp.create_dataset(
+                    "gripper_force",
+                    data=np.concatenate([gripper_force_hist[1:], gripper_force_hist[-1:]], axis=0).astype(np.float32),
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                next_grp.create_dataset(
+                    "gripper_contact",
+                    data=np.concatenate([gripper_contact_hist[1:], gripper_contact_hist[-1:]], axis=0).astype(np.float32),
+                    compression="gzip",
+                    compression_opts=4,
+                )
+
+                sensor_qc["carry_mode_requested"] = str(args.carry_mode)
+                sensor_qc["carry_modes_used"] = carry_modes_used
+                sensor_qc["dynamics"] = {
+                    "joint_effort_abs_max": float(np.max(np.abs(arm_eff_hist))) if arm_eff_hist.size else 0.0,
+                    "joint_effort_abs_mean": float(np.mean(np.abs(arm_eff_hist))) if arm_eff_hist.size else 0.0,
+                    "gripper_force_max": float(np.max(gripper_force_hist)) if gripper_force_hist.size else 0.0,
+                    "gripper_contact_ratio": float(np.mean(gripper_contact_hist)) if gripper_contact_hist.size else 0.0,
+                    "sources": dynamics_source_counts,
+                }
+
                 # attrs
                 grp.attrs["layout_id"] = layout_id
                 grp.attrs["variant_layout_json"] = str(variant_path)
                 grp.attrs["pick_object_type"] = str(demo.get("pick_object", {}).get("type", ""))
                 grp.attrs["place_surface_type"] = str(demo.get("place_surface", {}).get("type", ""))
 
-                demo_metadata["demos"].append(
-                    {
-                        "demo_name": demo_name,
-                        "demo_idx": demo_idx,
-                        "num_steps": T,
-                        "variant_layout_json": str(variant_path),
-                        "sensor_qc": sensor_qc,
-                    }
-                )
+                demo_meta_entry: Dict[str, Any] = {
+                    "demo_name": demo_name,
+                    "demo_idx": demo_idx,
+                    "num_steps": T,
+                    "variant_layout_json": str(variant_path),
+                    "sensor_qc": sensor_qc,
+                }
+                if lighting_jitter_info is not None:
+                    demo_meta_entry["lighting_jitter"] = lighting_jitter_info
+                if camera_jitter_info is not None:
+                    demo_meta_entry["camera_jitter"] = camera_jitter_info
+                demo_metadata["demos"].append(demo_meta_entry)
                 step_decomp["demos"].append(
                     {
                         "demo_name": demo_name,
@@ -1991,6 +2526,17 @@ def main() -> None:
                         "phase_labels": sorted(set(labels)),
                     }
                 )
+
+                # Reset lighting + cameras to base values after per-demo jitter
+                # to prevent cumulative drift between demos.
+                if _domain_rand_enabled:
+                    _add_default_lighting(
+                        stage,
+                        dome_intensity=float(args.dome_light_intensity),
+                        distant_intensity=float(args.sun_light_intensity),
+                    )
+                    _define_camera(stage, "/World/Cameras/agentview", pos=_cam_a_base_pos, look_at=_center_base)
+                    _define_camera(stage, "/World/Cameras/agentview_2", pos=_cam_b_base_pos, look_at=_center_base)
 
                 demo_global_idx += 1
                 h5.flush()
@@ -2026,6 +2572,16 @@ def main() -> None:
             for q in demo_qc_records
             if q.get("enabled")
         ]
+        gripper_contact_ratio_values = [
+            float((q.get("dynamics") or {}).get("gripper_contact_ratio", 0.0))
+            for q in demo_qc_records
+            if isinstance(q, dict)
+        ]
+        joint_effort_abs_max_values = [
+            float((q.get("dynamics") or {}).get("joint_effort_abs_max", 0.0))
+            for q in demo_qc_records
+            if isinstance(q, dict)
+        ]
         failed_demos = [
             {
                 "demo_idx": int(d.get("demo_idx", -1)),
@@ -2041,6 +2597,8 @@ def main() -> None:
 
         run_depth_finite_ratio = float(min(depth_finite_values)) if depth_finite_values else 0.0
         run_rgb_std = float(min(rgb_std_values)) if rgb_std_values else 0.0
+        run_gripper_contact_ratio = float(np.mean(gripper_contact_ratio_values)) if gripper_contact_ratio_values else 0.0
+        run_joint_effort_abs_max = float(max(joint_effort_abs_max_values)) if joint_effort_abs_max_values else 0.0
 
         metadata_grp = h5.create_group("metadata")
         prov_grp = metadata_grp.create_group("provenance")
@@ -2048,6 +2606,8 @@ def main() -> None:
         quality_grp = metadata_grp.create_group("quality")
         _write_root_scalar(quality_grp, "depth_finite_ratio", run_depth_finite_ratio)
         _write_root_scalar(quality_grp, "rgb_std", run_rgb_std)
+        _write_root_scalar(quality_grp, "gripper_contact_ratio", run_gripper_contact_ratio)
+        _write_root_scalar(quality_grp, "joint_effort_abs_max", run_joint_effort_abs_max)
         _write_root_scalar(quality_grp, "strict_sensors", bool(args.strict_sensors))
 
         h5.flush()
@@ -2059,17 +2619,38 @@ def main() -> None:
         if args.enable_cameras and bool(args.export_demo_videos):
             video_report = _export_demo_videos(final_h5_path, output_dir, demo_global_idx)
 
-        scene_paths_serialized = [str(p) for p in exported_scene_paths if p.exists()]
+        expected_scene_set = set(expected_scene_names if bool(args.export_scene_usd) else [])
+        actual_scene_paths = sorted(output_dir.glob("scene_*.usd"))
+        actual_scene_set = {p.name for p in actual_scene_paths}
         videos_dir = output_dir / "videos"
         video_files = sorted(videos_dir.glob("demo_*.mp4")) if videos_dir.exists() else []
+        video_name_set = {p.name for p in video_files}
+        expected_video_set = {f"demo_{i}.mp4" for i in range(int(demo_global_idx))}
+        missing_videos = sorted(expected_video_set - video_name_set)
+        unexpected_videos = sorted(video_name_set - expected_video_set)
+        missing_scenes = sorted(expected_scene_set - actual_scene_set)
+        unexpected_scenes = sorted(actual_scene_set - expected_scene_set) if expected_scene_set else []
+
+        scene_paths_serialized = [str(p) for p in actual_scene_paths]
+        artifact_contract_issues: List[str] = []
         if args.enable_cameras and bool(args.export_demo_videos) and bool(args.strict or args.strict_sensors):
-            if len(video_files) < int(demo_global_idx):
-                raise RuntimeError(
-                    f"Missing demo videos: expected={demo_global_idx} found={len(video_files)} in {videos_dir}"
+            if missing_videos or unexpected_videos:
+                artifact_contract_issues.append(
+                    f"video_set_mismatch missing={missing_videos} unexpected={unexpected_videos}"
+                )
+            if len(video_files) != int(demo_global_idx):
+                artifact_contract_issues.append(
+                    f"video_count_mismatch expected={demo_global_idx} found={len(video_files)} in {videos_dir}"
                 )
         if bool(args.export_scene_usd) and bool(args.strict):
+            if missing_scenes or unexpected_scenes:
+                artifact_contract_issues.append(
+                    f"scene_set_mismatch missing={missing_scenes} unexpected={unexpected_scenes}"
+                )
             if len(scene_paths_serialized) < 1:
-                raise RuntimeError("No scene_*.usd was exported in strict mode")
+                artifact_contract_issues.append("No scene_*.usd was exported in strict mode")
+        if artifact_contract_issues and bool(args.strict or args.strict_sensors):
+            raise RuntimeError("; ".join(artifact_contract_issues))
 
         quality_report: Dict[str, Any] = {
             "run_id": run_id,
@@ -2086,6 +2667,8 @@ def main() -> None:
                 "max_rgb_saturation_ratio": float(args.max_rgb_saturation_ratio),
                 "min_depth_std": float(args.sensor_min_depth_std),
                 "min_depth_range_m": float(args.min_depth_range_m),
+                "min_gripper_contact_force": float(args.min_gripper_contact_force),
+                "gripper_closed_width_threshold": float(args.gripper_closed_width_threshold),
             },
             "num_demos": int(demo_global_idx),
             "warmup_sensor_checks": warmup_sensor_checks,
@@ -2094,11 +2677,32 @@ def main() -> None:
             "summary": {
                 "depth_finite_ratio_min": run_depth_finite_ratio,
                 "rgb_std_min": run_rgb_std,
+                "gripper_contact_ratio_mean": run_gripper_contact_ratio,
+                "joint_effort_abs_max": run_joint_effort_abs_max,
+            },
+            "stale_cleanup": cleanup_report,
+            "artifact_contract": {
+                "expected_video_names": sorted(expected_video_set),
+                "actual_video_names": sorted(video_name_set),
+                "missing_videos": missing_videos,
+                "unexpected_videos": unexpected_videos,
+                "expected_scene_names": sorted(expected_scene_set),
+                "actual_scene_names": sorted(actual_scene_set),
+                "missing_scenes": missing_scenes,
+                "unexpected_scenes": unexpected_scenes,
             },
             "scene_exports": scene_paths_serialized,
             "video_report": video_report,
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+
+        demo_metadata_path = output_dir / "demo_metadata.json"
+        step_decomp_path = output_dir / "step_decomposition.json"
+        capture_manifest_path = output_dir / "capture_manifest.json"
+        _write_json(demo_metadata_path, demo_metadata)
+        _write_json(step_decomp_path, step_decomp)
+        _write_json(capture_manifest_path, cameras_manifest)
+        _write_json(quality_report_path, quality_report)
 
         artifact_manifest: Dict[str, Any] = {
             "run_id": run_id,
@@ -2112,19 +2716,23 @@ def main() -> None:
                 "videos": int(len(video_files)),
             },
             "quality_report_path": str(quality_report_path),
+            "stale_cleanup": cleanup_report,
         }
-        if final_h5_path.exists():
-            artifact_manifest["files"].append(_artifact_entry(final_h5_path, root=output_dir))
+        core_paths = [
+            final_h5_path,
+            demo_metadata_path,
+            step_decomp_path,
+            capture_manifest_path,
+            quality_report_path,
+        ]
+        for path in core_paths:
+            if path.exists():
+                artifact_manifest["files"].append(_artifact_entry(path, root=output_dir))
         for scene_path_str in scene_paths_serialized:
             scene_path = Path(scene_path_str)
             artifact_manifest["files"].append(_artifact_entry(scene_path, root=output_dir))
         for mp4 in video_files:
             artifact_manifest["files"].append(_artifact_entry(mp4, root=output_dir))
-
-        _write_json(output_dir / "demo_metadata.json", demo_metadata)
-        _write_json(output_dir / "step_decomposition.json", step_decomp)
-        _write_json(output_dir / "capture_manifest.json", cameras_manifest)
-        _write_json(quality_report_path, quality_report)
         _write_json(artifact_manifest_path, artifact_manifest)
 
         _log(f"Wrote {demo_global_idx} demos to {final_h5_path}")
@@ -2147,6 +2755,7 @@ def main() -> None:
                 "layout_id": layout_id if "layout_id" in locals() else "",
                 "status": "error",
                 "error": str(exc),
+                "stale_cleanup": cleanup_report if "cleanup_report" in locals() else {},
                 "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
             _write_json(quality_report_path, fail_report)
