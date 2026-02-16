@@ -774,6 +774,48 @@ else:
 PYEOF
 fi
 
+# ── Patch 14: pose_aug_mm_from_layout_with_task.py — guard None base poses ─────
+log "Patch 14: pose_aug_mm_from_layout_with_task.py — guard None robot base positions"
+POSE_AUG_SCRIPT="${SAGE_DIR}/server/augment/pose_aug_mm_from_layout_with_task.py"
+if [[ -f "${POSE_AUG_SCRIPT}" ]]; then
+    python3 - "${POSE_AUG_SCRIPT}" <<'PYEOF'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+orig = text
+
+marker = "# BP_PATCH_POSE_AUG_SAFE_CPU"
+if marker in text:
+    print(f"  OK: pose_aug safe-cpu patch already present in {path}")
+    raise SystemExit(0)
+
+# The upstream script can return None for base poses in rare cases (e.g. no feasible
+# placement samples). Downstream code sometimes calls `.cpu()` on these values.
+pat = re.compile(
+    r"^(?P<indent>\\s*)(?P<var>robot_base_pos_(?:pick|place))\\s*=\\s*(?P=var)\\.cpu\\(\\)(?P<suffix>[^\\n]*)$",
+    re.MULTILINE,
+)
+
+def repl(m: re.Match[str]) -> str:
+    indent = m.group("indent")
+    var = m.group("var")
+    suffix = m.group("suffix")
+    # Preserve any chained operations after `.cpu()` (e.g. `.numpy()`).
+    return f"{indent}{var} = {var}.cpu(){suffix} if {var} is not None else None  {marker}"
+
+text = pat.sub(repl, text)
+
+if text != orig:
+    path.write_text(text)
+    print(f"  PATCHED: {path}")
+else:
+    print(f"  OK: no changes needed in {path}")
+PYEOF
+fi
+
 # ── Final: Validate syntax of all patched Python files ──────────────────────
 log "Validating patched file syntax..."
 _SAGE_PY="${WORKSPACE:-/workspace}/miniconda3/envs/sage/bin/python"
@@ -783,6 +825,7 @@ for _check_file in \
     "${SAGE_DIR}/server/layout.py" \
     "${SAGE_DIR}/server/layout_wo_robot.py" \
     "${SAGE_DIR}/server/vlm.py" \
+    "${SAGE_DIR}/server/augment/pose_aug_mm_from_layout_with_task.py" \
     "${SAGE_DIR}/client/client_generation_robot_task.py" \
     "${SAGE_DIR}/client/client_generation_room_desc.py" \
     "${SAGE_DIR}/client/client_generation_scene_aug.py"; do

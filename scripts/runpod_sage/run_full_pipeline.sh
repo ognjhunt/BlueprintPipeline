@@ -80,9 +80,41 @@ SAGE_QUALITY_PROFILE="${SAGE_QUALITY_PROFILE:-standard}"  # standard|strict
 SAGE_QUALITY_FALLBACK_ENABLED="${SAGE_QUALITY_FALLBACK_ENABLED:-1}"  # 1|0
 SAGE_QUALITY_MAX_ITERS="${SAGE_QUALITY_MAX_ITERS:-6}"
 POSE_AUG_NAME="${POSE_AUG_NAME:-pose_aug_0}"
+# Navigation robustness controls (Stage 4b pre-conditioning + retry).
+NAV_CORRIDOR_REPAIR="${NAV_CORRIDOR_REPAIR:-1}"                 # 1|0
+NAV_MIN_CORRIDOR_M="${NAV_MIN_CORRIDOR_M:-0.95}"                # meters
+NAV_MIN_CORRIDOR_RETRY_M="${NAV_MIN_CORRIDOR_RETRY_M:-1.10}"    # meters
+NAV_REPAIR_MAX_MOVES="${NAV_REPAIR_MAX_MOVES:-8}"               # objects
+# Hard robot-nav gate (pre-acceptance).
+NAV_GATE_ENABLED="${NAV_GATE_ENABLED:-1}"                       # 1|0
+NAV_GATE_HARD_FAIL="${NAV_GATE_HARD_FAIL:-1}"                   # 1|0
+NAV_GATE_GRID_RES_M="${NAV_GATE_GRID_RES_M:-0.05}"              # meters
+NAV_GATE_PICK_RADIUS_MIN_M="${NAV_GATE_PICK_RADIUS_MIN_M:-0.55}"# meters
+NAV_GATE_PICK_RADIUS_MAX_M="${NAV_GATE_PICK_RADIUS_MAX_M:-1.40}"# meters
+# SceneSmith critic-loop acceptance gate (pre-mesh, bounded retries).
+SCENESMITH_CRITIC_LOOP_ENABLED="${SCENESMITH_CRITIC_LOOP_ENABLED:-1}"             # 1|0
+SCENESMITH_CRITIC_MAX_ATTEMPTS="${SCENESMITH_CRITIC_MAX_ATTEMPTS:-4}"              # attempts
+SCENESMITH_CRITIC_REQUIRE_QUALITY_PASS="${SCENESMITH_CRITIC_REQUIRE_QUALITY_PASS:-1}"  # 1|0
+SCENESMITH_CRITIC_REQUIRE_SCORE="${SCENESMITH_CRITIC_REQUIRE_SCORE:-1}"            # 1|0
+SCENESMITH_CRITIC_REQUIRE_FAITHFULNESS="${SCENESMITH_CRITIC_REQUIRE_FAITHFULNESS:-1}"  # 1|0
+SCENESMITH_CRITIC_MIN_SCORE_0_10="${SCENESMITH_CRITIC_MIN_SCORE_0_10:-8.0}"
+SCENESMITH_CRITIC_MIN_SCORE_0_1="${SCENESMITH_CRITIC_MIN_SCORE_0_1:-0.80}"
+SCENESMITH_CRITIC_MIN_FAITHFULNESS="${SCENESMITH_CRITIC_MIN_FAITHFULNESS:-0.80}"
+SCENESMITH_CRITIC_SEED_STRIDE="${SCENESMITH_CRITIC_SEED_STRIDE:-7919}"
+SCENESMITH_CRITIC_ALLOW_LAST_ATTEMPT_ON_FAIL="${SCENESMITH_CRITIC_ALLOW_LAST_ATTEMPT_ON_FAIL:-0}"  # 1|0
+# SAGE scene acceptance retry loop (pre-Stage4 quality+nav gate on Stage 1-3 output).
+SAGE_STAGE13_CRITIC_LOOP_ENABLED="${SAGE_STAGE13_CRITIC_LOOP_ENABLED:-1}"  # 1|0
+SAGE_STAGE13_MAX_ATTEMPTS="${SAGE_STAGE13_MAX_ATTEMPTS:-3}"                # attempts
+SAGE_STAGE13_CRITIC_MIN_TOTAL_0_10="${SAGE_STAGE13_CRITIC_MIN_TOTAL_0_10:-8.0}"
+SAGE_STAGE13_CRITIC_MIN_FAITHFULNESS="${SAGE_STAGE13_CRITIC_MIN_FAITHFULNESS:-0.80}"
+SAGE_STAGE13_CRITIC_MAX_COLLISION_RATE="${SAGE_STAGE13_CRITIC_MAX_COLLISION_RATE:-0.08}"
 # NOTE: SAGE's physics MCP server starts Isaac Sim (noisy stdout). If enabled, ensure your MCP stdio stack
 # is patched to ignore non-JSON stdout and Isaac Sim can run headless. Default off for robustness.
 PHYSICS_CRITIC_ENABLED="${PHYSICS_CRITIC_ENABLED:-false}"
+
+# Resume from an existing results directory (skips stages 1-3 scene generation).
+# Set to an explicit layout id (e.g. layout_12345) or "latest".
+RESUME_LAYOUT_ID="${RESUME_LAYOUT_ID:-}"
 
 # Object cap (prevents runaway clutter that explodes SAM3D time).
 # If unset, choose a default by room type; set `SAGE_MAX_OBJECTS=0` to disable.
@@ -135,6 +167,9 @@ log "SAGE Full Pipeline (7 Stages + BP + Interactive)"
 log "=========================================="
 log "Scene source: ${SCENE_SOURCE}"
 log "Quality: ${SAGE_QUALITY_PROFILE} (fallback=${SAGE_QUALITY_FALLBACK_ENABLED}, iters=${SAGE_QUALITY_MAX_ITERS})"
+log "SceneSmith critic loop: enabled=${SCENESMITH_CRITIC_LOOP_ENABLED} attempts=${SCENESMITH_CRITIC_MAX_ATTEMPTS} qg=${SCENESMITH_CRITIC_REQUIRE_QUALITY_PASS} score=${SCENESMITH_CRITIC_REQUIRE_SCORE} faith=${SCENESMITH_CRITIC_REQUIRE_FAITHFULNESS}"
+log "SAGE Stage1-3 accept loop: enabled=${SAGE_STAGE13_CRITIC_LOOP_ENABLED} attempts=${SAGE_STAGE13_MAX_ATTEMPTS}"
+log "SAGE pre-Stage4 critic thresholds: total>=${SAGE_STAGE13_CRITIC_MIN_TOTAL_0_10}, faith>=${SAGE_STAGE13_CRITIC_MIN_FAITHFULNESS}, collision<=${SAGE_STAGE13_CRITIC_MAX_COLLISION_RATE}"
 log "Interactive: ${ENABLE_INTERACTIVE}"
 log "Room:  ${ROOM_TYPE}"
 log "Robot: ${ROBOT_TYPE}"
@@ -189,51 +224,29 @@ _ensure_sam3d_healthy() {
     return 1
 }
 
-# ── SCENE GENERATION ───────────────────────────────────────────────────────
-if [[ "${SCENE_SOURCE}" == "scenesmith" ]]; then
-    log "════ SCENE GENERATION: SceneSmith → SAGE Layout Dir ════"
-    STAGE13_LOG="/tmp/scenesmith_stage1_$(date +%s).log"
-    log "Running SceneSmith paper stack bridge... (log: ${STAGE13_LOG})"
+_run_sage_stage13_once() {
+    local _attempt_idx="${1:-1}"
+    local _stage13_log="${2:-/tmp/sage_stage13.log}"
 
-    SCENESMITH_TO_SAGE="${SAGE_SCRIPTS}/scenesmith_to_sage_layout.py"
-    if [[ ! -f "${SCENESMITH_TO_SAGE}" ]]; then
-        log "ERROR: Missing ${SCENESMITH_TO_SAGE}"
-        exit 1
-    fi
-
-    # SceneSmith mode intentionally skips SAGE Stage 4 augmentation.
-    SKIP_AUGMENTATION=1
-
-    LAYOUT_ID="$("${PY_SYS}" "${SCENESMITH_TO_SAGE}" \
-        --results_dir "${SAGE_DIR}/server/results" \
-        --room_type "${ROOM_TYPE}" \
-        --task_desc "${TASK_DESC_CAPPED}" \
-        --pose_aug_name "${POSE_AUG_NAME}" \
-        2> >(tee "${STAGE13_LOG}" >&2))"
-    echo "${LAYOUT_ID}" >> "${STAGE13_LOG}"
-    if [[ -z "${LAYOUT_ID}" ]]; then
-        log "ERROR: SceneSmith->SAGE bridge did not return a layout_id"
-        exit 1
-    fi
-    LAYOUT_DIR="${SAGE_DIR}/server/results/${LAYOUT_ID}"
-else
-    log "════ STAGES 1-3: Scene Generation (SAGE) ════"
-
-    # Pre-flight: ensure SAM3D is alive
-    _ensure_sam3d_healthy || { log "FATAL: Cannot start SAM3D. Aborting."; exit 1; }
+    _ensure_sam3d_healthy || {
+        log "ERROR: Cannot start SAM3D before Stage 1-3."
+        return 1
+    }
 
     cd "${SAGE_DIR}/client"
 
-    STAGE13_LOG="/tmp/sage_stage13_$(date +%s).log"
-    log "Running robot task client... (log: ${STAGE13_LOG})"
-
     export PHYSICS_CRITIC_ENABLED
-    SERVER_PATHS=(../server/layout.py)
-    if [[ "${PHYSICS_CRITIC_ENABLED}" == "1" || "${PHYSICS_CRITIC_ENABLED}" == "true" ]]; then
-        SERVER_PATHS+=(../server/physics/physics.py)
+    local _task_desc="${TASK_DESC_CAPPED}"
+    if [[ "${_attempt_idx}" -gt 1 ]]; then
+        _task_desc="${TASK_DESC_CAPPED} Generate a different valid scene arrangement than previous attempts while keeping task-critical objects."
     fi
 
-    # Background watchdog: restart SAM3D if it dies during generation
+    local -a _server_paths=(../server/layout.py)
+    if [[ "${PHYSICS_CRITIC_ENABLED}" == "1" || "${PHYSICS_CRITIC_ENABLED}" == "true" ]]; then
+        _server_paths+=(../server/physics/physics.py)
+    fi
+
+    # Background watchdog: restart SAM3D if it dies during generation.
     (
         while true; do
             sleep 30
@@ -256,131 +269,462 @@ else
             fi
         done
     ) &
-    SAM3D_WATCHDOG_PID=$!
-    _stop_sam3d_watchdog() {
-        if [[ -n "${SAM3D_WATCHDOG_PID:-}" ]]; then
-            kill "${SAM3D_WATCHDOG_PID}" 2>/dev/null || true
-            wait "${SAM3D_WATCHDOG_PID}" 2>/dev/null || true
-            SAM3D_WATCHDOG_PID=""
-        fi
-    }
-    trap _stop_sam3d_watchdog EXIT
+    local _watchdog_pid=$!
 
-    # Run scene generation with timeout
     set +e
+    local _scene_gen_exit=0
     if command -v timeout >/dev/null 2>&1; then
         timeout "${SCENE_GEN_TIMEOUT}" \
             python client_generation_robot_task.py \
                 --room_type "${ROOM_TYPE}" \
                 --robot_type "${ROBOT_TYPE}" \
-                --task_description "${TASK_DESC_CAPPED}" \
-                --server_paths "${SERVER_PATHS[@]}" \
-                2>&1 | tee "${STAGE13_LOG}"
-        SCENE_GEN_EXIT=${PIPESTATUS[0]}
+                --task_description "${_task_desc}" \
+                --server_paths "${_server_paths[@]}" \
+                2>&1 | tee "${_stage13_log}"
+        _scene_gen_exit=${PIPESTATUS[0]}
     else
         log "WARNING: 'timeout' not found; running scene generation without an outer timeout."
         python client_generation_robot_task.py \
             --room_type "${ROOM_TYPE}" \
             --robot_type "${ROBOT_TYPE}" \
-            --task_description "${TASK_DESC_CAPPED}" \
-            --server_paths "${SERVER_PATHS[@]}" \
-            2>&1 | tee "${STAGE13_LOG}"
-        SCENE_GEN_EXIT=${PIPESTATUS[0]}
+            --task_description "${_task_desc}" \
+            --server_paths "${_server_paths[@]}" \
+            2>&1 | tee "${_stage13_log}"
+        _scene_gen_exit=${PIPESTATUS[0]}
     fi
     set -e
 
-    # Stop watchdog (now that mesh generation is over)
-    _stop_sam3d_watchdog
+    kill "${_watchdog_pid}" 2>/dev/null || true
+    wait "${_watchdog_pid}" 2>/dev/null || true
 
-    if [[ "${SCENE_GEN_EXIT}" -eq 124 ]]; then
+    if [[ "${_scene_gen_exit}" -eq 124 ]]; then
         log "ERROR: Scene generation timed out after ${SCENE_GEN_TIMEOUT}s"
-        exit 1
-    elif [[ "${SCENE_GEN_EXIT}" -ne 0 ]]; then
+        return 124
+    fi
+    if [[ "${_scene_gen_exit}" -ne 0 ]]; then
         if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-            log "ERROR: Scene generation exited with code ${SCENE_GEN_EXIT} (STRICT_PIPELINE=1)"
-            exit 1
+            log "ERROR: Scene generation exited with code ${_scene_gen_exit} (STRICT_PIPELINE=1)"
+            return "${_scene_gen_exit}"
         fi
-        log "WARNING: Scene generation exited with code ${SCENE_GEN_EXIT} (continuing; STRICT_PIPELINE=0)"
+        log "WARNING: Scene generation exited with code ${_scene_gen_exit} (continuing; STRICT_PIPELINE=0)"
     fi
 
-    # Find the latest layout directory
+    # Find the latest layout directory.
     LAYOUT_ID=$(ls -td "${SAGE_DIR}/server/results/layout_"* 2>/dev/null | head -1 | xargs basename)
     if [[ -z "${LAYOUT_ID}" ]]; then
         log "ERROR: No layout directory found after scene generation"
+        return 1
+    fi
+    LAYOUT_DIR="${SAGE_DIR}/server/results/${LAYOUT_ID}"
+    return 0
+}
+
+_prepare_layout_for_stage4() {
+    log "Layout: ${LAYOUT_ID}"
+    log "Directory: ${LAYOUT_DIR}"
+
+    if [[ ! -d "${LAYOUT_DIR}" ]]; then
+        log "ERROR: Layout directory does not exist: ${LAYOUT_DIR}"
+        return 1
+    fi
+
+    # Count generated objects.
+    NUM_OBJECTS=$(ls "${LAYOUT_DIR}/generation/"*.obj 2>/dev/null | wc -l || echo "0")
+    log "Objects generated: ${NUM_OBJECTS}"
+
+    # Repair layout JSON for downstream stage compatibility (4a/4b).
+    LAYOUT_JSON="${LAYOUT_DIR}/${LAYOUT_ID}.json"
+    if [[ ! -f "${LAYOUT_JSON}" ]]; then
+        log "ERROR: Missing layout JSON: ${LAYOUT_JSON}"
+        return 1
+    fi
+    FIX_LAYOUT_JSON_SCRIPT="${SAGE_SCRIPTS}/fix_layout_json.py"
+    if [[ -f "${FIX_LAYOUT_JSON_SCRIPT}" ]]; then
+        log "Repairing layout JSON for Stage 4 (policy_analysis matches + updated_task_decomposition)..."
+        if ! "${PY_SYS}" "${FIX_LAYOUT_JSON_SCRIPT}" "${LAYOUT_JSON}" 2>&1 | tee "/tmp/sage_fix_layout_json.log"; then
+            log "ERROR: Layout JSON repair failed (see /tmp/sage_fix_layout_json.log)"
+            return 1
+        fi
+    else
+        log "ERROR: Missing layout JSON repair script: ${FIX_LAYOUT_JSON_SCRIPT}"
+        return 1
+    fi
+
+    NAV_REPAIR_SCRIPT="${SAGE_SCRIPTS}/repair_navigation_corridor.py"
+    if [[ "${NAV_CORRIDOR_REPAIR}" == "1" ]]; then
+        if [[ -f "${NAV_REPAIR_SCRIPT}" ]]; then
+            log "Pre-conditioning layout for mobile-base corridor clearance..."
+            if ! "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" \
+                --layout_json "${LAYOUT_JSON}" \
+                --min_corridor_m "${NAV_MIN_CORRIDOR_M}" \
+                --max_moves "${NAV_REPAIR_MAX_MOVES}" \
+                2>&1 | tee "/tmp/sage_nav_repair_pre4.log"; then
+                log "WARNING: navigation corridor pre-repair failed (continuing)."
+            fi
+        else
+            log "WARNING: navigation repair script not found: ${NAV_REPAIR_SCRIPT}"
+        fi
+    fi
+
+    NAV_GATE_SCRIPT="${SAGE_SCRIPTS}/robot_nav_gate.py"
+    if [[ "${NAV_GATE_ENABLED}" == "1" ]]; then
+        if [[ -f "${NAV_GATE_SCRIPT}" ]]; then
+            NAV_GATE_REPORT="${LAYOUT_DIR}/quality/nav_gate_report.json"
+            log "Running hard robot-nav gate before scene acceptance..."
+            NAV_GATE_OK=0
+            if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" \
+                --layout_json "${LAYOUT_JSON}" \
+                --report_path "${NAV_GATE_REPORT}" \
+                --grid_res_m "${NAV_GATE_GRID_RES_M}" \
+                --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}" \
+                --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}" \
+                2>&1 | tee "/tmp/sage_nav_gate_pre4.log"; then
+                NAV_GATE_OK=1
+            fi
+
+            if [[ "${NAV_GATE_OK}" != "0" && "${NAV_CORRIDOR_REPAIR}" == "1" && -f "${NAV_REPAIR_SCRIPT}" ]]; then
+                log "Robot-nav gate failed. Applying aggressive corridor repair and retrying nav gate once..."
+                if "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" \
+                    --layout_json "${LAYOUT_JSON}" \
+                    --min_corridor_m "${NAV_MIN_CORRIDOR_RETRY_M}" \
+                    --max_moves "$(( NAV_REPAIR_MAX_MOVES * 2 ))" \
+                    --aggressive \
+                    2>&1 | tee "/tmp/sage_nav_repair_gate_retry.log"; then
+                    NAV_GATE_OK=0
+                    if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" \
+                        --layout_json "${LAYOUT_JSON}" \
+                        --report_path "${NAV_GATE_REPORT}" \
+                        --grid_res_m "${NAV_GATE_GRID_RES_M}" \
+                        --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}" \
+                        --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}" \
+                        2>&1 | tee "/tmp/sage_nav_gate_retry.log"; then
+                        NAV_GATE_OK=1
+                    fi
+                fi
+            fi
+
+            if [[ "${NAV_GATE_OK}" != "0" ]]; then
+                if [[ "${NAV_GATE_HARD_FAIL}" == "1" || "${STRICT_PIPELINE}" == "1" ]]; then
+                    log "ERROR: Robot-nav gate failed. Rejecting scene before Stage 4/5."
+                    log "  See report: ${NAV_GATE_REPORT}"
+                    return 1
+                fi
+                log "WARNING: Robot-nav gate failed but continuing (NAV_GATE_HARD_FAIL=0, STRICT_PIPELINE=0)."
+            fi
+        else
+            if [[ "${NAV_GATE_HARD_FAIL}" == "1" || "${STRICT_PIPELINE}" == "1" ]]; then
+                log "ERROR: Robot-nav gate script missing: ${NAV_GATE_SCRIPT}"
+                return 1
+            fi
+            log "WARNING: Robot-nav gate script missing (continuing)."
+        fi
+    fi
+
+    if [[ "${NUM_OBJECTS}" -eq 0 ]]; then
+        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+            log "ERROR: Zero objects generated in ${LAYOUT_DIR}/generation/. Aborting (STRICT_PIPELINE=1)."
+            return 1
+        fi
+        log "WARNING: Zero objects generated. Downstream stages may fail."
+    fi
+    return 0
+}
+
+_run_sage_prestage4_quality_gate() {
+    local _critic_script="${SAGE_SCRIPTS}/sage_scenesmith_critic_gate.py"
+    local _quality_script="${SAGE_SCRIPTS}/sage_scene_quality.py"
+    if [[ ! -f "${_critic_script}" ]]; then
+        log "ERROR: Missing SceneSmith critic gate script for SAGE acceptance loop: ${_critic_script}"
+        return 1
+    fi
+    if [[ ! -f "${_quality_script}" ]]; then
+        log "ERROR: Missing quality script for SAGE acceptance loop: ${_quality_script}"
+        return 1
+    fi
+
+    local _critic_report="${LAYOUT_DIR}/quality/sage_scenesmith_critic_report.json"
+    local _critic_log="/tmp/sage_scenesmith_critic_pre4_${LAYOUT_ID}_$(date +%s).log"
+    if ! "${PY_SYS}" "${_critic_script}" \
+        --layout_json "${LAYOUT_JSON}" \
+        --task_desc "${TASK_DESC}" \
+        --report_path "${_critic_report}" \
+        --min_total_0_10 "${SAGE_STAGE13_CRITIC_MIN_TOTAL_0_10}" \
+        --min_faithfulness "${SAGE_STAGE13_CRITIC_MIN_FAITHFULNESS}" \
+        --max_collision_rate "${SAGE_STAGE13_CRITIC_MAX_COLLISION_RATE}" \
+        2>&1 | tee "${_critic_log}"; then
+        log "Pre-Stage4 SceneSmith critic gate: FAIL (log: ${_critic_log})"
+        return 1
+    fi
+
+    local _quality_log="/tmp/sage_scene_quality_pre4_${LAYOUT_ID}_$(date +%s).log"
+    if "${PY_SYS}" "${_quality_script}" \
+        --layout_dir "${LAYOUT_DIR}" \
+        --pose_aug_name "${POSE_AUG_NAME}" \
+        --profile "${SAGE_QUALITY_PROFILE}" \
+        --max_iters "${SAGE_QUALITY_MAX_ITERS}" \
+        2>&1 | tee "${_quality_log}"; then
+        log "Pre-Stage4 quality gates: PASS (SceneSmith critic + scene quality)"
+        return 0
+    fi
+    log "Pre-Stage4 quality gate: FAIL (log: ${_quality_log})"
+    return 1
+}
+
+# ── SCENE GENERATION ───────────────────────────────────────────────────────
+LAYOUT_PREPARED=0
+if [[ -n "${RESUME_LAYOUT_ID}" ]]; then
+    log "════ RESUME: Using Existing Layout Results ════"
+    if [[ "${RESUME_LAYOUT_ID}" == "latest" ]]; then
+        LAYOUT_ID=$(ls -td "${SAGE_DIR}/server/results/layout_"* 2>/dev/null | head -1 | xargs basename)
+        if [[ -z "${LAYOUT_ID}" ]]; then
+            log "ERROR: RESUME_LAYOUT_ID=latest but no layout directory found in ${SAGE_DIR}/server/results/"
+            exit 1
+        fi
+    else
+        LAYOUT_ID="${RESUME_LAYOUT_ID}"
+    fi
+    LAYOUT_DIR="${SAGE_DIR}/server/results/${LAYOUT_ID}"
+elif [[ "${SCENE_SOURCE}" == "scenesmith" ]]; then
+    log "════ SCENE GENERATION: SceneSmith → SAGE Layout Dir ════"
+    STAGE13_LOG="/tmp/scenesmith_stage1_$(date +%s).log"
+    log "Running SceneSmith paper stack bridge... (log: ${STAGE13_LOG})"
+
+    SCENESMITH_TO_SAGE="${SAGE_SCRIPTS}/scenesmith_to_sage_layout.py"
+    if [[ ! -f "${SCENESMITH_TO_SAGE}" ]]; then
+        log "ERROR: Missing ${SCENESMITH_TO_SAGE}"
+        exit 1
+    fi
+
+    # SceneSmith mode intentionally skips SAGE Stage 4 augmentation.
+    SKIP_AUGMENTATION=1
+
+    LAYOUT_ID="$("${PY_SYS}" "${SCENESMITH_TO_SAGE}" \
+        --results_dir "${SAGE_DIR}/server/results" \
+        --room_type "${ROOM_TYPE}" \
+        --task_desc "${TASK_DESC_CAPPED}" \
+        --pose_aug_name "${POSE_AUG_NAME}" \
+        --critic_loop_enabled "${SCENESMITH_CRITIC_LOOP_ENABLED}" \
+        --critic_max_attempts "${SCENESMITH_CRITIC_MAX_ATTEMPTS}" \
+        --critic_require_quality_pass "${SCENESMITH_CRITIC_REQUIRE_QUALITY_PASS}" \
+        --critic_require_score "${SCENESMITH_CRITIC_REQUIRE_SCORE}" \
+        --critic_require_faithfulness "${SCENESMITH_CRITIC_REQUIRE_FAITHFULNESS}" \
+        --critic_min_score_0_10 "${SCENESMITH_CRITIC_MIN_SCORE_0_10}" \
+        --critic_min_score_0_1 "${SCENESMITH_CRITIC_MIN_SCORE_0_1}" \
+        --critic_min_faithfulness "${SCENESMITH_CRITIC_MIN_FAITHFULNESS}" \
+        --critic_seed_stride "${SCENESMITH_CRITIC_SEED_STRIDE}" \
+        --critic_allow_last_attempt_on_fail "${SCENESMITH_CRITIC_ALLOW_LAST_ATTEMPT_ON_FAIL}" \
+        2> >(tee "${STAGE13_LOG}" >&2))"
+    echo "${LAYOUT_ID}" >> "${STAGE13_LOG}"
+    if [[ -z "${LAYOUT_ID}" ]]; then
+        log "ERROR: SceneSmith->SAGE bridge did not return a layout_id"
         exit 1
     fi
     LAYOUT_DIR="${SAGE_DIR}/server/results/${LAYOUT_ID}"
-fi
+else
+    log "════ STAGES 1-3: Scene Generation (SAGE) ════"
+    SAGE_STAGE13_ATTEMPTS=1
+    if [[ "${SAGE_STAGE13_CRITIC_LOOP_ENABLED}" == "1" ]]; then
+        SAGE_STAGE13_ATTEMPTS="${SAGE_STAGE13_MAX_ATTEMPTS}"
+    fi
+    if [[ ! "${SAGE_STAGE13_ATTEMPTS}" =~ ^[0-9]+$ || "${SAGE_STAGE13_ATTEMPTS}" -lt 1 ]]; then
+        log "WARNING: Invalid SAGE_STAGE13_MAX_ATTEMPTS='${SAGE_STAGE13_ATTEMPTS}'; defaulting to 1."
+        SAGE_STAGE13_ATTEMPTS=1
+    fi
 
-log "Layout: ${LAYOUT_ID}"
-log "Directory: ${LAYOUT_DIR}"
+    SAGE_STAGE13_ACCEPTED=0
+    for _attempt in $(seq 1 "${SAGE_STAGE13_ATTEMPTS}"); do
+        STAGE13_LOG="/tmp/sage_stage13_attempt${_attempt}_$(date +%s).log"
+        log "Running robot task client... (attempt ${_attempt}/${SAGE_STAGE13_ATTEMPTS}, log: ${STAGE13_LOG})"
 
-if [[ ! -d "${LAYOUT_DIR}" ]]; then
-    log "ERROR: Layout directory does not exist: ${LAYOUT_DIR}"
-    exit 1
-fi
+        if ! _run_sage_stage13_once "${_attempt}" "${STAGE13_LOG}"; then
+            if [[ "${_attempt}" -lt "${SAGE_STAGE13_ATTEMPTS}" ]]; then
+                log "SAGE Stage 1-3 attempt ${_attempt} failed. Regenerating..."
+                continue
+            fi
+            log "ERROR: SAGE Stage 1-3 failed after ${SAGE_STAGE13_ATTEMPTS} attempts."
+            exit 1
+        fi
 
-# Count generated objects
-NUM_OBJECTS=$(ls "${LAYOUT_DIR}/generation/"*.obj 2>/dev/null | wc -l || echo "0")
-log "Objects generated: ${NUM_OBJECTS}"
+        if ! _prepare_layout_for_stage4; then
+            if [[ "${_attempt}" -lt "${SAGE_STAGE13_ATTEMPTS}" ]]; then
+                log "SAGE Stage 1-3 attempt ${_attempt} rejected by layout/nav gate. Regenerating..."
+                continue
+            fi
+            log "ERROR: SAGE Stage 1-3 failed acceptance gates after ${SAGE_STAGE13_ATTEMPTS} attempts."
+            exit 1
+        fi
 
-if [[ "${NUM_OBJECTS}" -eq 0 ]]; then
-    if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-        log "ERROR: Zero objects generated in ${LAYOUT_DIR}/generation/. Aborting (STRICT_PIPELINE=1)."
+        if [[ "${SAGE_STAGE13_CRITIC_LOOP_ENABLED}" == "1" ]]; then
+            if ! _run_sage_prestage4_quality_gate; then
+                if [[ "${_attempt}" -lt "${SAGE_STAGE13_ATTEMPTS}" ]]; then
+                    log "SAGE Stage 1-3 attempt ${_attempt} rejected by pre-Stage4 quality gate. Regenerating..."
+                    continue
+                fi
+                log "ERROR: SAGE Stage 1-3 did not pass pre-Stage4 quality gate after ${SAGE_STAGE13_ATTEMPTS} attempts."
+                exit 1
+            fi
+        fi
+
+        SAGE_STAGE13_ACCEPTED=1
+        LAYOUT_PREPARED=1
+        break
+    done
+
+    if [[ "${SAGE_STAGE13_ACCEPTED}" != "1" ]]; then
+        log "ERROR: SAGE Stage 1-3 acceptance loop exhausted without an accepted layout."
         exit 1
     fi
-    log "WARNING: Zero objects generated. Downstream stages may fail."
+fi
+
+if [[ "${LAYOUT_PREPARED}" != "1" ]]; then
+    if ! _prepare_layout_for_stage4; then
+        log "ERROR: Failed to prepare accepted layout for Stage 4."
+        exit 1
+    fi
+    LAYOUT_PREPARED=1
 fi
 
 STAGE13_END=$(date +%s)
 log "Scene generation completed in $(( STAGE13_END - PIPELINE_START ))s"
 
 	# ── STAGE 4: Scene Augmentation ─────────────────────────────────────────────
-	if [[ "${SKIP_AUGMENTATION}" != "1" ]]; then
-	    log ""
-	    log "════ STAGE 4: Scene Augmentation ════"
+		if [[ "${SKIP_AUGMENTATION}" != "1" ]]; then
+		    log ""
+		    log "════ STAGE 4: Scene Augmentation ════"
 
-	    # 4a: MCP-based augmentation (agent adds complementary objects)
-	    log "4a: MCP-based augmentation..."
-	    AUG_CLIENT="${SAGE_DIR}/client/client_generation_scene_aug.py"
-	    if [[ -f "${AUG_CLIENT}" ]]; then
-	        if ! python "${AUG_CLIENT}" \
-	            --base_layout_dict_path "${LAYOUT_DIR}/${LAYOUT_ID}.json" \
-	            --server_paths "${SAGE_DIR}/server/layout.py" \
-	            --from_task_required_objects \
-	            2>&1 | tee "/tmp/sage_stage4a.log"; then
-	            # Stage 4a is best-effort: it improves scene richness but is not required
-	            # for pose augmentation or downstream grasp/planning stages.
-	            log "WARNING: MCP augmentation failed (continuing; Stage 4a is best-effort)."
-	        fi
-	    else
-	        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-	            log "ERROR: Strict mode requires MCP augmentation script; missing ${AUG_CLIENT}"
-	            exit 1
-        fi
-        log "SKIP: client_generation_scene_aug.py not found"
-    fi
+		    # 4a: MCP-based augmentation (agent adds complementary objects)
+		    log "4a: MCP-based augmentation..."
+		    AUG_CLIENT="${SAGE_DIR}/client/client_generation_scene_aug.py"
+		    if [[ -f "${AUG_CLIENT}" ]]; then
+		        if ! python "${AUG_CLIENT}" \
+		            --base_layout_dict_path "${LAYOUT_DIR}/${LAYOUT_ID}.json" \
+		            --server_paths "${SAGE_DIR}/server/layout.py" \
+		            --from_task_required_objects \
+		            2>&1 | tee "/tmp/sage_stage4a.log"; then
+		            # Stage 4a is best-effort: it improves scene richness but is not required
+		            # for pose augmentation or downstream grasp/planning stages.
+		            log "WARNING: MCP augmentation failed (continuing; Stage 4a is best-effort)."
+		        fi
+		    else
+		        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+		            log "ERROR: Strict mode requires MCP augmentation script; missing ${AUG_CLIENT}"
+		            exit 1
+		        fi
+		        log "SKIP: client_generation_scene_aug.py not found"
+		    fi
 
-	    # 4b: Pose augmentation
-	    log "4b: Pose augmentation (${NUM_POSE_SAMPLES} samples)..."
-	    POSE_AUG_SCRIPT="${SAGE_DIR}/server/augment/pose_aug_mm_from_layout_with_task.py"
-	    if [[ -f "${POSE_AUG_SCRIPT}" ]]; then
-	        if ! (cd "${SAGE_DIR}/server" && export PYTHONPATH="${SAGE_DIR}/server:${PYTHONPATH:-}" && python "${POSE_AUG_SCRIPT}" \
-	            --layout_id "${LAYOUT_ID}" \
-	            --save_dir_name "${POSE_AUG_NAME}" \
-	            --num_samples "${NUM_POSE_SAMPLES}" \
-	            2>&1 | tee "/tmp/sage_stage4b.log"); then
-	            if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-	                log "ERROR: Pose augmentation failed in strict mode."
-                exit 1
-            fi
-            log "WARNING: Pose augmentation failed (non-fatal)"
-        fi
-    else
-        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-            log "ERROR: Strict mode requires pose augmentation script; missing ${POSE_AUG_SCRIPT}"
-            exit 1
-        fi
+		    # 4a sometimes rewrites the layout JSON; re-apply the compatibility patch so
+		    # Stage 4b never fails on missing keys.
+		    log "Re-checking layout JSON for Stage 4b..."
+		    if ! "${PY_SYS}" "${FIX_LAYOUT_JSON_SCRIPT}" "${LAYOUT_JSON}" 2>&1 | tee "/tmp/sage_fix_layout_json_post4a.log"; then
+		        log "ERROR: Layout JSON repair failed after Stage 4a (see /tmp/sage_fix_layout_json_post4a.log)"
+		        exit 1
+		    fi
+
+		    # 4b: Pose augmentation
+		    log "4b: Pose augmentation (${NUM_POSE_SAMPLES} samples)..."
+		    POSE_AUG_SCRIPT="${SAGE_DIR}/server/augment/pose_aug_mm_from_layout_with_task.py"
+		    if [[ -f "${POSE_AUG_SCRIPT}" ]]; then
+		        _count_pose_meta_layouts() {
+		            local _meta_path="$1"
+		            if [[ ! -f "${_meta_path}" ]]; then
+		                echo "0"
+		                return 0
+		            fi
+		            "${PY_SYS}" - <<PY
+import json
+path = "${_meta_path}"
+data = json.load(open(path, "r"))
+count = 0
+if isinstance(data, list):
+    count = len(data)
+elif isinstance(data, dict):
+    for key in ("layouts", "layout_dict_paths", "layout_paths", "variants", "feasible_layouts"):
+        if key in data and isinstance(data[key], list):
+            count = len(data[key])
+            break
+print(count)
+PY
+		        }
+
+		        _run_pose_aug_for_dir() {
+		            local _save_dir_name="$1"
+		            local _log_file="$2"
+		            (cd "${SAGE_DIR}/server" && export PYTHONPATH="${SAGE_DIR}/server:${PYTHONPATH:-}" && python "${POSE_AUG_SCRIPT}" \
+		                --layout_id "${LAYOUT_ID}" \
+		                --save_dir_name "${_save_dir_name}" \
+		                --num_samples "${NUM_POSE_SAMPLES}" \
+		                2>&1 | tee "${_log_file}")
+		        }
+
+		        if ! _run_pose_aug_for_dir "${POSE_AUG_NAME}" "/tmp/sage_stage4b.log"; then
+		            if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+		                log "ERROR: Pose augmentation failed in strict mode."
+		                exit 1
+		            fi
+		            log "WARNING: Pose augmentation failed (non-fatal)"
+		        fi
+
+		        # If planner filtering yields 0 feasible layouts, attempt one aggressive
+		        # corridor repair + Stage 4b retry before synthetic fallback meta.
+		        POSE_META_FALLBACK="${LAYOUT_DIR}/${POSE_AUG_NAME}/meta.json"
+		        POSE_META_COUNT="$(_count_pose_meta_layouts "${POSE_META_FALLBACK}")"
+		        if [[ "${POSE_META_COUNT}" -lt 1 && "${NAV_CORRIDOR_REPAIR}" == "1" && -f "${NAV_REPAIR_SCRIPT}" ]]; then
+		            log "WARNING: Stage 4b produced 0 feasible layouts. Applying aggressive corridor repair and retrying once..."
+		            if "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" \
+		                --layout_json "${LAYOUT_JSON}" \
+		                --min_corridor_m "${NAV_MIN_CORRIDOR_RETRY_M}" \
+		                --max_moves "$(( NAV_REPAIR_MAX_MOVES * 2 ))" \
+		                --aggressive \
+		                2>&1 | tee "/tmp/sage_nav_repair_retry4b.log"; then
+		                POSE_AUG_RETRY_NAME="${POSE_AUG_NAME}_retry1"
+		                if ! _run_pose_aug_for_dir "${POSE_AUG_RETRY_NAME}" "/tmp/sage_stage4b_retry.log"; then
+		                    if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+		                        log "ERROR: Pose augmentation retry failed in strict mode."
+		                        exit 1
+		                    fi
+		                    log "WARNING: Pose augmentation retry failed (non-fatal)"
+		                fi
+		                POSE_AUG_NAME="${POSE_AUG_RETRY_NAME}"
+		                POSE_META_FALLBACK="${LAYOUT_DIR}/${POSE_AUG_NAME}/meta.json"
+		                POSE_META_COUNT="$(_count_pose_meta_layouts "${POSE_META_FALLBACK}")"
+		                log "Stage 4b retry complete (pose_aug_name=${POSE_AUG_NAME}, feasible_layouts=${POSE_META_COUNT})"
+		            else
+		                log "WARNING: aggressive corridor repair failed; continuing with fallback meta logic."
+		            fi
+		        fi
+
+		        # Final fallback: if meta is missing or empty, synthesize from generated variants.
+		        if [[ "${POSE_META_COUNT}" -lt 1 ]]; then
+		            if ls "${LAYOUT_DIR}/${POSE_AUG_NAME}"/variant_*.json >/dev/null 2>&1; then
+		                if [[ -f "${POSE_META_FALLBACK}" ]]; then
+		                    log "WARNING: Pose augmentation meta has 0 layouts; rebuilding fallback meta from generated variants."
+		                else
+		                    log "WARNING: Pose augmentation did not write meta.json; creating fallback meta from generated variants."
+		                fi
+		                "${PY_SYS}" - <<PY
+import glob
+import json
+import os
+
+pose_dir = "${LAYOUT_DIR}/${POSE_AUG_NAME}"
+variant_paths = sorted(glob.glob(os.path.join(pose_dir, "variant_*.json")))
+variant_names = [os.path.basename(p) for p in variant_paths]
+# Use one canonical variant to keep strict Stage 5-7 deterministic/retryable.
+pick = "variant_000.json" if "variant_000.json" in variant_names else (variant_names[0] if variant_names else None)
+variants = [pick] if pick else []
+out_path = os.path.join(pose_dir, "meta.json")
+with open(out_path, "w") as f:
+    json.dump(variants, f, indent=2)
+print(f"[bp] wrote {out_path} ({len(variants)} variant, selected={pick})")
+PY
+		            fi
+		        fi
+		    else
+		        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+		            log "ERROR: Strict mode requires pose augmentation script; missing ${POSE_AUG_SCRIPT}"
+		            exit 1
+		        fi
         log "SKIP: pose augmentation script not found"
     fi
 
@@ -451,6 +795,16 @@ if [[ "${SKIP_GRASPS}" != "1" && "${SKIP_DATA_GEN}" != "1" ]]; then
                 --room_type "${ROOM_TYPE}" \
                 --task_desc "${TASK_DESC_CAPPED}" \
                 --pose_aug_name "${POSE_AUG_NAME}" \
+                --critic_loop_enabled "${SCENESMITH_CRITIC_LOOP_ENABLED}" \
+                --critic_max_attempts "${SCENESMITH_CRITIC_MAX_ATTEMPTS}" \
+                --critic_require_quality_pass "${SCENESMITH_CRITIC_REQUIRE_QUALITY_PASS}" \
+                --critic_require_score "${SCENESMITH_CRITIC_REQUIRE_SCORE}" \
+                --critic_require_faithfulness "${SCENESMITH_CRITIC_REQUIRE_FAITHFULNESS}" \
+                --critic_min_score_0_10 "${SCENESMITH_CRITIC_MIN_SCORE_0_10}" \
+                --critic_min_score_0_1 "${SCENESMITH_CRITIC_MIN_SCORE_0_1}" \
+                --critic_min_faithfulness "${SCENESMITH_CRITIC_MIN_FAITHFULNESS}" \
+                --critic_seed_stride "${SCENESMITH_CRITIC_SEED_STRIDE}" \
+                --critic_allow_last_attempt_on_fail "${SCENESMITH_CRITIC_ALLOW_LAST_ATTEMPT_ON_FAIL}" \
                 2> >(tee "${FALLBACK_LOG}" >&2))"
             echo "${LAYOUT_ID}" >> "${FALLBACK_LOG}"
             if [[ -z "${LAYOUT_ID}" ]]; then
@@ -462,6 +816,47 @@ if [[ "${SKIP_GRASPS}" != "1" && "${SKIP_DATA_GEN}" != "1" ]]; then
 
             NUM_OBJECTS=$(ls "${LAYOUT_DIR}/generation/"*.obj 2>/dev/null | wc -l || echo "0")
             log "Fallback layout: ${LAYOUT_ID} (objects=${NUM_OBJECTS})"
+
+            # Re-run hard robot-nav gate on the fallback scene before accepting it.
+            LAYOUT_JSON="${LAYOUT_DIR}/${LAYOUT_ID}.json"
+            if [[ "${NAV_GATE_ENABLED}" == "1" && -f "${NAV_GATE_SCRIPT}" ]]; then
+                NAV_GATE_REPORT="${LAYOUT_DIR}/quality/nav_gate_report.json"
+                NAV_GATE_OK=0
+                log "Running hard robot-nav gate on fallback scene..."
+                if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" \
+                    --layout_json "${LAYOUT_JSON}" \
+                    --report_path "${NAV_GATE_REPORT}" \
+                    --grid_res_m "${NAV_GATE_GRID_RES_M}" \
+                    --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}" \
+                    --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}" \
+                    2>&1 | tee "/tmp/sage_nav_gate_fallback.log"; then
+                    NAV_GATE_OK=1
+                fi
+                if [[ "${NAV_GATE_OK}" != "0" && "${NAV_CORRIDOR_REPAIR}" == "1" && -f "${NAV_REPAIR_SCRIPT}" ]]; then
+                    log "Fallback robot-nav gate failed. Applying aggressive corridor repair and retrying once..."
+                    if "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" \
+                        --layout_json "${LAYOUT_JSON}" \
+                        --min_corridor_m "${NAV_MIN_CORRIDOR_RETRY_M}" \
+                        --max_moves "$(( NAV_REPAIR_MAX_MOVES * 2 ))" \
+                        --aggressive \
+                        2>&1 | tee "/tmp/sage_nav_repair_fallback_retry.log"; then
+                        NAV_GATE_OK=0
+                        if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" \
+                            --layout_json "${LAYOUT_JSON}" \
+                            --report_path "${NAV_GATE_REPORT}" \
+                            --grid_res_m "${NAV_GATE_GRID_RES_M}" \
+                            --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}" \
+                            --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}" \
+                            2>&1 | tee "/tmp/sage_nav_gate_fallback_retry.log"; then
+                            NAV_GATE_OK=1
+                        fi
+                    fi
+                fi
+                if [[ "${NAV_GATE_OK}" != "0" ]]; then
+                    log "ERROR: Fallback scene failed hard robot-nav gate."
+                    exit 1
+                fi
+            fi
 
             # Validate meta again.
             POSE_META="${LAYOUT_DIR}/${POSE_AUG_NAME}/meta.json"
@@ -655,6 +1050,7 @@ log "Outputs:"
 log "  Scene:    ${LAYOUT_DIR}/"
 log "  Grasps:   ${LAYOUT_DIR}/grasps/"
 log "  Demos:    ${LAYOUT_DIR}/demos/"
+[[ -n "${NAV_GATE_REPORT:-}" ]] && log "  Nav gate: ${NAV_GATE_REPORT}"
 [[ "${SKIP_BP_POSTPROCESS}" != "1" ]] && log "  Quality:  ${WORKSPACE}/outputs/${LAYOUT_ID}_bp/"
 log ""
 if [[ "${ENABLE_INTERACTIVE}" == "1" ]] && [[ ${BACKEND_READY:-0} -eq 1 ]]; then
@@ -667,6 +1063,8 @@ fi
 log "Logs:"
 log "  Stages 1-3: ${STAGE13_LOG}"
 log "  Stage 4:    /tmp/sage_stage4a.log, /tmp/sage_stage4b.log"
+log "  Nav gate:   /tmp/sage_nav_gate_pre4.log, /tmp/sage_nav_gate_retry.log"
+log "  Nav fallback:/tmp/sage_nav_gate_fallback.log, /tmp/sage_nav_gate_fallback_retry.log"
 log "  Quality:    ${QUALITY_LOG:-}"
 log "  Stages 5-7: /tmp/sage_stage567.log"
 log "  BP:         /tmp/sage_bp_postprocess.log"

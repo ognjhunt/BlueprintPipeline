@@ -14,6 +14,7 @@ The mobile Franka (Omron LD-250 base + Franka Emika arm) has approximate footpri
 """
 
 import math
+import os
 from collections import namedtuple
 import numpy as np
 
@@ -25,10 +26,13 @@ support_point = namedtuple("support_point", ["x", "y", "yaw"])
 
 # ── Robot Footprint Constants ────────────────────────────────────────────────
 # Omron LD-250 base dimensions (meters)
-ROBOT_BASE_LENGTH = 0.707   # Along forward direction
-ROBOT_BASE_WIDTH = 0.530    # Along side direction
-# Safety margin for collision checking
-SAFETY_MARGIN = 0.10        # 10cm extra on each side
+# Configurable to avoid hard-coding conservative assumptions in all environments.
+ROBOT_BASE_LENGTH = float(os.getenv("OMRON_BASE_LENGTH_M", "0.707"))  # Along forward direction
+ROBOT_BASE_WIDTH = float(os.getenv("OMRON_BASE_WIDTH_M", "0.530"))    # Along side direction
+# Safety margin for collision checking.
+# The old fixed 0.10m often over-constrained kitchen corridors; use a more
+# realistic default while still allowing explicit override.
+SAFETY_MARGIN = float(os.getenv("OMRON_OCCUPANCY_SAFETY_MARGIN_M", "0.04"))
 # Effective footprint with margin
 FOOTPRINT_HALF_LENGTH = (ROBOT_BASE_LENGTH / 2) + SAFETY_MARGIN  # ~0.45m
 FOOTPRINT_HALF_WIDTH = (ROBOT_BASE_WIDTH / 2) + SAFETY_MARGIN    # ~0.37m

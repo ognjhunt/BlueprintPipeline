@@ -105,6 +105,18 @@ def _resolve_pose_aug_variants(meta_path: Path, layout_dir: Path) -> List[Path]:
             continue
         seen.add(str(p))
         out.append(p)
+
+    # Fallback for cases where pose augmentation produced variant files but left
+    # meta.json empty after planner filtering.
+    if not out:
+        all_variants = sorted(meta_path.parent.glob("variant_*.json"))
+        if all_variants:
+            preferred = meta_path.parent / "variant_000.json"
+            out = [preferred] if preferred.exists() else [all_variants[0]]
+            _log(
+                f"WARNING: pose meta resolved to 0 layouts; using fallback variant "
+                f"{out[0].name} from {meta_path.parent}"
+            )
     return out
 
 
@@ -227,7 +239,7 @@ def _sample_base_pose_near(
     room_dims: Dict[str, Any],
     grid: np.ndarray,
     grid_meta: Dict[str, Any],
-    approach_dist: float = 0.65,
+    approach_dist: float = 0.40,
 ) -> Tuple[float, float, float]:
     tx, ty = target_xy
     width = float(room_dims.get("width", 6.0))
@@ -237,7 +249,7 @@ def _sample_base_pose_near(
     best = None
     best_clear = -1.0
 
-    for angle in np.linspace(0.0, 2.0 * math.pi, 24, endpoint=False):
+    for angle in np.linspace(0.0, 2.0 * math.pi, 36, endpoint=False):
         bx = tx + approach_dist * math.cos(angle)
         by = ty + approach_dist * math.sin(angle)
         if not (margin < bx < width - margin and margin < by < length - margin):
@@ -374,20 +386,41 @@ def _plan_arm_segments_with_curobo(
 ) -> Dict[str, np.ndarray]:
     import torch
     from curobo.types.math import Pose
+    from curobo.types.robot import JointState
 
     # Franka home joints (7)
     home = np.asarray([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=np.float32)
 
     def plan_to_pose(start_q: np.ndarray, target_T: np.ndarray) -> np.ndarray:
-        pos = target_T[:3, 3].astype(np.float32)
-        quat = _quat_from_rot(target_T[:3, :3])
-        target = Pose(position=pos.tolist(), quaternion=quat)
-        start_state = torch.tensor(start_q, dtype=torch.float32)
+        pos = torch.tensor(target_T[:3, 3].astype(np.float32)).unsqueeze(0).cuda()
+        quat_list = _quat_from_rot(target_T[:3, :3])
+        quat = torch.tensor(quat_list, dtype=torch.float32).unsqueeze(0).cuda()
+        target = Pose(position=pos, quaternion=quat)
+        q_pos = torch.tensor(start_q, dtype=torch.float32).unsqueeze(0).cuda()
+        q_vel = torch.zeros_like(q_pos)
+        start_state = JointState(position=q_pos, velocity=q_vel)
         result = motion_gen.plan_single(start_state, target)
-        if not bool(getattr(result, "success", False)):
-            raise RuntimeError("cuRobo plan_single failed")
+        success = getattr(result, "success", None)
+        if success is not None and hasattr(success, "item"):
+            success = success.item()
+        if not success:
+            raise RuntimeError(f"cuRobo plan_single failed (success={success})")
         traj = result.get_interpolated_plan()
-        return traj.cpu().numpy()
+        if traj is None:
+            raise RuntimeError("cuRobo get_interpolated_plan returned None")
+        traj_pos = getattr(traj, "position", None)
+        if traj_pos is None:
+            # Some cuRobo versions return the JointState directly
+            traj_pos = getattr(traj, "joint_state", traj)
+            if hasattr(traj_pos, "position"):
+                traj_pos = traj_pos.position
+        if hasattr(traj_pos, "cpu"):
+            arr = traj_pos.cpu().numpy()
+        else:
+            arr = np.asarray(traj_pos)
+        if arr.ndim == 3:
+            arr = arr.squeeze(0)  # (1, T, 7) -> (T, 7)
+        return arr
 
     # Pregrasp/backoff along grasp approach (-Z of grasp frame).
     approach = -grasp_pose_base[:3, 2]
@@ -422,86 +455,36 @@ def _plan_arm_segments_with_curobo(
 
 def _init_curobo_motion_gen():
     try:
+        import torch
         from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig
+        from curobo.types.base import TensorDeviceType
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(f"cuRobo not available: {exc}") from exc
 
-    config = MotionGenConfig.load_from_robot_config("franka.yml", interpolation_dt=0.02)
+    tensor_args = TensorDeviceType(device=torch.device("cuda:0"))
+    config = MotionGenConfig.load_from_robot_config(
+        "franka.yml",
+        interpolation_dt=0.02,
+        tensor_args=tensor_args,
+        num_ik_seeds=32,
+    )
     mg = MotionGen(config)
     mg.warmup()
     return mg
 
 
-def _call_generate_m2t2_data(
-    generate_fn,
-    *,
-    layout_id: str,
-    layout_dir: Path,
-    layout_dict_path: Path,
-    num_views: int,
-    strict: bool,
-) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    sig = inspect.signature(generate_fn)
-    params = sig.parameters
+def _build_mesh_dict_list(variant_layout_json: Path, room_id: str):
+    """Convert a layout JSON into the mesh_dict_list that M2T2 expects."""
+    from tex_utils import dict_to_floor_plan, export_single_room_layout_to_mesh_dict_list
 
-    kwargs: Dict[str, Any] = {}
-    if "layout_id" in params:
-        kwargs["layout_id"] = layout_id
-    if "layout_dir" in params:
-        kwargs["layout_dir"] = str(layout_dir)
-    if "results_dir" in params:
-        kwargs["results_dir"] = str(layout_dir.parent)
-    if "layout_dict_path" in params:
-        kwargs["layout_dict_path"] = str(layout_dict_path)
-    if "layout_dict_save_path" in params:
-        kwargs["layout_dict_save_path"] = str(layout_dict_path)
-    if "room_dict_save_path" in params:
-        kwargs["room_dict_save_path"] = str(layout_dict_path)
-    if "num_views" in params:
-        kwargs["num_views"] = int(num_views)
-    if "num_viewpoints" in params:
-        kwargs["num_viewpoints"] = int(num_views)
-
-    missing_required = [
-        name
-        for name, p in params.items()
-        if p.default is inspect._empty and name not in kwargs
-    ]
-    if missing_required:
-        raise RuntimeError(
-            "generate_m2t2_data signature mismatch. Missing required params: "
-            f"{missing_required}. Full signature: {sig}"
-        )
-
-    out = generate_fn(**kwargs)
-
-    # Normalize output into list[(meta_data, vis_data)]
-    pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
-    if isinstance(out, tuple) and len(out) == 2:
-        meta, vis = out
-        if isinstance(meta, list) and isinstance(vis, list):
-            for m, v in zip(meta, vis):
-                pairs.append((m, v))
-        elif isinstance(meta, dict) and isinstance(vis, dict):
-            pairs.append((meta, vis))
-    elif isinstance(out, dict):
-        # Common forms: {"meta_data": ..., "vis_data": ...} or plural.
-        if "meta_data" in out and "vis_data" in out and isinstance(out["meta_data"], dict) and isinstance(out["vis_data"], dict):
-            pairs.append((out["meta_data"], out["vis_data"]))
-        elif "meta_datas" in out and "vis_datas" in out and isinstance(out["meta_datas"], list) and isinstance(out["vis_datas"], list):
-            for m, v in zip(out["meta_datas"], out["vis_datas"]):
-                pairs.append((m, v))
-    elif isinstance(out, list):
-        for item in out:
-            if isinstance(item, dict) and "meta_data" in item and "vis_data" in item:
-                pairs.append((item["meta_data"], item["vis_data"]))
-
-    if not pairs:
-        raise RuntimeError(
-            "generate_m2t2_data returned an unsupported structure. "
-            f"type={type(out).__name__}"
-        )
-    return pairs
+    layout_data = _load_json(variant_layout_json)
+    layout = dict_to_floor_plan(layout_data)
+    # Use the first room if room_id not found (single-room layouts).
+    rid = room_id
+    if not any(r.id == rid for r in layout.rooms):
+        rid = layout.rooms[0].id
+    mesh_info_dict = export_single_room_layout_to_mesh_dict_list(layout, rid)
+    return mesh_info_dict
 
 
 def _infer_grasps_for_variant(
@@ -509,6 +492,9 @@ def _infer_grasps_for_variant(
     layout_id: str,
     layout_dir: Path,
     variant_layout_json: Path,
+    pick_obj_id: str,
+    base_pos: Tuple[float, float, float],
+    room_id: str,
     num_views: int,
     strict: bool,
     model,
@@ -520,19 +506,32 @@ def _infer_grasps_for_variant(
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(f"Cannot import SAGE M2T2 utilities: {exc}") from exc
 
-    pairs = _call_generate_m2t2_data(
-        generate_m2t2_data,
-        layout_id=layout_id,
-        layout_dir=layout_dir,
-        layout_dict_path=variant_layout_json,
-        num_views=num_views,
-        strict=strict,
-    )
+    mesh_dict_list = _build_mesh_dict_list(variant_layout_json, room_id)
+
+    # generate_m2t2_data places camera at base_pos + [0,0,0.8].
+    # For objects on elevated surfaces (counters, tables), the camera may be
+    # below the object.  Raise base_pos.z so the camera is above the target.
+    target_mesh = mesh_dict_list.get(pick_obj_id, {}).get("mesh")
+    adjusted_base = list(base_pos)
+    if target_mesh is not None:
+        obj_top_z = float(target_mesh.bounds[1, 2])  # max Z of target
+        cam_z_needed = obj_top_z + 0.3  # camera should be above the object
+        cam_offset = 0.8  # offset added inside generate_m2t2_data
+        if adjusted_base[2] + cam_offset < cam_z_needed:
+            adjusted_base[2] = cam_z_needed - cam_offset
+            _log(f"Raised M2T2 camera base_z to {adjusted_base[2]:.3f} (obj_top={obj_top_z:.3f})")
+
+    meta_data, vis_data = generate_m2t2_data(mesh_dict_list, pick_obj_id, adjusted_base)
+    pairs = [(meta_data, vis_data)]
 
     all_grasps: List[np.ndarray] = []
     all_contacts: List[np.ndarray] = []
     for meta_data, vis_data in pairs:
-        grasps_out = infer_m2t2(meta_data, vis_data, model, cfg, return_contacts=True)
+        try:
+            grasps_out = infer_m2t2(meta_data, vis_data, model, cfg, return_contacts=True)
+        except (ZeroDivisionError, RuntimeError) as exc:
+            _log(f"WARNING: M2T2 inference failed for {pick_obj_id}: {exc}")
+            continue
         if isinstance(grasps_out, tuple) and len(grasps_out) == 2:
             grasps, contacts = grasps_out
         else:
@@ -551,13 +550,20 @@ def _infer_grasps_for_variant(
     return grasps.astype(np.float32), contacts.astype(np.float32)
 
 
+RIDGEBACK_ARM_BASE_HEIGHT = 0.40  # Ridgeback mobile base top + mount ≈ 0.40m
+
 def _world_from_base(base_pose: Sequence[float]) -> np.ndarray:
+    """Transform from Franka arm base frame to world frame.
+
+    The arm base is on a Ridgeback mobile base at height RIDGEBACK_ARM_BASE_HEIGHT.
+    base_pose = (x, y, yaw) of the mobile base on the floor.
+    """
     x, y, yaw = float(base_pose[0]), float(base_pose[1]), float(base_pose[2])
     c = math.cos(yaw)
     s = math.sin(yaw)
     T = np.eye(4, dtype=np.float32)
     T[:3, :3] = np.asarray([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
-    T[:3, 3] = np.asarray([x, y, 0.0], dtype=np.float32)
+    T[:3, 3] = np.asarray([x, y, RIDGEBACK_ARM_BASE_HEIGHT], dtype=np.float32)
     return T
 
 
@@ -673,9 +679,15 @@ def main() -> None:
     all_contacts_for_report: List[np.ndarray] = []
 
     for demo_idx in range(args.num_demos):
+      try:
         # Deterministic variant selection (rotate) for reproducibility.
         variant_json = variants[demo_idx % len(variants)]
-        room = _load_json(variant_json)
+        _variant_data = _load_json(variant_json)
+        # Handle both room-level and layout-level JSONs.
+        if "rooms" in _variant_data and isinstance(_variant_data["rooms"], list) and _variant_data["rooms"]:
+            room = _variant_data["rooms"][0]
+        else:
+            room = _variant_data
         room_dims = room.get("dimensions", {}) or {}
 
         pick_obj, place_surface = _select_pick_and_place(room, task_desc=args.task_desc)
@@ -697,13 +709,19 @@ def main() -> None:
             layout_id=args.layout_id,
             layout_dir=layout_dir,
             variant_layout_json=variant_json,
+            pick_obj_id=pick_obj["id"],
+            base_pos=(base_pick[0], base_pick[1], 0.0),
+            room_id=room.get("id", "room_0"),
             num_views=args.num_views_m2t2,
             strict=args.strict,
             model=model,
             cfg=cfg,
         )
-        if args.strict and grasps_world.shape[0] == 0:
-            raise RuntimeError(f"Stage 5 produced 0 grasps for demo={demo_idx} (variant={variant_json})")
+        if grasps_world.shape[0] == 0:
+            _log(f"demo={demo_idx}: Stage 5 produced 0 grasps — skipping")
+            if args.strict:
+                raise RuntimeError(f"Stage 5 produced 0 grasps for demo={demo_idx} (variant={variant_json})")
+            continue
 
         # Choose grasp using top-K candidates and require first successful cuRobo plan.
         top_k = max(1, int(args.grasp_top_k))
@@ -714,6 +732,13 @@ def main() -> None:
         # Convert base pose for frame conversion once.
         base_T_world = _invert_T(_world_from_base(base_pick))
         place_pose_base = _default_place_pose_base(place_surface, base_place)
+
+        # Debug: show grasp in base frame
+        if grasps_world.shape[0] > 0:
+            g0 = base_T_world @ grasps_world[0]
+            _log(f"demo={demo_idx}: base_pick=({base_pick[0]:.2f},{base_pick[1]:.2f},{base_pick[2]:.2f}) "
+                 f"grasp[0]_base=({g0[0,3]:.3f},{g0[1,3]:.3f},{g0[2,3]:.3f}) "
+                 f"dist={np.linalg.norm(g0[:3,3]):.3f}m")
 
         chosen_grasp_world: Optional[np.ndarray] = None
         chosen_segments: Optional[Dict[str, np.ndarray]] = None
@@ -734,15 +759,21 @@ def main() -> None:
                 chosen_idx = cand_idx
                 break
             except Exception as e:  # pragma: no cover
+                import traceback
                 plan_error = str(e)
-                _log(f"demo={demo_idx}: grasp candidate {cand_idx + 1}/{grasp_candidates} failed: {e}")
+                tb = traceback.format_exc()
+                _log(f"demo={demo_idx}: grasp candidate {cand_idx + 1}/{grasp_candidates} failed: {e}\n{tb}")
                 continue
 
         if chosen_segments is None or chosen_grasp_world is None:
-            raise RuntimeError(
+            msg = (
                 f"Stage 6 failed to plan arm trajectory for demo={demo_idx}. "
                 f"No feasible grasps in top-K ({grasp_candidates}). last_error={plan_error}"
             )
+            if args.strict:
+                raise RuntimeError(msg)
+            _log(f"WARNING: {msg} — skipping demo")
+            continue
 
         all_grasps_for_report.append(chosen_grasp_world[None, ...])
         all_contacts_for_report.append((contacts[chosen_idx : chosen_idx + 1] if contacts.shape[0] else np.zeros((1, 3), dtype=np.float32)))
@@ -811,6 +842,11 @@ def main() -> None:
                 chosen_grasp_T_world=chosen_grasp_world.tolist(),
             )
         )
+      except Exception as exc:
+        if args.strict:
+            raise
+        _log(f"ERROR: demo={demo_idx} failed: {exc} — skipping")
+        continue
 
     # Save grasps (only the selected ones per demo to keep artifact small).
     grasps_out_dir = layout_dir / "grasps"
@@ -850,6 +886,11 @@ def main() -> None:
     plan_path = plan_dir / "plan_bundle.json"
     _write_json(plan_path, plan_bundle)
     _log(f"Wrote plan bundle: {plan_path}")
+
+    if not plans:
+        _log("WARNING: No successful demo plans. Skipping Stage 7 (Isaac Sim collection).")
+        _log("Stage 5–6 complete with 0 demos.")
+        return
 
     collector = Path(__file__).with_name("isaacsim_collect_mobile_franka.py")
     if not collector.exists():

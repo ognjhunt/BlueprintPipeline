@@ -9,6 +9,7 @@ Goal:
 This script:
   1) Runs the official SceneSmith paper stack via:
        BlueprintPipeline/scenesmith-service/scenesmith_paper_command.py
+     with an optional critic-loop accept/reject gate.
   2) Converts objects + transforms into a SAGE-style room dict JSON (z-up).
   3) Writes a minimal pose augmentation folder:
        pose_aug_0/meta.json (list with 1 variant)
@@ -42,6 +43,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 _SURFACE_TOKENS = ("table", "counter", "desk", "island", "bench")
 
 
+_PASS_TOKENS = {"pass", "passed", "ok", "success", "succeeded"}
+_FAIL_TOKENS = {"fail", "failed", "error", "invalid", "rejected"}
+
+
 def _log(msg: str) -> None:
     print(f"[scenesmith->sage {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] {msg}", file=sys.stderr, flush=True)
 
@@ -51,6 +56,26 @@ def _safe_float(v: Any, default: float) -> float:
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_int(v: Any, default: int) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_truthy(v: Any, *, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def _slug(s: str, default: str) -> str:
@@ -72,6 +97,187 @@ def _load_json(path: Path) -> Any:
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _extract_critic_payload(response: Mapping[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    critic_outputs = response.get("critic_outputs")
+    if isinstance(critic_outputs, Mapping):
+        payload.update(dict(critic_outputs))
+    for key in (
+        "placement_stages",
+        "critic_scores",
+        "support_surfaces",
+        "faithfulness_report",
+        "quality_gate_report",
+    ):
+        value = response.get(key)
+        if value is None or key in payload:
+            continue
+        if isinstance(value, (Mapping, list)):
+            payload[key] = value
+    return payload
+
+
+def _json_compact(value: Any, max_len: int = 240) -> str:
+    try:
+        text = json.dumps(value, sort_keys=True)
+    except Exception:
+        text = repr(value)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
+@dataclass
+class CriticLoopConfig:
+    enabled: bool
+    max_attempts: int
+    require_quality_pass: bool
+    require_critic_score: bool
+    require_faithfulness: bool
+    min_faithfulness: float
+    min_critic_total_0_10: float
+    min_critic_total_0_1: float
+    seed_stride: int
+    allow_last_attempt_on_fail: bool
+
+
+def _parse_quality_pass(quality_gate_report: Mapping[str, Any]) -> Optional[bool]:
+    all_pass = quality_gate_report.get("all_pass")
+    if isinstance(all_pass, bool):
+        return all_pass
+    if isinstance(all_pass, (int, float)):
+        return bool(all_pass)
+
+    status = quality_gate_report.get("status")
+    if status is not None:
+        s = str(status).strip().lower()
+        if s in _PASS_TOKENS:
+            return True
+        if s in _FAIL_TOKENS:
+            return False
+        for tok in _FAIL_TOKENS:
+            if tok in s:
+                return False
+        if "not pass" in s or "not_pass" in s or "notpassed" in s:
+            return False
+        for tok in _PASS_TOKENS:
+            if tok in s:
+                return True
+
+    checks = quality_gate_report.get("checks")
+    if isinstance(checks, list) and checks:
+        has_false = False
+        has_true = False
+        for item in checks:
+            if not isinstance(item, Mapping):
+                continue
+            passed = item.get("passed")
+            if isinstance(passed, bool):
+                has_true = has_true or passed
+                has_false = has_false or (not passed)
+        if has_false:
+            return False
+        if has_true:
+            return True
+    return None
+
+
+def _extract_critic_total(critic_scores: Any) -> Tuple[Optional[float], Optional[str]]:
+    if not isinstance(critic_scores, list):
+        return None, None
+    best_score: Optional[float] = None
+    scale_hint: Optional[str] = None
+    for entry in critic_scores:
+        if not isinstance(entry, Mapping):
+            continue
+        candidate = None
+        for key in ("total", "overall_score", "overall", "score", "final_score", "aggregate"):
+            value = entry.get(key)
+            if isinstance(value, (int, float)):
+                candidate = float(value)
+                break
+            if isinstance(value, str):
+                parsed = _safe_float(value, float("nan"))
+                if math.isfinite(parsed):
+                    candidate = float(parsed)
+                    break
+        if candidate is None or not math.isfinite(candidate):
+            continue
+        if best_score is None or candidate > best_score:
+            best_score = candidate
+    if best_score is not None:
+        scale_hint = "0_1" if 0.0 <= best_score <= 1.5 else "0_10"
+    return best_score, scale_hint
+
+
+def _extract_faithfulness_score(faithfulness_report: Any) -> Optional[float]:
+    if not isinstance(faithfulness_report, Mapping):
+        return None
+    for key in ("score", "overall_score", "overall", "faithfulness"):
+        value = faithfulness_report.get(key)
+        if isinstance(value, (int, float)):
+            out = float(value)
+            return (out / 10.0) if out > 1.5 else out
+        if isinstance(value, str):
+            out = _safe_float(value, float("nan"))
+            if math.isfinite(out):
+                return (out / 10.0) if out > 1.5 else out
+    return None
+
+
+def _evaluate_critic(response: Mapping[str, Any], config: CriticLoopConfig) -> Dict[str, Any]:
+    critic_payload = _extract_critic_payload(response)
+    quality_gate_report = critic_payload.get("quality_gate_report")
+    quality_pass: Optional[bool] = None
+    if isinstance(quality_gate_report, Mapping):
+        quality_pass = _parse_quality_pass(quality_gate_report)
+
+    critic_scores = critic_payload.get("critic_scores")
+    critic_total, critic_scale = _extract_critic_total(critic_scores)
+    critic_threshold = (
+        config.min_critic_total_0_1 if critic_scale == "0_1" else config.min_critic_total_0_10
+    )
+    critic_pass: Optional[bool] = None
+    if critic_total is not None:
+        critic_pass = bool(critic_total >= critic_threshold)
+
+    faithfulness = _extract_faithfulness_score(critic_payload.get("faithfulness_report"))
+    faithfulness_pass: Optional[bool] = None
+    if faithfulness is not None:
+        faithfulness_pass = bool(faithfulness >= config.min_faithfulness)
+
+    failures: List[str] = []
+    if config.require_quality_pass:
+        if quality_pass is None:
+            failures.append("missing quality_gate_report pass/fail signal")
+        elif not quality_pass:
+            failures.append("quality gate report did not pass")
+    if config.require_critic_score:
+        if critic_pass is None:
+            failures.append("missing critic total score")
+        elif not critic_pass:
+            failures.append(
+                f"critic total {critic_total:.3f} below threshold {critic_threshold:.3f} ({critic_scale or 'unknown_scale'})"
+            )
+    if config.require_faithfulness:
+        if faithfulness_pass is None:
+            failures.append("missing faithfulness score")
+        elif not faithfulness_pass:
+            failures.append(f"faithfulness {faithfulness:.3f} below threshold {config.min_faithfulness:.3f}")
+
+    return {
+        "passed": len(failures) == 0,
+        "failures": failures,
+        "quality_pass": quality_pass,
+        "critic_total": critic_total,
+        "critic_scale": critic_scale,
+        "critic_threshold": critic_threshold if critic_total is not None else None,
+        "faithfulness": faithfulness,
+        "faithfulness_threshold": config.min_faithfulness if faithfulness is not None else None,
+        "critic_found_keys": sorted(list(critic_payload.keys())),
+    }
 
 
 def _write_unit_box_obj(path: Path) -> None:
@@ -488,6 +694,61 @@ def main() -> int:
     parser.add_argument("--max_meshes", type=int, default=int(os.getenv("SCENESMITH_TO_SAGE_MAX_MESHES", "30")))
     parser.add_argument("--sam3d_server", default=os.getenv("SAM3D_SERVER_URL", "http://127.0.0.1:8080"))
     parser.add_argument("--stop_sam3d_before_paper", action="store_true", default=os.getenv("SCENESMITH_TO_SAGE_STOP_SAM3D_BEFORE_PAPER", "1") == "1")
+    parser.add_argument(
+        "--critic_loop_enabled",
+        type=int,
+        choices=[0, 1],
+        default=_safe_int(os.getenv("SCENESMITH_CRITIC_LOOP_ENABLED", "1"), 1),
+    )
+    parser.add_argument(
+        "--critic_max_attempts",
+        type=int,
+        default=_safe_int(os.getenv("SCENESMITH_CRITIC_MAX_ATTEMPTS", "4"), 4),
+    )
+    parser.add_argument(
+        "--critic_require_quality_pass",
+        type=int,
+        choices=[0, 1],
+        default=_safe_int(os.getenv("SCENESMITH_CRITIC_REQUIRE_QUALITY_PASS", "1"), 1),
+    )
+    parser.add_argument(
+        "--critic_require_score",
+        type=int,
+        choices=[0, 1],
+        default=_safe_int(os.getenv("SCENESMITH_CRITIC_REQUIRE_SCORE", "1"), 1),
+    )
+    parser.add_argument(
+        "--critic_require_faithfulness",
+        type=int,
+        choices=[0, 1],
+        default=_safe_int(os.getenv("SCENESMITH_CRITIC_REQUIRE_FAITHFULNESS", "1"), 1),
+    )
+    parser.add_argument(
+        "--critic_min_score_0_10",
+        type=float,
+        default=_safe_float(os.getenv("SCENESMITH_CRITIC_MIN_SCORE_0_10"), 8.0),
+    )
+    parser.add_argument(
+        "--critic_min_score_0_1",
+        type=float,
+        default=_safe_float(os.getenv("SCENESMITH_CRITIC_MIN_SCORE_0_1"), 0.80),
+    )
+    parser.add_argument(
+        "--critic_min_faithfulness",
+        type=float,
+        default=_safe_float(os.getenv("SCENESMITH_CRITIC_MIN_FAITHFULNESS"), 0.80),
+    )
+    parser.add_argument(
+        "--critic_seed_stride",
+        type=int,
+        default=_safe_int(os.getenv("SCENESMITH_CRITIC_SEED_STRIDE", "7919"), 7919),
+    )
+    parser.add_argument(
+        "--critic_allow_last_attempt_on_fail",
+        type=int,
+        choices=[0, 1],
+        default=_safe_int(os.getenv("SCENESMITH_CRITIC_ALLOW_LAST_ATTEMPT_ON_FAIL", "0"), 0),
+    )
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir).expanduser().resolve()
@@ -514,7 +775,24 @@ def main() -> int:
     if seed == 0:
         seed = random.randint(1, 10_000_000)
 
-    _log(f"Generating SceneSmith scene: layout_id={layout_id} room_type={args.room_type} seed={seed}")
+    critic_cfg = CriticLoopConfig(
+        enabled=bool(args.critic_loop_enabled),
+        max_attempts=max(1, int(args.critic_max_attempts)),
+        require_quality_pass=bool(args.critic_require_quality_pass),
+        require_critic_score=bool(args.critic_require_score),
+        require_faithfulness=bool(args.critic_require_faithfulness),
+        min_faithfulness=float(args.critic_min_faithfulness),
+        min_critic_total_0_10=float(args.critic_min_score_0_10),
+        min_critic_total_0_1=float(args.critic_min_score_0_1),
+        seed_stride=max(1, int(args.critic_seed_stride)),
+        allow_last_attempt_on_fail=bool(args.critic_allow_last_attempt_on_fail),
+    )
+
+    _log(
+        "Generating SceneSmith scene: "
+        f"layout_id={layout_id} room_type={args.room_type} seed={seed} "
+        f"critic_loop={'on' if critic_cfg.enabled else 'off'} max_attempts={critic_cfg.max_attempts}"
+    )
     # Avoid concurrent VRAM usage: stop SAM3D server during SceneSmith generation.
     if bool(args.stop_sam3d_before_paper) and _sam3d_health(str(args.sam3d_server)):
         _log("Stopping SAM3D server before SceneSmith paper stack (free VRAM)...")
@@ -525,13 +803,117 @@ def main() -> int:
                 break
             time.sleep(1.0)
 
-    response = _run_scenesmith_paper_stack(scene_id=layout_id, prompt=prompt, room_type=str(args.room_type), seed=seed)
-    raw_objects = response.get("objects") if isinstance(response.get("objects"), list) else []
-    if not raw_objects:
-        raise RuntimeError("SceneSmith returned 0 objects")
+    chosen_response: Optional[Dict[str, Any]] = None
+    chosen_seed: Optional[int] = None
+    chosen_attempt: Optional[int] = None
+    chosen_raw_objects: List[Mapping[str, Any]] = []
+    attempt_summaries: List[Dict[str, Any]] = []
+
+    last_response: Optional[Dict[str, Any]] = None
+    last_seed: Optional[int] = None
+    last_objects: List[Mapping[str, Any]] = []
+
+    max_attempts = critic_cfg.max_attempts if critic_cfg.enabled else 1
+    for attempt_idx in range(1, max_attempts + 1):
+        attempt_seed = seed + ((attempt_idx - 1) * critic_cfg.seed_stride)
+        attempt_scene_id = layout_id if attempt_idx == 1 else f"{layout_id}_a{attempt_idx:02d}"
+        _log(
+            f"SceneSmith attempt {attempt_idx}/{max_attempts}: "
+            f"scene_id={attempt_scene_id} seed={attempt_seed}"
+        )
+        response = _run_scenesmith_paper_stack(
+            scene_id=attempt_scene_id,
+            prompt=prompt,
+            room_type=str(args.room_type),
+            seed=attempt_seed,
+        )
+        raw_objects = response.get("objects") if isinstance(response.get("objects"), list) else []
+        last_response = response
+        last_seed = attempt_seed
+        last_objects = list(raw_objects)
+
+        eval_report = _evaluate_critic(response, critic_cfg)
+        failures = list(eval_report.get("failures", []))
+        object_count = len(raw_objects)
+        if object_count < 1:
+            failures.append("SceneSmith returned 0 objects")
+            eval_report["passed"] = False
+            eval_report["failures"] = failures
+
+        attempt_summary = {
+            "attempt": attempt_idx,
+            "seed": attempt_seed,
+            "scene_id": attempt_scene_id,
+            "object_count": object_count,
+            "critic": eval_report,
+            "accepted": False,
+        }
+        attempt_summaries.append(attempt_summary)
+
+        if not critic_cfg.enabled:
+            chosen_response = response
+            chosen_seed = attempt_seed
+            chosen_attempt = attempt_idx
+            chosen_raw_objects = list(raw_objects)
+            attempt_summary["accepted"] = True
+            if not eval_report.get("passed"):
+                _log(
+                    "Critic loop disabled; accepting first attempt even though critic checks did not pass: "
+                    f"{'; '.join(failures) if failures else 'unknown reason'}"
+                )
+            break
+
+        if eval_report.get("passed"):
+            chosen_response = response
+            chosen_seed = attempt_seed
+            chosen_attempt = attempt_idx
+            chosen_raw_objects = list(raw_objects)
+            attempt_summary["accepted"] = True
+            _log(
+                "SceneSmith critic gate PASS: "
+                f"attempt={attempt_idx} object_count={object_count} "
+                f"quality_pass={eval_report.get('quality_pass')} "
+                f"critic_total={eval_report.get('critic_total')} "
+                f"faithfulness={eval_report.get('faithfulness')}"
+            )
+            break
+
+        _log(
+            "SceneSmith critic gate FAIL: "
+            f"attempt={attempt_idx} reasons={'; '.join(failures) if failures else 'unknown'} "
+            f"critic_keys={_json_compact(eval_report.get('critic_found_keys', []), max_len=160)}"
+        )
+
+    if chosen_response is None:
+        if critic_cfg.allow_last_attempt_on_fail and last_response is not None and last_objects:
+            chosen_response = last_response
+            chosen_seed = last_seed
+            chosen_attempt = max_attempts
+            chosen_raw_objects = list(last_objects)
+            if attempt_summaries:
+                attempt_summaries[-1]["accepted"] = True
+            _log(
+                "WARNING: SceneSmith critic loop rejected all attempts; "
+                "accepting last attempt due to critic_allow_last_attempt_on_fail=1."
+            )
+        else:
+            last_reason = ""
+            if attempt_summaries:
+                last_failures = attempt_summaries[-1].get("critic", {}).get("failures", [])
+                if isinstance(last_failures, list) and last_failures:
+                    last_reason = f" Last failure: {last_failures[0]}"
+            raise RuntimeError(
+                f"SceneSmith critic loop rejected all {max_attempts} attempts."
+                f"{last_reason}"
+            )
+
+    assert chosen_response is not None  # for type checkers
+    assert chosen_seed is not None
+    response = chosen_response
+    raw_objects = chosen_raw_objects
 
     # Convert objects to SAGE room dict.
-    room = _convert_objects_to_sage(raw_objects, margin_m=0.6, room_type=str(args.room_type), seed=seed)
+    room = _convert_objects_to_sage(raw_objects, margin_m=0.6, room_type=str(args.room_type), seed=int(chosen_seed))
     objs = list(room.get("objects", []) or [])
 
     # Create layout dir structure.
@@ -559,7 +941,7 @@ def main() -> int:
             try:
                 _sam3d_start_if_needed(str(args.sam3d_server))
                 _log(f"SAM3D mesh [{i+1}/{len(objs)}]: {prompt_i!r} -> {out_obj.name}")
-                _sam3d_generate_obj(prompt=prompt_i, out_obj_path=out_obj, seed=seed + i, server_base=str(args.sam3d_server))
+                _sam3d_generate_obj(prompt=prompt_i, out_obj_path=out_obj, seed=int(chosen_seed) + i, server_base=str(args.sam3d_server))
                 continue
             except Exception as exc:
                 _log(f"WARNING: SAM3D mesh failed for {prompt_i!r}: {exc} (falling back to unit box)")
@@ -581,6 +963,41 @@ def main() -> int:
 
     # Keep a copy of raw response for debugging.
     _write_json(layout_dir / "scenesmith_response.json", response)
+    _write_json(
+        layout_dir / "scenesmith_critic_attempts.json",
+        {
+            "layout_id": layout_id,
+            "accepted_attempt": int(chosen_attempt or 1),
+            "accepted_seed": int(chosen_seed),
+            "critic_loop": {
+                "enabled": critic_cfg.enabled,
+                "max_attempts": critic_cfg.max_attempts,
+                "require_quality_pass": critic_cfg.require_quality_pass,
+                "require_critic_score": critic_cfg.require_critic_score,
+                "require_faithfulness": critic_cfg.require_faithfulness,
+                "min_critic_total_0_10": critic_cfg.min_critic_total_0_10,
+                "min_critic_total_0_1": critic_cfg.min_critic_total_0_1,
+                "min_faithfulness": critic_cfg.min_faithfulness,
+                "seed_stride": critic_cfg.seed_stride,
+                "allow_last_attempt_on_fail": critic_cfg.allow_last_attempt_on_fail,
+            },
+            "attempts": attempt_summaries,
+        },
+    )
+    critic_report: Dict[str, Any] = {}
+    critic_outputs = response.get("critic_outputs")
+    if isinstance(critic_outputs, Mapping):
+        critic_report.update(dict(critic_outputs))
+    for key in ("placement_stages", "critic_scores", "support_surfaces", "faithfulness_report", "quality_gate_report"):
+        value = response.get(key)
+        if value is None or key in critic_report:
+            continue
+        if isinstance(value, (Mapping, list)):
+            critic_report[key] = value
+    if critic_report:
+        critic_path = layout_dir / "scenesmith_critic_report.json"
+        _write_json(critic_path, critic_report)
+        _log(f"Saved SceneSmith critic report: {critic_path}")
 
     # Print layout id only (consumed by bash).
     sys.stdout.write(layout_id + "\n")

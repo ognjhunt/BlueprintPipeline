@@ -15,7 +15,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Tuple
 
 _STATIC_CLASSES = {
     "bed",
@@ -76,6 +76,14 @@ _VALID_PIPELINE_STAGES = {
     "ceiling_mounted",
     "manipuland",
 }
+
+_CRITIC_PAYLOAD_KEYS = (
+    "placement_stages",
+    "critic_scores",
+    "support_surfaces",
+    "faithfulness_report",
+    "quality_gate_report",
+)
 
 _OPENAI_API_WRAPPER = """\
 import os
@@ -424,6 +432,98 @@ def _find_house_state(run_dir: Path, scene_name: str) -> Path:
     raise FileNotFoundError(f"Unable to locate house_state.json under {run_dir}")
 
 
+def _json_clone(value: Any) -> Any:
+    # Keep return payload strictly JSON-safe.
+    return json.loads(json.dumps(value))
+
+
+def _extract_critic_payload(candidate: Mapping[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key in _CRITIC_PAYLOAD_KEYS:
+        value = candidate.get(key)
+        if key in {"placement_stages", "critic_scores", "support_surfaces"}:
+            if isinstance(value, list):
+                out[key] = _json_clone(value)
+        else:
+            if isinstance(value, Mapping):
+                out[key] = _json_clone(dict(value))
+    return out
+
+
+def _iter_candidate_json_files(run_dir: Path) -> List[Path]:
+    roots = [run_dir / "outputs", run_dir]
+    include_tokens = ("quality", "critic", "package", "report", "result", "metadata", "house_state")
+    seen: set[str] = set()
+    out: List[Path] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.json")):
+            sp = str(path.resolve())
+            if sp in seen:
+                continue
+            seen.add(sp)
+            name = path.name.lower()
+            if not any(tok in name for tok in include_tokens):
+                continue
+            try:
+                if path.stat().st_size > 8_000_000:
+                    continue
+            except OSError:
+                continue
+            out.append(path)
+    return out
+
+
+def _collect_critic_outputs(
+    *,
+    run_dir: Path,
+    house_state: Mapping[str, Any],
+    house_state_path: Path,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    merged = _extract_critic_payload(house_state)
+    source_files: List[str] = []
+    if merged:
+        source_files.append(str(house_state_path))
+
+    for json_path in _iter_candidate_json_files(run_dir):
+        if json_path.resolve() == house_state_path.resolve():
+            continue
+        try:
+            parsed = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        candidates: List[Mapping[str, Any]] = []
+        if isinstance(parsed, Mapping):
+            candidates.append(parsed)
+            package = parsed.get("package")
+            if isinstance(package, Mapping):
+                candidates.append(package)
+
+        found_any = False
+        for cand in candidates:
+            extracted = _extract_critic_payload(cand)
+            if not extracted:
+                continue
+            for key, value in extracted.items():
+                if key not in merged:
+                    merged[key] = value
+            found_any = True
+        if found_any:
+            source_files.append(str(json_path))
+
+        # Enough data collected; avoid scanning the whole run tree.
+        if "critic_scores" in merged and "quality_gate_report" in merged and "faithfulness_report" in merged:
+            break
+
+    summary = {
+        "found_keys": sorted(list(merged.keys())),
+        "source_files": source_files,
+    }
+    return merged, summary
+
+
 def _hydra_overrides(*, payload: Mapping[str, Any], run_dir: Path, scene_name: str) -> List[str]:
     prompt = str(payload.get("prompt") or "").strip()
     if not prompt:
@@ -566,6 +666,11 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
         raw_objects = _collect_raw_objects(house_state)
         if not raw_objects:
             raise RuntimeError(f"Official SceneSmith returned zero objects (house_state={house_state_path})")
+        critic_outputs, critic_summary = _collect_critic_outputs(
+            run_dir=run_dir,
+            house_state=house_state,
+            house_state_path=house_state_path,
+        )
 
         objects = [
             _object_from_house_state(
@@ -582,7 +687,7 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
             else "generic_room"
         )
 
-        return {
+        response: Dict[str, Any] = {
             "schema_version": "v1",
             "request_id": str(payload.get("request_id") or ""),
             "room_type": room_type,
@@ -598,8 +703,18 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
                 "object_count": len(objects),
                 "backend": str(os.getenv("SCENESMITH_PAPER_BACKEND", "openai")),
                 "model": str(os.getenv("SCENESMITH_PAPER_MODEL", "")),
+                "critic_found_keys": critic_summary.get("found_keys", []),
+                "critic_source_files": critic_summary.get("source_files", []),
             },
         }
+        if critic_outputs:
+            response["critic_outputs"] = critic_outputs
+            # Also expose common fields at top-level for compatibility with consumers
+            # that read these directly.
+            for key in _CRITIC_PAYLOAD_KEYS:
+                if key in critic_outputs:
+                    response[key] = critic_outputs[key]
+        return response
     finally:
         if run_dir.exists() and not keep_run_dir:
             shutil.rmtree(run_dir, ignore_errors=True)
