@@ -40,7 +40,9 @@ sys.path.insert(0, SAGE_SERVER_DIR)
 
 
 M2T2_WEIGHTS_DEFAULT = "/workspace/SAGE/M2T2/m2t2.pth"
-ISAACSIM_PY_DEFAULT = "/workspace/isaacsim_env/bin/python3"
+ISAACSIM_PY_DEFAULT = os.environ.get(
+    "ISAACSIM_PY_STAGE7", "/workspace/isaacsim_env/bin/python3"
+)
 
 
 def _log(msg: str) -> None:
@@ -121,6 +123,16 @@ def _build_stage7_command_and_env(
     output_dir: Path,
     run_id: str = "",
 ) -> Tuple[List[str], Dict[str, str]]:
+    strict_sensors_raw = os.environ.get("SAGE_STRICT_SENSORS", "").strip()
+    if strict_sensors_raw:
+        strict_sensors_default = strict_sensors_raw.lower() in {"1", "true", "yes", "on"}
+    else:
+        # Inherit strictness from pipeline mode unless explicitly overridden.
+        strict_sensors_default = bool(args.strict)
+    export_scene_usd_default = os.environ.get("SAGE_EXPORT_SCENE_USD", "1").strip().lower() in {"1", "true", "yes", "on"}
+    export_demo_videos_default = os.environ.get("SAGE_EXPORT_DEMO_VIDEOS", "1").strip().lower() in {"1", "true", "yes", "on"}
+    quality_report_path = str((output_dir / "quality_report.json").resolve())
+
     cmd = [
         args.isaacsim_py,
         "-P",
@@ -133,17 +145,31 @@ def _build_stage7_command_and_env(
     cmd.append("--headless" if args.headless else "--no-headless")
     cmd.append("--enable_cameras" if args.enable_cameras else "--disable_cameras")
     cmd.append("--strict" if args.strict else "--no-strict")
+    cmd.append("--strict-sensors" if strict_sensors_default else "--no-strict-sensors")
+    cmd.extend(["--min-depth-finite-ratio", os.environ.get("SAGE_MIN_DEPTH_FINITE_RATIO", "0.98")])
+    cmd.extend(["--min-rgb-std", os.environ.get("SAGE_SENSOR_MIN_RGB_STD", "5.0")])
+    cmd.extend(["--max-rgb-saturation-ratio", os.environ.get("SAGE_MAX_RGB_SATURATION_RATIO", "0.85")])
+    cmd.extend(["--quality-report-path", quality_report_path])
+    cmd.append("--export-scene-usd" if export_scene_usd_default else "--no-export-scene-usd")
+    cmd.append("--export-demo-videos" if export_demo_videos_default else "--no-export-demo-videos")
 
     env = os.environ.copy()
     env["OMNI_KIT_ACCEPT_EULA"] = "yes"
     env.setdefault("ISAAC_ASSETS_ROOT", "/workspace/isaacsim_assets/Assets/Isaac/5.1")
     env.setdefault("SAGE_ALLOW_REMOTE_ISAAC_ASSETS", "0")
     env.setdefault("SAGE_SENSOR_FAILURE_POLICY", "fail" if bool(args.strict) else "warn")
+    env.setdefault("SAGE_STRICT_SENSORS", "1" if strict_sensors_default else "0")
     env.setdefault("SAGE_RENDER_WARMUP_FRAMES", "100")
-    env.setdefault("SAGE_SENSOR_MIN_RGB_STD", "0.01")
+    env.setdefault("SAGE_SENSOR_MIN_RGB_STD", "5.0")
     env.setdefault("SAGE_SENSOR_MIN_DEPTH_STD", "0.0001")
+    env.setdefault("SAGE_MIN_DEPTH_FINITE_RATIO", "0.98")
+    env.setdefault("SAGE_MAX_RGB_SATURATION_RATIO", "0.85")
+    env.setdefault("SAGE_MIN_DEPTH_RANGE_M", "0.05")
     env.setdefault("SAGE_MIN_VALID_DEPTH_PX", "1024")
     env.setdefault("SAGE_SENSOR_CHECK_FRAME", "10")
+    env.setdefault("SAGE_EXPORT_SCENE_USD", "1")
+    env.setdefault("SAGE_EXPORT_DEMO_VIDEOS", "1")
+    env.setdefault("SAGE_QUALITY_REPORT_PATH", quality_report_path)
     env.setdefault("SAGE_ENFORCE_BUNDLE_STRICT", "1")
     if run_id:
         env.setdefault("SAGE_RUN_ID", run_id)
@@ -821,6 +847,66 @@ def _infer_grasps_for_variant(
     return grasps.astype(np.float32), contacts.astype(np.float32)
 
 
+def _infer_grasps_with_retries(
+    *,
+    layout_id: str,
+    layout_dir: Path,
+    variant_layout_json: Path,
+    pick_obj_id: str,
+    base_pos: Tuple[float, float, float],
+    room_id: str,
+    num_views: int,
+    strict: bool,
+    model: Any,
+    cfg: Any,
+    min_grasps_per_object: int,
+    max_retries: int,
+) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, Any]]]:
+    best_grasps = np.zeros((0, 4, 4), dtype=np.float32)
+    best_contacts = np.zeros((0, 3), dtype=np.float32)
+    attempts: List[Dict[str, Any]] = []
+
+    total_attempts = max(1, int(max_retries))
+    for attempt_idx in range(total_attempts):
+        z_offset = 0.10 * float(attempt_idx)
+        attempt_base = (float(base_pos[0]), float(base_pos[1]), float(base_pos[2]) + z_offset)
+        views_attempt = max(1, int(num_views) + attempt_idx)
+
+        t0 = time.time()
+        grasps_world, contacts = _infer_grasps_for_variant(
+            layout_id=layout_id,
+            layout_dir=layout_dir,
+            variant_layout_json=variant_layout_json,
+            pick_obj_id=pick_obj_id,
+            base_pos=attempt_base,
+            room_id=room_id,
+            num_views=views_attempt,
+            strict=strict,
+            model=model,
+            cfg=cfg,
+        )
+        elapsed_s = float(time.time() - t0)
+        num_grasps = int(grasps_world.shape[0])
+        attempts.append(
+            {
+                "attempt": int(attempt_idx + 1),
+                "base_pos": [float(attempt_base[0]), float(attempt_base[1]), float(attempt_base[2])],
+                "num_views_m2t2": int(views_attempt),
+                "num_grasps": num_grasps,
+                "elapsed_s": round(elapsed_s, 6),
+            }
+        )
+
+        if num_grasps > int(best_grasps.shape[0]):
+            best_grasps = grasps_world
+            best_contacts = contacts
+
+        if num_grasps >= int(min_grasps_per_object):
+            return grasps_world, contacts, attempts
+
+    return best_grasps, best_contacts, attempts
+
+
 RIDGEBACK_ARM_BASE_HEIGHT = 0.40  # Ridgeback mobile base top + mount ≈ 0.40m
 
 def _world_from_base(base_pose: Sequence[float]) -> np.ndarray:
@@ -888,6 +974,9 @@ def main() -> None:
     parser.add_argument("--num_demos", type=int, required=True)
     parser.add_argument("--num_views_m2t2", type=int, default=1)
     parser.add_argument("--grasp_top_k", type=int, default=8)
+    parser.add_argument("--min_grasps_per_object", type=int, default=int(os.getenv("STAGE5_MIN_GRASPS_PER_OBJECT", "10")))
+    parser.add_argument("--stage5_max_retries", type=int, default=int(os.getenv("STAGE5_MAX_RETRIES", "3")))
+    parser.add_argument("--stage5_quality_report", default="")
     parser.add_argument("--output_dir", default="")
     parser.add_argument("--task_desc", default=os.getenv("TASK_DESC", ""))
 
@@ -953,6 +1042,12 @@ def main() -> None:
     plans: List[DemoPlan] = []
     all_grasps_for_report: List[np.ndarray] = []
     all_contacts_for_report: List[np.ndarray] = []
+    stage5_quality_path = (
+        Path(args.stage5_quality_report).expanduser().resolve()
+        if str(args.stage5_quality_report).strip()
+        else (layout_dir / "quality" / "stage5_quality_report.json")
+    )
+    stage5_demo_stats: List[Dict[str, Any]] = []
 
     for demo_idx in range(args.num_demos):
       try:
@@ -991,7 +1086,7 @@ def main() -> None:
 
         _log(f"demo={demo_idx}: variant={variant_json.name} pick={pick_obj.get('type')} place={place_surface.get('type')}")
 
-        grasps_world, contacts = _infer_grasps_for_variant(
+        grasps_world, contacts, grasp_attempts = _infer_grasps_with_retries(
             layout_id=args.layout_id,
             layout_dir=layout_dir,
             variant_layout_json=variant_json,
@@ -1002,16 +1097,50 @@ def main() -> None:
             strict=args.strict,
             model=model,
             cfg=cfg,
+            min_grasps_per_object=int(args.min_grasps_per_object),
+            max_retries=int(args.stage5_max_retries),
         )
-        if grasps_world.shape[0] == 0:
+        num_grasps = grasps_world.shape[0]
+        stage5_entry: Dict[str, Any] = {
+            "demo_idx": int(demo_idx),
+            "variant_layout_json": str(variant_json),
+            "pick_object_id": str(pick_obj.get("id", "")),
+            "pick_object_type": str(pick_obj.get("type", "")),
+            "required_min_grasps": int(args.min_grasps_per_object),
+            "num_grasps": int(num_grasps),
+            "attempts": grasp_attempts,
+            "passed": bool(int(num_grasps) >= int(args.min_grasps_per_object)),
+        }
+        stage5_demo_stats.append(stage5_entry)
+        if int(num_grasps) < int(args.min_grasps_per_object):
+            msg = (
+                f"demo={demo_idx}: insufficient grasps "
+                f"({num_grasps} < {int(args.min_grasps_per_object)}) after "
+                f"{int(args.stage5_max_retries)} attempt(s)"
+            )
+            if args.strict:
+                raise RuntimeError(msg)
+            _log(f"WARNING: {msg} — skipping")
+            continue
+        if num_grasps == 0:
             _log(f"demo={demo_idx}: Stage 5 produced 0 grasps — skipping")
             if args.strict:
                 raise RuntimeError(f"Stage 5 produced 0 grasps for demo={demo_idx} (variant={variant_json})")
             continue
 
+        # Warn about low grasp counts — a single grasp means no fallback if
+        # cuRobo planning fails for that candidate.
+        MIN_GRASP_WARNING = 3
+        if num_grasps < MIN_GRASP_WARNING:
+            _log(
+                f"WARNING: demo={demo_idx}: only {num_grasps} grasp(s) produced "
+                f"(min recommended: {MIN_GRASP_WARNING}). "
+                f"Motion planning may fail with no fallback candidates."
+            )
+
         # Choose grasp using top-K candidates and require first successful cuRobo plan.
         top_k = max(1, int(args.grasp_top_k))
-        grasp_candidates = min(grasps_world.shape[0], top_k)
+        grasp_candidates = min(num_grasps, top_k)
         if args.strict and grasp_candidates <= 0:
             raise RuntimeError(f"Stage 5 produced 0 grasps after filtering for demo={demo_idx} (variant={variant_json})")
 
@@ -1056,11 +1185,15 @@ def main() -> None:
                 f"Stage 6 failed to plan arm trajectory for demo={demo_idx}. "
                 f"No feasible grasps in top-K ({grasp_candidates}). last_error={plan_error}"
             )
+            stage5_entry["passed"] = False
+            stage5_entry["stage6_error"] = msg
             if args.strict:
                 raise RuntimeError(msg)
             _log(f"WARNING: {msg} — skipping demo")
             continue
 
+        stage5_entry["selected_grasp_idx"] = int(chosen_idx)
+        stage5_entry["evaluated_candidates"] = int(grasp_candidates)
         all_grasps_for_report.append(chosen_grasp_world[None, ...])
         all_contacts_for_report.append((contacts[chosen_idx : chosen_idx + 1] if contacts.shape[0] else np.zeros((1, 3), dtype=np.float32)))
 
@@ -1156,6 +1289,27 @@ def main() -> None:
         _log(f"ERROR: demo={demo_idx} failed: {exc} — skipping")
         continue
 
+    stage5_failed = [entry for entry in stage5_demo_stats if not bool(entry.get("passed"))]
+    stage5_quality_report: Dict[str, Any] = {
+        "run_id": run_id,
+        "layout_id": args.layout_id,
+        "status": "pass" if not stage5_failed else "fail",
+        "required_min_grasps": int(args.min_grasps_per_object),
+        "max_retries": int(args.stage5_max_retries),
+        "num_demos_requested": int(args.num_demos),
+        "num_demos_planned": int(len(plans)),
+        "num_failed_demos": int(len(stage5_failed)),
+        "failed_demos": stage5_failed,
+        "demos": stage5_demo_stats,
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    _write_json(stage5_quality_path, stage5_quality_report)
+    _log(f"Wrote Stage 5 quality report: {stage5_quality_path}")
+    if args.strict and stage5_failed:
+        raise RuntimeError(
+            f"Stage 5 quality gate failed for {len(stage5_failed)} demo(s); see {stage5_quality_path}"
+        )
+
     # Save grasps (only the selected ones per demo to keep artifact small).
     grasps_out_dir = layout_dir / "grasps"
     grasps_out_dir.mkdir(parents=True, exist_ok=True)
@@ -1197,6 +1351,7 @@ def main() -> None:
             "bp_git_commit": _git_commit_sha(Path(__file__).resolve().parents[2]),
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "stage7_log_path": str(layout_dir / "stage7_output" / "stage7.log"),
+            "stage5_quality_report_path": str(stage5_quality_path),
             "collector_script": str(Path(__file__).with_name("isaacsim_collect_mobile_franka.py").resolve()),
             "policy_env": {
                 "ISAAC_ASSETS_ROOT": os.environ.get("ISAAC_ASSETS_ROOT", ""),
@@ -1225,6 +1380,18 @@ def main() -> None:
     collector = Path(__file__).with_name("isaacsim_collect_mobile_franka.py")
     if not collector.exists():
         raise FileNotFoundError(f"Missing collector script: {collector}")
+
+    # Validate Isaac Sim Python binary exists before attempting launch.
+    isaacsim_py_path = Path(args.isaacsim_py)
+    if not isaacsim_py_path.exists():
+        raise FileNotFoundError(
+            f"Isaac Sim Python not found at {args.isaacsim_py}. "
+            f"Set ISAACSIM_PY_STAGE7 env var or --isaacsim_py to the correct path. "
+            f"Typical locations: /workspace/isaacsim_env/bin/python3, "
+            f"/workspace/miniconda3/envs/isaacsim/bin/python3"
+        )
+    _log(f"Stage 7 Python binary: {args.isaacsim_py}")
+
     stage7_log_path = layout_dir / "stage7_output" / "stage7.log"
     cmd, env = _build_stage7_command_and_env(
         args=args,

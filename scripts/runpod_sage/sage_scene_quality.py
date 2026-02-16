@@ -141,6 +141,56 @@ _PROFILES: Dict[str, _Profile] = {
 
 _SURFACE_TOKENS = ("table", "counter", "desk", "island", "bench")
 _WALL_MOUNT_TOKENS = ("picture", "painting", "mirror", "clock", "poster", "frame", "wall")
+_TABLETOP_OBJECT_TOKENS = (
+    "plate",
+    "bowl",
+    "cup",
+    "mug",
+    "glass",
+    "bottle",
+    "can",
+    "jar",
+    "salt",
+    "pepper",
+    "shaker",
+    "utensil",
+    "fork",
+    "spoon",
+    "knife",
+)
+_MASS_PRESETS_KG: Dict[str, Dict[str, float]] = {
+    "salt": {"target": 0.30, "min": 0.05, "max": 0.80},
+    "pepper": {"target": 0.30, "min": 0.05, "max": 0.80},
+    "salt_shaker": {"target": 0.30, "min": 0.05, "max": 0.80},
+    "pepper_shaker": {"target": 0.30, "min": 0.05, "max": 0.80},
+    "plate": {"target": 0.50, "min": 0.10, "max": 2.00},
+    "bowl": {"target": 0.40, "min": 0.10, "max": 2.00},
+    "mug": {"target": 0.30, "min": 0.05, "max": 1.50},
+    "cup": {"target": 0.25, "min": 0.05, "max": 1.50},
+    "bottle": {"target": 0.60, "min": 0.10, "max": 2.00},
+}
+
+
+def _object_type(obj: Dict[str, Any]) -> str:
+    return _normalize_type(str(obj.get("type", "")))
+
+
+def _match_mass_preset_key(obj_type: str) -> Optional[str]:
+    if not obj_type:
+        return None
+    for key in _MASS_PRESETS_KG:
+        if key in obj_type:
+            return key
+    return None
+
+
+def _is_tabletop_candidate(obj: Dict[str, Any]) -> bool:
+    t = _object_type(obj)
+    if any(tok in t for tok in _TABLETOP_OBJECT_TOKENS):
+        return True
+    if _is_manipulable(obj):
+        return True
+    return False
 
 
 def _dims(obj: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
@@ -181,7 +231,7 @@ def _is_manipulable(obj: Dict[str, Any]) -> bool:
     if d is None:
         return False
     w, l, _ = d
-    if min(w, l) > 0.20:
+    if min(w, l) > 0.35 and not any(tok in _object_type(obj) for tok in _TABLETOP_OBJECT_TOKENS):
         return False
     return bool(obj.get("source_id"))
 
@@ -272,15 +322,16 @@ def _floating_and_floor_metrics(room: Dict[str, Any]) -> Dict[str, Any]:
     eps_floor = 1e-4
     floor_violations = 0
     floating_violations = 0
+    tabletop_support_violations = 0
 
-    surfaces: List[Tuple[float, float, float, float, float, float]] = []
+    surfaces: List[Tuple[Dict[str, Any], Tuple[float, float, float, float, float, float]]] = []
     for obj in objs:
         if not _is_surface(obj):
             continue
         a = _aabb(obj)
         if a is None:
             continue
-        surfaces.append(a)
+        surfaces.append((obj, a))
 
     for obj in objs:
         p = _pos(obj)
@@ -293,28 +344,33 @@ def _floating_and_floor_metrics(room: Dict[str, Any]) -> Dict[str, Any]:
 
         if _is_wall_mounted(obj):
             continue
-        if z <= 0.05:
+        requires_surface = bool(surfaces) and (not _is_surface(obj)) and _is_tabletop_candidate(obj)
+        if z <= 0.05 and not requires_surface:
             continue
 
         # Supported if any surface top is near the object's bottom and overlaps in XY.
         supported = False
         a = _aabb(obj)
         if a is not None:
-            for s in surfaces:
+            for _surface_obj, s in surfaces:
                 ox = min(a[3], s[3]) - max(a[0], s[0])
                 oy = min(a[4], s[4]) - max(a[1], s[1])
                 if ox <= 0.0 or oy <= 0.0:
                     continue
                 top = float(s[5])
-                if abs(z - top) <= 0.05:
+                support_tol = 0.08 if requires_surface else 0.05
+                if abs(z - top) <= support_tol:
                     supported = True
                     break
         if not supported:
             floating_violations += 1
+        if requires_surface and (not supported or z <= 0.08):
+            tabletop_support_violations += 1
 
     return {
         "floor_violations": int(floor_violations),
         "floating_violations": int(floating_violations),
+        "tabletop_support_violations": int(tabletop_support_violations),
         "num_surfaces": int(len(surfaces)),
     }
 
@@ -326,12 +382,49 @@ def _object_count_sanity(room: Dict[str, Any]) -> Dict[str, Any]:
     return {"num_manipulable": int(num_manip), "num_surfaces": int(num_surf)}
 
 
+def _mass_outlier_metrics(room: Dict[str, Any]) -> Dict[str, Any]:
+    objs = list(room.get("objects", []) or [])
+    outliers: List[Dict[str, Any]] = []
+    known = 0
+    for obj in objs:
+        key = _match_mass_preset_key(_object_type(obj))
+        if key is None:
+            continue
+        known += 1
+        profile = _MASS_PRESETS_KG[key]
+        mass_raw = (obj.get("physics", {}) or {}).get("mass")
+        mass = _safe_float(mass_raw, default=float("nan"))
+        if not math.isfinite(mass):
+            outliers.append(
+                {"id": str(obj.get("id", "")), "type": str(obj.get("type", "")), "reason": "missing_mass", "preset_key": key}
+            )
+            continue
+        if mass < float(profile["min"]) or mass > float(profile["max"]):
+            outliers.append(
+                {
+                    "id": str(obj.get("id", "")),
+                    "type": str(obj.get("type", "")),
+                    "reason": "mass_out_of_range",
+                    "preset_key": key,
+                    "mass": float(mass),
+                    "min": float(profile["min"]),
+                    "max": float(profile["max"]),
+                }
+            )
+    return {
+        "num_known_mass_objects": int(known),
+        "mass_outlier_count": int(len(outliers)),
+        "mass_outliers": outliers[:100],
+    }
+
+
 def evaluate_room(room: Dict[str, Any]) -> Dict[str, Any]:
     objs = list(room.get("objects", []) or [])
     metrics = {}
     metrics.update(_collision_metrics(objs))
     metrics.update(_floating_and_floor_metrics(room))
     metrics.update(_object_count_sanity(room))
+    metrics.update(_mass_outlier_metrics(room))
     return metrics
 
 
@@ -353,6 +446,10 @@ def _profile_pass(metrics: Dict[str, Any], profile: _Profile) -> Tuple[bool, Lis
         errors.append("max_penetration_exceeds_threshold")
     if int(metrics.get("floor_violations", 0) or 0) > profile.max_floor_violations:
         errors.append("floor_violations_exceeds_threshold")
+    if int(metrics.get("tabletop_support_violations", 0) or 0) > 0:
+        errors.append("tabletop_support_violations_exceeds_threshold")
+    if int(metrics.get("mass_outlier_count", 0) or 0) > 0:
+        errors.append("mass_outliers_exceed_threshold")
 
     max_float = int(math.ceil(profile.max_floating_violations_rate * float(n)))
     if int(metrics.get("floating_violations", 0) or 0) > max_float:
@@ -361,7 +458,13 @@ def _profile_pass(metrics: Dict[str, Any], profile: _Profile) -> Tuple[bool, Lis
     return (len(errors) == 0), errors
 
 
-def _clamp_room_bounds(room: Dict[str, Any], objs: Sequence[Dict[str, Any]], *, margin: float = 0.02) -> int:
+def _clamp_room_bounds(
+    room: Dict[str, Any],
+    objs: Sequence[Dict[str, Any]],
+    *,
+    margin: float = 0.02,
+    correction_log: Optional[List[Dict[str, Any]]] = None,
+) -> int:
     dims = _room_dims(room)
     room_w = float(dims["width"])
     room_l = float(dims["length"])
@@ -386,14 +489,35 @@ def _clamp_room_bounds(room: Dict[str, Any], objs: Sequence[Dict[str, Any]], *, 
         if abs(nx - x) > 1e-6:
             p["x"] = float(nx)
             changed += 1
+            _record_correction(
+                correction_log,
+                obj=obj,
+                field="position.x",
+                before=float(x),
+                after=float(nx),
+                reason="room_bounds_clamp",
+            )
         if abs(ny - y) > 1e-6:
             p["y"] = float(ny)
             changed += 1
+            _record_correction(
+                correction_log,
+                obj=obj,
+                field="position.y",
+                before=float(y),
+                after=float(ny),
+                reason="room_bounds_clamp",
+            )
         obj["position"] = p
     return changed
 
 
-def _floor_clamp(objs: Sequence[Dict[str, Any]], *, eps: float = 0.0) -> int:
+def _floor_clamp(
+    objs: Sequence[Dict[str, Any]],
+    *,
+    eps: float = 0.0,
+    correction_log: Optional[List[Dict[str, Any]]] = None,
+) -> int:
     changed = 0
     for obj in objs:
         p = obj.get("position", {}) or {}
@@ -403,10 +527,80 @@ def _floor_clamp(objs: Sequence[Dict[str, Any]], *, eps: float = 0.0) -> int:
             p["z"] = nz
             obj["position"] = p
             changed += 1
+            _record_correction(
+                correction_log,
+                obj=obj,
+                field="position.z",
+                before=float(z),
+                after=float(nz),
+                reason="floor_clamp",
+            )
     return changed
 
 
-def _surface_snap(room: Dict[str, Any], objs: Sequence[Dict[str, Any]], *, z_eps: float = 0.005) -> int:
+def _record_correction(
+    correction_log: Optional[List[Dict[str, Any]]],
+    *,
+    obj: Dict[str, Any],
+    field: str,
+    before: Any,
+    after: Any,
+    reason: str,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    if correction_log is None:
+        return
+    payload: Dict[str, Any] = {
+        "object_id": str(obj.get("id", "")),
+        "object_type": str(obj.get("type", "")),
+        "field": field,
+        "before": before,
+        "after": after,
+        "reason": reason,
+    }
+    if extra:
+        payload.update(extra)
+    correction_log.append(payload)
+
+
+def _normalize_mass_presets(
+    objs: Sequence[Dict[str, Any]],
+    *,
+    correction_log: Optional[List[Dict[str, Any]]] = None,
+) -> int:
+    changed = 0
+    for obj in objs:
+        key = _match_mass_preset_key(_object_type(obj))
+        if key is None:
+            continue
+        profile = _MASS_PRESETS_KG[key]
+        physics = obj.get("physics", {}) or {}
+        mass_before = _safe_float(physics.get("mass"), default=float("nan"))
+        mass_after = float(profile["target"])
+        if math.isfinite(mass_before) and float(profile["min"]) <= mass_before <= float(profile["max"]):
+            continue
+        physics["mass"] = mass_after
+        obj["physics"] = physics
+        changed += 1
+        _record_correction(
+            correction_log,
+            obj=obj,
+            field="physics.mass",
+            before=(None if not math.isfinite(mass_before) else float(mass_before)),
+            after=float(mass_after),
+            reason="mass_preset_normalization",
+            extra={"preset_key": key, "allowed_min": float(profile["min"]), "allowed_max": float(profile["max"])},
+        )
+    return changed
+
+
+def _surface_snap(
+    room: Dict[str, Any],
+    objs: Sequence[Dict[str, Any]],
+    *,
+    z_eps: float = 0.005,
+    correction_log: Optional[List[Dict[str, Any]]] = None,
+) -> int:
     surfaces: List[Tuple[Dict[str, Any], Tuple[float, float, float, float, float, float]]] = []
     for o in objs:
         if not _is_surface(o):
@@ -418,7 +612,9 @@ def _surface_snap(room: Dict[str, Any], objs: Sequence[Dict[str, Any]], *, z_eps
 
     changed = 0
     for o in objs:
-        if not _is_manipulable(o):
+        if _is_surface(o):
+            continue
+        if not _is_tabletop_candidate(o):
             continue
         a = _aabb(o)
         if a is None:
@@ -428,7 +624,20 @@ def _surface_snap(room: Dict[str, Any], objs: Sequence[Dict[str, Any]], *, z_eps
 
         best_top = None
         best_dist = 1e9
+        best_support_id = ""
+        best_support_xy = 1e9
+        best_support_xy_top = None
+        obj_center_x = _safe_float(p.get("x"), default=0.0)
+        obj_center_y = _safe_float(p.get("y"), default=0.0)
         for s_obj, s_aabb in surfaces:
+            s_pos = s_obj.get("position", {}) or {}
+            s_cx = _safe_float(s_pos.get("x"), default=0.0)
+            s_cy = _safe_float(s_pos.get("y"), default=0.0)
+            xy_dist = math.sqrt((obj_center_x - s_cx) ** 2 + (obj_center_y - s_cy) ** 2)
+            if xy_dist < best_support_xy:
+                best_support_xy = xy_dist
+                best_support_xy_top = float(s_aabb[5])
+
             ox = min(a[3], s_aabb[3]) - max(a[0], s_aabb[0])
             oy = min(a[4], s_aabb[4]) - max(a[1], s_aabb[1])
             if ox <= 0.0 or oy <= 0.0:
@@ -438,20 +647,41 @@ def _surface_snap(room: Dict[str, Any], objs: Sequence[Dict[str, Any]], *, z_eps
             if dist < best_dist:
                 best_dist = dist
                 best_top = top
+                best_support_id = str(s_obj.get("id", ""))
 
+        if best_top is None and best_support_xy_top is not None and z <= 0.08:
+            best_top = float(best_support_xy_top)
+            best_dist = abs(z - best_top)
+            best_support_id = "nearest_surface"
         if best_top is None:
             continue
         # Snap only when already near a plausible surface top.
-        if best_dist <= 0.10:
+        if best_dist <= 0.20 or z <= 0.08:
             nz = float(best_top + z_eps)
             if abs(nz - z) > 1e-6:
                 p["z"] = nz
                 o["position"] = p
                 changed += 1
+                _record_correction(
+                    correction_log,
+                    obj=o,
+                    field="position.z",
+                    before=float(z),
+                    after=float(nz),
+                    reason=("tabletop_floor_correction" if z <= 0.08 else "surface_snap"),
+                    extra={"support_id": best_support_id},
+                )
     return changed
 
 
-def _push_apart_xy(room: Dict[str, Any], objs: Sequence[Dict[str, Any]], *, sep_eps: float = 0.002, max_step_m: float = 0.25) -> int:
+def _push_apart_xy(
+    room: Dict[str, Any],
+    objs: Sequence[Dict[str, Any]],
+    *,
+    sep_eps: float = 0.002,
+    max_step_m: float = 0.25,
+    correction_log: Optional[List[Dict[str, Any]]] = None,
+) -> int:
     # Accumulate XY displacements.
     n = len(objs)
     deltas = [[0.0, 0.0] for _ in range(n)]
@@ -523,9 +753,25 @@ def _push_apart_xy(room: Dict[str, Any], objs: Sequence[Dict[str, Any]], *, sep_
         if abs(nx - x) > 1e-9:
             p["x"] = float(nx)
             changed += 1
+            _record_correction(
+                correction_log,
+                obj=obj,
+                field="position.x",
+                before=float(x),
+                after=float(nx),
+                reason="collision_push_apart",
+            )
         if abs(ny - y) > 1e-9:
             p["y"] = float(ny)
             changed += 1
+            _record_correction(
+                correction_log,
+                obj=obj,
+                field="position.y",
+                before=float(y),
+                after=float(ny),
+                reason="collision_push_apart",
+            )
         obj["position"] = p
     return changed
 
@@ -535,31 +781,53 @@ def repair_room_inplace(
     *,
     profile: _Profile,
     max_iters: int,
+    auto_fix: bool = True,
+    max_corrected_ratio: float = 0.20,
 ) -> Dict[str, Any]:
     objs = list(room.get("objects", []) or [])
     before = evaluate_room(room)
     pass_before, errors_before = _profile_pass(before, profile)
+    corrections: List[Dict[str, Any]] = []
     report: Dict[str, Any] = {
         "pass_before": bool(pass_before),
         "errors_before": errors_before,
         "before": before,
         "iters": [],
+        "auto_fix": bool(auto_fix),
+        "max_corrected_ratio": float(max_corrected_ratio),
     }
-    if pass_before:
+    if pass_before and bool(auto_fix):
         report["pass_after"] = True
         report["errors_after"] = []
         report["after"] = before
         report["iterations_used"] = 0
         report["changed"] = False
+        report["corrections"] = []
+        report["corrected_object_count"] = 0
+        report["corrected_object_ratio"] = 0.0
         return report
 
     changed_any = False
+    if not bool(auto_fix):
+        after = before
+        pass_after, errors_after = _profile_pass(after, profile)
+        report["pass_after"] = bool(pass_after)
+        report["errors_after"] = errors_after
+        report["after"] = after
+        report["iterations_used"] = 0
+        report["changed"] = False
+        report["corrections"] = []
+        report["corrected_object_count"] = 0
+        report["corrected_object_ratio"] = 0.0
+        return report
+
     for it in range(int(max_iters)):
         it_changed = 0
-        it_changed += _push_apart_xy(room, objs)
-        it_changed += _floor_clamp(objs)
-        it_changed += _surface_snap(room, objs)
-        it_changed += _clamp_room_bounds(room, objs)
+        it_changed += _normalize_mass_presets(objs, correction_log=corrections)
+        it_changed += _push_apart_xy(room, objs, correction_log=corrections)
+        it_changed += _floor_clamp(objs, correction_log=corrections)
+        it_changed += _surface_snap(room, objs, correction_log=corrections)
+        it_changed += _clamp_room_bounds(room, objs, correction_log=corrections)
         changed_any = changed_any or (it_changed > 0)
 
         metrics = evaluate_room(room)
@@ -578,11 +846,21 @@ def repair_room_inplace(
 
     after = evaluate_room(room)
     pass_after, errors_after = _profile_pass(after, profile)
+    corrected_object_ids = {
+        str(item.get("object_id", "")) for item in corrections if str(item.get("object_id", ""))
+    }
+    corrected_ratio = float(len(corrected_object_ids) / max(1, len(objs)))
+    if corrected_ratio > float(max_corrected_ratio):
+        errors_after = list(errors_after) + ["corrected_object_ratio_exceeds_threshold"]
+        pass_after = False
     report["pass_after"] = bool(pass_after)
     report["errors_after"] = errors_after
     report["after"] = after
     report["iterations_used"] = len(report["iters"])
     report["changed"] = bool(changed_any)
+    report["corrections"] = corrections
+    report["corrected_object_count"] = int(len(corrected_object_ids))
+    report["corrected_object_ratio"] = round(corrected_ratio, 6)
     return report
 
 
@@ -614,6 +892,10 @@ def main() -> int:
     parser.add_argument("--pose_aug_name", default=os.getenv("POSE_AUG_NAME", "pose_aug_0"))
     parser.add_argument("--profile", default=os.getenv("SAGE_QUALITY_PROFILE", "standard"), choices=sorted(_PROFILES.keys()))
     parser.add_argument("--max_iters", type=int, default=int(os.getenv("SAGE_QUALITY_MAX_ITERS", "6")))
+    parser.add_argument("--auto-fix", dest="auto_fix", action="store_true", default=_safe_float(os.getenv("SAGE_AUTO_FIX_LAYOUT", "1"), 1.0) >= 0.5)
+    parser.add_argument("--no-auto-fix", dest="auto_fix", action="store_false")
+    parser.add_argument("--max-corrected-ratio", type=float, default=float(os.getenv("SAGE_LAYOUT_MAX_CORRECTED_RATIO", "0.20")))
+    parser.add_argument("--layout-fix-report", default=os.getenv("SAGE_LAYOUT_FIX_REPORT", ""))
     parser.add_argument("--write", action="store_true", default=True)
     parser.add_argument("--no-write", dest="write", action="store_false")
     args = parser.parse_args()
@@ -628,7 +910,11 @@ def main() -> int:
         _log(f"No target JSONs found under {layout_dir}")
         return 3
 
-    _log(f"layout_dir={layout_dir} profile={profile.name} targets={len(targets)} max_iters={args.max_iters}")
+    _log(
+        f"layout_dir={layout_dir} profile={profile.name} targets={len(targets)} "
+        f"max_iters={args.max_iters} auto_fix={args.auto_fix} "
+        f"max_corrected_ratio={args.max_corrected_ratio}"
+    )
 
     per_file: List[Dict[str, Any]] = []
     all_pass = True
@@ -643,7 +929,13 @@ def main() -> int:
             all_pass = False
             continue
 
-        rep = repair_room_inplace(room, profile=profile, max_iters=int(args.max_iters))
+        rep = repair_room_inplace(
+            room,
+            profile=profile,
+            max_iters=int(args.max_iters),
+            auto_fix=bool(args.auto_fix),
+            max_corrected_ratio=float(args.max_corrected_ratio),
+        )
         rep["path"] = str(path)
         per_file.append(rep)
         any_changed = any_changed or bool(rep.get("changed"))
@@ -665,6 +957,35 @@ def main() -> int:
     out_path = layout_dir / "quality" / "scene_quality_report.json"
     _write_json(out_path, report)
     _log(f"Wrote report: {out_path} all_pass={all_pass} any_changed={any_changed}")
+
+    raw_layout_fix_report = str(args.layout_fix_report or "").strip()
+    if not raw_layout_fix_report:
+        layout_fix_path = layout_dir / "quality" / "layout_fix_report.json"
+    else:
+        layout_fix_path = Path(raw_layout_fix_report).expanduser()
+        if not layout_fix_path.is_absolute():
+            layout_fix_path = (layout_dir / layout_fix_path).resolve()
+    fix_report = {
+        "layout_dir": str(layout_dir),
+        "profile": profile.name,
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "auto_fix": bool(args.auto_fix),
+        "max_corrected_ratio": float(args.max_corrected_ratio),
+        "all_pass": bool(all_pass),
+        "files": [
+            {
+                "path": entry.get("path"),
+                "pass_after": bool(entry.get("pass_after")),
+                "errors_after": entry.get("errors_after", []),
+                "corrected_object_count": int(entry.get("corrected_object_count", 0)),
+                "corrected_object_ratio": float(entry.get("corrected_object_ratio", 0.0)),
+                "corrections": entry.get("corrections", []),
+            }
+            for entry in per_file
+        ],
+    }
+    _write_json(layout_fix_path, fix_report)
+    _log(f"Wrote layout fix report: {layout_fix_path}")
 
     return 0 if all_pass else 3
 

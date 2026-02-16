@@ -157,33 +157,51 @@ def _camera_sensor_qc_metrics(
     *,
     rgb_frame: np.ndarray,
     depth_raw: np.ndarray,
+    min_depth_finite_ratio: float = 0.0,
     min_valid_depth_px: int,
     min_rgb_std: float,
+    max_rgb_saturation_ratio: float = 1.0,
     min_depth_std: float,
+    min_depth_range_m: float = 0.0,
 ) -> Dict[str, Any]:
     rgb_np = np.asarray(rgb_frame)
     depth_np = np.asarray(depth_raw, dtype=np.float32)
     rgb_std = float(rgb_np.std()) if rgb_np.size else 0.0
     rgb_max = float(rgb_np.max()) if rgb_np.size else 0.0
+    rgb_sat_ratio = (
+        float(np.mean(np.any(rgb_np >= 250, axis=-1)))
+        if (rgb_np.size and rgb_np.ndim == 3 and rgb_np.shape[-1] >= 3)
+        else 1.0
+    )
     valid_depth_mask = np.logical_and(np.isfinite(depth_np), depth_np > 0.0)
     valid_depth_px = int(valid_depth_mask.sum())
     valid_fraction = float(valid_depth_px / max(1, depth_np.size))
-    depth_std = float(depth_np[valid_depth_mask].std()) if valid_depth_px > 0 else 0.0
+    depth_values = depth_np[valid_depth_mask]
+    depth_std = float(depth_values.std()) if valid_depth_px > 0 else 0.0
+    depth_range_m = float(depth_values.max() - depth_values.min()) if valid_depth_px > 0 else 0.0
 
     failures: List[str] = []
-    if rgb_std <= float(min_rgb_std) and rgb_max <= 2.0:
-        failures.append("degenerate_rgb")
+    if rgb_std < float(min_rgb_std):
+        failures.append("low_rgb_std")
+    if rgb_sat_ratio > float(max_rgb_saturation_ratio):
+        failures.append("rgb_saturation_exceeds_threshold")
+    if valid_fraction < float(min_depth_finite_ratio):
+        failures.append("degenerate_depth_finite_ratio")
     if valid_depth_px < int(min_valid_depth_px):
         failures.append("degenerate_depth_valid_px")
-    elif depth_std <= float(min_depth_std):
+    if depth_std <= float(min_depth_std):
         failures.append("low_depth_variance")
+    if depth_range_m <= float(min_depth_range_m):
+        failures.append("low_depth_range")
 
     return {
         "rgb_std": rgb_std,
         "rgb_max": rgb_max,
+        "rgb_saturation_ratio": rgb_sat_ratio,
         "valid_depth_px": valid_depth_px,
-        "valid_depth_fraction": valid_fraction,
+        "depth_finite_ratio": valid_fraction,
         "depth_std": depth_std,
+        "depth_range_m": depth_range_m,
         "failures": failures,
     }
 
@@ -194,31 +212,44 @@ def _evaluate_dual_camera_sensor_qc(
     agentview_depth_raw: np.ndarray,
     agentview2_rgb: np.ndarray,
     agentview2_depth_raw: np.ndarray,
+    min_depth_finite_ratio: float = 0.0,
     min_valid_depth_px: int,
     min_rgb_std: float,
+    max_rgb_saturation_ratio: float = 1.0,
     min_depth_std: float,
+    min_depth_range_m: float = 0.0,
 ) -> Dict[str, Any]:
     qc_a = _camera_sensor_qc_metrics(
         rgb_frame=agentview_rgb,
         depth_raw=agentview_depth_raw,
+        min_depth_finite_ratio=min_depth_finite_ratio,
         min_valid_depth_px=min_valid_depth_px,
         min_rgb_std=min_rgb_std,
+        max_rgb_saturation_ratio=max_rgb_saturation_ratio,
         min_depth_std=min_depth_std,
+        min_depth_range_m=min_depth_range_m,
     )
     qc_b = _camera_sensor_qc_metrics(
         rgb_frame=agentview2_rgb,
         depth_raw=agentview2_depth_raw,
+        min_depth_finite_ratio=min_depth_finite_ratio,
         min_valid_depth_px=min_valid_depth_px,
         min_rgb_std=min_rgb_std,
+        max_rgb_saturation_ratio=max_rgb_saturation_ratio,
         min_depth_std=min_depth_std,
+        min_depth_range_m=min_depth_range_m,
     )
 
     failures: List[str] = []
     failures.extend([f"agentview:{item}" for item in qc_a["failures"]])
     failures.extend([f"agentview_2:{item}" for item in qc_b["failures"]])
+    depth_finite_ratio = float(min(qc_a["depth_finite_ratio"], qc_b["depth_finite_ratio"]))
+    rgb_std = float(min(qc_a["rgb_std"], qc_b["rgb_std"]))
     return {
         "status": "pass" if not failures else "fail",
         "failures": failures,
+        "depth_finite_ratio": depth_finite_ratio,
+        "rgb_std": rgb_std,
         "agentview": qc_a,
         "agentview_2": qc_b,
     }
@@ -369,12 +400,19 @@ def _runtime_provenance(
         "ISAAC_ASSETS_ROOT": os.environ.get("ISAAC_ASSETS_ROOT", ""),
         "SAGE_ALLOW_REMOTE_ISAAC_ASSETS": os.environ.get("SAGE_ALLOW_REMOTE_ISAAC_ASSETS", "0"),
         "SAGE_SENSOR_FAILURE_POLICY": os.environ.get("SAGE_SENSOR_FAILURE_POLICY", "auto"),
+        "SAGE_STRICT_SENSORS": os.environ.get("SAGE_STRICT_SENSORS", ""),
         "SAGE_RENDER_WARMUP_FRAMES": os.environ.get("SAGE_RENDER_WARMUP_FRAMES", ""),
         "SAGE_SENSOR_MIN_RGB_STD": os.environ.get("SAGE_SENSOR_MIN_RGB_STD", ""),
         "SAGE_SENSOR_MIN_DEPTH_STD": os.environ.get("SAGE_SENSOR_MIN_DEPTH_STD", ""),
+        "SAGE_MIN_DEPTH_FINITE_RATIO": os.environ.get("SAGE_MIN_DEPTH_FINITE_RATIO", ""),
+        "SAGE_MAX_RGB_SATURATION_RATIO": os.environ.get("SAGE_MAX_RGB_SATURATION_RATIO", ""),
+        "SAGE_MIN_DEPTH_RANGE_M": os.environ.get("SAGE_MIN_DEPTH_RANGE_M", ""),
         "SAGE_MIN_VALID_DEPTH_PX": os.environ.get("SAGE_MIN_VALID_DEPTH_PX", ""),
         "SAGE_SENSOR_CHECK_FRAME": os.environ.get("SAGE_SENSOR_CHECK_FRAME", ""),
         "SAGE_ENFORCE_BUNDLE_STRICT": os.environ.get("SAGE_ENFORCE_BUNDLE_STRICT", ""),
+        "SAGE_EXPORT_SCENE_USD": os.environ.get("SAGE_EXPORT_SCENE_USD", ""),
+        "SAGE_EXPORT_DEMO_VIDEOS": os.environ.get("SAGE_EXPORT_DEMO_VIDEOS", ""),
+        "SAGE_QUALITY_REPORT_PATH": os.environ.get("SAGE_QUALITY_REPORT_PATH", ""),
         "SAGE_RUN_ID": os.environ.get("SAGE_RUN_ID", ""),
     }
     return {
@@ -390,11 +428,18 @@ def _runtime_provenance(
             "headless": bool(args.headless),
             "enable_cameras": bool(args.enable_cameras),
             "strict": bool(args.strict),
+            "strict_sensors": bool(getattr(args, "strict_sensors", False)),
             "render_warmup_frames": int(args.render_warmup_frames),
             "sensor_check_frame": int(args.sensor_check_frame),
             "sensor_min_rgb_std": float(args.sensor_min_rgb_std),
             "sensor_min_depth_std": float(args.sensor_min_depth_std),
+            "min_depth_finite_ratio": float(getattr(args, "min_depth_finite_ratio", 0.98)),
+            "max_rgb_saturation_ratio": float(getattr(args, "max_rgb_saturation_ratio", 0.85)),
+            "min_depth_range_m": float(getattr(args, "min_depth_range_m", 0.05)),
             "min_valid_depth_px": int(args.min_valid_depth_px),
+            "export_scene_usd": bool(getattr(args, "export_scene_usd", True)),
+            "export_demo_videos": bool(getattr(args, "export_demo_videos", True)),
+            "quality_report_path": str(getattr(args, "quality_report_path", "")),
             "camera_retry_steps": int(args.camera_retry_steps),
             "dome_light_intensity": float(args.dome_light_intensity),
             "sun_light_intensity": float(args.sun_light_intensity),
@@ -564,6 +609,61 @@ def _capture_camera_frames(
         world.step(render=True)
 
     raise RuntimeError(f"Camera capture did not become valid after retries: {last_reason}")
+
+
+def _render_product_path(render_product: Any) -> str:
+    if isinstance(render_product, str):
+        return render_product
+    for attr in ("path", "render_product_path", "prim_path"):
+        value = getattr(render_product, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    text = str(render_product or "").strip()
+    return text
+
+
+def _read_render_product_resolution(stage: Any, render_product_path: str) -> Optional[Tuple[int, int]]:
+    if not render_product_path:
+        return None
+    prim = stage.GetPrimAtPath(render_product_path)
+    if not prim or not prim.IsValid():
+        return None
+    for attr_name in ("resolution", "renderProductResolution", "dataWindowNDC"):
+        attr = prim.GetAttribute(attr_name)
+        if attr is None or not attr.IsValid():
+            continue
+        value = attr.Get()
+        if value is None:
+            continue
+        if hasattr(value, "__len__") and len(value) >= 2:
+            try:
+                return int(value[0]), int(value[1])
+            except Exception:
+                continue
+    return None
+
+
+def _enforce_render_resolution_contract(
+    *,
+    stage: Any,
+    render_product_path: str,
+    expected_width: int,
+    expected_height: int,
+    strict_sensors: bool,
+) -> None:
+    actual = _read_render_product_resolution(stage, render_product_path)
+    if actual is None:
+        _log(f"WARNING: Could not read render product resolution for {render_product_path}")
+        return
+    if actual == (int(expected_width), int(expected_height)):
+        return
+    msg = (
+        f"Render resolution contract mismatch at {render_product_path}: "
+        f"expected=({expected_width}, {expected_height}) actual={actual}"
+    )
+    if strict_sensors:
+        raise RuntimeError(msg)
+    _log(f"WARNING: {msg}")
 
 
 def _read_obj_bounds(obj_path: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -829,6 +929,159 @@ def _apply_joint_targets(dc, art, dof_names: List[str], arm_q: np.ndarray, gripp
     dc.set_articulation_dof_position_targets(art, targets)
 
 
+def _export_demo_videos(
+    hdf5_path: Path,
+    output_dir: Path,
+    num_demos: int,
+    fps: int = 10,
+) -> Dict[str, Any]:
+    """Extract per-demo MP4 videos from HDF5 RGB data (agentview camera)."""
+    report: Dict[str, Any] = {
+        "attempted_demos": int(num_demos),
+        "exported_demos": 0,
+        "videos": [],
+        "errors": [],
+    }
+    try:
+        import h5py
+    except ImportError:
+        _log("WARNING: h5py not available — skipping video export")
+        report["errors"].append("missing_h5py")
+        return report
+
+    iio_v3 = None
+    iio_v2 = None
+    try:
+        import imageio.v3 as iio_v3  # type: ignore[assignment]
+    except Exception:
+        iio_v3 = None
+    try:
+        import imageio as iio_v2  # type: ignore[assignment]
+    except Exception:
+        iio_v2 = None
+    if iio_v3 is None and iio_v2 is None:
+        _log("WARNING: imageio not available — skipping video export")
+        report["errors"].append("missing_imageio")
+        return report
+
+    videos_dir = output_dir / "videos"
+    videos_dir.mkdir(parents=True, exist_ok=True)
+    exported = 0
+
+    def _write_mp4(path: Path, frames: np.ndarray) -> Optional[Exception]:
+        last_exc: Optional[Exception] = None
+        if iio_v3 is not None:
+            try:
+                iio_v3.imwrite(str(path), frames, fps=fps, codec="libx264")
+                return None
+            except Exception as exc:
+                last_exc = exc
+            try:
+                iio_v3.imwrite(str(path), frames, fps=fps)
+                return None
+            except Exception as exc:
+                last_exc = exc
+        if iio_v2 is not None:
+            frame_list = [frame for frame in frames]
+            try:
+                iio_v2.mimwrite(str(path), frame_list, fps=fps, codec="libx264")
+                return None
+            except Exception as exc:
+                last_exc = exc
+            try:
+                iio_v2.mimwrite(str(path), frame_list, fps=fps)
+                return None
+            except Exception as exc:
+                last_exc = exc
+        return last_exc
+
+    try:
+        with h5py.File(str(hdf5_path), "r") as f:
+            data = f["data"]
+            for i in range(num_demos):
+                demo_key = f"demo_{i}"
+                if demo_key not in data:
+                    continue
+                demo = data[demo_key]
+                if "obs" not in demo or "agentview_rgb" not in demo["obs"]:
+                    continue
+
+                rgb = demo["obs"]["agentview_rgb"][:]  # (T, H, W, 3)
+                if rgb.size == 0 or rgb.shape[0] <= 0:
+                    report["errors"].append(f"{demo_key}:empty_rgb_tensor")
+                    continue
+                if rgb.max() == 0:
+                    _log(f"WARNING: demo {i} RGB is all-black, skipping video")
+                    report["errors"].append(f"{demo_key}:all_black_rgb")
+                    continue
+
+                mp4_path = videos_dir / f"demo_{i}.mp4"
+                write_err = _write_mp4(mp4_path, rgb)
+                if write_err is not None:
+                    report["errors"].append(f"{demo_key}:video_write_failed:{write_err}")
+                    _log(f"WARNING: failed to export {demo_key} video: {write_err}")
+                    continue
+                if not mp4_path.exists() or mp4_path.stat().st_size <= 0:
+                    report["errors"].append(f"{demo_key}:video_not_written")
+                    continue
+                exported += 1
+                report["videos"].append(
+                    {
+                        "demo_name": demo_key,
+                        "path": str(mp4_path),
+                        "frames": int(rgb.shape[0]),
+                        "size_bytes": int(mp4_path.stat().st_size),
+                    }
+                )
+
+        _log(f"Exported {exported}/{num_demos} demo videos to {videos_dir}")
+        report["exported_demos"] = int(exported)
+    except Exception as e:
+        _log(f"WARNING: Video export failed: {e}")
+        report["errors"].append(f"video_export_failed:{e}")
+    return report
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            block = f.read(1024 * 1024)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def _validate_usd_loadable(path: Path) -> bool:
+    try:
+        from pxr import Usd
+
+        stage = Usd.Stage.Open(str(path))
+        return stage is not None
+    except Exception:
+        return False
+
+
+def _artifact_entry(path: Path, *, root: Path) -> Dict[str, Any]:
+    return {
+        "path": str(path.relative_to(root)),
+        "size_bytes": int(path.stat().st_size),
+        "sha256": _sha256_file(path),
+    }
+
+
+def _write_root_scalar(group: Any, key: str, value: Any) -> None:
+    if isinstance(value, str):
+        group.attrs[key] = value
+    elif isinstance(value, bool):
+        group.create_dataset(key, data=np.asarray(bool(value), dtype=np.bool_))
+    elif isinstance(value, int):
+        group.create_dataset(key, data=np.asarray(int(value), dtype=np.int64))
+    else:
+        group.create_dataset(key, data=np.asarray(float(value), dtype=np.float64))
+
+
 def _create_or_open_hdf5(path: Path):
     import h5py
 
@@ -848,12 +1101,38 @@ def main() -> None:
     parser.add_argument("--disable_cameras", dest="enable_cameras", action="store_false")
     parser.add_argument("--strict", dest="strict", action="store_true", default=False)
     parser.add_argument("--no-strict", dest="strict", action="store_false")
+    parser.add_argument(
+        "--strict-sensors",
+        dest="strict_sensors",
+        action="store_true",
+        default=_env_bool("SAGE_STRICT_SENSORS", default=False),
+    )
+    parser.add_argument("--no-strict-sensors", dest="strict_sensors", action="store_false")
     parser.add_argument("--render_warmup_frames", type=int, default=int(os.getenv("SAGE_RENDER_WARMUP_FRAMES", "100")))
     parser.add_argument("--sensor_check_frame", type=int, default=int(os.getenv("SAGE_SENSOR_CHECK_FRAME", "10")))
     parser.add_argument("--camera_retry_steps", type=int, default=int(os.getenv("SAGE_CAMERA_RETRY_STEPS", "90")))
-    parser.add_argument("--sensor_min_rgb_std", type=float, default=float(os.getenv("SAGE_SENSOR_MIN_RGB_STD", "0.01")))
+    parser.add_argument("--sensor_min_rgb_std", type=float, default=float(os.getenv("SAGE_SENSOR_MIN_RGB_STD", "5.0")))
+    parser.add_argument("--min-rgb-std", dest="min_rgb_std_override", type=float, default=None)
     parser.add_argument("--sensor_min_depth_std", type=float, default=float(os.getenv("SAGE_SENSOR_MIN_DEPTH_STD", "0.0001")))
+    parser.add_argument("--min-depth-finite-ratio", type=float, default=float(os.getenv("SAGE_MIN_DEPTH_FINITE_RATIO", "0.98")))
+    parser.add_argument("--max-rgb-saturation-ratio", type=float, default=float(os.getenv("SAGE_MAX_RGB_SATURATION_RATIO", "0.85")))
+    parser.add_argument("--min-depth-range-m", type=float, default=float(os.getenv("SAGE_MIN_DEPTH_RANGE_M", "0.05")))
     parser.add_argument("--min_valid_depth_px", type=int, default=int(os.getenv("SAGE_MIN_VALID_DEPTH_PX", "1024")))
+    parser.add_argument(
+        "--export-scene-usd",
+        dest="export_scene_usd",
+        action="store_true",
+        default=_env_bool("SAGE_EXPORT_SCENE_USD", default=True),
+    )
+    parser.add_argument("--no-export-scene-usd", dest="export_scene_usd", action="store_false")
+    parser.add_argument(
+        "--export-demo-videos",
+        dest="export_demo_videos",
+        action="store_true",
+        default=_env_bool("SAGE_EXPORT_DEMO_VIDEOS", default=True),
+    )
+    parser.add_argument("--no-export-demo-videos", dest="export_demo_videos", action="store_false")
+    parser.add_argument("--quality-report-path", default=os.getenv("SAGE_QUALITY_REPORT_PATH", ""))
     parser.add_argument("--dome_light_intensity", type=float, default=float(os.getenv("SAGE_DOME_LIGHT_INTENSITY", "3000")))
     parser.add_argument("--sun_light_intensity", type=float, default=float(os.getenv("SAGE_SUN_LIGHT_INTENSITY", "600")))
     parser.add_argument(
@@ -862,7 +1141,12 @@ def main() -> None:
         default=os.getenv("SAGE_SENSOR_FAILURE_POLICY", "auto"),
     )
     args, unknown_args = parser.parse_known_args()
-    sensor_failure_policy = _resolve_sensor_failure_policy(strict=bool(args.strict), requested=args.sensor_failure_policy)
+    if args.min_rgb_std_override is not None:
+        args.sensor_min_rgb_std = float(args.min_rgb_std_override)
+    sensor_failure_policy = _resolve_sensor_failure_policy(
+        strict=bool(args.strict or args.strict_sensors),
+        requested=args.sensor_failure_policy,
+    )
 
     os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
     os.environ.setdefault("ACCEPT_EULA", "Y")
@@ -890,6 +1174,8 @@ def main() -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    quality_report_path = Path(args.quality_report_path) if args.quality_report_path else (output_dir / "quality_report.json")
+    artifact_manifest_path = output_dir / "artifact_manifest.json"
     final_h5_path = output_dir / "dataset.hdf5"
     h5_tmp_path = output_dir / "dataset.tmp.hdf5"
     h5 = None
@@ -920,6 +1206,29 @@ def main() -> None:
         # Camera config
         res_env = os.getenv("SAGE_CAPTURE_RES", "640,480")
         width, height = [int(x) for x in res_env.split(",")]
+
+        # Headless RTX render quality: disable DLSS (causes upscale artifacts at
+        # low resolution), use direct lighting to avoid noisy path-tracing, and
+        # set the internal render resolution to at least match the capture
+        # resolution so the RGB annotator returns clean frames.
+        if args.headless:
+            try:
+                import carb
+                settings = carb.settings.get_settings()
+                # Disable DLSS — it requires minimum 300px and causes uniform-brightness
+                # artifacts in headless mode.
+                settings.set("/rtx/post/dlss/enabled", False)
+                # Use higher sample count for less noisy output.
+                settings.set("/rtx/pathtracing/spp", 64)
+                settings.set("/rtx/pathtracing/totalSpp", 64)
+                # Ensure internal render resolution matches capture resolution.
+                settings.set("/rtx/renderResolution/width", width)
+                settings.set("/rtx/renderResolution/height", height)
+                # Enable tone mapping for proper LDR output.
+                settings.set("/rtx/post/tonemap/enabled", True)
+                _log(f"Headless RTX settings applied: DLSS=off, spp=64, res={width}x{height}")
+            except Exception as rtx_err:
+                _log(f"WARNING: Could not apply headless RTX settings: {rtx_err}")
 
         # HDF5 output (atomic: write temp then rename).
         if h5_tmp_path.exists():
@@ -986,6 +1295,32 @@ def main() -> None:
 
             physics_report: Dict[str, Any] = {"objects": []}
             source_to_prim: Dict[str, str] = {}
+
+            # Validate and repair object Z-heights: objects placed on surfaces
+            # (place_id != "floor") should have Z ≈ surface top, not Z ≈ 0.
+            surface_heights: Dict[str, float] = {}
+            all_objects = room.get("objects", []) or []
+            for obj in all_objects:
+                oid = obj.get("id", "")
+                otype = (obj.get("type", "") or "").lower()
+                dims = obj.get("dimensions", {}) or {}
+                h = float(dims.get("height", 0.0))
+                z = float((obj.get("position", {}) or {}).get("z", 0.0))
+                if otype in ("table", "counter", "desk", "shelf", "dresser", "nightstand", "cabinet"):
+                    surface_heights[oid] = z + h
+
+            for obj in all_objects:
+                place_id = obj.get("place_id", "") or ""
+                if place_id and place_id != "floor" and place_id in surface_heights:
+                    pos = obj.get("position", {}) or {}
+                    obj_z = float(pos.get("z", 0.0))
+                    surface_top = surface_heights[place_id]
+                    if obj_z < surface_top * 0.5 and surface_top > 0.1:
+                        _log(
+                            f"WARNING: Z-repair: {obj.get('id','?')} ({obj.get('type','?')}) "
+                            f"z={obj_z:.3f}m -> {surface_top:.3f}m (placed on {place_id})"
+                        )
+                        pos["z"] = surface_top
 
             gen_dir = layout_dir / "generation"
             for idx, obj in enumerate(room.get("objects", []) or []):
@@ -1108,7 +1443,7 @@ def main() -> None:
             candidates.sort(key=lambda x: x[0], reverse=True)
             return candidates[0][1]
 
-        def setup_cameras(room: Dict[str, Any]) -> Dict[str, Any]:
+        def setup_cameras(room: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, str], str]:
             stage = omni.usd.get_context().get_stage()
             dims = room.get("dimensions", {}) or {}
             w = float(dims.get("width", 6.0))
@@ -1125,13 +1460,33 @@ def main() -> None:
 
             render_a = rep.create.render_product(cam_a, resolution=(width, height))
             render_b = rep.create.render_product(cam_b, resolution=(width, height))
+            render_a_path = _render_product_path(render_a)
+            render_b_path = _render_product_path(render_b)
+            _enforce_render_resolution_contract(
+                stage=stage,
+                render_product_path=render_a_path,
+                expected_width=width,
+                expected_height=height,
+                strict_sensors=bool(args.strict_sensors),
+            )
+            _enforce_render_resolution_contract(
+                stage=stage,
+                render_product_path=render_b_path,
+                expected_width=width,
+                expected_height=height,
+                strict_sensors=bool(args.strict_sensors),
+            )
 
             rgb_a = rep.AnnotatorRegistry.get_annotator("rgb")
             rgb_b = rep.AnnotatorRegistry.get_annotator("rgb")
             depth_name = None
             depth_a = None
             depth_b = None
-            for candidate in ("distance_to_image_plane", "distance_to_camera"):
+            # RTX-based depth annotators produce valid data only with a display-attached
+            # GPU.  In headless mode the basic rasterized "depth" annotator (z-buffer) is
+            # the most reliable fallback.  Try it last so RTX variants are preferred when
+            # they actually work.
+            for candidate in ("distance_to_image_plane", "distance_to_camera", "depth"):
                 try:
                     depth_a = rep.AnnotatorRegistry.get_annotator(candidate)
                     depth_b = rep.AnnotatorRegistry.get_annotator(candidate)
@@ -1140,7 +1495,7 @@ def main() -> None:
                 except Exception:
                     continue
             if depth_a is None or depth_b is None or depth_name is None:
-                raise RuntimeError("Could not initialize depth annotator (distance_to_image_plane/camera)")
+                raise RuntimeError("Could not initialize depth annotator (distance_to_image_plane/camera/depth)")
             _log(f"Using depth annotator: {depth_name}")
 
             rgb_a.attach([render_a])
@@ -1153,18 +1508,29 @@ def main() -> None:
                 {"camera_id": "agentview_2", "prim_path": cam_b},
             ]
             cameras_manifest["depth_annotator"] = depth_name
-            return {
-                "agentview": {"rgb": rgb_a, "depth": depth_a},
-                "agentview_2": {"rgb": rgb_b, "depth": depth_b},
-            }
+            return (
+                {
+                    "agentview": {"rgb": rgb_a, "depth": depth_a},
+                    "agentview_2": {"rgb": rgb_b, "depth": depth_b},
+                },
+                {"agentview": render_a, "agentview_2": render_b},
+                {"agentview": render_a_path, "agentview_2": render_b_path},
+                str(depth_name),
+            )
 
         demos = bundle.get("demos", []) or []
         _log(
             f"collector start: run_id={run_id} layout_id={layout_id} demos={len(demos)} "
             f"headless={args.headless} cameras={args.enable_cameras} strict={args.strict} "
             f"warmup={args.render_warmup_frames} retry={args.camera_retry_steps} "
+            f"strict_sensors={args.strict_sensors} "
             f"rgb_std_min={args.sensor_min_rgb_std} depth_std_min={args.sensor_min_depth_std} "
+            f"depth_finite_ratio_min={args.min_depth_finite_ratio} "
+            f"depth_range_min_m={args.min_depth_range_m} "
+            f"max_rgb_saturation_ratio={args.max_rgb_saturation_ratio} "
             f"min_depth_px={args.min_valid_depth_px} "
+            f"export_scene_usd={args.export_scene_usd} export_demo_videos={args.export_demo_videos} "
+            f"quality_report_path={quality_report_path} "
             f"dome_light={args.dome_light_intensity} sun_light={args.sun_light_intensity} "
             f"sensor_policy={sensor_failure_policy} "
             f"enforce_bundle_strict={os.environ.get('SAGE_ENFORCE_BUNDLE_STRICT', '1')} "
@@ -1179,6 +1545,8 @@ def main() -> None:
             by_variant.setdefault(str(d["variant_layout_json"]), []).append(d)
 
         demo_global_idx = 0
+        exported_scene_paths: List[Path] = []
+        warmup_sensor_checks: List[Dict[str, Any]] = []
         for variant_json, demo_list in by_variant.items():
             variant_path = _resolve_variant_json_path(variant_json, layout_dir=layout_dir)
             layout_payload = _load_json(variant_path)
@@ -1195,7 +1563,11 @@ def main() -> None:
             if args.strict and ee_prim_path is None:
                 _log("WARNING: could not auto-detect end-effector prim; object carry will be disabled.")
 
-            annotators = setup_cameras(room) if args.enable_cameras else {}
+            annotators: Dict[str, Any] = {}
+            render_products: Dict[str, Any] = {}
+            depth_name = ""
+            if args.enable_cameras:
+                annotators, render_products, _render_paths, depth_name = setup_cameras(room)
 
             # Add a simple ground plane (avoids Nucleus asset download).
             from pxr import UsdPhysics
@@ -1213,6 +1585,92 @@ def main() -> None:
             world.reset()
             for _ in range(max(0, int(args.render_warmup_frames))):
                 world.step(render=True)
+
+            # Probe depth annotator after warmup — if the selected annotator produces
+            # all-inf/NaN (common with RTX annotators in headless mode), fall back to
+            # the basic rasterized "depth" (z-buffer) annotator automatically.
+            if args.enable_cameras and depth_name != "depth":
+                try:
+                    world.step(render=True)
+                    probe = _annotator_data(annotators["agentview"]["depth"], name="depth_probe")
+                    probe_raw = np.asarray(probe, dtype=np.float32)
+                    probe_valid = int(np.logical_and(np.isfinite(probe_raw), probe_raw > 0.0).sum())
+                    _log(f"Depth probe ({depth_name}): {probe_valid}/{probe_raw.size} valid pixels")
+                    if probe_valid < int(args.min_valid_depth_px):
+                        _log(f"WARNING: {depth_name} produced {probe_valid} valid pixels in headless "
+                             f"mode — falling back to rasterized 'depth' annotator")
+                        try:
+                            fallback_a = rep.AnnotatorRegistry.get_annotator("depth")
+                            fallback_b = rep.AnnotatorRegistry.get_annotator("depth")
+                            fallback_a.attach([render_products["agentview"]])
+                            fallback_b.attach([render_products["agentview_2"]])
+                            annotators["agentview"]["depth"] = fallback_a
+                            annotators["agentview_2"]["depth"] = fallback_b
+                            depth_name = "depth"
+                            cameras_manifest["depth_annotator"] = "depth"
+                            cameras_manifest["depth_fallback_reason"] = "headless_rtx_failure"
+                            _log(f"Switched to rasterized 'depth' annotator successfully")
+                        except Exception as fb_err:
+                            _log(f"WARNING: Rasterized depth fallback also failed: {fb_err}")
+                except Exception as probe_err:
+                    _log(f"WARNING: Depth probe failed: {probe_err}")
+
+            if args.enable_cameras:
+                try:
+                    warm_a_rgb, _, warm_a_d_raw, warm_b_rgb, _, warm_b_d_raw = _capture_camera_frames(
+                        annotators=annotators,
+                        world=world,
+                        max_extra_steps=int(args.camera_retry_steps),
+                        width=width,
+                        height=height,
+                        min_valid_depth_px=int(args.min_valid_depth_px),
+                    )
+                except Exception as warmup_exc:
+                    detail = str(warmup_exc)
+                    if "LdrColorSDhost" in detail or "renderVar" in detail:
+                        raise RuntimeError(f"RGB render var unavailable during warmup: {detail}")
+                    raise RuntimeError(f"Camera warmup capture failed: {detail}")
+
+                warmup_qc = _evaluate_dual_camera_sensor_qc(
+                    agentview_rgb=warm_a_rgb,
+                    agentview_depth_raw=warm_a_d_raw,
+                    agentview2_rgb=warm_b_rgb,
+                    agentview2_depth_raw=warm_b_d_raw,
+                    min_depth_finite_ratio=float(args.min_depth_finite_ratio),
+                    min_valid_depth_px=int(args.min_valid_depth_px),
+                    min_rgb_std=float(args.sensor_min_rgb_std),
+                    max_rgb_saturation_ratio=float(args.max_rgb_saturation_ratio),
+                    min_depth_std=float(args.sensor_min_depth_std),
+                    min_depth_range_m=float(args.min_depth_range_m),
+                )
+                warmup_qc["variant_layout_json"] = str(variant_path)
+                warmup_qc["depth_annotator"] = str(depth_name)
+                warmup_sensor_checks.append(warmup_qc)
+                if warmup_qc["status"] != "pass":
+                    msg = (
+                        f"Warmup sensor QC failed for {variant_path.name}: "
+                        f"{','.join(warmup_qc.get('failures', []))}"
+                    )
+                    if bool(args.strict_sensors) or sensor_failure_policy == "fail":
+                        raise RuntimeError(msg)
+                    _log(f"WARNING: {msg}")
+
+            # Export the assembled USD scene to disk (before trajectory replay).
+            scene_usd_path = output_dir / f"scene_{variant_path.stem}.usd"
+            if bool(args.export_scene_usd):
+                try:
+                    stage.Export(str(scene_usd_path))
+                    if not scene_usd_path.exists():
+                        raise RuntimeError("scene USD export did not create a file")
+                    if not _validate_usd_loadable(scene_usd_path):
+                        raise RuntimeError(f"scene USD is not loadable: {scene_usd_path}")
+                    exported_scene_paths.append(scene_usd_path)
+                    _log(f"Exported assembled scene to {scene_usd_path}")
+                except Exception as e:
+                    msg = f"Failed to export scene USD: {e}"
+                    if args.strict:
+                        raise RuntimeError(msg)
+                    _log(f"WARNING: {msg}")
 
             dc, art, dof_names = _init_dynamic_control(robot_articulation)
 
@@ -1371,10 +1829,20 @@ def main() -> None:
                 sensor_qc: Dict[str, Any] = {
                     "enabled": bool(args.enable_cameras),
                     "policy": sensor_failure_policy,
+                    "strict_sensors": bool(args.strict_sensors),
                     "check_frame": int(check_t) if args.enable_cameras else None,
                     "status": "not_checked" if args.enable_cameras else "disabled",
                     "failures": [],
+                    "thresholds": {
+                        "min_depth_finite_ratio": float(args.min_depth_finite_ratio),
+                        "min_valid_depth_px": int(args.min_valid_depth_px),
+                        "min_rgb_std": float(args.sensor_min_rgb_std),
+                        "max_rgb_saturation_ratio": float(args.max_rgb_saturation_ratio),
+                        "min_depth_std": float(args.sensor_min_depth_std),
+                        "min_depth_range_m": float(args.min_depth_range_m),
+                    },
                 }
+                frame_qc_records: List[Dict[str, Any]] = []
                 for t in range(T):
                     _set_robot_root_pose(stage, robot_xform, float(base[t, 0]), float(base[t, 1]), float(base[t, 2]))
                     _apply_joint_targets(dc, art, dof_names, arm[t], float(grip[t]))
@@ -1435,36 +1903,30 @@ def main() -> None:
                         last_a_rgb, last_a_d = a_rgb_np, a_d_np
                         last_b_rgb, last_b_d = b_rgb_np, b_d_np
 
+                        qc = _evaluate_dual_camera_sensor_qc(
+                            agentview_rgb=a_rgb_np,
+                            agentview_depth_raw=a_d_raw,
+                            agentview2_rgb=b_rgb_np,
+                            agentview2_depth_raw=b_d_raw,
+                            min_depth_finite_ratio=float(args.min_depth_finite_ratio),
+                            min_valid_depth_px=int(args.min_valid_depth_px),
+                            min_rgb_std=float(args.sensor_min_rgb_std),
+                            max_rgb_saturation_ratio=float(args.max_rgb_saturation_ratio),
+                            min_depth_std=float(args.sensor_min_depth_std),
+                            min_depth_range_m=float(args.min_depth_range_m),
+                        )
+                        qc["frame_idx"] = int(t)
+                        frame_qc_records.append(qc)
                         if t == check_t:
-                            qc = _evaluate_dual_camera_sensor_qc(
-                                agentview_rgb=a_rgb_np,
-                                agentview_depth_raw=a_d_raw,
-                                agentview2_rgb=b_rgb_np,
-                                agentview2_depth_raw=b_d_raw,
-                                min_valid_depth_px=int(args.min_valid_depth_px),
-                                min_rgb_std=float(args.sensor_min_rgb_std),
-                                min_depth_std=float(args.sensor_min_depth_std),
-                            )
-                            sensor_qc.update(qc)
-                            depth_failures = [
-                                item
-                                for item in qc["failures"]
-                                if item.endswith("degenerate_depth_valid_px") or item.endswith("low_depth_variance")
-                            ]
-                            rgb_failures = [item for item in qc["failures"] if item.endswith("degenerate_rgb")]
-                            if depth_failures:
-                                msg = (
-                                    f"Degenerate depth for demo {demo_idx} "
-                                    f"(failures={','.join(depth_failures)})"
-                                )
-                                if sensor_failure_policy == "fail":
-                                    raise RuntimeError(msg)
-                                _log(f"WARNING: {msg} — continuing")
-                            if rgb_failures:
-                                msg = f"Degenerate RGB for demo {demo_idx} (failures={','.join(rgb_failures)})"
-                                if sensor_failure_policy == "fail":
-                                    raise RuntimeError(msg)
-                                _log(f"WARNING: {msg} — continuing")
+                            sensor_qc["check_frame_qc"] = qc
+
+                        if qc["status"] != "pass":
+                            reason = f"frame={t} failures={','.join(qc.get('failures', []))}"
+                            sensor_qc["failures"].append(reason)
+                            msg = f"Sensor QC failed for demo {demo_idx}: {reason}"
+                            if bool(args.strict_sensors) or sensor_failure_policy == "fail":
+                                raise RuntimeError(msg)
+                            _log(f"WARNING: {msg}")
 
                 if args.enable_cameras:
                     # Last next_obs repeats last obs.
@@ -1472,6 +1934,39 @@ def main() -> None:
                     cam_next_dsets["agentview_depth"][T - 1] = last_a_d
                     cam_next_dsets["agentview_2_rgb"][T - 1] = last_b_rgb
                     cam_next_dsets["agentview_2_depth"][T - 1] = last_b_d
+                    if frame_qc_records:
+                        depth_ratios = [float(item.get("depth_finite_ratio", 0.0)) for item in frame_qc_records]
+                        rgb_stds = [float(item.get("rgb_std", 0.0)) for item in frame_qc_records]
+                        sat_ratios = [
+                            float(
+                                max(
+                                    item.get("agentview", {}).get("rgb_saturation_ratio", 0.0),
+                                    item.get("agentview_2", {}).get("rgb_saturation_ratio", 0.0),
+                                )
+                            )
+                            for item in frame_qc_records
+                        ]
+                        depth_ranges = [
+                            float(
+                                min(
+                                    item.get("agentview", {}).get("depth_range_m", 0.0),
+                                    item.get("agentview_2", {}).get("depth_range_m", 0.0),
+                                )
+                            )
+                            for item in frame_qc_records
+                        ]
+                        sensor_qc.update(
+                            {
+                                "status": "pass" if not sensor_qc["failures"] else "fail",
+                                "frames_checked": int(len(frame_qc_records)),
+                                "depth_finite_ratio_min": float(min(depth_ratios)),
+                                "depth_finite_ratio_mean": float(np.mean(depth_ratios)),
+                                "rgb_std_min": float(min(rgb_stds)),
+                                "rgb_std_mean": float(np.mean(rgb_stds)),
+                                "rgb_saturation_ratio_max": float(max(sat_ratios)),
+                                "depth_range_m_min": float(min(depth_ranges)),
+                            }
+                        )
 
                 # attrs
                 grp.attrs["layout_id"] = layout_id
@@ -1518,14 +2013,119 @@ def main() -> None:
         mask.create_dataset("train", data=np.arange(num_train, dtype=np.int64))
         mask.create_dataset("valid", data=np.arange(num_train, demo_global_idx, dtype=np.int64))
 
+        demo_qc_records = [
+            d.get("sensor_qc", {}) for d in demo_metadata.get("demos", []) if isinstance(d.get("sensor_qc"), dict)
+        ]
+        depth_finite_values = [
+            float(q.get("depth_finite_ratio_min", q.get("depth_finite_ratio", 0.0)))
+            for q in demo_qc_records
+            if q.get("enabled")
+        ]
+        rgb_std_values = [
+            float(q.get("rgb_std_min", q.get("rgb_std", 0.0)))
+            for q in demo_qc_records
+            if q.get("enabled")
+        ]
+        failed_demos = [
+            {
+                "demo_idx": int(d.get("demo_idx", -1)),
+                "demo_name": str(d.get("demo_name", "")),
+                "failures": list((d.get("sensor_qc") or {}).get("failures", [])),
+            }
+            for d in demo_metadata.get("demos", [])
+            if isinstance(d.get("sensor_qc"), dict) and (d["sensor_qc"].get("status") == "fail")
+        ]
+        quality_status = "disabled"
+        if args.enable_cameras:
+            quality_status = "pass" if not failed_demos else "fail"
+
+        run_depth_finite_ratio = float(min(depth_finite_values)) if depth_finite_values else 0.0
+        run_rgb_std = float(min(rgb_std_values)) if rgb_std_values else 0.0
+
+        metadata_grp = h5.create_group("metadata")
+        prov_grp = metadata_grp.create_group("provenance")
+        _write_root_scalar(prov_grp, "run_id", str(run_id))
+        quality_grp = metadata_grp.create_group("quality")
+        _write_root_scalar(quality_grp, "depth_finite_ratio", run_depth_finite_ratio)
+        _write_root_scalar(quality_grp, "rgb_std", run_rgb_std)
+        _write_root_scalar(quality_grp, "strict_sensors", bool(args.strict_sensors))
+
         h5.flush()
         h5.close()
         h5 = None
         os.replace(str(h5_tmp_path), str(final_h5_path))
 
+        video_report: Dict[str, Any] = {"attempted_demos": 0, "exported_demos": 0, "videos": [], "errors": []}
+        if args.enable_cameras and bool(args.export_demo_videos):
+            video_report = _export_demo_videos(final_h5_path, output_dir, demo_global_idx)
+
+        scene_paths_serialized = [str(p) for p in exported_scene_paths if p.exists()]
+        videos_dir = output_dir / "videos"
+        video_files = sorted(videos_dir.glob("demo_*.mp4")) if videos_dir.exists() else []
+        if args.enable_cameras and bool(args.export_demo_videos) and bool(args.strict or args.strict_sensors):
+            if len(video_files) < int(demo_global_idx):
+                raise RuntimeError(
+                    f"Missing demo videos: expected={demo_global_idx} found={len(video_files)} in {videos_dir}"
+                )
+        if bool(args.export_scene_usd) and bool(args.strict):
+            if len(scene_paths_serialized) < 1:
+                raise RuntimeError("No scene_*.usd was exported in strict mode")
+
+        quality_report: Dict[str, Any] = {
+            "run_id": run_id,
+            "layout_id": layout_id,
+            "status": quality_status,
+            "strict": bool(args.strict),
+            "strict_sensors": bool(args.strict_sensors),
+            "sensor_failure_policy": sensor_failure_policy,
+            "quality_report_path": str(quality_report_path),
+            "thresholds": {
+                "min_depth_finite_ratio": float(args.min_depth_finite_ratio),
+                "min_valid_depth_px": int(args.min_valid_depth_px),
+                "min_rgb_std": float(args.sensor_min_rgb_std),
+                "max_rgb_saturation_ratio": float(args.max_rgb_saturation_ratio),
+                "min_depth_std": float(args.sensor_min_depth_std),
+                "min_depth_range_m": float(args.min_depth_range_m),
+            },
+            "num_demos": int(demo_global_idx),
+            "warmup_sensor_checks": warmup_sensor_checks,
+            "demos": demo_metadata.get("demos", []),
+            "failed_demos": failed_demos,
+            "summary": {
+                "depth_finite_ratio_min": run_depth_finite_ratio,
+                "rgb_std_min": run_rgb_std,
+            },
+            "scene_exports": scene_paths_serialized,
+            "video_report": video_report,
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+        artifact_manifest: Dict[str, Any] = {
+            "run_id": run_id,
+            "layout_id": layout_id,
+            "status": "ok",
+            "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "files": [],
+            "counts": {
+                "demos": int(demo_global_idx),
+                "scene_usd": int(len(scene_paths_serialized)),
+                "videos": int(len(video_files)),
+            },
+            "quality_report_path": str(quality_report_path),
+        }
+        if final_h5_path.exists():
+            artifact_manifest["files"].append(_artifact_entry(final_h5_path, root=output_dir))
+        for scene_path_str in scene_paths_serialized:
+            scene_path = Path(scene_path_str)
+            artifact_manifest["files"].append(_artifact_entry(scene_path, root=output_dir))
+        for mp4 in video_files:
+            artifact_manifest["files"].append(_artifact_entry(mp4, root=output_dir))
+
         _write_json(output_dir / "demo_metadata.json", demo_metadata)
         _write_json(output_dir / "step_decomposition.json", step_decomp)
         _write_json(output_dir / "capture_manifest.json", cameras_manifest)
+        _write_json(quality_report_path, quality_report)
+        _write_json(artifact_manifest_path, artifact_manifest)
 
         _log(f"Wrote {demo_global_idx} demos to {final_h5_path}")
 
@@ -1533,10 +2133,25 @@ def main() -> None:
             expected = len(demos)
             if demo_global_idx < expected:
                 raise RuntimeError(f"Only {demo_global_idx}/{expected} demos captured")
+        if args.enable_cameras and bool(args.strict or args.strict_sensors) and failed_demos:
+            raise RuntimeError(
+                f"Sensor QC failed for {len(failed_demos)} demos (see {quality_report_path})"
+            )
 
     except Exception as exc:
         _log(f"ERROR: Stage 7 collector failed: {exc}")
         _log(traceback.format_exc())
+        try:
+            fail_report = {
+                "run_id": run_id if "run_id" in locals() else "",
+                "layout_id": layout_id if "layout_id" in locals() else "",
+                "status": "error",
+                "error": str(exc),
+                "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _write_json(quality_report_path, fail_report)
+        except Exception:
+            pass
         raise
     finally:
         try:

@@ -199,11 +199,18 @@ def test_stage7_command_env_assembly_defaults(monkeypatch, tmp_path):
 
     monkeypatch.delenv("SAGE_ALLOW_REMOTE_ISAAC_ASSETS", raising=False)
     monkeypatch.delenv("SAGE_SENSOR_FAILURE_POLICY", raising=False)
+    monkeypatch.delenv("SAGE_STRICT_SENSORS", raising=False)
     monkeypatch.delenv("SAGE_RENDER_WARMUP_FRAMES", raising=False)
     monkeypatch.delenv("SAGE_SENSOR_MIN_RGB_STD", raising=False)
     monkeypatch.delenv("SAGE_SENSOR_MIN_DEPTH_STD", raising=False)
+    monkeypatch.delenv("SAGE_MIN_DEPTH_FINITE_RATIO", raising=False)
+    monkeypatch.delenv("SAGE_MAX_RGB_SATURATION_RATIO", raising=False)
+    monkeypatch.delenv("SAGE_MIN_DEPTH_RANGE_M", raising=False)
     monkeypatch.delenv("SAGE_MIN_VALID_DEPTH_PX", raising=False)
     monkeypatch.delenv("SAGE_SENSOR_CHECK_FRAME", raising=False)
+    monkeypatch.delenv("SAGE_EXPORT_SCENE_USD", raising=False)
+    monkeypatch.delenv("SAGE_EXPORT_DEMO_VIDEOS", raising=False)
+    monkeypatch.delenv("SAGE_QUALITY_REPORT_PATH", raising=False)
     monkeypatch.delenv("SAGE_ENFORCE_BUNDLE_STRICT", raising=False)
     monkeypatch.delenv("SAGE_RUN_ID", raising=False)
 
@@ -229,15 +236,26 @@ def test_stage7_command_env_assembly_defaults(monkeypatch, tmp_path):
 
     assert cmd[:3] == ["/tmp/isaacsim_env/bin/python3", "-P", str(collector)]
     assert "--strict" in cmd
+    assert "--strict-sensors" in cmd
     assert "--headless" in cmd
     assert "--enable_cameras" in cmd
+    assert "--export-scene-usd" in cmd
+    assert "--export-demo-videos" in cmd
+    assert "--quality-report-path" in cmd
     assert env["SAGE_ALLOW_REMOTE_ISAAC_ASSETS"] == "0"
     assert env["SAGE_SENSOR_FAILURE_POLICY"] == "fail"
+    assert env["SAGE_STRICT_SENSORS"] == "1"
     assert env["SAGE_RENDER_WARMUP_FRAMES"] == "100"
-    assert env["SAGE_SENSOR_MIN_RGB_STD"] == "0.01"
+    assert env["SAGE_SENSOR_MIN_RGB_STD"] == "5.0"
     assert env["SAGE_SENSOR_MIN_DEPTH_STD"] == "0.0001"
+    assert env["SAGE_MIN_DEPTH_FINITE_RATIO"] == "0.98"
+    assert env["SAGE_MAX_RGB_SATURATION_RATIO"] == "0.85"
+    assert env["SAGE_MIN_DEPTH_RANGE_M"] == "0.05"
     assert env["SAGE_MIN_VALID_DEPTH_PX"] == "1024"
     assert env["SAGE_SENSOR_CHECK_FRAME"] == "10"
+    assert env["SAGE_EXPORT_SCENE_USD"] == "1"
+    assert env["SAGE_EXPORT_DEMO_VIDEOS"] == "1"
+    assert env["SAGE_QUALITY_REPORT_PATH"].endswith("/quality_report.json")
     assert env["SAGE_ENFORCE_BUNDLE_STRICT"] == "1"
     assert env["SAGE_RUN_ID"] == "run_test_123"
 
@@ -279,9 +297,12 @@ def test_dual_camera_sensor_qc_pass_and_fail_cases():
         agentview_depth_raw=depth_ok,
         agentview2_rgb=rgb_ok,
         agentview2_depth_raw=depth_ok,
+        min_depth_finite_ratio=0.5,
         min_valid_depth_px=4,
         min_rgb_std=0.01,
+        max_rgb_saturation_ratio=0.95,
         min_depth_std=0.0001,
+        min_depth_range_m=0.1,
     )
     assert qc_ok["status"] == "pass"
     assert qc_ok["failures"] == []
@@ -292,9 +313,12 @@ def test_dual_camera_sensor_qc_pass_and_fail_cases():
         agentview_depth_raw=depth_ok,
         agentview2_rgb=rgb_ok,
         agentview2_depth_raw=depth_bad,
+        min_depth_finite_ratio=0.5,
         min_valid_depth_px=4,
         min_rgb_std=0.01,
+        max_rgb_saturation_ratio=0.95,
         min_depth_std=0.0001,
+        min_depth_range_m=0.1,
     )
     assert qc_bad["status"] == "fail"
     assert "agentview_2:degenerate_depth_valid_px" in qc_bad["failures"]
@@ -310,3 +334,37 @@ def test_collision_approximation_normalization_and_validation():
     assert c._is_valid_dynamic_collision_approximation("convexHull")
     assert c._is_valid_dynamic_collision_approximation("convexDecomposition")
     assert not c._is_valid_dynamic_collision_approximation("MeshSimplification")
+
+
+@pytest.mark.unit
+def test_stage5_grasp_retry_meets_threshold(monkeypatch, tmp_path):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    calls = {"count": 0}
+
+    def _fake_infer(*, layout_id, layout_dir, variant_layout_json, pick_obj_id, base_pos, room_id, num_views, strict, model, cfg):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return np.zeros((2, 4, 4), dtype=np.float32), np.zeros((2, 3), dtype=np.float32)
+        return np.zeros((12, 4, 4), dtype=np.float32), np.zeros((12, 3), dtype=np.float32)
+
+    monkeypatch.setattr(s, "_infer_grasps_for_variant", _fake_infer)
+    grasps, contacts, attempts = s._infer_grasps_with_retries(
+        layout_id="layout_x",
+        layout_dir=tmp_path,
+        variant_layout_json=tmp_path / "variant.json",
+        pick_obj_id="obj_1",
+        base_pos=(1.0, 2.0, 0.0),
+        room_id="room_0",
+        num_views=1,
+        strict=True,
+        model=object(),
+        cfg=object(),
+        min_grasps_per_object=10,
+        max_retries=3,
+    )
+    assert grasps.shape[0] == 12
+    assert contacts.shape[0] == 12
+    assert len(attempts) == 2
+    assert attempts[0]["num_grasps"] == 2
+    assert attempts[1]["num_grasps"] == 12

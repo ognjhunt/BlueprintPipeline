@@ -16,7 +16,7 @@ def test_sage_scene_quality_push_apart_resolves_overlap():
                 "type": "table",
                 "id": "table_0",
                 "source_id": "table_0",
-                "position": {"x": 7.0, "y": 7.0, "z": 0.0},
+                "position": {"x": 1.0, "y": 1.0, "z": 0.0},
                 "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "dimensions": {"width": 2.0, "length": 1.0, "height": 0.75},
             },
@@ -25,7 +25,7 @@ def test_sage_scene_quality_push_apart_resolves_overlap():
                 "type": "mug",
                 "id": "mug_0",
                 "source_id": "mug_0",
-                "position": {"x": 1.0, "y": 1.0, "z": 0.0},
+                "position": {"x": 1.0, "y": 1.0, "z": 0.75},
                 "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "dimensions": {"width": 0.10, "length": 0.10, "height": 0.10},
             },
@@ -33,7 +33,7 @@ def test_sage_scene_quality_push_apart_resolves_overlap():
                 "type": "cup",
                 "id": "cup_0",
                 "source_id": "cup_0",
-                "position": {"x": 1.05, "y": 1.0, "z": 0.0},
+                "position": {"x": 1.05, "y": 1.0, "z": 0.75},
                 "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
                 "dimensions": {"width": 0.10, "length": 0.10, "height": 0.10},
             },
@@ -43,11 +43,98 @@ def test_sage_scene_quality_push_apart_resolves_overlap():
     before = q.evaluate_room(room)
     assert before["num_colliding_pairs"] >= 1
 
-    rep = q.repair_room_inplace(room, profile=q._PROFILES["strict"], max_iters=10)
+    rep = q.repair_room_inplace(room, profile=q._PROFILES["strict"], max_iters=10, max_corrected_ratio=1.0)
     assert rep["pass_after"] is True
 
     after = rep["after"]
     assert after["num_colliding_pairs"] == 0
+
+
+@pytest.mark.unit
+def test_sage_scene_quality_normalizes_condiment_mass_and_snaps_tabletop():
+    from scripts.runpod_sage import sage_scene_quality as q
+
+    room = {
+        "room_type": "kitchen",
+        "dimensions": {"width": 6.0, "length": 6.0, "height": 3.0},
+        "objects": [
+            {
+                "type": "table",
+                "id": "table_0",
+                "source_id": "table_0",
+                "position": {"x": 2.0, "y": 2.0, "z": 0.0},
+                "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "dimensions": {"width": 1.2, "length": 1.0, "height": 0.58},
+            },
+            {
+                "type": "pepper_shaker",
+                "id": "pepper_0",
+                "source_id": "pepper_0",
+                "position": {"x": 2.0, "y": 2.0, "z": 0.03},
+                "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "dimensions": {"width": 0.06, "length": 0.06, "height": 0.11},
+                "physics": {"mass": 3.2},
+            },
+        ],
+    }
+
+    rep = q.repair_room_inplace(
+        room,
+        profile=q._PROFILES["strict"],
+        max_iters=4,
+        auto_fix=True,
+        max_corrected_ratio=1.0,
+    )
+    assert rep["pass_after"] is True
+
+    pepper = next(obj for obj in room["objects"] if obj["id"] == "pepper_0")
+    assert pepper["physics"]["mass"] == pytest.approx(0.3, abs=1e-6)
+    assert pepper["position"]["z"] == pytest.approx(0.585, abs=1e-3)
+    correction_reasons = {entry["reason"] for entry in rep["corrections"]}
+    assert "mass_preset_normalization" in correction_reasons
+    assert "tabletop_floor_correction" in correction_reasons or "surface_snap" in correction_reasons
+
+
+@pytest.mark.unit
+def test_sage_scene_quality_corrected_ratio_gate():
+    from scripts.runpod_sage import sage_scene_quality as q
+
+    objects = [
+        {
+            "type": "table",
+            "id": "table_0",
+            "source_id": "table_0",
+            "position": {"x": 2.0, "y": 2.0, "z": 0.0},
+            "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "dimensions": {"width": 1.2, "length": 1.0, "height": 0.58},
+        }
+    ]
+    for idx in range(8):
+        objects.append(
+            {
+                "type": "salt_shaker",
+                "id": f"salt_{idx}",
+                "source_id": f"salt_{idx}",
+                "position": {"x": 2.0, "y": 2.0, "z": -0.02},
+                "rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "dimensions": {"width": 0.05, "length": 0.05, "height": 0.10},
+                "physics": {"mass": 4.0},
+            }
+        )
+    room = {
+        "room_type": "kitchen",
+        "dimensions": {"width": 6.0, "length": 6.0, "height": 3.0},
+        "objects": objects,
+    }
+    rep = q.repair_room_inplace(
+        room,
+        profile=q._PROFILES["strict"],
+        max_iters=3,
+        auto_fix=True,
+        max_corrected_ratio=0.2,
+    )
+    assert rep["pass_after"] is False
+    assert "corrected_object_ratio_exceeds_threshold" in rep["errors_after"]
 
 
 @pytest.mark.unit
@@ -140,4 +227,3 @@ def test_scenesmith_to_sage_room_bounds_and_shift_positive():
     assert min_y >= margin - 1e-6
     assert max_x <= float(dims["width"]) - margin + 1e-6
     assert max_y <= float(dims["length"]) - margin + 1e-6
-
