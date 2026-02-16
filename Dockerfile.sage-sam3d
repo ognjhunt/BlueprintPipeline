@@ -88,6 +88,10 @@ RUN conda env create -n sage -f /workspace/SAGE/client/environment.yml && \
 RUN /workspace/miniconda3/bin/conda run -n sage pip install --no-cache-dir \
         pytorch-lightning opencv-python-headless
 
+# Pin spconv to a CUDA 12.4-compatible build (SAM3D hard dependency in practice).
+RUN /workspace/miniconda3/bin/conda run -n sage pip install --no-cache-dir \
+        spconv-cu124==2.3.8
+
 # =============================================================================
 # Phase 4.5: Install M2T2 + nvdiffrast into conda env (Stage 5)
 # =============================================================================

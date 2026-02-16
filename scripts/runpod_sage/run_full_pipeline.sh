@@ -27,6 +27,34 @@ set -euo pipefail
 
 log() { echo "[pipeline $(date -u +%FT%TZ)] $*"; }
 
+_norm_room_type() {
+    local rt="${1:-}"
+    rt="${rt,,}"
+    rt="${rt// /_}"
+    rt="${rt//-/_}"
+    echo "${rt}"
+}
+
+_default_max_objects_for_room_type() {
+    # Conservative defaults for smoke tests and end-to-end validation.
+    # Override explicitly with `SAGE_MAX_OBJECTS=<int>` (set to 0 to disable).
+    local rt="$(_norm_room_type "${1:-}")"
+    case "${rt}" in
+        *house*|*multi*|*open_plan*|*floorplan*|*home*) echo 45 ;;
+        *apartment*|*studio*) echo 35 ;;
+        *kitchen*) echo 28 ;;
+        *living*|*family*|*lounge*) echo 25 ;;
+        *dining*) echo 24 ;;
+        *bed*) echo 22 ;;
+        *office*|*study*) echo 22 ;;
+        *garage*|*workshop*) echo 25 ;;
+        *bath*|*restroom*) echo 16 ;;
+        *hall*|*corridor*|*entry*|*foyer*) echo 15 ;;
+        *closet*|*pantry*|*laundry*) echo 18 ;;
+        *) echo 24 ;;
+    esac
+}
+
 # ── Config ──────────────────────────────────────────────────────────────────
 WORKSPACE="${WORKSPACE:-/workspace}"
 SAGE_DIR="${WORKSPACE}/SAGE"
@@ -55,6 +83,22 @@ POSE_AUG_NAME="${POSE_AUG_NAME:-pose_aug_0}"
 # NOTE: SAGE's physics MCP server starts Isaac Sim (noisy stdout). If enabled, ensure your MCP stdio stack
 # is patched to ignore non-JSON stdout and Isaac Sim can run headless. Default off for robustness.
 PHYSICS_CRITIC_ENABLED="${PHYSICS_CRITIC_ENABLED:-false}"
+
+# Object cap (prevents runaway clutter that explodes SAM3D time).
+# If unset, choose a default by room type; set `SAGE_MAX_OBJECTS=0` to disable.
+if [[ -z "${SAGE_MAX_OBJECTS+x}" ]]; then
+    SAGE_MAX_OBJECTS="$(_default_max_objects_for_room_type "${ROOM_TYPE}")"
+fi
+if [[ ! "${SAGE_MAX_OBJECTS}" =~ ^[0-9]+$ ]]; then
+    log "WARNING: SAGE_MAX_OBJECTS must be an integer; got '${SAGE_MAX_OBJECTS}'. Disabling cap."
+    SAGE_MAX_OBJECTS=0
+fi
+export SAGE_MAX_OBJECTS
+
+TASK_DESC_CAPPED="${TASK_DESC}"
+if [[ "${SAGE_MAX_OBJECTS}" -gt 0 ]]; then
+    TASK_DESC_CAPPED="${TASK_DESC}. Scene constraints: Keep total object count <= ${SAGE_MAX_OBJECTS} (including fixtures, furniture, appliances, and small items). Never omit task-referenced objects. Prefer essential surfaces + task-critical items; omit low-importance decor/clutter once you hit the cap."
+fi
 
 # Strict mode disallows skipping required stages.
 if [[ "${STRICT_PIPELINE}" == "1" ]]; then
@@ -95,10 +139,55 @@ log "Interactive: ${ENABLE_INTERACTIVE}"
 log "Room:  ${ROOM_TYPE}"
 log "Robot: ${ROBOT_TYPE}"
 log "Task:  ${TASK_DESC}"
+log "Max objects: ${SAGE_MAX_OBJECTS} (override with SAGE_MAX_OBJECTS=..., set 0 to disable)"
 log "Demos: ${NUM_DEMOS}"
 log ""
 
 PIPELINE_START=$(date +%s)
+
+# ── SAM3D health check helper ─────────────────────────────────────────────
+SAM3D_PORT="${SAM3D_PORT:-8080}"
+SAM3D_URL="http://127.0.0.1:${SAM3D_PORT}"
+SCENE_GEN_TIMEOUT="${SCENE_GEN_TIMEOUT:-7200}"  # 2 hours max for scene generation (meshes can take ~1-2 min/object)
+
+_ensure_sam3d_healthy() {
+    local status
+    status=$(curl -sf -o /dev/null -w "%{http_code}" "${SAM3D_URL}/health" 2>/dev/null || echo "000")
+    if [[ "${status}" == "200" ]]; then
+        return 0
+    fi
+    log "SAM3D health check failed (status=${status}). Restarting..."
+
+    pkill -f sam3d_server.py 2>/dev/null || true
+    sleep 3
+
+    # Determine python binary for SAM3D
+    local sam3d_py="${PY_SYS}"
+    [[ -x "/workspace/miniconda3/envs/sage/bin/python" ]] && sam3d_py="/workspace/miniconda3/envs/sage/bin/python"
+
+    local sam3d_args="--port ${SAM3D_PORT} --image-backend ${SAM3D_IMAGE_BACKEND:-gemini}"
+    [[ -f /workspace/sam3d/checkpoints/hf/pipeline.yaml ]] && sam3d_args="${sam3d_args} --checkpoint-dir /workspace/sam3d/checkpoints/hf"
+
+    nohup "${sam3d_py}" "${SAGE_SCRIPTS}/sam3d_server.py" ${sam3d_args} >> /tmp/sam3d_server.log 2>&1 &
+    local new_pid=$!
+    echo "${new_pid}" > /tmp/sam3d.pid
+    log "SAM3D restarted (PID=${new_pid}). Waiting for health..."
+
+    local deadline=$(( $(date +%s) + 300 ))
+    while [[ "$(date +%s)" -lt "${deadline}" ]]; do
+        if curl -sf "${SAM3D_URL}/health" >/dev/null 2>&1; then
+            log "SAM3D healthy after restart."
+            return 0
+        fi
+        if ! kill -0 "${new_pid}" 2>/dev/null; then
+            log "ERROR: SAM3D died during restart."
+            return 1
+        fi
+        sleep 3
+    done
+    log "ERROR: SAM3D did not become healthy within 300s."
+    return 1
+}
 
 # ── SCENE GENERATION ───────────────────────────────────────────────────────
 if [[ "${SCENE_SOURCE}" == "scenesmith" ]]; then
@@ -118,7 +207,7 @@ if [[ "${SCENE_SOURCE}" == "scenesmith" ]]; then
     LAYOUT_ID="$("${PY_SYS}" "${SCENESMITH_TO_SAGE}" \
         --results_dir "${SAGE_DIR}/server/results" \
         --room_type "${ROOM_TYPE}" \
-        --task_desc "${TASK_DESC}" \
+        --task_desc "${TASK_DESC_CAPPED}" \
         --pose_aug_name "${POSE_AUG_NAME}" \
         2> >(tee "${STAGE13_LOG}" >&2))"
     echo "${LAYOUT_ID}" >> "${STAGE13_LOG}"
@@ -129,6 +218,10 @@ if [[ "${SCENE_SOURCE}" == "scenesmith" ]]; then
     LAYOUT_DIR="${SAGE_DIR}/server/results/${LAYOUT_ID}"
 else
     log "════ STAGES 1-3: Scene Generation (SAGE) ════"
+
+    # Pre-flight: ensure SAM3D is alive
+    _ensure_sam3d_healthy || { log "FATAL: Cannot start SAM3D. Aborting."; exit 1; }
+
     cd "${SAGE_DIR}/client"
 
     STAGE13_LOG="/tmp/sage_stage13_$(date +%s).log"
@@ -140,12 +233,75 @@ else
         SERVER_PATHS+=(../server/physics/physics.py)
     fi
 
-    python client_generation_robot_task.py \
-        --room_type "${ROOM_TYPE}" \
-        --robot_type "${ROBOT_TYPE}" \
-        --task_description "${TASK_DESC}" \
-        --server_paths "${SERVER_PATHS[@]}" \
-        2>&1 | tee "${STAGE13_LOG}"
+    # Background watchdog: restart SAM3D if it dies during generation
+    (
+        while true; do
+            sleep 30
+            wd_status=$(curl -sf -o /dev/null -w "%{http_code}" "${SAM3D_URL}/health" 2>/dev/null || echo "000")
+            if [[ "${wd_status}" != "200" ]]; then
+                echo "[pipeline $(date -u +%FT%TZ)] SAM3D watchdog: unhealthy (${wd_status}), restarting..." >&2
+                pkill -f sam3d_server.py 2>/dev/null || true
+                sleep 3
+                wd_py="${PY_SYS}"
+                [[ -x "/workspace/miniconda3/envs/sage/bin/python" ]] && wd_py="/workspace/miniconda3/envs/sage/bin/python"
+                wd_args="--port ${SAM3D_PORT} --image-backend ${SAM3D_IMAGE_BACKEND:-gemini}"
+                [[ -f /workspace/sam3d/checkpoints/hf/pipeline.yaml ]] && wd_args="${wd_args} --checkpoint-dir /workspace/sam3d/checkpoints/hf"
+                nohup "${wd_py}" "${SAGE_SCRIPTS}/sam3d_server.py" ${wd_args} >> /tmp/sam3d_server.log 2>&1 &
+                echo $! > /tmp/sam3d.pid
+                for _w in $(seq 1 100); do
+                    curl -sf "${SAM3D_URL}/health" >/dev/null 2>&1 && break
+                    sleep 3
+                done
+                echo "[pipeline $(date -u +%FT%TZ)] SAM3D watchdog: restart complete" >&2
+            fi
+        done
+    ) &
+    SAM3D_WATCHDOG_PID=$!
+    _stop_sam3d_watchdog() {
+        if [[ -n "${SAM3D_WATCHDOG_PID:-}" ]]; then
+            kill "${SAM3D_WATCHDOG_PID}" 2>/dev/null || true
+            wait "${SAM3D_WATCHDOG_PID}" 2>/dev/null || true
+            SAM3D_WATCHDOG_PID=""
+        fi
+    }
+    trap _stop_sam3d_watchdog EXIT
+
+    # Run scene generation with timeout
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${SCENE_GEN_TIMEOUT}" \
+            python client_generation_robot_task.py \
+                --room_type "${ROOM_TYPE}" \
+                --robot_type "${ROBOT_TYPE}" \
+                --task_description "${TASK_DESC_CAPPED}" \
+                --server_paths "${SERVER_PATHS[@]}" \
+                2>&1 | tee "${STAGE13_LOG}"
+        SCENE_GEN_EXIT=${PIPESTATUS[0]}
+    else
+        log "WARNING: 'timeout' not found; running scene generation without an outer timeout."
+        python client_generation_robot_task.py \
+            --room_type "${ROOM_TYPE}" \
+            --robot_type "${ROBOT_TYPE}" \
+            --task_description "${TASK_DESC_CAPPED}" \
+            --server_paths "${SERVER_PATHS[@]}" \
+            2>&1 | tee "${STAGE13_LOG}"
+        SCENE_GEN_EXIT=${PIPESTATUS[0]}
+    fi
+    set -e
+
+    # Stop watchdog (now that mesh generation is over)
+    _stop_sam3d_watchdog
+
+    if [[ "${SCENE_GEN_EXIT}" -eq 124 ]]; then
+        log "ERROR: Scene generation timed out after ${SCENE_GEN_TIMEOUT}s"
+        exit 1
+    elif [[ "${SCENE_GEN_EXIT}" -ne 0 ]]; then
+        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+            log "ERROR: Scene generation exited with code ${SCENE_GEN_EXIT} (STRICT_PIPELINE=1)"
+            exit 1
+        fi
+        log "WARNING: Scene generation exited with code ${SCENE_GEN_EXIT} (continuing; STRICT_PIPELINE=0)"
+    fi
 
     # Find the latest layout directory
     LAYOUT_ID=$(ls -td "${SAGE_DIR}/server/results/layout_"* 2>/dev/null | head -1 | xargs basename)
@@ -179,45 +335,43 @@ fi
 STAGE13_END=$(date +%s)
 log "Scene generation completed in $(( STAGE13_END - PIPELINE_START ))s"
 
-# ── STAGE 4: Scene Augmentation ─────────────────────────────────────────────
-if [[ "${SKIP_AUGMENTATION}" != "1" ]]; then
-    log ""
-    log "════ STAGE 4: Scene Augmentation ════"
+	# ── STAGE 4: Scene Augmentation ─────────────────────────────────────────────
+	if [[ "${SKIP_AUGMENTATION}" != "1" ]]; then
+	    log ""
+	    log "════ STAGE 4: Scene Augmentation ════"
 
-    # 4a: MCP-based augmentation (agent adds complementary objects)
-    log "4a: MCP-based augmentation..."
-    AUG_CLIENT="${SAGE_DIR}/client/client_generation_scene_aug.py"
-    if [[ -f "${AUG_CLIENT}" ]]; then
-        if ! python "${AUG_CLIENT}" \
-            --base_layout_dict_path "${LAYOUT_DIR}/${LAYOUT_ID}.json" \
-            --server_paths "${SAGE_DIR}/server/layout.py" \
-            --from_task_required_objects \
-            2>&1 | tee "/tmp/sage_stage4a.log"; then
-            if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-                log "ERROR: MCP augmentation failed in strict mode."
-                exit 1
-            fi
-            log "WARNING: MCP augmentation failed (non-fatal)"
-        fi
-    else
-        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-            log "ERROR: Strict mode requires MCP augmentation script; missing ${AUG_CLIENT}"
-            exit 1
+	    # 4a: MCP-based augmentation (agent adds complementary objects)
+	    log "4a: MCP-based augmentation..."
+	    AUG_CLIENT="${SAGE_DIR}/client/client_generation_scene_aug.py"
+	    if [[ -f "${AUG_CLIENT}" ]]; then
+	        if ! python "${AUG_CLIENT}" \
+	            --base_layout_dict_path "${LAYOUT_DIR}/${LAYOUT_ID}.json" \
+	            --server_paths "${SAGE_DIR}/server/layout.py" \
+	            --from_task_required_objects \
+	            2>&1 | tee "/tmp/sage_stage4a.log"; then
+	            # Stage 4a is best-effort: it improves scene richness but is not required
+	            # for pose augmentation or downstream grasp/planning stages.
+	            log "WARNING: MCP augmentation failed (continuing; Stage 4a is best-effort)."
+	        fi
+	    else
+	        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+	            log "ERROR: Strict mode requires MCP augmentation script; missing ${AUG_CLIENT}"
+	            exit 1
         fi
         log "SKIP: client_generation_scene_aug.py not found"
     fi
 
-    # 4b: Pose augmentation
-    log "4b: Pose augmentation (${NUM_POSE_SAMPLES} samples)..."
-    POSE_AUG_SCRIPT="${SAGE_DIR}/server/augment/pose_aug_mm_from_layout_with_task.py"
-    if [[ -f "${POSE_AUG_SCRIPT}" ]]; then
-        if ! (cd "${SAGE_DIR}/server" && python "${POSE_AUG_SCRIPT}" \
-            --layout_id "${LAYOUT_ID}" \
-            --save_dir_name "${POSE_AUG_NAME}" \
-            --num_samples "${NUM_POSE_SAMPLES}" \
-            2>&1 | tee "/tmp/sage_stage4b.log"); then
-            if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-                log "ERROR: Pose augmentation failed in strict mode."
+	    # 4b: Pose augmentation
+	    log "4b: Pose augmentation (${NUM_POSE_SAMPLES} samples)..."
+	    POSE_AUG_SCRIPT="${SAGE_DIR}/server/augment/pose_aug_mm_from_layout_with_task.py"
+	    if [[ -f "${POSE_AUG_SCRIPT}" ]]; then
+	        if ! (cd "${SAGE_DIR}/server" && export PYTHONPATH="${SAGE_DIR}/server:${PYTHONPATH:-}" && python "${POSE_AUG_SCRIPT}" \
+	            --layout_id "${LAYOUT_ID}" \
+	            --save_dir_name "${POSE_AUG_NAME}" \
+	            --num_samples "${NUM_POSE_SAMPLES}" \
+	            2>&1 | tee "/tmp/sage_stage4b.log"); then
+	            if [[ "${STRICT_PIPELINE}" == "1" ]]; then
+	                log "ERROR: Pose augmentation failed in strict mode."
                 exit 1
             fi
             log "WARNING: Pose augmentation failed (non-fatal)"
@@ -295,7 +449,7 @@ if [[ "${SKIP_GRASPS}" != "1" && "${SKIP_DATA_GEN}" != "1" ]]; then
             LAYOUT_ID="$("${PY_SYS}" "${SCENESMITH_TO_SAGE}" \
                 --results_dir "${SAGE_DIR}/server/results" \
                 --room_type "${ROOM_TYPE}" \
-                --task_desc "${TASK_DESC}" \
+                --task_desc "${TASK_DESC_CAPPED}" \
                 --pose_aug_name "${POSE_AUG_NAME}" \
                 2> >(tee "${FALLBACK_LOG}" >&2))"
             echo "${LAYOUT_ID}" >> "${FALLBACK_LOG}"

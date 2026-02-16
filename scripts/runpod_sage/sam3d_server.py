@@ -17,8 +17,10 @@ Usage:
 
 import os
 import sys
+import gc
 import io
 import json
+import signal
 import time
 import random
 import tempfile
@@ -200,6 +202,107 @@ job_queue = []
 queue_lock = threading.Lock()
 queue_event = threading.Event()
 
+# ── Worker watchdog ───────────────────────────────────────────────────────
+_worker_thread = None
+_worker_healthy = True
+_worker_lock = threading.Lock()
+
+def _safe_float_env(key: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(key, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+    return float(value) if value > 0 else float(default)
+
+
+# How long a single /generate job is allowed to stay in "processing" before being
+# marked failed. This prevents clients from polling forever if the worker hangs.
+# Default aligns with SceneSmith bridge timeout_total_s=900.
+JOB_TIMEOUT_S = _safe_float_env("SAM3D_JOB_TIMEOUT_S", 900.0)
+# How often to check worker/job health.
+WATCHDOG_INTERVAL_S = _safe_float_env("SAM3D_WATCHDOG_INTERVAL_S", 10.0)
+# If enabled, terminate the server when it becomes unhealthy so an external
+# supervisor can restart it.
+EXIT_ON_UNHEALTHY = os.environ.get("SAM3D_EXIT_ON_UNHEALTHY", "0") == "1"
+
+
+def _start_worker():
+    """Start (or restart) the worker thread."""
+    global _worker_thread, _worker_healthy
+    with _worker_lock:
+        if _worker_thread is not None and _worker_thread.is_alive():
+            return
+        _worker_healthy = True
+        _worker_thread = threading.Thread(target=worker_loop, daemon=True, name="sam3d-worker")
+        _worker_thread.start()
+        print(f"[SAM3D] Worker thread started (tid={_worker_thread.ident})", flush=True)
+
+
+def _watchdog_loop():
+    """Monitor worker thread and fail stuck jobs so clients don't poll forever."""
+    global _worker_healthy
+    while True:
+        time.sleep(WATCHDOG_INTERVAL_S)
+        with _worker_lock:
+            alive = _worker_thread is not None and _worker_thread.is_alive()
+        if not alive:
+            if _worker_healthy:
+                print("[SAM3D] WATCHDOG: Worker thread died! Restarting...", flush=True)
+                _worker_healthy = False
+
+            # Fail any jobs stuck in "processing"
+            with jobs_lock:
+                for jid, jdata in jobs.items():
+                    if jdata.get("status") == "processing":
+                        jdata["status"] = "failed"
+                        jdata["error"] = "Worker thread crashed during processing"
+                        jdata["failed_at"] = time.time()
+                        print(f"[SAM3D] WATCHDOG: Marked job {jid} as failed", flush=True)
+
+            # Clean up CUDA state
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    # synchronize() can hang if the CUDA context is corrupted.
+                    try:
+                        torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                    print("[SAM3D] WATCHDOG: CUDA cache cleared", flush=True)
+            except Exception as e:
+                print(f"[SAM3D] WATCHDOG: CUDA cleanup error: {e}", flush=True)
+
+            _start_worker()
+            continue
+
+        # Detect a stuck processing job (thread alive but no completion).
+        stuck_job_id = None
+        stuck_age_s = None
+        now = time.time()
+        with jobs_lock:
+            for jid, jdata in jobs.items():
+                if jdata.get("status") != "processing":
+                    continue
+                started_at = float(jdata.get("started_at") or jdata.get("created_at") or now)
+                age_s = now - started_at
+                if age_s > JOB_TIMEOUT_S:
+                    stuck_job_id = jid
+                    stuck_age_s = age_s
+                    jdata["status"] = "failed"
+                    jdata["error"] = f"Job timed out after {JOB_TIMEOUT_S:.0f}s in processing"
+                    jdata["failed_at"] = now
+                    break
+        if stuck_job_id:
+            print(
+                f"[SAM3D] WATCHDOG: Job {stuck_job_id} timed out after {stuck_age_s:.1f}s (timeout={JOB_TIMEOUT_S:.0f}s)",
+                flush=True,
+            )
+            _worker_healthy = False
+            if EXIT_ON_UNHEALTHY:
+                print("[SAM3D] WATCHDOG: Exiting process due to SAM3D_EXIT_ON_UNHEALTHY=1", flush=True)
+                os.kill(os.getpid(), signal.SIGTERM)
+
 
 def worker_loop():
     """Process jobs one at a time to prevent GPU OOM."""
@@ -220,15 +323,25 @@ def worker_loop():
 
             with jobs_lock:
                 jobs[job_id]["status"] = "processing"
+                jobs[job_id]["started_at"] = time.time()
 
             try:
                 _process_job(job_id, job["input_text"], job["seed"])
             except Exception as e:
                 tb = traceback.format_exc()
-                print(f"Job {job_id} failed: {e}\n{tb}")
+                print(f"Job {job_id} failed: {e}\n{tb}", flush=True)
                 with jobs_lock:
                     jobs[job_id]["status"] = "failed"
                     jobs[job_id]["error"] = str(e)
+            finally:
+                # Free VRAM between jobs to prevent fragmentation
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                gc.collect()
 
 
 def _process_job(job_id, input_text, seed):
@@ -408,6 +521,30 @@ def _process_job(job_id, input_text, seed):
 
 @app.route("/health", methods=["GET"])
 def health_check():
+    with _worker_lock:
+        alive = _worker_thread is not None and _worker_thread.is_alive()
+    if not alive:
+        return jsonify({
+            "status": "unhealthy",
+            "reason": "worker_thread_dead",
+            "gpu_available": True,
+            "backend": "sam3d",
+        }), 503
+    # If any job is stuck in processing beyond JOB_TIMEOUT_S, report unhealthy.
+    now = time.time()
+    with jobs_lock:
+        for jdata in jobs.values():
+            if jdata.get("status") != "processing":
+                continue
+            started_at = float(jdata.get("started_at") or jdata.get("created_at") or now)
+            if now - started_at > JOB_TIMEOUT_S:
+                return jsonify({
+                    "status": "unhealthy",
+                    "reason": "job_processing_timeout",
+                    "job_timeout_s": JOB_TIMEOUT_S,
+                    "gpu_available": True,
+                    "backend": "sam3d",
+                }), 503
     return jsonify({"status": "healthy", "gpu_available": True, "backend": "sam3d"})
 
 
@@ -458,6 +595,18 @@ def get_job(job_id):
             "error": job.get("error", "Unknown error"),
         }), 500
     else:
+        # Prevent indefinite polling: fail "processing" jobs that exceed timeout.
+        if job.get("status") == "processing":
+            now = time.time()
+            started_at = float(job.get("started_at") or job.get("created_at") or now)
+            if now - started_at > JOB_TIMEOUT_S:
+                with jobs_lock:
+                    job2 = jobs.get(job_id)
+                    if job2 and job2.get("status") == "processing":
+                        job2["status"] = "failed"
+                        job2["error"] = f"Job timed out after {JOB_TIMEOUT_S:.0f}s in processing"
+                        job2["failed_at"] = now
+                return jsonify({"status": "failed", "error": f"Job timed out after {JOB_TIMEOUT_S:.0f}s"}), 500
         return jsonify({
             "status": job["status"],
             "job_id": job_id,
@@ -507,9 +656,10 @@ def shutdown():
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Start worker thread
-    worker_thread = threading.Thread(target=worker_loop, daemon=True)
-    worker_thread.start()
+    # Start managed worker thread + watchdog
+    _start_worker()
+    _watchdog = threading.Thread(target=_watchdog_loop, daemon=True, name="sam3d-watchdog")
+    _watchdog.start()
 
     print("=" * 60)
     print("SAM3D Drop-in Server (TRELLIS-compatible API)")

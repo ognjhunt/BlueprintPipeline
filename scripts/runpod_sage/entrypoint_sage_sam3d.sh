@@ -39,8 +39,20 @@ OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.1}"
 OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 SAM3D_IMAGE_BACKEND="${SAM3D_IMAGE_BACKEND:-gemini}"
 SAM3D_TEXTURE_BAKING="${SAM3D_TEXTURE_BAKING:-1}"
-SKIP_PATCH_PULL="${SKIP_PATCH_PULL:-1}"
+SKIP_PATCHES="${SKIP_PATCHES:-0}"
 RUN_MODE="${RUN_MODE:-services}"  # services|full_pipeline
+
+is_placeholder() {
+    # Treat common placeholder tokens as "unset" so we don't bake them into key.json.
+    # Usage: is_placeholder "${VAR:-}"
+    local v="${1:-}"
+    v="$(echo "${v}" | tr -d '[:space:]')"
+    if [[ -z "${v}" ]]; then
+        return 0
+    fi
+    v="${v^^}"
+    [[ "${v}" == "PLACEHOLDER" || "${v}" == "CHANGEME" || "${v}" == "TODO" ]]
+}
 
 # Full pipeline launches its own headless SimulationApp in Stage 7; the MCP service
 # only wastes VRAM and can destabilize stdio. Default to skipping Isaac Sim here.
@@ -77,13 +89,23 @@ fi
 # ── 1. Write key.json files from env vars ────────────────────────────────────
 log "Writing SAGE key.json files..."
 
-if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+OPENAI_API_KEY_EFFECTIVE="${OPENAI_API_KEY:-${API_TOKEN:-}}"
+GEMINI_API_KEY_EFFECTIVE="${GEMINI_API_KEY:-}"
+ANTHROPIC_API_KEY_EFFECTIVE="${ANTHROPIC_API_KEY:-}"
+
+if is_placeholder "${OPENAI_API_KEY_EFFECTIVE}"; then OPENAI_API_KEY_EFFECTIVE=""; fi
+if is_placeholder "${GEMINI_API_KEY_EFFECTIVE}"; then GEMINI_API_KEY_EFFECTIVE=""; fi
+if is_placeholder "${ANTHROPIC_API_KEY_EFFECTIVE}"; then ANTHROPIC_API_KEY_EFFECTIVE=""; fi
+
+export OPENAI_API_KEY_EFFECTIVE GEMINI_API_KEY_EFFECTIVE ANTHROPIC_API_KEY_EFFECTIVE
+
+if [[ -n "${OPENAI_API_KEY_EFFECTIVE}" ]]; then
     # Client key.json
     python3 - <<PYEOF
 import json, os, pathlib
 
 client_key = {
-    "API_TOKEN": os.environ.get("OPENAI_API_KEY", ""),
+    "API_TOKEN": os.environ.get("OPENAI_API_KEY_EFFECTIVE", ""),
     "API_URL_QWEN": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     "MODEL_NAME": os.environ.get("OPENAI_MODEL", "gpt-5.1"),
 }
@@ -96,8 +118,8 @@ print(f"  wrote {path}")
 # Server key.json
 model = os.environ.get("OPENAI_MODEL", "gpt-5.1")
 server_key = {
-    "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
-    "API_TOKEN": os.environ.get("OPENAI_API_KEY", ""),
+    "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY_EFFECTIVE", ""),
+    "API_TOKEN": os.environ.get("OPENAI_API_KEY_EFFECTIVE", ""),
     "API_URL_QWEN": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     "API_URL_OPENAI": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     "MODEL_DICT": {
@@ -108,7 +130,7 @@ server_key = {
     },
     "TRELLIS_SERVER_URL": f"http://localhost:{os.environ.get('SAM3D_PORT', '8080')}",
     "FLUX_SERVER_URL": "",
-    "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", ""),
+    "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY_EFFECTIVE", ""),
 }
 path = pathlib.Path("${SAGE_DIR}/server/key.json")
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,16 +140,47 @@ print(f"  wrote {path}")
 PYEOF
     log "key.json files written."
 else
-    log "WARNING: OPENAI_API_KEY not set. key.json not written."
-    log "  Set it before running SAGE: export OPENAI_API_KEY=sk-..."
+    log "WARNING: OPENAI_API_KEY/API_TOKEN not set. key.json not written."
+    log "  Set it before running SAGE: export OPENAI_API_KEY=sk-... (or API_TOKEN=...)"
+fi
+
+# ── 1b. Fix spconv if needed (cu120 → cu124 for CUDA 12.4) ────────────────
+SAGE_PYTHON="/workspace/miniconda3/envs/sage/bin/python"
+if [[ -x "${SAGE_PYTHON}" ]]; then
+    _spconv_ver=$("${SAGE_PYTHON}" -c "import spconv; print(spconv.__version__)" 2>/dev/null || echo "missing")
+    if [[ "${_spconv_ver}" != "2.3.8" ]]; then
+        log "Upgrading spconv (${_spconv_ver} → 2.3.8 for cu124)..."
+        "${SAGE_PYTHON}" -m pip install -q spconv-cu124==2.3.8 2>/dev/null && \
+            log "spconv upgraded to 2.3.8" || \
+            log "WARNING: spconv upgrade failed (SAM3D may crash)"
+    else
+        log "spconv 2.3.8 OK"
+    fi
 fi
 
 # ── 2. Apply SAGE patches (idempotent) ──────────────────────────────────────
-if [[ "${SKIP_PATCH_PULL}" != "1" && -x "${WORKSPACE}/apply_sage_patches.sh" ]]; then
+PATCH_SCRIPT="${WORKSPACE}/BlueprintPipeline/scripts/runpod_sage/apply_sage_patches.sh"
+if [[ "${SKIP_PATCHES}" == "1" ]]; then
+    log "Skipping SAGE patches (SKIP_PATCHES=1)"
+elif [[ -f "${PATCH_SCRIPT}" ]]; then
     log "Applying SAGE patches..."
-    bash "${WORKSPACE}/apply_sage_patches.sh" || log "WARNING: Some patches may have failed (non-fatal)"
+    bash "${PATCH_SCRIPT}" || log "WARNING: Some patches may have failed (non-fatal)"
+    # Validate syntax of patched files
+    SYNTAX_OK=1
+    for _pf in "${SAGE_DIR}/server/layout.py" "${SAGE_DIR}/server/layout_wo_robot.py" "${SAGE_DIR}/server/vlm.py"; do
+        if [[ -f "${_pf}" ]]; then
+            if ! "${SAGE_PYTHON}" -c "import py_compile; py_compile.compile('${_pf}', doraise=True)" 2>/dev/null; then
+                log "ERROR: Syntax error in ${_pf} after patching!"
+                SYNTAX_OK=0
+            fi
+        fi
+    done
+    if [[ "${SYNTAX_OK}" != "1" ]]; then
+        log "FATAL: One or more patched files have syntax errors."
+        exit 1
+    fi
 else
-    log "Skipping runtime SAGE patch application."
+    log "Skipping SAGE patches (${PATCH_SCRIPT} not found)"
 fi
 
 # ── 3. Early exit if SAGE_ONLY mode ─────────────────────────────────────────
@@ -149,8 +202,8 @@ if [[ "${SKIP_SAM3D:-0}" != "1" ]]; then
         log "Starting SAM3D server on :${SAM3D_PORT} (backend=${SAM3D_IMAGE_BACKEND})..."
 
         SAM3D_ARGS="--port ${SAM3D_PORT} --image-backend ${SAM3D_IMAGE_BACKEND}"
-        [[ -n "${OPENAI_API_KEY:-}" ]] && SAM3D_ARGS="${SAM3D_ARGS} --openai-key ${OPENAI_API_KEY}"
-        [[ -n "${GEMINI_API_KEY:-}" ]] && SAM3D_ARGS="${SAM3D_ARGS} --gemini-key ${GEMINI_API_KEY}"
+        [[ -n "${OPENAI_API_KEY_EFFECTIVE:-}" ]] && SAM3D_ARGS="${SAM3D_ARGS} --openai-key ${OPENAI_API_KEY_EFFECTIVE}"
+        [[ -n "${GEMINI_API_KEY_EFFECTIVE:-}" ]] && SAM3D_ARGS="${SAM3D_ARGS} --gemini-key ${GEMINI_API_KEY_EFFECTIVE}"
 
         # Check for SAM3D checkpoints
         if [[ -f "/workspace/sam3d/checkpoints/hf/pipeline.yaml" ]]; then
