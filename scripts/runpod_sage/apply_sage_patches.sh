@@ -272,6 +272,31 @@ else
     log "  SKIP: isaaclab_fallback not found (will be created later)"
 fi
 
+# ── Patch 9b: Stage 5-7 script source of truth symlinks ─────────────────────
+log "Patch 9b: Stage 5-7 source-of-truth script symlinks"
+BP_STAGE567="${WORKSPACE:-/workspace}/BlueprintPipeline/scripts/runpod_sage/sage_stage567_mobile_franka.py"
+BP_STAGE7_COLLECTOR="${WORKSPACE:-/workspace}/BlueprintPipeline/scripts/runpod_sage/isaacsim_collect_mobile_franka.py"
+BP_SIMREADY_LITE="${WORKSPACE:-/workspace}/BlueprintPipeline/scripts/runpod_sage/bp_simready_lite.py"
+SAGE_STAGE567="${SAGE_DIR}/server/sage_stage567_mobile_franka.py"
+SAGE_STAGE7_COLLECTOR="${SAGE_DIR}/server/isaacsim_collect_mobile_franka.py"
+SAGE_SIMREADY_LITE="${SAGE_DIR}/server/bp_simready_lite.py"
+
+_link_stage_script() {
+    local src="$1"
+    local dst="$2"
+    local label="$3"
+    if [[ ! -f "${src}" ]]; then
+        log "  WARNING: missing source for ${label}: ${src}"
+        return
+    fi
+    ln -sfn "${src}" "${dst}"
+    log "  LINKED: ${dst} -> ${src}"
+}
+
+_link_stage_script "${BP_STAGE567}" "${SAGE_STAGE567}" "sage_stage567_mobile_franka.py"
+_link_stage_script "${BP_STAGE7_COLLECTOR}" "${SAGE_STAGE7_COLLECTOR}" "isaacsim_collect_mobile_franka.py"
+_link_stage_script "${BP_SIMREADY_LITE}" "${SAGE_SIMREADY_LITE}" "bp_simready_lite.py"
+
 # ── Patch 10: key.py + layout.py — key.json path + missing Anthropic fallback ─
 log "Patch 10: key.py + layout.py — key.json path fix + fallback for missing ANTHROPIC_API_KEY"
 

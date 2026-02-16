@@ -76,6 +76,10 @@ SAGE_ALLOW_REMOTE_ISAAC_ASSETS="${SAGE_ALLOW_REMOTE_ISAAC_ASSETS:-0}"
 SAGE_SENSOR_FAILURE_POLICY="${SAGE_SENSOR_FAILURE_POLICY:-fail}"
 SAGE_RENDER_WARMUP_FRAMES="${SAGE_RENDER_WARMUP_FRAMES:-100}"
 SAGE_SENSOR_MIN_RGB_STD="${SAGE_SENSOR_MIN_RGB_STD:-0.01}"
+SAGE_SENSOR_MIN_DEPTH_STD="${SAGE_SENSOR_MIN_DEPTH_STD:-0.0001}"
+SAGE_MIN_VALID_DEPTH_PX="${SAGE_MIN_VALID_DEPTH_PX:-1024}"
+SAGE_SENSOR_CHECK_FRAME="${SAGE_SENSOR_CHECK_FRAME:-10}"
+SAGE_ENFORCE_BUNDLE_STRICT="${SAGE_ENFORCE_BUNDLE_STRICT:-1}"
 SKIP_AUGMENTATION="${SKIP_AUGMENTATION:-0}"
 SKIP_GRASPS="${SKIP_GRASPS:-0}"
 SKIP_DATA_GEN="${SKIP_DATA_GEN:-0}"
@@ -140,6 +144,10 @@ export SAGE_ALLOW_REMOTE_ISAAC_ASSETS
 export SAGE_SENSOR_FAILURE_POLICY
 export SAGE_RENDER_WARMUP_FRAMES
 export SAGE_SENSOR_MIN_RGB_STD
+export SAGE_SENSOR_MIN_DEPTH_STD
+export SAGE_MIN_VALID_DEPTH_PX
+export SAGE_SENSOR_CHECK_FRAME
+export SAGE_ENFORCE_BUNDLE_STRICT
 
 TASK_DESC_CAPPED="${TASK_DESC}"
 if [[ "${SAGE_MAX_OBJECTS}" -gt 0 ]]; then
@@ -196,7 +204,8 @@ log "Stage7 assets root: ${ISAAC_ASSETS_ROOT}"
 log "Stage7 local robot asset required: ${REQUIRE_LOCAL_ROBOT_ASSET}"
 log "Stage7 remote assets allowed: ${SAGE_ALLOW_REMOTE_ISAAC_ASSETS}"
 log "Stage7 sensor failure policy: ${SAGE_SENSOR_FAILURE_POLICY}"
-log "Stage7 warmup/rgb_std defaults: ${SAGE_RENDER_WARMUP_FRAMES}/${SAGE_SENSOR_MIN_RGB_STD}"
+log "Stage7 sensor defaults: warmup=${SAGE_RENDER_WARMUP_FRAMES} rgb_std=${SAGE_SENSOR_MIN_RGB_STD} depth_std=${SAGE_SENSOR_MIN_DEPTH_STD} min_depth_px=${SAGE_MIN_VALID_DEPTH_PX} check_frame=${SAGE_SENSOR_CHECK_FRAME}"
+log "Stage7 bundle strict enforcement: ${SAGE_ENFORCE_BUNDLE_STRICT}"
 log ""
 
 PIPELINE_START=$(date +%s)
@@ -489,6 +498,56 @@ _run_sage_prestage4_quality_gate() {
     fi
     log "Pre-Stage4 quality gate: FAIL (log: ${_quality_log})"
     return 1
+}
+
+_audit_stage7_log() {
+    local _log_path="$1"
+    local _strict_mode="${2:-0}"
+    local _has_issues=0
+    local -a _hits=()
+
+    if [[ ! -f "${_log_path}" ]]; then
+        if [[ "${_strict_mode}" == "1" ]]; then
+            log "ERROR: Stage7 audit log is missing: ${_log_path}"
+            return 1
+        fi
+        log "WARNING: Stage7 audit skipped (missing log): ${_log_path}"
+        return 0
+    fi
+
+    if grep -Fq "ModuleNotFoundError: No module named 'isaacsim.simulation_app'" "${_log_path}"; then
+        _hits+=("import_failure: isaacsim.simulation_app missing")
+    fi
+    if grep -Fq "Degenerate depth" "${_log_path}"; then
+        _hits+=("sensor_qc: degenerate depth")
+    fi
+    if grep -Eq "triangle mesh collision.*falling back to convexHull|falling back to convexHull.*triangle mesh collision" "${_log_path}"; then
+        _hits+=("physx_collision: triangle mesh fallback to convexHull")
+    fi
+    if grep -Fq "BUNDLE_RUNTIME_MISMATCH" "${_log_path}"; then
+        _hits+=("strictness: bundle/runtime mismatch")
+    fi
+    if grep -Fq "BUNDLE_RUNTIME_MISSING_RUN_ID" "${_log_path}"; then
+        _hits+=("strictness: missing run_id")
+    fi
+
+    if [[ "${#_hits[@]}" -gt 0 ]]; then
+        _has_issues=1
+        for _hit in "${_hits[@]}"; do
+            log "Stage7 audit hit: ${_hit}"
+        done
+    fi
+
+    if [[ "${_has_issues}" == "1" && "${_strict_mode}" == "1" ]]; then
+        log "ERROR: Stage7 strict log audit failed."
+        return 1
+    fi
+    if [[ "${_has_issues}" == "1" ]]; then
+        log "WARNING: Stage7 log audit found issues (continuing; STRICT_PIPELINE=0)."
+    else
+        log "Stage7 log audit passed."
+    fi
+    return 0
 }
 
 # ── SCENE GENERATION ───────────────────────────────────────────────────────
@@ -985,6 +1044,9 @@ else
     fi
     if [[ ! -f "${LAYOUT_DIR}/stage7_output/stage7.log" ]]; then
         log "WARNING: Missing Stage 7 log at ${LAYOUT_DIR}/stage7_output/stage7.log"
+    fi
+    if ! _audit_stage7_log "${LAYOUT_DIR}/stage7_output/stage7.log" "${STRICT_PIPELINE}"; then
+        exit 1
     fi
 
     # Required artifacts

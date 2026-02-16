@@ -85,6 +85,145 @@ def _resolve_sensor_failure_policy(*, strict: bool, requested: str) -> str:
     return "fail" if strict else "warn"
 
 
+BUNDLE_RUNTIME_MISMATCH_MARKER = "BUNDLE_RUNTIME_MISMATCH"
+BUNDLE_RUNTIME_MISSING_RUN_ID_MARKER = "BUNDLE_RUNTIME_MISSING_RUN_ID"
+DYNAMIC_COLLISION_APPROX_ALLOWED = {"convexDecomposition", "convexHull"}
+
+
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return bool(int(value))
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in {"1", "true", "yes", "y", "on"}:
+            return True
+        if raw in {"0", "false", "no", "n", "off"}:
+            return False
+    return None
+
+
+def _bundle_runtime_mismatches(bundle: Dict[str, Any], args: argparse.Namespace) -> List[str]:
+    checks = (
+        ("strict", "strict"),
+        ("headless", "headless"),
+        ("enable_cameras", "enable_cameras"),
+    )
+    mismatches: List[str] = []
+    for bundle_key, arg_key in checks:
+        expected = _coerce_optional_bool(bundle.get(bundle_key))
+        actual = bool(getattr(args, arg_key))
+        if expected is None:
+            mismatches.append(
+                f"{BUNDLE_RUNTIME_MISMATCH_MARKER}: missing/invalid bundle field '{bundle_key}' "
+                f"(runtime {arg_key}={actual})"
+            )
+            continue
+        if expected != actual:
+            mismatches.append(
+                f"{BUNDLE_RUNTIME_MISMATCH_MARKER}: bundle {bundle_key}={expected} "
+                f"!= runtime {arg_key}={actual}"
+            )
+    return mismatches
+
+
+def _enforce_bundle_runtime_parity(bundle: Dict[str, Any], args: argparse.Namespace) -> None:
+    mismatches = _bundle_runtime_mismatches(bundle, args)
+    if not mismatches:
+        return
+    message = "; ".join(mismatches)
+    enforce = bool(args.strict) or _env_bool("SAGE_ENFORCE_BUNDLE_STRICT", default=True)
+    if enforce:
+        raise RuntimeError(message)
+    _log(f"WARNING: {message} (continuing because strict enforcement is disabled)")
+
+
+def _normalize_dynamic_collision_approximation(value: Any) -> str:
+    token = str(value or "").strip()
+    lower = token.lower()
+    if lower in {"convexdecomposition", "convex_decomposition"}:
+        return "convexDecomposition"
+    if lower in {"convexhull", "convex_hull"}:
+        return "convexHull"
+    return "convexDecomposition"
+
+
+def _is_valid_dynamic_collision_approximation(value: Any) -> bool:
+    return str(value) in DYNAMIC_COLLISION_APPROX_ALLOWED
+
+
+def _camera_sensor_qc_metrics(
+    *,
+    rgb_frame: np.ndarray,
+    depth_raw: np.ndarray,
+    min_valid_depth_px: int,
+    min_rgb_std: float,
+    min_depth_std: float,
+) -> Dict[str, Any]:
+    rgb_np = np.asarray(rgb_frame)
+    depth_np = np.asarray(depth_raw, dtype=np.float32)
+    rgb_std = float(rgb_np.std()) if rgb_np.size else 0.0
+    rgb_max = float(rgb_np.max()) if rgb_np.size else 0.0
+    valid_depth_mask = np.logical_and(np.isfinite(depth_np), depth_np > 0.0)
+    valid_depth_px = int(valid_depth_mask.sum())
+    valid_fraction = float(valid_depth_px / max(1, depth_np.size))
+    depth_std = float(depth_np[valid_depth_mask].std()) if valid_depth_px > 0 else 0.0
+
+    failures: List[str] = []
+    if rgb_std <= float(min_rgb_std) and rgb_max <= 2.0:
+        failures.append("degenerate_rgb")
+    if valid_depth_px < int(min_valid_depth_px):
+        failures.append("degenerate_depth_valid_px")
+    elif depth_std <= float(min_depth_std):
+        failures.append("low_depth_variance")
+
+    return {
+        "rgb_std": rgb_std,
+        "rgb_max": rgb_max,
+        "valid_depth_px": valid_depth_px,
+        "valid_depth_fraction": valid_fraction,
+        "depth_std": depth_std,
+        "failures": failures,
+    }
+
+
+def _evaluate_dual_camera_sensor_qc(
+    *,
+    agentview_rgb: np.ndarray,
+    agentview_depth_raw: np.ndarray,
+    agentview2_rgb: np.ndarray,
+    agentview2_depth_raw: np.ndarray,
+    min_valid_depth_px: int,
+    min_rgb_std: float,
+    min_depth_std: float,
+) -> Dict[str, Any]:
+    qc_a = _camera_sensor_qc_metrics(
+        rgb_frame=agentview_rgb,
+        depth_raw=agentview_depth_raw,
+        min_valid_depth_px=min_valid_depth_px,
+        min_rgb_std=min_rgb_std,
+        min_depth_std=min_depth_std,
+    )
+    qc_b = _camera_sensor_qc_metrics(
+        rgb_frame=agentview2_rgb,
+        depth_raw=agentview2_depth_raw,
+        min_valid_depth_px=min_valid_depth_px,
+        min_rgb_std=min_rgb_std,
+        min_depth_std=min_depth_std,
+    )
+
+    failures: List[str] = []
+    failures.extend([f"agentview:{item}" for item in qc_a["failures"]])
+    failures.extend([f"agentview_2:{item}" for item in qc_b["failures"]])
+    return {
+        "status": "pass" if not failures else "fail",
+        "failures": failures,
+        "agentview": qc_a,
+        "agentview_2": qc_b,
+    }
+
+
 def _resolve_variant_json_path(raw_path: str, *, layout_dir: Path) -> Path:
     p = Path(raw_path)
     if p.exists():
@@ -221,6 +360,9 @@ def _runtime_provenance(
     bp_root: Path,
     sensor_failure_policy: str,
     args: argparse.Namespace,
+    run_id: str,
+    bundle_path: Path,
+    bundle_sha256: str,
 ) -> Dict[str, Any]:
     script_path = Path(__file__).resolve()
     env_snapshot = {
@@ -231,18 +373,25 @@ def _runtime_provenance(
         "SAGE_SENSOR_MIN_RGB_STD": os.environ.get("SAGE_SENSOR_MIN_RGB_STD", ""),
         "SAGE_SENSOR_MIN_DEPTH_STD": os.environ.get("SAGE_SENSOR_MIN_DEPTH_STD", ""),
         "SAGE_MIN_VALID_DEPTH_PX": os.environ.get("SAGE_MIN_VALID_DEPTH_PX", ""),
+        "SAGE_SENSOR_CHECK_FRAME": os.environ.get("SAGE_SENSOR_CHECK_FRAME", ""),
+        "SAGE_ENFORCE_BUNDLE_STRICT": os.environ.get("SAGE_ENFORCE_BUNDLE_STRICT", ""),
+        "SAGE_RUN_ID": os.environ.get("SAGE_RUN_ID", ""),
     }
     return {
+        "run_id": run_id,
         "collector_script": str(script_path),
         "collector_script_sha256": _file_sha256(script_path),
         "bp_git_commit": _git_commit_sha(bp_root),
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "plan_bundle_path": str(bundle_path),
+        "plan_bundle_sha256": bundle_sha256,
         "sensor_failure_policy_effective": sensor_failure_policy,
         "args": {
             "headless": bool(args.headless),
             "enable_cameras": bool(args.enable_cameras),
             "strict": bool(args.strict),
             "render_warmup_frames": int(args.render_warmup_frames),
+            "sensor_check_frame": int(args.sensor_check_frame),
             "sensor_min_rgb_std": float(args.sensor_min_rgb_std),
             "sensor_min_depth_std": float(args.sensor_min_depth_std),
             "min_valid_depth_px": int(args.min_valid_depth_px),
@@ -365,7 +514,7 @@ def _capture_camera_frames(
     width: int,
     height: int,
     min_valid_depth_px: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Capture one frame from both cameras, retrying a few simulation steps until
     shapes are valid, RGB is not fully black, and depth has enough valid pixels.
@@ -393,15 +542,21 @@ def _capture_camera_frames(
             and a_valid_depth_px >= int(min_valid_depth_px)
             and b_valid_depth_px >= int(min_valid_depth_px)
         )
-        not_black = bool(a_rgb_np.size > 0 and float(a_rgb_np.max()) > 0.0)
+        not_black = bool(
+            a_rgb_np.size > 0
+            and b_rgb_np.size > 0
+            and float(a_rgb_np.max()) > 0.0
+            and float(b_rgb_np.max()) > 0.0
+        )
 
         if rgb_ok and depth_ok and not_black:
-            return a_rgb_np, a_d_np, b_rgb_np, b_d_np
+            return a_rgb_np, a_d_np, a_d_raw, b_rgb_np, b_d_np, b_d_raw
 
         last_reason = (
             f"rgb_shapes={a_rgb_np.shape}/{b_rgb_np.shape} "
             f"depth_shapes={a_d_np.shape}/{b_d_np.shape} "
-            f"rgb_max={float(a_rgb_np.max()) if a_rgb_np.size else -1.0:.3f} "
+            f"rgb_max={float(a_rgb_np.max()) if a_rgb_np.size else -1.0:.3f}/"
+            f"{float(b_rgb_np.max()) if b_rgb_np.size else -1.0:.3f} "
             f"valid_depth_px={a_valid_depth_px}/{b_valid_depth_px} "
             f"depth_minmax={float(np.nanmin(a_d_raw)) if a_d_raw.size else float('nan'):.4f}/"
             f"{float(np.nanmax(a_d_raw)) if a_d_raw.size else float('nan'):.4f}"
@@ -488,7 +643,7 @@ def _apply_simready_lite_physics(stage, prim_path: str, *, category: str, dims: 
     """
     Apply mass/friction/restitution + collision approximation hints.
     """
-    from pxr import Sdf, UsdPhysics, UsdShade
+    from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
     try:
         from pxr import PhysxSchema  # type: ignore
@@ -500,14 +655,16 @@ def _apply_simready_lite_physics(stage, prim_path: str, *, category: str, dims: 
     if not prim or not prim.IsValid():
         raise RuntimeError(f"Invalid prim for physics: {prim_path}")
 
-    # Collision is usually authored on geometry prims; try a common child path.
-    collision_prim = stage.GetPrimAtPath(prim_path + "/Mesh")
-    if collision_prim and collision_prim.IsValid():
-        collision_target = collision_prim
-    else:
-        collision_target = prim
+    mesh_prims: List[Any] = []
+    for candidate in Usd.PrimRange(prim):
+        if candidate and candidate.IsValid() and candidate.IsA(UsdGeom.Mesh):
+            mesh_prims.append(candidate)
+    collision_targets = mesh_prims if mesh_prims else [prim]
 
     preset = recommend_simready_lite(category=category, dimensions=dims)
+    approximation = str(preset.collision_approximation)
+    if preset.is_dynamic:
+        approximation = _normalize_dynamic_collision_approximation(approximation)
 
     # Rigid body + mass
     rigid_body_api = UsdPhysics.RigidBodyAPI.Apply(prim)
@@ -515,17 +672,19 @@ def _apply_simready_lite_physics(stage, prim_path: str, *, category: str, dims: 
     mass_api = UsdPhysics.MassAPI.Apply(prim)
     mass_api.CreateMassAttr().Set(float(preset.mass_kg))
 
-    # Collision + approximation
-    collision_api = UsdPhysics.CollisionAPI.Apply(collision_target)
-    collision_api.CreateCollisionEnabledAttr().Set(True)
-    collision_target.CreateAttribute("physics:approximation", Sdf.ValueTypeNames.Token).Set(preset.collision_approximation)
+    mesh_collision_paths: List[str] = []
+    for collision_target in collision_targets:
+        collision_api = UsdPhysics.CollisionAPI.Apply(collision_target)
+        collision_api.CreateCollisionEnabledAttr().Set(True)
+        collision_target.CreateAttribute("physics:approximation", Sdf.ValueTypeNames.Token).Set(approximation)
+        mesh_collision_paths.append(str(collision_target.GetPath()))
 
-    if PHYSX is not None and preset.collision_approximation == "convexDecomposition":
-        try:
-            physx_collision = PHYSX.PhysxCollisionAPI.Apply(collision_target)
-            physx_collision.CreateMaxConvexHullsAttr().Set(int(preset.collision_max_hulls))
-        except Exception:
-            pass
+        if PHYSX is not None and approximation == "convexDecomposition":
+            try:
+                physx_collision = PHYSX.PhysxCollisionAPI.Apply(collision_target)
+                physx_collision.CreateMaxConvexHullsAttr().Set(int(preset.collision_max_hulls))
+            except Exception:
+                pass
 
     # Material (friction/restitution) bound as physics material
     material_path = f"{prim_path}/PhysicsMaterial"
@@ -546,6 +705,8 @@ def _apply_simready_lite_physics(stage, prim_path: str, *, category: str, dims: 
             pass
 
     UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)
+    for collision_target in collision_targets:
+        UsdShade.MaterialBindingAPI.Apply(collision_target).Bind(material)
 
     return {
         "mass_kg": preset.mass_kg,
@@ -553,8 +714,58 @@ def _apply_simready_lite_physics(stage, prim_path: str, *, category: str, dims: 
         "dynamic_friction": preset.dynamic_friction,
         "restitution": preset.restitution,
         "is_dynamic": preset.is_dynamic,
-        "collision_approximation": preset.collision_approximation,
+        "collision_approximation": approximation,
         "collision_max_hulls": preset.collision_max_hulls,
+        "mesh_collision_prims": mesh_collision_paths,
+    }
+
+
+def _validate_dynamic_collision_settings(stage, physics_report: Dict[str, Any]) -> Dict[str, Any]:
+    from pxr import UsdPhysics
+
+    total_dynamic_meshes = 0
+    collision_enabled_meshes = 0
+    bad_dynamic_approximations: List[Dict[str, str]] = []
+    missing_collision_paths: List[str] = []
+
+    for entry in physics_report.get("objects", []) or []:
+        if not bool(entry.get("is_dynamic")):
+            continue
+        mesh_paths = list(entry.get("mesh_collision_prims") or [])
+        for mesh_path in mesh_paths:
+            total_dynamic_meshes += 1
+            prim = stage.GetPrimAtPath(mesh_path)
+            if not prim or not prim.IsValid():
+                missing_collision_paths.append(str(mesh_path))
+                continue
+
+            coll_api = UsdPhysics.CollisionAPI(prim)
+            enabled_attr = coll_api.GetCollisionEnabledAttr()
+            enabled = False
+            if enabled_attr and enabled_attr.IsValid():
+                value = enabled_attr.Get()
+                enabled = bool(value) if value is not None else False
+            if enabled:
+                collision_enabled_meshes += 1
+            else:
+                missing_collision_paths.append(str(mesh_path))
+
+            approx_attr = prim.GetAttribute("physics:approximation")
+            approx_value = approx_attr.Get() if approx_attr and approx_attr.IsValid() else ""
+            if str(approx_value) not in DYNAMIC_COLLISION_APPROX_ALLOWED:
+                bad_dynamic_approximations.append(
+                    {"path": str(mesh_path), "approximation": str(approx_value)}
+                )
+
+    coverage = float(collision_enabled_meshes / max(1, total_dynamic_meshes))
+    return {
+        "total_dynamic_meshes": total_dynamic_meshes,
+        "collision_enabled_meshes": collision_enabled_meshes,
+        "collision_coverage": coverage,
+        "missing_collision_count": len(missing_collision_paths),
+        "missing_collision_paths": missing_collision_paths[:50],
+        "bad_dynamic_approx_count": len(bad_dynamic_approximations),
+        "bad_dynamic_approximations": bad_dynamic_approximations[:50],
     }
 
 
@@ -638,11 +849,11 @@ def main() -> None:
     parser.add_argument("--strict", dest="strict", action="store_true", default=False)
     parser.add_argument("--no-strict", dest="strict", action="store_false")
     parser.add_argument("--render_warmup_frames", type=int, default=int(os.getenv("SAGE_RENDER_WARMUP_FRAMES", "100")))
-    parser.add_argument("--sensor_check_frame", type=int, default=int(os.getenv("SAGE_SENSOR_CHECK_FRAME", "5")))
+    parser.add_argument("--sensor_check_frame", type=int, default=int(os.getenv("SAGE_SENSOR_CHECK_FRAME", "10")))
     parser.add_argument("--camera_retry_steps", type=int, default=int(os.getenv("SAGE_CAMERA_RETRY_STEPS", "90")))
     parser.add_argument("--sensor_min_rgb_std", type=float, default=float(os.getenv("SAGE_SENSOR_MIN_RGB_STD", "0.01")))
     parser.add_argument("--sensor_min_depth_std", type=float, default=float(os.getenv("SAGE_SENSOR_MIN_DEPTH_STD", "0.0001")))
-    parser.add_argument("--min_valid_depth_px", type=int, default=int(os.getenv("SAGE_MIN_VALID_DEPTH_PX", "128")))
+    parser.add_argument("--min_valid_depth_px", type=int, default=int(os.getenv("SAGE_MIN_VALID_DEPTH_PX", "1024")))
     parser.add_argument("--dome_light_intensity", type=float, default=float(os.getenv("SAGE_DOME_LIGHT_INTENSITY", "3000")))
     parser.add_argument("--sun_light_intensity", type=float, default=float(os.getenv("SAGE_SUN_LIGHT_INTENSITY", "600")))
     parser.add_argument(
@@ -659,6 +870,19 @@ def main() -> None:
 
     bundle_path = Path(args.plan_bundle)
     bundle = _load_json(bundle_path)
+    _enforce_bundle_runtime_parity(bundle, args)
+
+    run_id = str(bundle.get("run_id") or os.environ.get("SAGE_RUN_ID", "")).strip()
+    if not run_id:
+        msg = (
+            f"{BUNDLE_RUNTIME_MISSING_RUN_ID_MARKER}: plan bundle missing run_id "
+            "and SAGE_RUN_ID is unset"
+        )
+        if args.strict:
+            raise RuntimeError(msg)
+        run_id = f"non_strict_{int(time.time())}"
+        _log(f"WARNING: {msg}; generated fallback run_id={run_id}")
+    os.environ.setdefault("SAGE_RUN_ID", run_id)
 
     layout_id = str(bundle["layout_id"])
     results_dir = Path(bundle["results_dir"])
@@ -706,14 +930,19 @@ def main() -> None:
             bp_root=Path(BP_DIR).resolve(),
             sensor_failure_policy=sensor_failure_policy,
             args=args,
+            run_id=run_id,
+            bundle_path=bundle_path,
+            bundle_sha256=_file_sha256(bundle_path),
         )
         demo_metadata: Dict[str, Any] = {
+            "run_id": run_id,
             "layout_id": layout_id,
             "num_demos": 0,
             "demos": [],
             "provenance": runtime_provenance,
         }
         step_decomp: Dict[str, Any] = {
+            "run_id": run_id,
             "num_demos": 0,
             "phase_labels": [],
             "demos": [],
@@ -721,6 +950,7 @@ def main() -> None:
         }
 
         cameras_manifest: Dict[str, Any] = {
+            "run_id": run_id,
             "layout_id": layout_id,
             "resolution": [width, height],
             "modalities": ["rgb", "depth"] if args.enable_cameras else [],
@@ -818,6 +1048,30 @@ def main() -> None:
                 )
                 physics_report["objects"].append({"prim_path": prim_path, "source_id": source_id, **phys})
 
+            collision_validation = _validate_dynamic_collision_settings(stage, physics_report)
+            physics_report["validation"] = collision_validation
+            _log(
+                "Collision validation: "
+                f"dynamic_meshes={collision_validation['total_dynamic_meshes']} "
+                f"coverage={collision_validation['collision_coverage']:.3f} "
+                f"bad_dynamic_approx={collision_validation['bad_dynamic_approx_count']}"
+            )
+            collision_invalid = (
+                collision_validation["bad_dynamic_approx_count"] > 0
+                or collision_validation["missing_collision_count"] > 0
+                or (
+                    collision_validation["total_dynamic_meshes"] > 0
+                    and collision_validation["collision_coverage"] < 0.999
+                )
+            )
+            if args.strict and collision_invalid:
+                raise RuntimeError(
+                    "Dynamic collision validation failed: "
+                    f"coverage={collision_validation['collision_coverage']:.3f}, "
+                    f"missing={collision_validation['missing_collision_count']}, "
+                    f"bad_dynamic_approx={collision_validation['bad_dynamic_approx_count']}"
+                )
+
             # Robot
             robot_xform = "/World/Robot"
             robot_articulation = "/World/Robot/RidgebackFranka"
@@ -877,7 +1131,7 @@ def main() -> None:
             depth_name = None
             depth_a = None
             depth_b = None
-            for candidate in ("distance_to_camera", "distance_to_image_plane"):
+            for candidate in ("distance_to_image_plane", "distance_to_camera"):
                 try:
                     depth_a = rep.AnnotatorRegistry.get_annotator(candidate)
                     depth_b = rep.AnnotatorRegistry.get_annotator(candidate)
@@ -898,6 +1152,7 @@ def main() -> None:
                 {"camera_id": "agentview", "prim_path": cam_a},
                 {"camera_id": "agentview_2", "prim_path": cam_b},
             ]
+            cameras_manifest["depth_annotator"] = depth_name
             return {
                 "agentview": {"rgb": rgb_a, "depth": depth_a},
                 "agentview_2": {"rgb": rgb_b, "depth": depth_b},
@@ -905,13 +1160,14 @@ def main() -> None:
 
         demos = bundle.get("demos", []) or []
         _log(
-            f"collector start: layout_id={layout_id} demos={len(demos)} "
+            f"collector start: run_id={run_id} layout_id={layout_id} demos={len(demos)} "
             f"headless={args.headless} cameras={args.enable_cameras} strict={args.strict} "
             f"warmup={args.render_warmup_frames} retry={args.camera_retry_steps} "
             f"rgb_std_min={args.sensor_min_rgb_std} depth_std_min={args.sensor_min_depth_std} "
             f"min_depth_px={args.min_valid_depth_px} "
             f"dome_light={args.dome_light_intensity} sun_light={args.sun_light_intensity} "
             f"sensor_policy={sensor_failure_policy} "
+            f"enforce_bundle_strict={os.environ.get('SAGE_ENFORCE_BUNDLE_STRICT', '1')} "
             f"remote_assets={os.environ.get('SAGE_ALLOW_REMOTE_ISAAC_ASSETS', '0')}"
         )
         if args.strict and len(demos) < 1:
@@ -1111,6 +1367,14 @@ def main() -> None:
                 last_a_d = None
                 last_b_rgb = None
                 last_b_d = None
+                check_t = max(0, min(int(args.sensor_check_frame), T - 1))
+                sensor_qc: Dict[str, Any] = {
+                    "enabled": bool(args.enable_cameras),
+                    "policy": sensor_failure_policy,
+                    "check_frame": int(check_t) if args.enable_cameras else None,
+                    "status": "not_checked" if args.enable_cameras else "disabled",
+                    "failures": [],
+                }
                 for t in range(T):
                     _set_robot_root_pose(stage, robot_xform, float(base[t, 0]), float(base[t, 1]), float(base[t, 2]))
                     _apply_joint_targets(dc, art, dof_names, arm[t], float(grip[t]))
@@ -1147,7 +1411,7 @@ def main() -> None:
                                 pass
 
                     if args.enable_cameras:
-                        a_rgb_np, a_d_np, b_rgb_np, b_d_np = _capture_camera_frames(
+                        a_rgb_np, a_d_np, a_d_raw, b_rgb_np, b_d_np, b_d_raw = _capture_camera_frames(
                             annotators=annotators,
                             world=world,
                             max_extra_steps=int(args.camera_retry_steps),
@@ -1171,35 +1435,36 @@ def main() -> None:
                         last_a_rgb, last_a_d = a_rgb_np, a_d_np
                         last_b_rgb, last_b_d = b_rgb_np, b_d_np
 
-                        # Strict sensor sanity after render warm-up frame (bounded by trajectory length).
-                        check_t = max(0, min(int(args.sensor_check_frame), T - 1))
-                        if args.strict and t == check_t:
-                            rgb_std = float(a_rgb_np.std())
-                            rgb_max = float(a_rgb_np.max()) if a_rgb_np.size else 0.0
-                            if rgb_std <= float(args.sensor_min_rgb_std) and rgb_max <= 2.0:
-                                raise RuntimeError(
-                                    f"Degenerate RGB for demo {demo_idx} (std={rgb_std:.3f}, max={rgb_max:.3f})"
-                                )
-                            valid_depth = np.logical_and(np.isfinite(a_d_np), a_d_np > 0.0)
-                            valid_depth_px = int(valid_depth.sum())
-                            if valid_depth_px < int(args.min_valid_depth_px):
+                        if t == check_t:
+                            qc = _evaluate_dual_camera_sensor_qc(
+                                agentview_rgb=a_rgb_np,
+                                agentview_depth_raw=a_d_raw,
+                                agentview2_rgb=b_rgb_np,
+                                agentview2_depth_raw=b_d_raw,
+                                min_valid_depth_px=int(args.min_valid_depth_px),
+                                min_rgb_std=float(args.sensor_min_rgb_std),
+                                min_depth_std=float(args.sensor_min_depth_std),
+                            )
+                            sensor_qc.update(qc)
+                            depth_failures = [
+                                item
+                                for item in qc["failures"]
+                                if item.endswith("degenerate_depth_valid_px") or item.endswith("low_depth_variance")
+                            ]
+                            rgb_failures = [item for item in qc["failures"] if item.endswith("degenerate_rgb")]
+                            if depth_failures:
                                 msg = (
                                     f"Degenerate depth for demo {demo_idx} "
-                                    f"(valid_px={valid_depth_px} < {int(args.min_valid_depth_px)})"
+                                    f"(failures={','.join(depth_failures)})"
                                 )
                                 if sensor_failure_policy == "fail":
                                     raise RuntimeError(msg)
                                 _log(f"WARNING: {msg} — continuing")
-                            else:
-                                dvals = a_d_np[valid_depth]
-                                if float(dvals.std()) <= float(args.sensor_min_depth_std):
-                                    msg = (
-                                        f"Low-variance depth for demo {demo_idx} "
-                                        f"(std={float(dvals.std()):.6f}, valid_px={valid_depth_px})"
-                                    )
-                                    if sensor_failure_policy == "fail":
-                                        raise RuntimeError(msg)
-                                    _log(f"WARNING: {msg} — continuing")
+                            if rgb_failures:
+                                msg = f"Degenerate RGB for demo {demo_idx} (failures={','.join(rgb_failures)})"
+                                if sensor_failure_policy == "fail":
+                                    raise RuntimeError(msg)
+                                _log(f"WARNING: {msg} — continuing")
 
                 if args.enable_cameras:
                     # Last next_obs repeats last obs.
@@ -1220,6 +1485,7 @@ def main() -> None:
                         "demo_idx": demo_idx,
                         "num_steps": T,
                         "variant_layout_json": str(variant_path),
+                        "sensor_qc": sensor_qc,
                     }
                 )
                 step_decomp["demos"].append(

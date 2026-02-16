@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -118,6 +119,7 @@ def _build_stage7_command_and_env(
     collector: Path,
     plan_path: Path,
     output_dir: Path,
+    run_id: str = "",
 ) -> Tuple[List[str], Dict[str, str]]:
     cmd = [
         args.isaacsim_py,
@@ -139,10 +141,74 @@ def _build_stage7_command_and_env(
     env.setdefault("SAGE_SENSOR_FAILURE_POLICY", "fail" if bool(args.strict) else "warn")
     env.setdefault("SAGE_RENDER_WARMUP_FRAMES", "100")
     env.setdefault("SAGE_SENSOR_MIN_RGB_STD", "0.01")
+    env.setdefault("SAGE_SENSOR_MIN_DEPTH_STD", "0.0001")
+    env.setdefault("SAGE_MIN_VALID_DEPTH_PX", "1024")
+    env.setdefault("SAGE_SENSOR_CHECK_FRAME", "10")
+    env.setdefault("SAGE_ENFORCE_BUNDLE_STRICT", "1")
+    if run_id:
+        env.setdefault("SAGE_RUN_ID", run_id)
     env["PYTHONSAFEPATH"] = "1"
     _sanitize_pythonpath_for_isaacsim(env)
     _configure_vulkan_icd_env(env)
     return cmd, env
+
+
+def _run_isaacsim_import_preflight(*, isaacsim_py: str, env: Dict[str, str], cwd: Path) -> None:
+    preflight_code = """
+import importlib
+import inspect
+import os
+import pathlib
+import sys
+
+blocked = pathlib.Path(os.environ.get("SAGE_SERVER_DIR", "/workspace/SAGE/server")).resolve()
+
+def _is_shadowed(path_str: str) -> bool:
+    if not path_str:
+        return False
+    try:
+        path = pathlib.Path(path_str).resolve()
+    except Exception:
+        return False
+    return path == blocked or blocked in path.parents
+
+issues = []
+isaacsim = importlib.import_module("isaacsim")
+isaacsim_file = str(getattr(isaacsim, "__file__", "") or "")
+if isaacsim_file and _is_shadowed(isaacsim_file):
+    issues.append(f"isaacsim module is shadowed by SAGE server path: {isaacsim_file}")
+
+from isaacsim.simulation_app import SimulationApp
+simapp_file = str(inspect.getfile(SimulationApp))
+if _is_shadowed(simapp_file):
+    issues.append(f"SimulationApp import is shadowed by SAGE server path: {simapp_file}")
+
+print(f"isaacsim.__file__={isaacsim_file or '<namespace package>'}")
+print(f"SimulationApp.file={simapp_file}")
+
+if issues:
+    for issue in issues:
+        print(issue, file=sys.stderr)
+    sys.exit(86)
+"""
+    cmd = [isaacsim_py, "-P", "-c", preflight_code]
+    proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True)
+    if proc.returncode == 0:
+        if proc.stdout.strip():
+            _log(f"Stage 7 import preflight:\n{proc.stdout.strip()}")
+        return
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    details = "\n".join(x for x in (out, err) if x)
+    raise RuntimeError(
+        "Stage 7 preflight failed before launch: Isaac Sim import/shadowing check failed. "
+        f"python={isaacsim_py}. "
+        "Remediation: run scripts/runpod_sage/apply_sage_patches.sh to refresh SAGE/server symlinks, "
+        "launch via scripts/runpod_sage/run_full_pipeline.sh, and ensure ISAACSIM_PY_STAGE7 points to "
+        "a valid Isaac Sim Python.\n"
+        f"{details}"
+    )
 
 
 def _run_stage7_collector_with_tee(*, cmd: Sequence[str], env: Dict[str, str], cwd: Path, log_path: Path) -> None:
@@ -840,6 +906,10 @@ def main() -> None:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
+    run_id = str(os.environ.get("SAGE_RUN_ID", "")).strip()
+    if not run_id:
+        run_id = f"{args.layout_id}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+
     layout_dir = Path(args.results_dir) / args.layout_id
     if not layout_dir.exists():
         raise FileNotFoundError(f"Layout dir not found: {layout_dir}")
@@ -860,6 +930,7 @@ def main() -> None:
         raise FileNotFoundError(f"M2T2 weights missing: {weights_path}")
 
     _log(f"layout_id={args.layout_id}")
+    _log(f"run_id={run_id}")
     _log(f"pose_aug_variants={len(variants)}")
     _log(f"num_demos={args.num_demos} strict={args.strict} cameras={args.enable_cameras} headless={args.headless}")
 
@@ -1110,6 +1181,7 @@ def main() -> None:
     _write_json(grasps_out_dir / "grasp_transforms.json", grasp_payload)
 
     plan_bundle = {
+        "run_id": run_id,
         "layout_id": args.layout_id,
         "results_dir": str(Path(args.results_dir)),
         "pose_aug_name": args.pose_aug_name,
@@ -1119,11 +1191,13 @@ def main() -> None:
         "task_desc": args.task_desc,
         "demos": [p.__dict__ for p in plans],
         "provenance": {
+            "run_id": run_id,
             "stage567_script": str(Path(__file__).resolve()),
             "stage567_script_sha256": _file_sha256(Path(__file__).resolve()),
             "bp_git_commit": _git_commit_sha(Path(__file__).resolve().parents[2]),
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "stage7_log_path": str(layout_dir / "stage7_output" / "stage7.log"),
+            "collector_script": str(Path(__file__).with_name("isaacsim_collect_mobile_franka.py").resolve()),
             "policy_env": {
                 "ISAAC_ASSETS_ROOT": os.environ.get("ISAAC_ASSETS_ROOT", ""),
                 "REQUIRE_LOCAL_ROBOT_ASSET": os.environ.get("REQUIRE_LOCAL_ROBOT_ASSET", ""),
@@ -1131,6 +1205,10 @@ def main() -> None:
                 "SAGE_SENSOR_FAILURE_POLICY": os.environ.get("SAGE_SENSOR_FAILURE_POLICY", "auto"),
                 "SAGE_RENDER_WARMUP_FRAMES": os.environ.get("SAGE_RENDER_WARMUP_FRAMES", ""),
                 "SAGE_SENSOR_MIN_RGB_STD": os.environ.get("SAGE_SENSOR_MIN_RGB_STD", ""),
+                "SAGE_SENSOR_MIN_DEPTH_STD": os.environ.get("SAGE_SENSOR_MIN_DEPTH_STD", ""),
+                "SAGE_MIN_VALID_DEPTH_PX": os.environ.get("SAGE_MIN_VALID_DEPTH_PX", ""),
+                "SAGE_SENSOR_CHECK_FRAME": os.environ.get("SAGE_SENSOR_CHECK_FRAME", ""),
+                "SAGE_ENFORCE_BUNDLE_STRICT": os.environ.get("SAGE_ENFORCE_BUNDLE_STRICT", ""),
             },
         },
     }
@@ -1153,6 +1231,12 @@ def main() -> None:
         collector=collector,
         plan_path=plan_path,
         output_dir=Path(args.output_dir),
+        run_id=run_id,
+    )
+    _run_isaacsim_import_preflight(
+        isaacsim_py=args.isaacsim_py,
+        env=env,
+        cwd=Path(__file__).resolve().parents[2],
     )
     _log("Launching Stage 7 Isaac Sim collector...")
     _log(" ".join(cmd))
