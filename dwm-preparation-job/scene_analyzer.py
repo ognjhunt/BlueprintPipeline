@@ -2,7 +2,7 @@
 """
 Scene Analyzer for DWM - Extracts semantic meaning from scene manifests.
 
-Uses Gemini 3.0 Pro with Grounded Search to analyze scenes and extract:
+Uses Gemini 3.1 Pro with Grounded Search to analyze scenes and extract:
 1. Object affordances (what actions can be performed on each object)
 2. Semantic relationships between objects
 3. Valid task sequences for the environment
@@ -198,7 +198,7 @@ class SceneAnalysisResult:
 
 class SceneAnalyzer:
     """
-    Analyzes scenes using Gemini 3.0 Pro with Grounded Search.
+    Analyzes scenes using Gemini 3.1 Pro with Grounded Search.
 
     Extracts semantic information to enable dynamic, scene-aware DWM video generation.
 

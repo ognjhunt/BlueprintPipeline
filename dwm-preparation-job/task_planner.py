@@ -2,7 +2,7 @@
 """
 Task Planner for DWM - Generates episode action sequences.
 
-Uses Gemini 3.0 Pro with Grounded Search to plan manipulation tasks:
+Uses Gemini 3.1 Pro with Grounded Search to plan manipulation tasks:
 1. Generate meaningful action sequences for each task
 2. Break tasks into DWM-compatible clips (49 frames each)
 3. Define hand trajectories and camera paths for each action
@@ -230,7 +230,7 @@ class TaskPlanner:
     """
     Plans manipulation episodes from scene analysis.
 
-    Uses Gemini 3.0 Pro with Grounded Search to generate:
+    Uses Gemini 3.1 Pro with Grounded Search to generate:
     1. Detailed action sequences for each task
     2. Frame-level timing for each action
     3. Text prompts for DWM conditioning

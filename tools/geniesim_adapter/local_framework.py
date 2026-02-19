@@ -18667,7 +18667,7 @@ Scene objects: {scene_summary}
         collision_free: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Use Gemini 3.0 Pro Preview to enrich episode metadata.
+        Use Gemini 3.1 Pro Preview to enrich episode metadata.
 
         Generates task descriptions, scene annotations, success criteria,
         and evaluates whether the trajectory likely accomplishes the task.

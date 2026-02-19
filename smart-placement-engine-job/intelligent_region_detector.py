@@ -1,4 +1,4 @@
-"""Intelligent Region Detector using Gemini 3.0 Pro Preview.
+"""Intelligent Region Detector using Gemini 3.1 Pro Preview.
 
 This module provides AI-powered detection and understanding of placement regions
 within scenes. It uses Gemini to:
@@ -89,7 +89,7 @@ class RegionDetectionResult:
 
 
 class IntelligentRegionDetector:
-    """AI-powered region detection using Gemini 3.0 Pro Preview.
+    """AI-powered region detection using Gemini 3.1 Pro Preview.
 
     This detector analyzes scene manifests, USD files, and optionally images
     to understand the spatial layout and identify optimal placement regions.

@@ -1285,13 +1285,13 @@ def call_gemini_for_dimensions(
     prompt = make_dimension_estimation_prompt(obj, has_multiple_views=len(images) > 1)
 
     try:
-        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-pro-preview")
+        model_name = _get_env_value("GEMINI_MODEL", "gemini-3.1-pro-preview")
         if model_name.startswith("gemini-1") or model_name.startswith("gemini-2"):
             logger.warning(
-                "[SIMREADY] Overriding legacy Gemini model '%s' with gemini-3-pro-preview.",
+                "[SIMREADY] Overriding legacy Gemini model '%s' with gemini-3.1-pro-preview.",
                 model_name,
             )
-            model_name = "gemini-3-pro-preview"
+            model_name = "gemini-3.1-pro-preview"
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",
@@ -1390,7 +1390,7 @@ def call_gemini_for_object(
     prompt = make_gemini_prompt(oid, obj, bounds, base_cfg, has_image=reference_image is not None)
 
     try:
-        model_name = _get_env_value("GEMINI_MODEL", "gemini-3-pro-preview")
+        model_name = _get_env_value("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
         cfg_kwargs: Dict[str, Any] = {
             "response_mime_type": "application/json",

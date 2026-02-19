@@ -2,7 +2,7 @@
 Unified LLM Client for BlueprintPipeline.
 
 Provides a single abstraction layer supporting multiple LLM providers:
-- Google Gemini (DEFAULT, 3.0 Pro with Google Search grounding)
+- Google Gemini (DEFAULT, 3.1 Pro with Google Search grounding)
 - Anthropic Claude (Sonnet 4.5 with extended thinking)
 - OpenAI GPT-5.1 (with adaptive reasoning)
 

@@ -45,7 +45,7 @@ compatible = matrix.get_compatible_assets(context)
 
 ### 2. Intelligent Region Detector (`intelligent_region_detector.py`)
 
-Uses Gemini 3.0 Pro Preview to analyze scenes and detect placement regions:
+Uses Gemini 3.1 Pro Preview to analyze scenes and detect placement regions:
 
 ```python
 from intelligent_region_detector import create_region_detector

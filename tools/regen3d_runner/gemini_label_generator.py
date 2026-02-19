@@ -100,11 +100,11 @@ def generate_labels_from_image(
         FallbackLLMClient,
     )
 
-    # Fallback chain: Gemini 3 Flash → Gemini 3 Pro → Gemini 2.5 Flash
+    # Fallback chain: Gemini 3 Flash → Gemini 3.1 Pro → Gemini 2.5 Flash
     # All support image input + JSON output.
     primary = GeminiClient(model="gemini-3-flash-preview")
     fallbacks = [
-        GeminiClient(model="gemini-3-pro-preview"),
+        GeminiClient(model="gemini-3.1-pro-preview"),
         GeminiClient(model="gemini-2.5-flash"),
     ]
     client = FallbackLLMClient(primary=primary, fallbacks=fallbacks)

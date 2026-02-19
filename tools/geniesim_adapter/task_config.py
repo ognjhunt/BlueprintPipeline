@@ -762,7 +762,7 @@ class TaskConfigGenerator:
         return min(priority, 5)  # Cap at 5
 
     # =========================================================================
-    # LLM-based Scene Planning (Gemini 3.0 Pro Preview)
+    # LLM-based Scene Planning (Gemini 3.1 Pro Preview)
     # =========================================================================
 
     def _plan_scene_with_llm(
@@ -774,7 +774,7 @@ class TaskConfigGenerator:
     ) -> Tuple[List[SuggestedTask], RobotConfig]:
         """
         Unified LLM scene planning: derives workspace bounds, robot placement,
-        and manipulation tasks in a single call to Gemini 3.0 Pro Preview.
+        and manipulation tasks in a single call to Gemini 3.1 Pro Preview.
 
         Returns:
             Tuple of (tasks, robot_config) where the robot_config has
@@ -785,7 +785,7 @@ class TaskConfigGenerator:
         client = create_llm_client(provider=LLMProvider.GEMINI)
         prompt = self._build_scene_planning_prompt(manifest, environment_type, robot_type, max_tasks)
 
-        self.log("Requesting unified scene planning from Gemini 3.0 Pro Preview")
+        self.log("Requesting unified scene planning from Gemini 3.1 Pro Preview")
         response = client.generate(
             prompt=prompt,
             json_output=True,

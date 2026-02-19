@@ -9,7 +9,7 @@ This job generates realistic, wide-angle scene images for different environment 
 ### Key Features
 
 - **AI-Powered Image Generation**: Uses Gemini 3.0 Pro Image (Nano Banana Pro) with Google Search grounding
-- **Intelligent Prompt Diversification**: Uses Gemini 3.0 Pro Preview to generate diverse, unique prompts
+- **Intelligent Prompt Diversification**: Uses Gemini 3.1 Pro Preview to generate diverse, unique prompts
 - **History Tracking**: Firestore integration ensures diversity by tracking past generations
 - **Balanced Coverage**: Weighted distribution across all supported archetypes
 - **Pipeline Integration**: Auto-triggers downstream 3D reconstruction pipeline

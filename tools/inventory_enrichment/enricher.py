@@ -194,7 +194,7 @@ class ExternalInventoryEnricher(InventoryEnricher):
 class GeminiInventoryEnricher(InventoryEnricher):
     """Enriches inventory objects using Gemini for semantic metadata."""
 
-    def __init__(self, api_key: str, model: str = "gemini-3-pro-preview"):
+    def __init__(self, api_key: str, model: str = "gemini-3.1-pro-preview"):
         if not api_key:
             raise InventoryEnrichmentError("GEMINI_API_KEY is required for Gemini enrichment")
         self.api_key = api_key
@@ -384,7 +384,7 @@ def get_inventory_enricher(mode: Optional[str] = None) -> InventoryEnricher:
         if not gemini_key:
             logger.warning("GEMINI_API_KEY not set; falling back to mock enricher")
             return MockInventoryEnricher()
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
         return GeminiInventoryEnricher(api_key=gemini_key, model=gemini_model)
     if config.mode == "external":
         if not api_key:

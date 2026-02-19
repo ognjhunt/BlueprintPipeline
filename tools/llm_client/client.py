@@ -2,7 +2,7 @@
 Unified LLM Client Implementation.
 
 Supports:
-- Google Gemini 3.0 Pro (with Google Search grounding) - DEFAULT
+- Google Gemini 3.1 Pro (with Google Search grounding) - DEFAULT
 - Anthropic Claude Sonnet 4.5 (with extended thinking)
 - OpenAI GPT-5.1 (with adaptive reasoning)
 

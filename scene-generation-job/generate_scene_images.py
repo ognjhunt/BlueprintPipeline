@@ -8,7 +8,7 @@ capture the ENTIRE scene with no blind spots, suitable for 3D reconstruction.
 
 Pipeline flow:
 1. Query Firestore for generation history to ensure diversity
-2. Use Gemini 3.0 Pro Preview to generate diverse prompts based on archetype
+2. Use Gemini 3.1 Pro Preview to generate diverse prompts based on archetype
 3. Generate scene images using Gemini 3.0 Pro Image (Nano Banana Pro)
 4. Upload images to GCS to trigger downstream pipeline
 5. Record generation metadata in Firestore for future diversity
@@ -637,7 +637,7 @@ class GenerationHistoryTracker:
 # ============================================================================
 
 class PromptDiversifier:
-    """Uses Gemini 3.0 Pro Preview to generate diverse scene prompts."""
+    """Uses Gemini 3.1 Pro Preview to generate diverse scene prompts."""
 
     def __init__(self, client):
         """Initialize with Gemini client."""

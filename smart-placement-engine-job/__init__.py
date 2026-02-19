@@ -2,7 +2,7 @@
 
 This module provides:
 - Scene-to-asset compatibility matrix
-- AI-powered intelligent region detection using Gemini 3.0 Pro Preview
+- AI-powered intelligent region detection using Gemini 3.1 Pro Preview
 - Collision-aware smart placement logic
 - Physics validation for placements
 """
