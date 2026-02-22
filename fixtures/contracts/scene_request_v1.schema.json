@@ -21,7 +21,7 @@
     "text_backend": {
       "type": "string",
       "enum": ["internal", "scenesmith", "sage", "hybrid_serial"],
-      "default": "sage"
+      "default": "hybrid_serial"
     },
     "prompt": {
       "type": "string"

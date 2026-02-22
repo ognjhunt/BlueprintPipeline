@@ -137,7 +137,7 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `WORKFLOW_REGION`: legacy override for workflows that do not yet use primary/secondary routing.
 - `PRIMARY_BUCKET`: default bucket for manual or scheduler-driven workflows (replaces hardcoded bucket names).
 - `DEFAULT_SOURCE_MODE`: source-orchestrator default request mode (`text`, `image`, `auto`). Defaults to `text`.
-- `TEXT_BACKEND_DEFAULT`: default Stage 1 text backend when request omits `text_backend`. Defaults to `sage`.
+- `TEXT_BACKEND_DEFAULT`: default Stage 1 text backend when request omits `text_backend`. Defaults to `hybrid_serial`.
 - `TEXT_BACKEND_ALLOWLIST`: allowed Stage 1 text backends. Defaults to `internal,scenesmith,sage,hybrid_serial`.
 - `TEXT_GEN_RUNTIME`: source-orchestrator runtime profile hint for text Stage 1 (`vm`, `cloudrun`, `runpod`). Defaults to `vm`.
 - `TEXT_SCENE_GEN_JOB_NAME`: Stage 1 Cloud Run job name override for text scene generation. Defaults to `text-scene-gen-job`.

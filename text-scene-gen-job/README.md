@@ -26,7 +26,7 @@ which converts it into canonical Blueprint artifacts for Stage 2+.
 - `TEXT_GEN_STANDARD_PROFILE` (default: `standard_v1`)
 - `TEXT_GEN_PREMIUM_PROFILE` (default: `premium_v1`)
 - `TEXT_GEN_QUALITY_TIER` (optional override)
-- `TEXT_BACKEND_DEFAULT` (default: `sage`)
+- `TEXT_BACKEND_DEFAULT` (default: `hybrid_serial`)
 - `TEXT_BACKEND_ALLOWLIST` (default: `internal,scenesmith,sage,hybrid_serial`)
 - `TEXT_BACKEND` (optional per-run override)
 - `SCENESMITH_RUNTIME_MODE` (default: `cloudrun`)
