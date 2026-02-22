@@ -265,7 +265,7 @@ main:
         next: write_assets_ready_marker
 
     # Write .assets_ready marker to signal that layout processing is complete
-    # This triggers downstream pipelines (regen3d-pipeline, etc)
+    # This triggers downstream pipelines (source-orchestrator, etc)
     - write_assets_ready_marker:
         try:
           call: googleapis.storage.v1.objects.insert

@@ -4,14 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from fixtures.generate_mock_regen3d import generate_mock_regen3d
+from fixtures.generate_mock_stage1 import generate_mock_stage1
 from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep, StepResult
 
 
 @pytest.fixture
 def local_pipeline_runner(temp_test_dir):
     scene_id = "test_scene"
-    generate_mock_regen3d(
+    generate_mock_stage1(
         output_dir=temp_test_dir,
         scene_id=scene_id,
         environment_type="kitchen",
@@ -37,9 +37,9 @@ def _write_placeholder(path: Path, payload=None) -> None:
 
 
 def test_resume_skips_completed_steps(local_pipeline_runner, monkeypatch):
-    steps = [PipelineStep.REGEN3D, PipelineStep.SIMREADY, PipelineStep.USD]
+    steps = [PipelineStep.TEXT_SCENE_ADAPTER, PipelineStep.SIMREADY, PipelineStep.USD]
     run_calls = []
-    marker_path = local_pipeline_runner.assets_dir / ".regen3d_complete"
+    marker_path = local_pipeline_runner.assets_dir / ".stage1_complete"
 
     def fake_run_step(step):
         run_calls.append(step)
@@ -118,11 +118,11 @@ def test_resume_skips_completed_steps(local_pipeline_runner, monkeypatch):
 
     success = resume_runner_missing_marker.run(
         steps=steps,
-        resume_from=PipelineStep.REGEN3D,
+        resume_from=PipelineStep.TEXT_SCENE_ADAPTER,
     )
 
     assert not success
-    assert run_calls_missing_marker == [PipelineStep.REGEN3D, PipelineStep.SIMREADY, PipelineStep.USD]
+    assert run_calls_missing_marker == [PipelineStep.TEXT_SCENE_ADAPTER, PipelineStep.SIMREADY, PipelineStep.USD]
     assert marker_path.exists()
 
     resume_runner = LocalPipelineRunner(
@@ -158,14 +158,14 @@ def test_resume_skips_completed_steps(local_pipeline_runner, monkeypatch):
     monkeypatch.setattr(resume_runner, "_run_step", fake_run_step_resume)
     monkeypatch.setattr(resume_runner, "_apply_quality_gates", lambda step, result, **kwargs: result)
 
-    success = resume_runner.run(steps=steps, resume_from=PipelineStep.REGEN3D)
+    success = resume_runner.run(steps=steps, resume_from=PipelineStep.TEXT_SCENE_ADAPTER)
 
     assert success
-    assert run_calls == [PipelineStep.REGEN3D, PipelineStep.SIMREADY, PipelineStep.USD]
+    assert run_calls == [PipelineStep.TEXT_SCENE_ADAPTER, PipelineStep.SIMREADY, PipelineStep.USD]
 
 
 def test_resume_checkpointed_step_reapplies_quality_gates(local_pipeline_runner, monkeypatch):
-    step = PipelineStep.REGEN3D
+    step = PipelineStep.TEXT_SCENE_ADAPTER
 
     resume_runner = LocalPipelineRunner(
         scene_dir=local_pipeline_runner.scene_dir,

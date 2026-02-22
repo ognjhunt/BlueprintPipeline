@@ -71,14 +71,14 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def _validate_regen3d_inputs(scene_dir: Path) -> None:
-    regen3d_dir = scene_dir / "regen3d"
-    if not regen3d_dir.is_dir():
-        raise AssertionError(f"Missing regen3d output at {regen3d_dir}")
+def _validate_stage1_inputs(scene_dir: Path) -> None:
+    stage1_dir = scene_dir / "stage1"
+    if not stage1_dir.is_dir():
+        raise AssertionError(f"Missing stage1 output at {stage1_dir}")
 
     required_files = [
-        regen3d_dir / "scene_info.json",
-        regen3d_dir / "objects",
+        stage1_dir / "scene_info.json",
+        stage1_dir / "objects",
     ]
     for path in required_files:
         if not path.exists():
@@ -91,7 +91,7 @@ def test_staging_pipeline_with_real_reconstruction():
         pytest.skip("Set RUN_STAGING_E2E=1 to run staging Isaac Sim tests.")
 
     scene_dir = _resolve_scene_dir()
-    _validate_regen3d_inputs(scene_dir)
+    _validate_stage1_inputs(scene_dir)
 
     from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
 
@@ -104,7 +104,7 @@ def test_staging_pipeline_with_real_reconstruction():
 
     success = runner.run(
         steps=[
-            PipelineStep.REGEN3D,
+            PipelineStep.TEXT_SCENE_ADAPTER,
             PipelineStep.SIMREADY,
             PipelineStep.USD,
             PipelineStep.REPLICATOR,
@@ -142,7 +142,7 @@ def test_staging_pipeline_outputs_with_real_isaac_sim():
         pytest.skip("Set RUN_STAGING_E2E=1 to run staging Isaac Sim tests.")
 
     scene_dir = _resolve_scene_dir()
-    _validate_regen3d_inputs(scene_dir)
+    _validate_stage1_inputs(scene_dir)
 
     from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
     from tools.run_full_isaacsim_pipeline import IsaacSimPipeline, PipelineConfig
@@ -157,7 +157,7 @@ def test_staging_pipeline_outputs_with_real_isaac_sim():
 
     success = runner.run(
         steps=[
-            PipelineStep.REGEN3D,
+            PipelineStep.TEXT_SCENE_ADAPTER,
             PipelineStep.SIMREADY,
             PipelineStep.USD,
             PipelineStep.REPLICATOR,

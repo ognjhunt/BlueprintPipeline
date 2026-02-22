@@ -1,7 +1,7 @@
 # Genie Sim Submit - Handoff Document
 
 ## What We're Doing
-Testing the BlueprintPipeline end-to-end using a Lightwheel KitchenRoom SimReady scene, bypassing Phase 1 (3D-RE-GEN). The pipeline runs robot data collection via a Genie Sim gRPC server on a GCP VM.
+Testing the BlueprintPipeline end-to-end using a Lightwheel KitchenRoom SimReady scene, bypassing Phase 1 (Stage 1 text generation). The pipeline runs robot data collection via a Genie Sim gRPC server on a GCP VM.
 
 ## Current Status (2026-02-12)
 The pipeline uses **Franka Panda** (`franka_panda.json`). If robot init fails, the run fails (no automatic robot failover). See `docs/VM_CONTAINER_GUIDE.md` for the full operational runbook and current known issues.

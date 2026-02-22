@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 import pytest
 
+pytest.importorskip("pydantic")
+
 
 def _load_module(module_name: str, path: Path):
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -71,7 +73,6 @@ def test_text_stage1_jobs_integration_writes_canonical_artifacts(
                 "quality_tier": "standard",
                 "seed_count": 1,
                 "provider_policy": "openrouter_qwen_primary",
-                "fallback": {"allow_image_fallback": True},
             },
             indent=2,
         ),
@@ -110,7 +111,7 @@ def test_text_stage1_jobs_integration_writes_canonical_artifacts(
     assert (gcs_root / assets_prefix / "scene_manifest.json").is_file()
     assert (gcs_root / layout_prefix / "scene_layout_scaled.json").is_file()
     assert (gcs_root / seg_prefix / "inventory.json").is_file()
-    assert (gcs_root / assets_prefix / ".regen3d_complete").is_file()
+    assert (gcs_root / assets_prefix / ".stage1_complete").is_file()
 
 
 @pytest.mark.parametrize("text_backend", ["sage", "scenesmith", "hybrid_serial"])
@@ -143,7 +144,6 @@ def test_text_stage1_jobs_support_multiple_backends(
                 "quality_tier": "standard",
                 "seed_count": 1,
                 "provider_policy": "openrouter_qwen_primary",
-                "fallback": {"allow_image_fallback": True},
             },
             indent=2,
         ),
@@ -193,12 +193,11 @@ def test_text_stage1_jobs_cli_backend_override(
                 "schema_version": "v1",
                 "scene_id": scene_id,
                 "source_mode": "text",
-                "text_backend": "internal",
+                "text_backend": "hybrid_serial",
                 "prompt": "A compact office desk scene",
                 "quality_tier": "standard",
                 "seed_count": 1,
                 "provider_policy": "openrouter_qwen_primary",
-                "fallback": {"allow_image_fallback": True},
             },
             indent=2,
         ),

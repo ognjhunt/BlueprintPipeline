@@ -13,7 +13,7 @@ Resource needs vary by scene size and number of objects. Use these as starting p
 - **GPU**: Optional for non-rendering steps; required for Isaac Sim rendering or Replicator
 
 ### Cloud Run Jobs
-- **regen3d-job**: CPU-heavy for mesh processing; start with 4-8 vCPU, 16-32 GB RAM.
+- **text-scene-adapter-job**: CPU-heavy for mesh processing; start with 4-8 vCPU, 16-32 GB RAM.
 - **simready-job**: Geometry + physics proxy generation; start with 4-8 vCPU, 16-32 GB RAM.
 - **usd-assembly-job**: Moderate CPU, I/O heavy; start with 2-4 vCPU, 8-16 GB RAM.
 - **replicator-job**: Requires GPU for rendering; use GPU-enabled runners when running Replicator.
@@ -107,7 +107,7 @@ Example batch manifest (`batch_manifest.json`):
 ```bash
 python tools/run_scene_batch.py \
   --manifest batch_manifest.json \
-  --steps regen3d,simready,usd,replicator \
+  --steps stage1,simready,usd,replicator \
   --max-concurrent 6 \
   --retry-attempts 2 \
   --reports-dir ./batch_reports

@@ -22,10 +22,16 @@ from typing import Any, Dict, Iterable, List, Optional
 
 ASSET_CATALOG_SCHEMA_VERSION = 1
 
-firestore_spec = importlib.util.find_spec("google.cloud.firestore")
+try:
+    firestore_spec = importlib.util.find_spec("google.cloud.firestore")
+except ModuleNotFoundError:
+    firestore_spec = None
 firestore = importlib.import_module("google.cloud.firestore") if firestore_spec else None
 
-service_account_spec = importlib.util.find_spec("google.oauth2.service_account")
+try:
+    service_account_spec = importlib.util.find_spec("google.oauth2.service_account")
+except ModuleNotFoundError:
+    service_account_spec = None
 service_account = (
     importlib.import_module("google.oauth2.service_account") if service_account_spec else None
 )
@@ -62,7 +68,7 @@ class AssetDocument:
     asset_id: str
     schema_version: int = ASSET_CATALOG_SCHEMA_VERSION
     logical_id: Optional[str] = None
-    source: str = "unknown"  # "nvidia_pack", "regen3d", "generated", ...
+    source: str = "unknown"  # "nvidia_pack", "stage1", "generated", ...
     usd_path: Optional[str] = None
     gcs_uri: Optional[str] = None
     thumbnail_uri: Optional[str] = None

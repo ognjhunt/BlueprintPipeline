@@ -202,7 +202,7 @@ gcloud run jobs update scene-generation-job \
 gcloud run jobs describe scene-generation-job --region=<region>
 ```
 
-Repeat for each job defined in the pipeline (regen3d, simready, usd-assembly, replicator, isaac-lab, etc.).
+Repeat for each job defined in the pipeline (stage1, simready, usd-assembly, replicator, isaac-lab, etc.).
 
 ## Step 4: Deploy GKE workloads (if applicable)
 
@@ -239,20 +239,18 @@ gcloud workflows deploy blueprint-pipeline \
 gcloud eventarc triggers list --location=<region>
 ```
 
-For the text-first source orchestrator, deploy triggers with an explicit image compatibility mode:
+For the text-first source orchestrator, deploy triggers with text Stage-1 runtime configuration:
 
 ```bash
 cd workflows
 
-# Recommended: orchestrator topology (avoids duplicate marker-chain triggers)
-IMAGE_PATH_MODE=orchestrator \
+# Example: VM runtime for Stage 1 text generation
 TEXT_GEN_RUNTIME=vm \
-bash setup-all-triggers.sh <project_id> <bucket> <region> orchestrator
+bash setup-all-triggers.sh <project_id> <bucket> <region>
 
-# Legacy compatibility mode (keeps marker-chain trigger topology)
-IMAGE_PATH_MODE=legacy_chain \
+# Example: Cloud Run runtime for Stage 1 text generation
 TEXT_GEN_RUNTIME=cloudrun \
-bash setup-all-triggers.sh <project_id> <bucket> <region> legacy_chain
+bash setup-all-triggers.sh <project_id> <bucket> <region>
 ```
 
 Key source-orchestrator env vars to set at deploy time:
@@ -304,12 +302,7 @@ Key source-orchestrator env vars to set at deploy time:
 - `TEXT_HUNYUAN_TIMEOUT_SECONDS`
 - `TEXT_HUNYUAN_POLL_SECONDS`
 - `TEXT_GEN_MAX_SEEDS`
-- `TEXT_GEN_ENABLE_IMAGE_FALLBACK`
 - `ARENA_EXPORT_REQUIRED`
-- `IMAGE_PATH_MODE`
-- `IMAGE_ORCHESTRATOR_WORKFLOW_NAME`
-- `IMAGE_LEGACY_WORKFLOW_NAME`
-- `IMAGE_LEGACY_CHAIN_WAIT_SECONDS`
 - `TEXT_GEN_VM_NAME`
 - `TEXT_GEN_VM_ZONE`
 - `TEXT_GEN_VM_REPO_DIR`
@@ -498,10 +491,10 @@ Use this quick-start to validate the pipeline in production mode with a single s
 end-to-end production validation (no mock fallbacks, quality thresholds, and full artifact checks),
 see [docs/PRODUCTION_E2E_VALIDATION.md](PRODUCTION_E2E_VALIDATION.md).
 
-1. Generate mock regen3d fixtures (local staging or seed GCS inputs):
+1. Generate mock stage1 fixtures (local staging or seed GCS inputs):
 
    ```bash
-   python fixtures/generate_mock_regen3d.py --output-dir /tmp/regen3d-fixtures
+   python fixtures/generate_mock_stage1.py --output-dir /tmp/stage1-fixtures
    ```
 
 2. Run a single-scene pipeline in production mode with Genie Sim enabled:
@@ -595,7 +588,7 @@ If a canary scene fails, the submission job writes a rollback marker at
 ## Post-deploy validation
 
 - Confirm recent Cloud Run job executions succeed.
-- Validate that Eventarc triggers fire on `.regen3d_complete` markers.
+- Validate that Eventarc triggers fire on `.stage1_complete` markers.
 - Spot check GCS outputs for a recent scene.
 
 If anything fails, reference the rollback procedures in [docs/rollback.md](rollback.md).

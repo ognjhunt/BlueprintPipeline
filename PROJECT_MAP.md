@@ -28,7 +28,7 @@
 ### Core Transformation Flow
 
 ```
-Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene → RL Training Package
+Scene Image → Stage 1 text generation Reconstruction → Physics-Ready Assets → USD Scene → RL Training Package
 ```
 
 ### Key Outputs
@@ -47,7 +47,7 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              INPUT STAGE                                     │
 │  ┌──────────────┐     ┌──────────────────┐     ┌─────────────────────────┐  │
-│  │ Scene Image  │ ──▶ │    3D-RE-GEN     │ ──▶ │ Meshes + Poses + Bounds │  │
+│  │ Scene Image  │ ──▶ │    Stage 1 text generation     │ ──▶ │ Meshes + Poses + Bounds │  │
 │  └──────────────┘     │  (External Tool) │     └─────────────────────────┘  │
 │                       └──────────────────┘                                   │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -56,7 +56,7 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           PROCESSING STAGE                                   │
 │                                                                              │
-│  regen3d-job ──▶ scale-job ──▶ interactive-job ──▶ simready-job             │
+│  text-scene-adapter-job ──▶ scale-job ──▶ interactive-job ──▶ simready-job             │
 │       │              │               │                   │                   │
 │       ▼              ▼               ▼                   ▼                   │
 │   manifest       scaled          URDF +             physics                  │
@@ -108,7 +108,7 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 /home/user/BlueprintPipeline/
 │
 ├── CORE PIPELINE JOBS (20+ containerized jobs)
-│   ├── regen3d-job/              # Adapt 3D-RE-GEN outputs → manifest
+│   ├── text-scene-adapter-job/              # Adapt Stage 1 text generation outputs → manifest
 │   ├── scale-job/                # Scene scaling calibration
 │   ├── interactive-job/          # Articulation detection (Particulate)
 │   ├── simready-job/             # Physics property estimation
@@ -202,7 +202,7 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 │   │   ├── test_geniesim_*.py    # Genie Sim tests
 │   │   └── fixtures/             # Test data
 │   └── fixtures/                 # Mock data generators
-│       ├── generate_mock_regen3d.py
+│       ├── generate_mock_stage1.py
 │       └── generate_mock_geniesim_local.py
 │
 ├── INFRASTRUCTURE
@@ -243,7 +243,7 @@ Scene Image → 3D-RE-GEN Reconstruction → Physics-Ready Assets → USD Scene 
 
 ```python
 STEPS = [
-    "regen3d",           # 1. Adapt 3D-RE-GEN outputs
+    "stage1",           # 1. Adapt Stage 1 text generation outputs
     "scale",             # 2. Optional scale calibration
     "interactive",       # 3. Articulation detection
     "simready",          # 4. Physics properties
@@ -262,7 +262,7 @@ STEPS = [
 USE_GENIESIM=false python tools/run_local_pipeline.py --scene-dir ./scene
 ```
 
-Steps: regen3d → scale → interactive → simready → usd → replicator → isaac-lab
+Steps: stage1 → scale → interactive → simready → usd → replicator → isaac-lab
 
 ---
 
@@ -272,7 +272,7 @@ Steps: regen3d → scale → interactive → simready → usd → replicator →
 
 | Job | Purpose | Entry Point | Key Dependencies |
 |-----|---------|-------------|------------------|
-| `regen3d-job` | Adapt 3D-RE-GEN outputs | `regen3d_adapter_job.py` | scene_manifest |
+| `text-scene-adapter-job` | Adapt Stage 1 text generation outputs | `adapt_text_scene.py` | scene_manifest |
 | `scale-job` | Scene scale calibration | `run_scale_from_layout.py` | - |
 | `interactive-job` | Articulation detection | `run_interactive_assets.py` | Particulate service |
 | `objects-job` | Object segmentation | `run_objects_from_layout.py` | - |
@@ -349,7 +349,7 @@ Workflows are YAML files in `/workflows/` that orchestrate Cloud Run jobs.
 
 | Workflow | Trigger | Jobs Executed |
 |----------|---------|---------------|
-| `usd-assembly-pipeline.yaml` | `.regen3d_complete` marker | usd → simready → replicator → isaac-lab |
+| `usd-assembly-pipeline.yaml` | `.stage1_complete` marker | usd → simready → replicator → isaac-lab |
 | `episode-generation-pipeline.yaml` | `.usd_complete` marker | episode-generation |
 | `genie-sim-export-pipeline.yaml` | `.variation_pipeline_complete` | genie-sim-export → submit → import |
 | `genie-sim-import-pipeline.yaml` | Submission complete | genie-sim-import |
@@ -358,7 +358,7 @@ Workflows are YAML files in `/workflows/` that orchestrate Cloud Run jobs.
 ### EventArc Triggers
 
 Workflows auto-trigger on GCS completion markers:
-- `.regen3d_complete` → usd-assembly (core); dream2flow/dwm only when explicitly enabled
+- `.stage1_complete` → usd-assembly (core); dream2flow/dwm only when explicitly enabled
 - `.usd_complete` → episode-generation
 - `.variation_pipeline_complete` → genie-sim-export
 - `.geniesim_complete` → arena-export
@@ -428,7 +428,7 @@ Central data structure passing through all jobs:
 
 | Marker | Meaning |
 |--------|---------|
-| `.regen3d_complete` | 3D-RE-GEN processing done |
+| `.stage1_complete` | Stage 1 text generation processing done |
 | `.usd_complete` | USD assembly done |
 | `.replicator_complete` | Replicator generation done |
 | `.variation_pipeline_complete` | Variation assets ready |
@@ -440,7 +440,7 @@ Central data structure passing through all jobs:
 ```
 scenes/{scene_id}/
 ├── input/room.jpg
-├── regen3d/                    # 3D-RE-GEN outputs
+├── stage1/                    # Stage 1 text generation outputs
 ├── assets/
 │   ├── scene_manifest.json     # Canonical manifest
 │   └── obj_{id}/asset.glb
@@ -496,8 +496,8 @@ python tools/run_local_pipeline.py --scene-dir ./scene --validate
 ### Mock Fixtures
 
 ```bash
-# Generate mock 3D-RE-GEN data
-python fixtures/generate_mock_regen3d.py --scene-id test --output-dir ./test_scenes
+# Generate mock Stage 1 text generation data
+python fixtures/generate_mock_stage1.py --scene-id test --output-dir ./test_scenes
 
 # Generate mock Genie Sim data
 python fixtures/generate_mock_geniesim_local.py --scene-dir ./scene
@@ -738,13 +738,13 @@ python tools/run_local_pipeline.py --scene-dir ./scene --mock-geniesim
 
 ```bash
 # Generate mock data
-python fixtures/generate_mock_regen3d.py --scene-id test --output-dir ./test_scenes
+python fixtures/generate_mock_stage1.py --scene-id test --output-dir ./test_scenes
 
 # Run local pipeline
 python tools/run_local_pipeline.py --scene-dir ./scene --validate
 
 # Run specific steps
-python tools/run_local_pipeline.py --scene-dir ./scene --steps regen3d,simready,usd
+python tools/run_local_pipeline.py --scene-dir ./scene --steps stage1,simready,usd
 
 # Run without Genie Sim
 USE_GENIESIM=false python tools/run_local_pipeline.py --scene-dir ./scene

@@ -48,8 +48,8 @@ except ImportError:
 # back to GCS after the corresponding step completes.
 # A step can produce outputs in multiple directories (list of dir names).
 STEP_OUTPUT_DIRS: Dict[str, List[str]] = {
-    "regen3d-reconstruct": ["regen3d"],
-    "regen3d": ["assets", "layout", "seg"],
+    "text-scene-gen": ["textgen"],
+    "text-scene-adapter": ["assets", "layout", "seg", "textgen"],
     "scale": ["assets"],
     "interactive": ["assets"],
     "simready": ["assets", "layout"],
@@ -112,7 +112,7 @@ class GCSSync:
         sync = GCSSync("my-bucket", "scene_123", Path("/tmp/scenes/scene_123"))
         sync.download_inputs()
         # ... run pipeline ...
-        sync.upload_step_outputs("regen3d-reconstruct", Path("/tmp/scenes/scene_123/regen3d"))
+        sync.upload_step_outputs("text-scene-gen", Path("/tmp/scenes/scene_123/textgen"))
         sync.write_completion_marker(".reconstruction_complete")
     """
 
@@ -202,7 +202,7 @@ class GCSSync:
         """Download a single file from GCS.
 
         Args:
-            gcs_relative_path: Path relative to the scene prefix (e.g., "regen3d/scene_info.json").
+            gcs_relative_path: Path relative to the scene prefix (e.g., "assets/scene_manifest.json").
             local_path: Local destination path.
 
         Returns:
@@ -221,12 +221,12 @@ class GCSSync:
     def upload_step_outputs(self, step_name: str, local_dir: Optional[Path] = None) -> SyncResult:
         """Upload outputs from a single pipeline step to GCS.
 
-        A step can write to multiple directories (e.g., ``regen3d`` writes to
+        A step can write to multiple directories (e.g., ``text-scene-adapter`` writes to
         ``assets/``, ``layout/``, and ``seg/``).  All mapped directories are
         uploaded.
 
         Args:
-            step_name: Pipeline step name (e.g., ``"regen3d-reconstruct"``).
+            step_name: Pipeline step name (e.g., ``"text-scene-gen"``).
             local_dir: Override — upload this single directory instead of the
                 mapped directories.
 

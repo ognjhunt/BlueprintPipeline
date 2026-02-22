@@ -15,12 +15,12 @@
     },
     "source_mode": {
       "type": "string",
-      "enum": ["text", "image", "auto"],
+      "enum": ["text"],
       "default": "text"
     },
     "text_backend": {
       "type": "string",
-      "enum": ["internal", "scenesmith", "sage", "hybrid_serial"],
+      "enum": ["scenesmith", "sage", "hybrid_serial"],
       "default": "hybrid_serial"
     },
     "prompt": {
@@ -36,20 +36,6 @@
       "minimum": 1,
       "default": 1
     },
-    "image": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["gcs_uri"],
-      "properties": {
-        "gcs_uri": {
-          "type": "string",
-          "minLength": 1
-        },
-        "generation": {
-          "type": "string"
-        }
-      }
-    },
     "constraints": {
       "type": "object"
     },
@@ -57,16 +43,6 @@
       "type": "string",
       "enum": ["openai_primary", "openrouter_qwen_primary"],
       "default": "openrouter_qwen_primary"
-    },
-    "fallback": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "allow_image_fallback": {
-          "type": "boolean",
-          "default": true
-        }
-      }
     }
   }
 }

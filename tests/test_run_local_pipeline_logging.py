@@ -19,7 +19,7 @@ def test_log_outputs_json_with_run_id(tmp_path, capsys) -> None:
         verbose=True,
         json_logging=True,
     )
-    runner._current_step = PipelineStep.REGEN3D
+    runner._current_step = PipelineStep.TEXT_SCENE_ADAPTER
 
     runner.log("hello world", "INFO")
 
@@ -45,7 +45,7 @@ def test_log_outputs_text_with_run_id(tmp_path, capsys) -> None:
         verbose=True,
         json_logging=False,
     )
-    runner._current_step = PipelineStep.REGEN3D
+    runner._current_step = PipelineStep.TEXT_SCENE_ADAPTER
 
     runner.log("hello world", "INFO")
 

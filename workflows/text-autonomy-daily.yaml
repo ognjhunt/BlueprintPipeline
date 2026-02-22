@@ -32,8 +32,8 @@ main:
           - dailyQuota: '${int(default(sys.get_env("TEXT_DAILY_QUOTA"), "1"))}'
           - pauseAfterConsecutiveFails: '${int(default(sys.get_env("TEXT_DAILY_PAUSE_AFTER_CONSEC_FAILS"), "3"))}'
           - providerPolicy: '${default(sys.get_env("TEXT_AUTONOMY_PROVIDER_POLICY"), "openrouter_qwen_primary")}'
+          - textBackend: '${default(sys.get_env("TEXT_AUTONOMY_TEXT_BACKEND"), "hybrid_serial")}'
           - qualityTier: '${default(sys.get_env("TEXT_AUTONOMY_QUALITY_TIER"), "premium")}'
-          - allowImageFallback: '${text.lower(default(sys.get_env("TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK"), "false")) == "true"}'
           - seedCount: '${int(default(sys.get_env("TEXT_AUTONOMY_SEED_COUNT"), "1"))}'
           - sourceWaitTimeoutSeconds: '${int(default(sys.get_env("TEXT_AUTONOMY_SOURCE_WAIT_TIMEOUT_SECONDS"), "21600"))}'
           - sourceWaitPollSeconds: '${int(default(sys.get_env("TEXT_AUTONOMY_SOURCE_WAIT_POLL_SECONDS"), "30"))}'
@@ -47,7 +47,6 @@ main:
           - sceneIds: []
           - successCount: 0
           - failedCount: 0
-          - imageFallbackCount: 0
           - firstFailedScene: ""
           - runStatus: "UNKNOWN"
           - runError: ""
@@ -194,10 +193,10 @@ main:
                 value: ${runDate}
               - name: TEXT_AUTONOMY_PROVIDER_POLICY
                 value: ${providerPolicy}
+              - name: TEXT_AUTONOMY_TEXT_BACKEND
+                value: ${textBackend}
               - name: TEXT_AUTONOMY_QUALITY_TIER
                 value: ${qualityTier}
-              - name: TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK
-                value: '${if(allowImageFallback, "true", "false")}'
               - name: TEXT_AUTONOMY_SEED_COUNT
                 value: '${string(seedCount)}'
           result: emitterExec
@@ -273,17 +272,11 @@ main:
                 switch:
                   - condition: '${sceneTerminal.status == "FAILED"}'
                     next: mark_scene_failure
-                  - condition: '${default(map.get(default(sceneTerminal.payload, {}), "source_type"), "") == "image_fallback"}'
-                    next: mark_scene_fallback
                 next: mark_scene_success
             - mark_scene_failure:
                 assign:
                   - failedCount: ${failedCount + 1}
                   - firstFailedScene: '${if(firstFailedScene == "", sceneId, firstFailedScene)}'
-                next: scene_loop_continue
-            - mark_scene_fallback:
-                assign:
-                  - imageFallbackCount: ${imageFallbackCount + 1}
                 next: scene_loop_continue
             - mark_scene_success:
                 assign:
@@ -298,8 +291,6 @@ main:
         switch:
           - condition: '${failedCount > 0}'
             next: set_failure_after_wait
-          - condition: '${imageFallbackCount > 0 and successCount == 0}'
-            next: set_partial_after_wait
         next: set_success_after_wait
 
     - set_failure_after_wait:
@@ -307,12 +298,6 @@ main:
           - runStatus: "FAILED"
           - runError: '${"source_orchestrator_failed_scene: " + firstFailedScene}'
         next: update_state_for_failure
-
-    - set_partial_after_wait:
-        assign:
-          - runStatus: "PARTIAL"
-          - runError: '${"all_scenes_fell_back_to_image (" + string(imageFallbackCount) + " fallbacks)"}'
-        next: update_state_for_success
 
     - set_success_after_wait:
         assign:
@@ -410,7 +395,6 @@ main:
             "scene_count": len(sceneIds),
             "success_count": successCount,
             "failed_count": failedCount,
-            "image_fallback_count": imageFallbackCount,
             "pause_after_run": pausedAfterRun,
             "consecutive_failures": newConsecutiveFailures,
             "daily_quota": dailyQuota,

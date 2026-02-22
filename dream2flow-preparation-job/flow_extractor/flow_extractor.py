@@ -142,7 +142,7 @@ class FlowExtractor:
         # - Segmentation: SAM / Grounded-SAM for semantic object segmentation
         # - Depth estimation: DepthAnything / ZoeDepth for dense depth prediction
         # - Point tracking: CoTracker / TAPIR for robust optical flow estimation
-        # - 3D reconstruction: 3D-RE-GEN (arXiv:2512.17459) for SDF scene representation
+        # - 3D reconstruction: Stage 1 text generation (arXiv:2512.17459) for SDF scene representation
         # Expected workflow:
         # 1. Load and initialize each foundation model
         # 2. Create inference pipelines with batching support

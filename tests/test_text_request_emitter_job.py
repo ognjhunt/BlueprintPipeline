@@ -35,7 +35,6 @@ def test_text_request_emitter_emits_scene_request_and_updates_state(tmp_path: Pa
     monkeypatch.setenv("TEXT_AUTONOMY_PROVIDER_POLICY", "openai_primary")
     monkeypatch.setenv("TEXT_AUTONOMY_TEXT_BACKEND", "scenesmith")
     monkeypatch.setenv("TEXT_AUTONOMY_QUALITY_TIER", "premium")
-    monkeypatch.setenv("TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK", "false")
     monkeypatch.setenv("TEXT_AUTONOMY_SEED_COUNT", "1")
     monkeypatch.setenv("TEXT_PROMPT_USE_LLM", "false")
 
@@ -58,8 +57,12 @@ def test_text_request_emitter_emits_scene_request_and_updates_state(tmp_path: Pa
     assert request["quality_tier"] == "premium"
     assert request["provider_policy"] == "openai_primary"
     assert request["seed_count"] == 1
-    assert request["fallback"]["allow_image_fallback"] is False
     assert "prompt_diversity" in request["constraints"]
+    scene_config_path = gcs_root / f"scenes/{scene_id}/config.json"
+    assert scene_config_path.is_file()
+    scene_config = json.loads(scene_config_path.read_text(encoding="utf-8"))
+    assert scene_config["scene_id"] == scene_id
+    assert scene_config["use_geniesim"] is False
 
     state_payload = json.loads((gcs_root / "automation/text_daily/state.json").read_text(encoding="utf-8"))
     assert state_payload["last_emit_run_date"] == "2026-02-11"
@@ -132,3 +135,67 @@ def test_text_request_emitter_defaults_to_openrouter_policy(tmp_path: Path, monk
     request_path = gcs_root / f"scenes/{scene_id}/prompts/scene_request.json"
     request = json.loads(request_path.read_text(encoding="utf-8"))
     assert request["provider_policy"] == "openrouter_qwen_primary"
+
+
+def test_text_request_emitter_defaults_text_backend_to_hybrid_serial(tmp_path: Path, monkeypatch) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    module = _load_module(
+        "text_request_emitter_job_default_backend_test",
+        repo_root / "text-request-emitter-job" / "emit_text_requests.py",
+    )
+
+    gcs_root = tmp_path / "gcs"
+    monkeypatch.setattr(module, "GCS_ROOT", gcs_root)
+
+    monkeypatch.setenv("BUCKET", "test-bucket")
+    monkeypatch.setenv("TEXT_AUTONOMY_STORAGE_MODE", "filesystem")
+    monkeypatch.setenv("TEXT_AUTONOMY_STATE_PREFIX", "automation/text_daily")
+    monkeypatch.setenv("TEXT_AUTONOMY_TIMEZONE", "America/New_York")
+    monkeypatch.setenv("TEXT_AUTONOMY_RUN_DATE", "2026-02-14")
+    monkeypatch.setenv("TEXT_DAILY_QUOTA", "1")
+    monkeypatch.setenv("TEXT_AUTONOMY_PROVIDER_POLICY", "openai_primary")
+    monkeypatch.delenv("TEXT_AUTONOMY_TEXT_BACKEND", raising=False)
+    monkeypatch.setenv("TEXT_AUTONOMY_QUALITY_TIER", "premium")
+    monkeypatch.setenv("TEXT_PROMPT_USE_LLM", "false")
+
+    assert module.main() == 0
+
+    emitted_index = json.loads(
+        (gcs_root / "automation/text_daily/runs/2026-02-14/emitted_requests.json").read_text(encoding="utf-8")
+    )
+    scene_id = emitted_index["scene_ids"][0]
+    request_path = gcs_root / f"scenes/{scene_id}/prompts/scene_request.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert request["text_backend"] == "hybrid_serial"
+    scene_config_path = gcs_root / f"scenes/{scene_id}/config.json"
+    assert scene_config_path.is_file()
+    scene_config = json.loads(scene_config_path.read_text(encoding="utf-8"))
+    assert scene_config["use_geniesim"] is False
+
+
+def test_text_request_emitter_rejects_invalid_backend(tmp_path: Path, monkeypatch) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    module = _load_module(
+        "text_request_emitter_job_invalid_backend_test",
+        repo_root / "text-request-emitter-job" / "emit_text_requests.py",
+    )
+
+    gcs_root = tmp_path / "gcs"
+    monkeypatch.setattr(module, "GCS_ROOT", gcs_root)
+
+    monkeypatch.setenv("BUCKET", "test-bucket")
+    monkeypatch.setenv("TEXT_AUTONOMY_STORAGE_MODE", "filesystem")
+    monkeypatch.setenv("TEXT_AUTONOMY_STATE_PREFIX", "automation/text_daily")
+    monkeypatch.setenv("TEXT_AUTONOMY_RUN_DATE", "2026-02-15")
+    monkeypatch.setenv("TEXT_DAILY_QUOTA", "1")
+    monkeypatch.setenv("TEXT_AUTONOMY_PROVIDER_POLICY", "openai_primary")
+    monkeypatch.setenv("TEXT_AUTONOMY_TEXT_BACKEND", "internal")
+    monkeypatch.setenv("TEXT_AUTONOMY_QUALITY_TIER", "standard")
+    monkeypatch.setenv("TEXT_PROMPT_USE_LLM", "false")
+
+    try:
+        module.main()
+    except ValueError as exc:
+        assert "TEXT_AUTONOMY_TEXT_BACKEND must be scenesmith|sage|hybrid_serial" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for unsupported TEXT_AUTONOMY_TEXT_BACKEND")

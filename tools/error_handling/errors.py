@@ -130,7 +130,7 @@ class PipelineError(Exception):
 
 
 class SceneProcessingError(PipelineError):
-    """Error during scene processing (regen3d, simready, usd-assembly)."""
+    """Error during scene processing (Stage 1, simready, usd-assembly)."""
 
     def __init__(
         self,

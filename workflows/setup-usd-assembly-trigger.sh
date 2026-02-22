@@ -4,9 +4,9 @@
 # =============================================================================
 #
 # This script creates an EventArc trigger that invokes the usd-assembly-pipeline
-# workflow whenever a .regen3d_complete marker file is uploaded to GCS.
+# workflow whenever a .stage1_complete marker file is uploaded to GCS.
 #
-# The pipeline converts 3D-RE-GEN GLB output to USDZ, prepares sim-ready assets,
+# The pipeline converts Stage 1 text generation GLB output to USDZ, prepares sim-ready assets,
 # and generates Replicator bundles and Isaac Lab task packages.
 #
 # Usage:
@@ -128,7 +128,7 @@ if ! gcloud workflows describe ${WORKFLOW_NAME} --location=${REGION} --project=$
     gcloud workflows deploy ${WORKFLOW_NAME} \
         --location=${REGION} \
         --source=usd-assembly-pipeline.yaml \
-        --description="USD assembly pipeline (triggered by .regen3d_complete)" \
+        --description="USD assembly pipeline (triggered by .stage1_complete)" \
         --service-account=${SA_EMAIL} \
         --project=${PROJECT_ID}
 else
@@ -149,7 +149,7 @@ gcloud eventarc triggers create ${TRIGGER_NAME} \
     --destination-workflow-location=${REGION} \
     --event-filters="type=google.cloud.storage.object.v1.finalized" \
     --event-filters="bucket=${BUCKET}" \
-    --event-filters="name=^scenes/.+/assets/\\.regen3d_complete$" \
+    --event-filters="name=^scenes/.+/assets/\\.stage1_complete$" \
     --event-data-content-type="application/json"
 
 echo -e "${GREEN}EventArc trigger created${NC}"
@@ -175,14 +175,14 @@ echo "  Workflow: ${WORKFLOW_NAME}"
 echo "  Bucket: ${BUCKET}"
 echo "  Service Account: ${SA_EMAIL}"
 echo ""
-echo "The pipeline will trigger when .regen3d_complete markers are uploaded to:"
-echo "  gs://${BUCKET}/scenes/{scene_id}/assets/.regen3d_complete"
+echo "The pipeline will trigger when .stage1_complete markers are uploaded to:"
+echo "  gs://${BUCKET}/scenes/{scene_id}/assets/.stage1_complete"
 echo ""
 echo "This will run: GLB->USDZ conversion, Simready preparation, USD assembly,"
 echo "  Replicator bundle generation, and Isaac Lab task generation."
 echo ""
 echo "To test manually:"
-echo "  echo '{}' | gsutil cp - gs://${BUCKET}/scenes/test_scene/assets/.regen3d_complete"
+echo "  echo '{}' | gsutil cp - gs://${BUCKET}/scenes/test_scene/assets/.stage1_complete"
 echo ""
 echo "To view trigger:"
 echo "  gcloud eventarc triggers describe ${TRIGGER_NAME} --location=${REGION}"

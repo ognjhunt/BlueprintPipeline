@@ -57,7 +57,8 @@ def job_dir_paths(repo_root: Path) -> Dict[str, Path]:
         "isaac_lab": repo_root / "isaac-lab-job",
         "meshy": repo_root / "meshy-job",
         "objects": repo_root / "objects-job",
-        "regen3d": repo_root / "regen3d-job",
+        "text_scene_gen": repo_root / "text-scene-gen-job",
+        "text_scene_adapter": repo_root / "text-scene-adapter-job",
         "replicator": repo_root / "replicator-job",
         "scale": repo_root / "scale-job",
         "scene_batch": repo_root / "scene-batch-job",
@@ -121,9 +122,10 @@ def mock_scene_dir(temp_test_dir: Path) -> Path:
     scene_dir.mkdir(parents=True, exist_ok=True)
 
     # Create standard subdirectories
-    (scene_dir / "regen3d").mkdir(exist_ok=True)
+    (scene_dir / "textgen").mkdir(exist_ok=True)
     (scene_dir / "assets").mkdir(exist_ok=True)
     (scene_dir / "layout").mkdir(exist_ok=True)
+    (scene_dir / "seg").mkdir(exist_ok=True)
     (scene_dir / "usd").mkdir(exist_ok=True)
     (scene_dir / "replicator").mkdir(exist_ok=True)
 
@@ -199,33 +201,32 @@ def write_mock_scene_manifest(mock_scene_dir: Path, mock_scene_manifest: Dict[st
 
 
 @pytest.fixture
-def mock_regen3d_output(mock_scene_dir: Path) -> Path:
-    """Create minimal mock 3D-RE-GEN output structure."""
-    regen3d_dir = mock_scene_dir / "regen3d"
-    regen3d_dir.mkdir(parents=True, exist_ok=True)
+def mock_stage1_output(mock_scene_dir: Path) -> Path:
+    """Create minimal mock Stage 1 output structure."""
+    assets_dir = mock_scene_dir / "assets"
+    layout_dir = mock_scene_dir / "layout"
+    seg_dir = mock_scene_dir / "seg"
+    textgen_dir = mock_scene_dir / "textgen"
+    for directory in (assets_dir, layout_dir, seg_dir, textgen_dir):
+        directory.mkdir(parents=True, exist_ok=True)
 
-    # Create mock scene_info.json
-    scene_info = {
+    manifest = {
+        "version": "1.0.0",
         "scene_id": "test_scene",
-        "environment_type": "kitchen",
-        "reconstruction_method": "3D-RE-GEN",
-        "timestamp": "2026-01-15T00:00:00Z",
+        "scene": {"environment_type": "kitchen"},
         "objects": [
-            {"id": "table_0", "category": "table", "mesh": "table_0.glb"},
-            {"id": "mug_0", "category": "mug", "mesh": "mug_0.glb"},
+            {"id": "table_0", "category": "table", "asset": {"path": "assets/objects/table_0/mesh.glb"}},
+            {"id": "mug_0", "category": "mug", "asset": {"path": "assets/objects/mug_0/mesh.glb"}},
         ],
     }
-    (regen3d_dir / "scene_info.json").write_text(json.dumps(scene_info, indent=2))
+    (assets_dir / "scene_manifest.json").write_text(json.dumps(manifest, indent=2))
+    (layout_dir / "scene_layout_scaled.json").write_text(json.dumps({"scene_id": "test_scene", "objects": []}, indent=2))
+    (seg_dir / "inventory.json").write_text(json.dumps({"scene_id": "test_scene", "objects": []}, indent=2))
+    (assets_dir / ".stage1_complete").write_text(
+        json.dumps({"scene_id": "test_scene", "status": "completed", "marker_type": "stage1_complete"}, indent=2)
+    )
 
-    # Create mock objects directory
-    objects_dir = regen3d_dir / "objects"
-    objects_dir.mkdir(exist_ok=True)
-
-    # Create mock GLB files (empty files for testing)
-    for obj_id in ["table_0", "mug_0"]:
-        (objects_dir / f"{obj_id}.glb").write_bytes(b"mock_glb_data")
-
-    return regen3d_dir
+    return assets_dir
 
 
 # ============================================================================

@@ -209,38 +209,32 @@ class AssetIngestionService:
 
         return document
 
-    def ingest_regen3d_asset(
+    def ingest_stage1_asset(
         self,
         payload: dict[str, Any],
         storage: StorageURIs,
         text_embedding: Optional[np.ndarray] = None,
         thumbnail_embedding: Optional[np.ndarray] = None,
     ) -> dict[str, Any]:
-        """Ingest an asset from 3D-RE-GEN reconstruction.
-
-        3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
-        "image → sim-ready 3D reconstruction" with explicit physical constraints.
-
-        Reference: https://3dregen.jdihlmann.com/
-        """
+        """Ingest an asset produced by Stage 1 text generation."""
         asset_id = payload.get("asset_id") or payload.get("id")
         if not asset_id:
-            raise ValueError("3D-RE-GEN payload must include 'asset_id' or 'id'")
+            raise ValueError("Stage 1 payload must include 'asset_id' or 'id'")
 
-        metadata = {"asset_id": asset_id, "source": "regen3d"}
+        metadata = {"asset_id": asset_id, "source": "stage1"}
         embedding_refs = self._upsert_embeddings(
             asset_id, text_embedding, thumbnail_embedding, metadata=metadata
         )
 
         document = self._build_document(
             asset_id=asset_id,
-            pack_name=payload.get("pack_name", "3D-RE-GEN"),
+            pack_name=payload.get("pack_name", "Stage-1"),
             display_name=payload.get("display_name") or payload.get("title") or asset_id,
             version_hash=payload.get("version_hash"),
             category=payload.get("category", "uncategorized"),
             tags=payload.get("tags", []),
             storage=storage,
-            source="regen3d",
+            source="stage1",
             description=payload.get("description"),
             subcategory=payload.get("subcategory"),
             dimensions=payload.get("dimensions"),
@@ -256,6 +250,6 @@ class AssetIngestionService:
                     document, merge=True
                 )
             except Exception as exc:  # pragma: no cover - best effort ingest
-                logging.error("Failed to upsert 3D-RE-GEN asset %s to Firestore: %s", asset_id, exc)
+                logging.error("Failed to upsert Stage 1 asset %s to Firestore: %s", asset_id, exc)
 
         return document

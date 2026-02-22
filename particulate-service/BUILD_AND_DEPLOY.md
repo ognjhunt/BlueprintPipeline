@@ -16,7 +16,7 @@ Particulate is a feed-forward 3D articulation model that takes a mesh as input a
 - **Geometry-based**: Trained on mesh geometry features
 
 **Use cases:**
-- When you have a 3D mesh (from 3D-RE-GEN) and need articulation
+- When you have a 3D mesh (from Stage 1 text generation) and need articulation
 - Batch processing of many objects
 - Cost-sensitive deployments
 
@@ -177,7 +177,7 @@ returns placeholder responses.
 | **Strengths** | Internal parts detection, fast inference |
 
 ### When to use Particulate:
-- You have a 3D mesh from 3D-RE-GEN
+- You have a 3D mesh from Stage 1 text generation
 - Fast turnaround is important
 - Batch processing many objects
 - Budget-conscious deployments

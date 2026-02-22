@@ -1,4 +1,4 @@
-"""Asset Catalog - Tools for indexing and searching NVIDIA/3D-RE-GEN asset packs."""
+"""Asset Catalog - Tools for indexing and searching NVIDIA/Stage 1 text generation asset packs."""
 import importlib.util
 import sys
 from pathlib import Path

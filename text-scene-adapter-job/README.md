@@ -6,7 +6,7 @@ Converts text-generation Stage 1 outputs into BlueprintPipeline canonical artifa
 - `scenes/<scene_id>/assets/scene_manifest.json`
 - `scenes/<scene_id>/layout/scene_layout_scaled.json`
 - `scenes/<scene_id>/seg/inventory.json`
-- `scenes/<scene_id>/assets/.regen3d_complete`
+- `scenes/<scene_id>/assets/.stage1_complete`
 
 This keeps downstream Stage 2+ workflows unchanged.
 

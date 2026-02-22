@@ -8,7 +8,7 @@ Handles:
 - Material binding in USD
 - Fallback material generation
 
-This module bridges the gap between 3D-RE-GEN outputs and simulation-ready USD.
+This module bridges the gap between Stage 1 text generation outputs and simulation-ready USD.
 """
 
 from __future__ import annotations

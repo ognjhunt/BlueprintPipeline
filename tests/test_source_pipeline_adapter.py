@@ -53,6 +53,7 @@ def test_text_adapter_builds_canonical_artifacts_and_marker(tmp_path: Path) -> N
         "schema_version": "v1",
         "scene_id": scene_id,
         "source_mode": "text",
+        "text_backend": "hybrid_serial",
         "prompt": "A kitchen scene",
         "quality_tier": "standard",
         "seed_count": 1,
@@ -83,7 +84,7 @@ def test_text_adapter_builds_canonical_artifacts_and_marker(tmp_path: Path) -> N
     inventory = _load(inventory_path)
     marker = _load(completion_marker)
 
-    assert manifest["metadata"]["source"]["type"] == "text"
+    assert manifest["metadata"]["source"]["type"] == "text_hybrid_serial"
     assert manifest["metadata"]["source"]["provider"] == "openai"
     assert manifest["metadata"]["source"]["seed"] == 1
     assert manifest["scene"]["room"]["bounds"] == {"width": 6.0, "depth": 6.0, "height": 3.0}
@@ -347,8 +348,8 @@ def test_adapter_placeholder_usd_is_valid_syntax(tmp_path: Path) -> None:
     assert meta["class_name"] == "mug"
 
 
-def test_adapter_regen3d_complete_marker_content(tmp_path: Path) -> None:
-    """Verify .regen3d_complete marker has correct structure."""
+def test_adapter_stage1_complete_marker_content(tmp_path: Path) -> None:
+    """Verify .stage1_complete marker has correct structure."""
     objects = [{"id": "obj_m", "category": "bottle"}]
     result = _run_adapter(tmp_path, "scene_marker", objects)
 
@@ -696,7 +697,7 @@ def test_adapter_propagates_layout_and_stage_fields(tmp_path: Path, monkeypatch)
         "seed": 3,
         "quality_tier": "standard",
         "provider_used": "openai",
-        "text_backend": "internal",
+        "text_backend": "scenesmith",
         "layout_plan": {
             "room_box": {"min": [-3.5, 0.0, -2.9], "max": [3.5, 3.1, 2.9]},
             "wall_thickness_m": 0.14,

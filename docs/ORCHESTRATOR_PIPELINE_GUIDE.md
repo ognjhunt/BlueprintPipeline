@@ -31,7 +31,7 @@ End-to-end reference for the single-trigger orchestrator that converts an upload
 
 ### Before: Multi-Trigger Chain (Replaced)
 
-Previously, each pipeline stage wrote a GCS marker file (e.g., `.regen3d_complete`) that fired an Eventarc trigger to start the next stage. This consumed 10+ of the 10 available GCS Pub/Sub notification slots per bucket and broke whenever a trigger was missing.
+Previously, each pipeline stage wrote a GCS marker file (e.g., `.stage1_complete`) that fired an Eventarc trigger to start the next stage. This consumed 10+ of the 10 available GCS Pub/Sub notification slots per bucket and broke whenever a trigger was missing.
 
 ### Now: Single Orchestrator
 
@@ -49,7 +49,7 @@ The orchestrator workflow calls each sub-workflow directly via the `googleapis.w
 
 **What runs on the VM:**
 - Downloads the uploaded image from GCS
-- Runs 3D-RE-GEN reconstruction pipeline (7 steps):
+- Runs Stage 1 text generation reconstruction pipeline (7 steps):
   1. **Segmentation**: Gemini auto-labeling + GroundingDINO + SAM1 (detects and segments objects)
   2. **Inpainting**: Gemini 2.5 Flash generates empty room + object-isolated images
   3. **Camera estimation**: VGGT monocular depth/camera estimation
@@ -57,8 +57,8 @@ The orchestrator workflow calls each sub-workflow directly via the `googleapis.w
   5. **Point cloud extraction**: Extracts per-object point clouds from VGGT depth
   6. **Pose matching**: Differentiable rendering aligns GLBs to image (150 iters per object, ~4.5 min each)
   7. **Scene assembly**: Combines all posed GLBs into `combined_scene.glb`
-- Adapts reconstruction outputs into BlueprintPipeline `regen3d/` + `assets/` artifacts
-- Emits `.regen3d_complete` for Stage 2 (`usd-assembly-pipeline`)
+- Adapts reconstruction outputs into BlueprintPipeline `stage1/` + `assets/` artifacts
+- Emits `.stage1_complete` for Stage 2 (`usd-assembly-pipeline`)
 - Uploads results back to GCS
 
 **Known issues:**
@@ -70,7 +70,7 @@ The orchestrator workflow calls each sub-workflow directly via the `googleapis.w
 ### Stage 2: USD Assembly (~5-15 min)
 
 **Sub-workflow:** `usd-assembly-pipeline`
-**Synthetic event:** `{"data": {"bucket": "...", "name": "scenes/<id>/assets/.regen3d_complete"}}`
+**Synthetic event:** `{"data": {"bucket": "...", "name": "scenes/<id>/assets/.stage1_complete"}}`
 
 **What it does:**
 - GLB → USDZ conversion
@@ -373,7 +373,7 @@ gs://bucket/scenes/my_scene/
 ├── images/
 │   └── kitchen.jpeg                    # Uploaded image (trigger input)
 ├── assets/
-│   ├── .regen3d_complete               # Stage 1 completion marker
+│   ├── .stage1_complete               # Stage 1 completion marker
 │   ├── .interactive_complete           # Stage 2 interactive completion marker (when run)
 │   ├── .interactive_summary.json       # Stage 2 interactive diagnostics
 │   ├── *.glb, *.usdz                   # 3D reconstruction outputs
@@ -399,7 +399,7 @@ gs://bucket/scenes/my_scene/
 
 For the full pipeline to run end-to-end:
 
-1. **GPU VM** (`isaac-sim-ubuntu`) must exist in `us-east1-c` with 3D-RE-GEN repo at `/home/nijelhunt1/3D-RE-GEN` and venv at `venv_py310`
+1. **GPU VM** (`isaac-sim-ubuntu`) must exist in `us-east1-c` with Stage 1 text generation repo at `/home/nijelhunt1/Stage 1 text generation` and venv at `venv_py310`
 2. **Cloud Run jobs** for stages 2-4 must be deployed (simready-job, usd-assembly-job, replicator-job, variation-gen-job, genie-sim-export-job, etc.)
 3. **Sub-workflows** must be deployed to Cloud Workflows in `us-central1`
 4. **GKE cluster** needed for GenieSim GPU jobs (Stage 4)
@@ -418,32 +418,32 @@ export PYTHONPATH="/path/to/BlueprintPipeline"
 # Run reconstruction + downstream steps for a prepared scene directory
 python3 tools/run_local_pipeline.py \
   --scene-dir /tmp/blueprint_scenes/ChIJHy53k-XlrIkRTdgT1Ev8ln4 \
-  --steps regen3d-reconstruct,regen3d,simready,usd
+  --steps text-scene-gen,text-scene-adapter,simready,usd
 
 # With GCS upload (requires ADC or service account)
 python3 tools/run_local_pipeline.py \
   --scene-dir /tmp/blueprint_scenes/ChIJHy53k-XlrIkRTdgT1Ev8ln4 \
-  --steps regen3d-reconstruct \
+  --steps text-scene-gen \
   --gcs-bucket blueprint-8c1ca.appspot.com \
   --gcs-download-inputs \
   --gcs-upload-outputs
 ```
 
-### Key Config: `configs/regen3d_reconstruct.env`
+### Key Config: `configs/text_source.env`
 
 ```
-REGEN3D_VM_HOST=isaac-sim-ubuntu
-REGEN3D_VM_ZONE=us-east1-c
-REGEN3D_REPO_PATH=/home/nijelhunt1/3D-RE-GEN
-REGEN3D_SEG_BACKEND=grounded_sam
-REGEN3D_STEPS=1,2,3,4,5,6,7
-REGEN3D_REPAIR_EMPTYROOM_PC=false
+STAGE1_VM_HOST=isaac-sim-ubuntu
+STAGE1_VM_ZONE=us-east1-c
+STAGE1_REPO_PATH=/home/nijelhunt1/Stage 1 text generation
+STAGE1_SEG_BACKEND=grounded_sam
+STAGE1_STEPS=1,2,3,4,5,6,7
+STAGE1_REPAIR_EMPTYROOM_PC=false
 GCS_BUCKET=blueprint-8c1ca.appspot.com
 ```
 
 ### VM Patches Required
 
-The 3D-RE-GEN code on the VM requires several patches that survive stop/start:
+The Stage 1 text generation code on the VM requires several patches that survive stop/start:
 
 1. **`scene_reconstruction/run.py`** — GLB pre-filter: Hunyuan3D-2.1 outputs `{name}_shape.glb`, not `{name}.glb`. The pre-filter must check both paths and create symlinks.
 2. **`pose_matching_planar.py`** — GLB loading fallback for `_shape.glb` suffix.

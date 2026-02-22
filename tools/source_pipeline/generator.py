@@ -63,7 +63,7 @@ class TextGenerationContext:
 
 
 class TextSceneGeneratorStrategy:
-    backend_name = TextBackend.INTERNAL.value
+    backend_name = TextBackend.HYBRID_SERIAL.value
 
     def generate(self, context: TextGenerationContext) -> Dict[str, Any]:
         raise NotImplementedError
@@ -1397,6 +1397,13 @@ def _safe_positive_float(raw: Any, *, default: float) -> float:
     return value
 
 
+def _live_backend_required(*env_vars: str) -> bool:
+    for env_var in env_vars:
+        if _is_truthy(os.getenv(env_var), default=False):
+            return True
+    return False
+
+
 def _backend_allowlist() -> set[str]:
     raw = os.getenv(
         "TEXT_BACKEND_ALLOWLIST",
@@ -1414,17 +1421,19 @@ def _backend_allowlist() -> set[str]:
 
 def _normalize_text_backend(text_backend: TextBackend | str | None) -> TextBackend:
     if text_backend is None:
-        return TextBackend.INTERNAL
+        return TextBackend.HYBRID_SERIAL
     if isinstance(text_backend, TextBackend):
         return text_backend
     raw = str(text_backend).strip().lower()
     if raw == "":
-        return TextBackend.INTERNAL
+        return TextBackend.HYBRID_SERIAL
     try:
         return TextBackend(raw)
-    except ValueError:
-        logger.warning("[TEXT-GEN] unknown text backend %r, falling back to internal", text_backend)
-        return TextBackend.INTERNAL
+    except ValueError as exc:
+        allowed = ", ".join(sorted(backend.value for backend in TextBackend))
+        raise ValueError(
+            f"text_backend must be one of [{allowed}], got {text_backend!r}"
+        ) from exc
 
 
 def _append_backend_metadata(
@@ -1503,31 +1512,6 @@ def _build_sage_action_preview(
             },
         ],
     }
-
-
-class InternalGeneratorStrategy(TextSceneGeneratorStrategy):
-    backend_name = TextBackend.INTERNAL.value
-
-    def generate(self, context: TextGenerationContext) -> Dict[str, Any]:
-        started_at = time.time()
-        package = _generate_internal_scene_package(
-            scene_id=context.scene_id,
-            prompt=context.prompt,
-            quality_tier=context.quality_tier,
-            seed=context.seed,
-            provider_policy=context.provider_policy,
-            constraints=context.constraints,
-        )
-        return _append_backend_metadata(
-            package,
-            selected_backend=TextBackend.INTERNAL,
-            entry={
-                "name": TextBackend.INTERNAL.value,
-                "status": "completed",
-                "duration_seconds": round(max(0.001, time.time() - started_at), 4),
-                "notes": "Built-in deterministic/LLM hybrid generator",
-            },
-        )
 
 
 class SceneSmithGeneratorStrategy(TextSceneGeneratorStrategy):
@@ -1862,6 +1846,15 @@ class SceneSmithGeneratorStrategy(TextSceneGeneratorStrategy):
             else None
         )
         live_used = live_package is not None
+        if _live_backend_required("TEXT_ENFORCE_LIVE_BACKENDS", "SCENESMITH_LIVE_REQUIRED"):
+            if not live_requested:
+                raise RuntimeError(
+                    "SceneSmith live backend is required but SCENESMITH_SERVER_URL is not configured."
+                )
+            if not live_used:
+                raise RuntimeError(
+                    "SceneSmith live backend is required but invocation failed; deterministic fallback is disabled."
+                )
 
         package = (
             _copy_package(live_package)
@@ -2034,6 +2027,15 @@ class SAGEGeneratorStrategy(TextSceneGeneratorStrategy):
             else None
         )
         live_used = live_package is not None
+        if _live_backend_required("TEXT_ENFORCE_LIVE_BACKENDS", "SAGE_LIVE_REQUIRED"):
+            if not live_requested:
+                raise RuntimeError(
+                    "SAGE live backend is required but SAGE_SERVER_URL is not configured."
+                )
+            if not live_used:
+                raise RuntimeError(
+                    "SAGE live backend is required but invocation failed; fallback refinement is disabled."
+                )
 
         package = _copy_package(live_package) if live_package is not None else _copy_package(base_package)
         objects = [obj for obj in package.get("objects", []) if isinstance(obj, dict)]
@@ -2168,7 +2170,7 @@ class SAGEGeneratorStrategy(TextSceneGeneratorStrategy):
         return self._refine(
             base_package=base_package,
             context=context,
-            source_backend=TextBackend.INTERNAL.value,
+            source_backend=TextBackend.SCENESMITH.value,
         )
 
 
@@ -2206,7 +2208,7 @@ def _build_strategy(backend: TextBackend) -> TextSceneGeneratorStrategy:
         return SAGEGeneratorStrategy()
     if backend == TextBackend.HYBRID_SERIAL:
         return HybridSerialGeneratorStrategy()
-    return InternalGeneratorStrategy()
+    return HybridSerialGeneratorStrategy()
 
 
 def generate_text_scene_package(
@@ -2217,17 +2219,18 @@ def generate_text_scene_package(
     seed: int,
     provider_policy: str,
     constraints: Optional[Dict[str, Any]] = None,
-    text_backend: TextBackend | str = TextBackend.INTERNAL.value,
+    text_backend: TextBackend | str = TextBackend.HYBRID_SERIAL.value,
 ) -> Dict[str, Any]:
     """Generate Stage 1 text-scene package using configurable backend strategy."""
 
     requested_backend = _normalize_text_backend(text_backend)
-    if requested_backend.value not in _backend_allowlist():
-        logger.warning(
-            "[TEXT-GEN] text backend %s blocked by TEXT_BACKEND_ALLOWLIST; using internal",
-            requested_backend.value,
+    allowed_backends = _backend_allowlist()
+    if requested_backend.value not in allowed_backends:
+        allowed_list = ",".join(sorted(allowed_backends))
+        raise ValueError(
+            f"text_backend {requested_backend.value!r} is not allowed by "
+            f"TEXT_BACKEND_ALLOWLIST={allowed_list!r}"
         )
-        requested_backend = TextBackend.INTERNAL
 
     context = TextGenerationContext(
         scene_id=scene_id,

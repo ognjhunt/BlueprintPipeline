@@ -48,7 +48,7 @@ Per-step timeouts for the local pipeline runner.
 **Example**:
 ```bash
 # Bound individual steps with custom timeouts
-export PIPELINE_STEP_TIMEOUTS_JSON='{"regen3d": 1800, "genie-sim-submit": 7200, "genie-sim-import": 3600}'
+export PIPELINE_STEP_TIMEOUTS_JSON='{"text-stage1": 1800, "genie-sim-submit": 7200, "genie-sim-import": 3600}'
 ```
 
 ## Metrics & Observability

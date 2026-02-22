@@ -10,12 +10,12 @@ python tools/verify_workflow_triggers_and_dryrun.py
 The script performs checks on:
 
 1. **USD assembly trigger** – confirms `workflows/usd-assembly-pipeline.yaml`
-   filters on finalized `scenes/*/assets/.regen3d_complete` objects and invokes
+   filters on finalized `scenes/*/assets/.stage1_complete` objects and invokes
    the strict Stage 2 order:
    `convert-only USD` → `simready` → `interactive` → `full USD` → `replicator` → `isaac baseline`.
-2. **3D-RE-GEN trigger** – confirms the regen3d workflow listens for
-   3D-RE-GEN outputs and writes the `.regen3d_complete` marker.
-3. **Dry run** – simulates a `.regen3d_complete` finalize event, showing the
+2. **Stage 1 text generation trigger** – confirms the stage1 workflow listens for
+   Stage 1 text generation outputs and writes the `.stage1_complete` marker.
+3. **Dry run** – simulates a `.stage1_complete` finalize event, showing the
    expected sequence of actions that should occur automatically after the
    completion marker appears.
 

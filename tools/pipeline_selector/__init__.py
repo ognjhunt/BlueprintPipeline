@@ -1,31 +1,15 @@
-"""
-Pipeline Selector for BlueprintPipeline.
-
-Provides routing logic for choosing between 3D-RE-GEN and Gemini pipelines,
-with automatic fallback handling.
-
-Usage:
-    from tools.pipeline_selector import PipelineSelector, select_pipeline
-
-    # Auto-select pipeline based on environment and availability
-    selector = PipelineSelector()
-    pipeline = selector.select()
-
-    # Get job sequence for selected pipeline
-    jobs = selector.get_job_sequence()
-
-    # Check if 3D-RE-GEN output exists
-    if selector.has_regen3d_output(scene_dir):
-        jobs = selector.get_regen3d_jobs()
-    else:
-        jobs = selector.get_gemini_jobs()
-"""
+"""Pipeline selector exports for text-first Stage 1 routing."""
 
 from .selector import (
     PipelineSelector,
     select_pipeline,
     should_skip_deprecated_job,
     get_active_pipeline_mode,
+    get_data_generation_backend,
+    is_geniesim_enabled,
+    PipelineMode,
+    DataGenerationBackend,
+    PipelineDecision,
 )
 
 __all__ = [
@@ -33,4 +17,9 @@ __all__ = [
     "select_pipeline",
     "should_skip_deprecated_job",
     "get_active_pipeline_mode",
+    "get_data_generation_backend",
+    "is_geniesim_enabled",
+    "PipelineMode",
+    "DataGenerationBackend",
+    "PipelineDecision",
 ]

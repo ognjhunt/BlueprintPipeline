@@ -8,7 +8,7 @@
 #   3. Runs simready-job to add physics properties to the assets
 #   4. Runs isaac-lab-job refresh-only pass to update task spawn plans from generated variations
 #
-# Note: With 3D-RE-GEN pipeline, 3D model generation is handled by regen3d-job.
+# Note: With Stage 1 text generation pipeline, 3D model generation is handled by text-scene-adapter-job.
 #
 # Trigger: Cloud Storage object finalized event for .replicator_complete
 #

@@ -14,15 +14,14 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 | --- | --- | --- |
 | `asset-embedding-pipeline.yaml` | Eventarc (GCS finalized) | `automation/asset_embedding/queue/*.json` |
 | `arena-export-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/usd/.usd_complete`, `scenes/*/isaac_lab/.isaac_lab_complete`, `scenes/*/geniesim/.geniesim_complete` |
-| `dream2flow-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` (disabled unless enabled) |
-| `dwm-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` (disabled unless enabled) |
+| `dream2flow-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.stage1_complete` (disabled unless enabled) |
+| `dwm-preparation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.stage1_complete` (disabled unless enabled) |
 | `episode-generation-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/usd/.usd_complete` |
 | `genie-sim-export-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/variation_assets/.variation_pipeline_complete` |
 | `genie-sim-import-pipeline.yaml` | Eventarc custom event / manual | Event type `manual.geniesim.job.completed` or direct workflow payload |
 | `genie-sim-import-poller.yaml` | Cloud Scheduler | Every 5–10 minutes; scans `scenes/*/geniesim/job.json` |
 | `interactive-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/scene_assets.json` |
 | `objects-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/layout/scene_layout.json` |
-| `regen3d-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.assets_ready` |
 | `retention-cleanup.yaml` | Cloud Scheduler | Daily retention cleanup (managed in `infrastructure/terraform`) |
 | `scale-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/layout/scene_layout.json` |
 | `scene-batch.yaml` | Manual only | Provide a manifest object with a scene list |
@@ -31,7 +30,7 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 | `text-autonomy-daily.yaml` | Cloud Scheduler | Daily autonomous text request emission + downstream completion watch |
 | `training-pipeline.yaml` | Eventarc custom event | Event type `blueprintpipeline.episodes.imported` |
 | `upsell-features-pipeline.yaml` | Manual only | Manual run with `.episodes_complete` payload |
-| `usd-assembly-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.regen3d_complete` |
+| `usd-assembly-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/assets/.stage1_complete` |
 | `variation-assets-pipeline.yaml` | Eventarc (GCS finalized) | `scenes/*/replicator/.replicator_complete` |
 
 ## Primary entrypoints
@@ -39,8 +38,7 @@ Workflow definitions and trigger setup scripts for pipeline orchestration.
 
 ## Source Orchestrator (text-first)
 The `source-orchestrator.yaml` workflow is the text-first entry point for scene generation.
-It replaces Stage 1 reconstruction with LLM/template-based scene generation from a text prompt,
-then feeds the result into the same Stage 2-5 pipeline used by the image path.
+It runs Stage 1 text generation and then feeds the result into Stage 2-5.
 
 - **Text path**: `text-scene-gen-job` → `text-scene-adapter-job` → Stage 2-5
 - **Text runtime modes**: `TEXT_GEN_RUNTIME=vm|cloudrun|runpod` (`vm` default; `runpod` uses on-demand L40S Stage 1)
@@ -48,14 +46,10 @@ then feeds the result into the same Stage 2-5 pipeline used by the image path.
 - **LLM-first Stage 1**: `TEXT_GEN_USE_LLM=true` default with deterministic fallback metadata and retry controls
 - **Stage 5 strictness**: `ARENA_EXPORT_REQUIRED=true` default (text completion requires Arena success)
 - **Live backend services**: optional SceneSmith/SAGE endpoints via `SCENESMITH_SERVER_URL` and `SAGE_SERVER_URL`
-- **Image path (compat mode)**:
-  - `IMAGE_PATH_MODE=orchestrator` delegates to `image-to-scene-orchestrator`
-  - `IMAGE_PATH_MODE=legacy_chain` delegates to `image-to-scene-pipeline` and waits for `.geniesim_complete`
-- **Auto path**: tries text first, falls back to image if text fails and an image is present
 - **Multi-seed**: `seed_count > 1` fans out to child scene IDs (`{scene_id}-s001`, `-s002`, etc.)
 - **Child request path**: fanout requests are written to `scenes/<child_scene_id>/internal/scene_request.generated.json` (non-trigger path)
 - **Dedupe lock**: per-generation lock at `scenes/<scene_id>/locks/source-orchestrator-<generation>.lock` prevents concurrent duplicate executions
-- **Fallback**: fail-fast — if any seed fails, the entire request falls back to image (does not retry remaining seeds)
+- **Failure model**: fail-fast — if any seed fails, orchestration fails (does not retry remaining seeds)
 
 Service setup guide:
 - `/Users/nijelhunt_1/workspace/BlueprintPipeline/docs/text_backend_services.md`
@@ -78,14 +72,12 @@ Core fields:
 
 - `schema_version` (`v1`)
 - `scene_id`
-- `source_mode` (`text` | `image` | `auto`)
-- `text_backend` (`internal` | `scenesmith` | `sage` | `hybrid_serial`) optional; defaults to workflow/backend config
-- `prompt` (required for `text`/`auto`)
+- `source_mode` (`text`)
+- `text_backend` (`scenesmith` | `sage` | `hybrid_serial`) optional; defaults to workflow/backend config
+- `prompt` (required)
 - `quality_tier` (`standard` | `premium`)
 - `seed_count` (>= 1)
-- `image.gcs_uri` (required for `image` mode)
 - `provider_policy` (`openrouter_qwen_primary` | `openai_primary`)
-- `fallback.allow_image_fallback` (default `true`)
 
 **Note:** Dream2Flow and DWM workflows are experimental and remain disabled by
 default unless explicitly enabled (e.g., `ENABLE_DREAM2FLOW=true`,
@@ -136,9 +128,9 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `SECONDARY_WORKFLOW_REGION`: secondary region used when primary health checks fail. Defaults to `us-east1`.
 - `WORKFLOW_REGION`: legacy override for workflows that do not yet use primary/secondary routing.
 - `PRIMARY_BUCKET`: default bucket for manual or scheduler-driven workflows (replaces hardcoded bucket names).
-- `DEFAULT_SOURCE_MODE`: source-orchestrator default request mode (`text`, `image`, `auto`). Defaults to `text`.
+- `DEFAULT_SOURCE_MODE`: source-orchestrator default request mode (`text` only). Defaults to `text`.
 - `TEXT_BACKEND_DEFAULT`: default Stage 1 text backend when request omits `text_backend`. Defaults to `hybrid_serial`.
-- `TEXT_BACKEND_ALLOWLIST`: allowed Stage 1 text backends. Defaults to `internal,scenesmith,sage,hybrid_serial`.
+- `TEXT_BACKEND_ALLOWLIST`: allowed Stage 1 text backends. Defaults to `scenesmith,sage,hybrid_serial`.
 - `TEXT_GEN_RUNTIME`: source-orchestrator runtime profile hint for text Stage 1 (`vm`, `cloudrun`, `runpod`). Defaults to `vm`.
 - `TEXT_SCENE_GEN_JOB_NAME`: Stage 1 Cloud Run job name override for text scene generation. Defaults to `text-scene-gen-job`.
 - `TEXT_SCENE_ADAPTER_JOB_NAME`: Stage 1 Cloud Run job name override for text scene adaptation. Defaults to `text-scene-adapter-job`.
@@ -190,12 +182,7 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `TEXT_HUNYUAN_TIMEOUT_SECONDS`: Hunyuan task timeout seconds. Defaults to `1800`.
 - `TEXT_HUNYUAN_POLL_SECONDS`: Hunyuan poll interval seconds. Defaults to `10`.
 - `TEXT_GEN_MAX_SEEDS`: max allowed `seed_count` for `scene_request.json`. Defaults to `16`.
-- `TEXT_GEN_ENABLE_IMAGE_FALLBACK`: allow `auto`/`text` fallback to image path when text source fails. Defaults to `true`.
 - `ARENA_EXPORT_REQUIRED`: enforce Stage 5 arena success before source completion. Defaults to `true`.
-- `IMAGE_PATH_MODE`: image compatibility mode (`orchestrator` or `legacy_chain`). Defaults to `orchestrator`.
-- `IMAGE_ORCHESTRATOR_WORKFLOW_NAME`: workflow used when `IMAGE_PATH_MODE=orchestrator`. Defaults to `image-to-scene-orchestrator`.
-- `IMAGE_LEGACY_WORKFLOW_NAME`: workflow used when `IMAGE_PATH_MODE=legacy_chain`. Defaults to `image-to-scene-pipeline`.
-- `IMAGE_LEGACY_CHAIN_WAIT_SECONDS`: timeout while waiting for `scenes/<scene_id>/geniesim/.geniesim_complete` in legacy-chain mode. Defaults to `7200`.
 - `TEXT_GEN_VM_NAME`: VM name used when `TEXT_GEN_RUNTIME=vm`. Defaults to `isaac-sim-ubuntu`.
 - `TEXT_GEN_VM_ZONE`: VM zone used when `TEXT_GEN_RUNTIME=vm`. Defaults to `us-east1-c`.
 - `TEXT_GEN_VM_REPO_DIR`: repository directory on the VM for text Stage 1 scripts. Defaults to `~/BlueprintPipeline`.

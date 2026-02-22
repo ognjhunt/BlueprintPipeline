@@ -453,7 +453,7 @@ class CostTracker:
         tracker.track_gemini_call("scene_001", tokens_in=1000, tokens_out=500)
 
         # Track compute
-        tracker.track_compute("scene_001", "regen3d-job", duration_seconds=120)
+        tracker.track_compute("scene_001", "text-scene-adapter-job", duration_seconds=120)
 
         # Get costs
         costs = tracker.get_scene_cost("scene_001")

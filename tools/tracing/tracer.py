@@ -333,7 +333,7 @@ def trace_job(
         **attributes: Additional attributes to set
 
     Example:
-        with trace_job("regen3d-job", scene_id="scene_001", step="physics"):
+        with trace_job("text-scene-adapter-job", scene_id="scene_001", step="physics"):
             # Process scene
             pass
     """

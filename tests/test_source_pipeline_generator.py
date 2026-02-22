@@ -94,8 +94,8 @@ def test_generate_text_scene_package_standard_vs_premium_object_count() -> None:
         provider_policy="openai_primary",
     )
 
-    assert len(standard["objects"]) == 12
-    assert len(premium["objects"]) == 18
+    assert len(standard["objects"]) == 18
+    assert len(premium["objects"]) == 24
 
 
 def test_generate_text_scene_package_v2_emits_staged_fields(monkeypatch) -> None:
@@ -116,13 +116,13 @@ def test_generate_text_scene_package_v2_emits_staged_fields(monkeypatch) -> None
     assert isinstance(result.get("placement_stages"), list)
     assert [stage.get("stage") for stage in result["placement_stages"]] == ["furniture", "manipulands"]
     assert isinstance(result.get("critic_scores"), list)
-    assert len(result["critic_scores"]) == 2
+    assert len(result["critic_scores"]) >= 2
     assert isinstance(result.get("support_surfaces"), list)
     assert isinstance(result.get("faithfulness_report"), dict)
     assert 0.0 <= float(result["faithfulness_report"].get("score", 0.0)) <= 1.0
 
     for obj in result["objects"]:
-        assert obj.get("placement_stage") in {"furniture", "manipulands"}
+        assert obj.get("placement_stage") in {"furniture", "manipulands", "task_refined"}
         if obj.get("sim_role") == "manipulable_object":
             assert obj.get("parent_support_id") is not None
             assert isinstance(obj.get("surface_local_se2"), dict)
@@ -419,6 +419,7 @@ def test_generate_text_scene_package_records_llm_fallback_metadata(monkeypatch) 
         quality_tier=QualityTier.PREMIUM,
         seed=3,
         provider_policy="openai_primary",
+        text_backend="scenesmith",
     )
 
     assert result["used_llm"] is False
@@ -457,7 +458,7 @@ def test_generate_text_scene_package_sage_backend_uses_live_server_when_availabl
         quality_tier=QualityTier.STANDARD,
         seed=9,
         provider_policy="openai_primary",
-        text_backend="internal",
+        text_backend="scenesmith",
     )
     live_package = json.loads(json.dumps(live_base))
     live_package["scene_id"] = "scene_sage_live"
@@ -524,6 +525,41 @@ def test_generate_text_scene_package_sage_backend_falls_back_when_live_unavailab
     assert result["quality_gate_report"]["generation_mode"] == "sage_refined"
     assert result["sage"]["live_requested"] is True
     assert result["sage"]["live_used"] is False
+
+
+def test_generate_text_scene_package_sage_backend_live_required_without_endpoint_raises(monkeypatch) -> None:
+    monkeypatch.delenv("SAGE_SERVER_URL", raising=False)
+    monkeypatch.setenv("SAGE_LIVE_REQUIRED", "true")
+
+    with pytest.raises(RuntimeError, match="SAGE live backend is required but SAGE_SERVER_URL is not configured"):
+        generate_text_scene_package(
+            scene_id="scene_sage_live_required_missing_endpoint",
+            prompt="A pick-place scene with a mug and shelf",
+            quality_tier=QualityTier.STANDARD,
+            seed=11,
+            provider_policy="openai_primary",
+            text_backend="sage",
+        )
+
+
+def test_generate_text_scene_package_sage_backend_live_required_unavailable_raises(monkeypatch) -> None:
+    monkeypatch.setenv("SAGE_SERVER_URL", "https://sage.example/v1/refine")
+    monkeypatch.setenv("SAGE_LIVE_REQUIRED", "true")
+
+    def _raise_url_error(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise generator_mod.url_error.URLError("connection refused")
+
+    monkeypatch.setattr(generator_mod.url_request, "urlopen", _raise_url_error)
+
+    with pytest.raises(RuntimeError, match="SAGE live backend is required but invocation failed"):
+        generate_text_scene_package(
+            scene_id="scene_sage_live_required_failing_endpoint",
+            prompt="A pick-place scene with a mug and shelf",
+            quality_tier=QualityTier.STANDARD,
+            seed=12,
+            provider_policy="openai_primary",
+            text_backend="sage",
+        )
 
 
 def test_generate_text_scene_package_supports_scenesmith_backend() -> None:
@@ -636,6 +672,41 @@ def test_generate_text_scene_package_scenesmith_backend_falls_back_when_live_una
     assert result["scenesmith"]["live_used"] is False
 
 
+def test_generate_text_scene_package_scenesmith_backend_live_required_without_endpoint_raises(monkeypatch) -> None:
+    monkeypatch.delenv("SCENESMITH_SERVER_URL", raising=False)
+    monkeypatch.setenv("SCENESMITH_LIVE_REQUIRED", "true")
+
+    with pytest.raises(RuntimeError, match="SceneSmith live backend is required but SCENESMITH_SERVER_URL is not configured"):
+        generate_text_scene_package(
+            scene_id="scene_scenesmith_live_required_missing_endpoint",
+            prompt="A kitchen with dense clutter and task objects",
+            quality_tier=QualityTier.STANDARD,
+            seed=13,
+            provider_policy="openai_primary",
+            text_backend="scenesmith",
+        )
+
+
+def test_generate_text_scene_package_scenesmith_backend_live_required_unavailable_raises(monkeypatch) -> None:
+    monkeypatch.setenv("SCENESMITH_SERVER_URL", "https://scenesmith.example/v1/generate")
+    monkeypatch.setenv("SCENESMITH_LIVE_REQUIRED", "true")
+
+    def _raise_url_error(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise generator_mod.url_error.URLError("connection refused")
+
+    monkeypatch.setattr(generator_mod.url_request, "urlopen", _raise_url_error)
+
+    with pytest.raises(RuntimeError, match="SceneSmith live backend is required but invocation failed"):
+        generate_text_scene_package(
+            scene_id="scene_scenesmith_live_required_failing_endpoint",
+            prompt="A kitchen with dense clutter and task objects",
+            quality_tier=QualityTier.STANDARD,
+            seed=14,
+            provider_policy="openai_primary",
+            text_backend="scenesmith",
+        )
+
+
 def test_generate_text_scene_package_supports_hybrid_serial_backend() -> None:
     result = generate_text_scene_package(
         scene_id="scene_hybrid",
@@ -652,14 +723,30 @@ def test_generate_text_scene_package_supports_hybrid_serial_backend() -> None:
     assert "hybrid_serial" in backend_names
 
 
-def test_generate_text_scene_package_respects_backend_allowlist(monkeypatch) -> None:
-    monkeypatch.setenv("TEXT_BACKEND_ALLOWLIST", "internal")
-    result = generate_text_scene_package(
-        scene_id="scene_backend_allowlist",
-        prompt="A room",
-        quality_tier=QualityTier.STANDARD,
-        seed=1,
-        provider_policy="openai_primary",
-        text_backend="sage",
-    )
-    assert result["text_backend"] == "internal"
+def test_generate_text_scene_package_hybrid_serial_obeys_global_live_enforcement(monkeypatch) -> None:
+    monkeypatch.delenv("SCENESMITH_SERVER_URL", raising=False)
+    monkeypatch.delenv("SAGE_SERVER_URL", raising=False)
+    monkeypatch.setenv("TEXT_ENFORCE_LIVE_BACKENDS", "true")
+
+    with pytest.raises(RuntimeError, match="SceneSmith live backend is required but SCENESMITH_SERVER_URL is not configured"):
+        generate_text_scene_package(
+            scene_id="scene_hybrid_live_required_missing_endpoints",
+            prompt="A dense kitchen where a robot should move a bowl onto a shelf",
+            quality_tier=QualityTier.PREMIUM,
+            seed=15,
+            provider_policy="openai_primary",
+            text_backend="hybrid_serial",
+        )
+
+
+def test_generate_text_scene_package_rejects_backend_blocked_by_allowlist(monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_BACKEND_ALLOWLIST", "scenesmith")
+    with pytest.raises(ValueError, match="TEXT_BACKEND_ALLOWLIST"):
+        generate_text_scene_package(
+            scene_id="scene_backend_allowlist",
+            prompt="A room",
+            quality_tier=QualityTier.STANDARD,
+            seed=1,
+            provider_policy="openai_primary",
+            text_backend="sage",
+        )

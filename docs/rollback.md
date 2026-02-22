@@ -80,14 +80,14 @@ When rollback requires cleanup of partially processed data, remove the affected 
 from the last good checkpoint.
 
 - Identify the impacted `SCENE_ID`s and their GCS prefixes.
-- Remove intermediate artifacts that block reprocessing (e.g., `.regen3d_complete`, partial `scene.usda`).
+- Remove intermediate artifacts that block reprocessing (e.g., `.stage1_complete`, partial `scene.usda`).
 - Re-run the workflow for just the affected scenes.
 
 ### Example cleanup commands
 
 ```bash
 # Remove a partial completion marker
-gsutil rm gs://<bucket>/<scene_prefix>/.regen3d_complete
+gsutil rm gs://<bucket>/<scene_prefix>/.stage1_complete
 
 # Remove generated artifacts for a specific scene
 gsutil -m rm -r gs://<bucket>/<scene_prefix>/usd

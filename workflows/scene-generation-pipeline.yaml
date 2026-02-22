@@ -384,9 +384,9 @@ main:
         # In a real implementation, you would:
         # 1. Filter to only newly generated scenes (by timestamp)
         # 2. For each scene, check if it needs downstream processing
-        # 3. Optionally trigger 3D-RE-GEN pipeline for each
+        # 3. Optionally trigger Stage 1 text generation pipeline for each
         #
-        # For now, we just log completion since 3D-RE-GEN integration
+        # For now, we just log completion since Stage 1 text generation integration
         # is handled by the scene generation job writing trigger markers
         call: sys.log
         args:

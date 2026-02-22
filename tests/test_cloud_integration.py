@@ -90,7 +90,7 @@ def temp_scene_dir():
     scene_dir = Path(temp_dir) / "scenes" / "test_scene"
 
     # Create directory structure
-    for subdir in ["regen3d", "assets", "layout", "seg", "usd", "episodes"]:
+    for subdir in ["stage1", "assets", "layout", "seg", "usd", "episodes"]:
         (scene_dir / subdir).mkdir(parents=True, exist_ok=True)
 
     # Create mock scene data
@@ -173,7 +173,7 @@ def Xform "World" {
     (scene_dir / "usd" / "scene.usda").write_text(usda_content)
 
     # Create completion markers
-    (scene_dir / "assets" / ".regen3d_complete").write_text(json.dumps({
+    (scene_dir / "assets" / ".stage1_complete").write_text(json.dumps({
         "status": "complete",
         "timestamp": "2025-01-01T00:00:00Z",
     }))
@@ -301,7 +301,7 @@ class TestGCSOperations:
         bucket = client.bucket(config.bucket)
 
         scene_id = config.test_scene_id
-        marker_path = f"scenes/{scene_id}/assets/.regen3d_complete"
+        marker_path = f"scenes/{scene_id}/assets/.stage1_complete"
 
         # Initially, marker doesn't exist
         marker_blob = bucket.blob(marker_path)
@@ -341,7 +341,7 @@ class TestPipelineExecution:
 
         # Run just the first few steps
         success = runner.run(
-            steps=[PipelineStep.REGEN3D, PipelineStep.SIMREADY, PipelineStep.USD],
+            steps=[PipelineStep.TEXT_SCENE_ADAPTER, PipelineStep.SIMREADY, PipelineStep.USD],
             run_validation=False,
         )
 
@@ -362,7 +362,7 @@ class TestPipelineExecution:
         )
 
         # Run only USD step (should fail without prerequisites)
-        # Actually, we need to run regen3d first to create the manifest
+        # Actually, we need to run stage1 first to create the manifest
         success = runner.run(
             steps=[PipelineStep.USD],
             run_validation=False,
@@ -387,7 +387,7 @@ class TestPipelineExecution:
         )
 
         # Pipeline should handle missing files
-        # (It will try to create them from regen3d step)
+        # (It will try to create them from stage1 step)
 
 
 class TestErrorHandling:
@@ -697,7 +697,7 @@ class TestRealGCPIntegration:
             manifest_blob.upload_from_string('{"test": true}')
 
             # Create completion marker
-            marker_blob = bucket.blob(f"{prefix}assets/.regen3d_complete")
+            marker_blob = bucket.blob(f"{prefix}assets/.stage1_complete")
             marker_blob.upload_from_string(json.dumps({
                 "status": "complete",
                 "timestamp": "2025-01-01T00:00:00Z",

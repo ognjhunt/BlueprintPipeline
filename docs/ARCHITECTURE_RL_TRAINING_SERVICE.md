@@ -403,7 +403,7 @@ For each training run, deliver:
 │                           BlueprintPipeline                                  │
 │  (Existing - generates Isaac Lab task packages)                             │
 │                                                                              │
-│  Image → 3D-RE-GEN → SimReady → USD → Replicator → Isaac Lab Task          │
+│  Image → Stage 1 text generation → SimReady → USD → Replicator → Isaac Lab Task          │
 │                                                                              │
 │  Output: gs://{BUCKET}/scenes/{id}/isaac_lab/                               │
 │          - env_cfg.py, train_cfg.yaml, reward_functions.py, etc.            │

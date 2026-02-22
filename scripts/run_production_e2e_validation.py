@@ -210,7 +210,7 @@ def main() -> int:
     markers = {
         "variation_assets": f"scenes/{args.scene_id}/variation_assets/.variation_pipeline_complete",
         "usd_complete": f"scenes/{args.scene_id}/usd/.usd_complete",
-        "regen3d_complete": f"scenes/{args.scene_id}/assets/.regen3d_complete",
+        "stage1_complete": f"scenes/{args.scene_id}/assets/.stage1_complete",
     }
 
     for name, marker in markers.items():
@@ -305,7 +305,7 @@ def main() -> int:
     run_workflow(
         "dwm-preparation-pipeline",
         args.region,
-        {"data": {"bucket": args.bucket, "name": markers["regen3d_complete"]}},
+        {"data": {"bucket": args.bucket, "name": markers["stage1_complete"]}},
         args.timeout_seconds,
     )
 

@@ -9,10 +9,12 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("pydantic")
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(REPO_ROOT))
 
-from fixtures.generate_mock_regen3d import create_minimal_glb
+from fixtures.generate_mock_stage1 import create_minimal_glb
 
 MODULE_PATH = REPO_ROOT / "interactive-job" / "run_interactive_assets.py"
 SPEC = importlib.util.spec_from_file_location("run_interactive_assets", MODULE_PATH)
@@ -46,13 +48,13 @@ def build_scene_assets(assets_prefix: str, object_ids: list[str], gcs_root: Path
     root = gcs_root if gcs_root is not None else Path("/mnt/gcs")
     root.mkdir(parents=True, exist_ok=True)
     assets_root = root / assets_prefix
-    regen3d_root = assets_root / "regen3d"
-    regen3d_root.mkdir(parents=True, exist_ok=True)
+    stage1_root = assets_root / "stage1"
+    stage1_root.mkdir(parents=True, exist_ok=True)
 
     objects = []
     for obj_id in object_ids:
         obj_name = f"obj_{obj_id}"
-        obj_dir = regen3d_root / obj_name
+        obj_dir = stage1_root / obj_name
         obj_dir.mkdir(parents=True, exist_ok=True)
         glb_path = obj_dir / f"obj_{obj_id}.glb"
         glb_path.write_bytes(create_minimal_glb())
@@ -74,7 +76,7 @@ def build_scene_assets(assets_prefix: str, object_ids: list[str], gcs_root: Path
                     "rotation_quaternion": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
                     "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
                 },
-                "asset": {"path": f"regen3d/{obj_name}/obj_{obj_id}.glb"},
+                "asset": {"path": f"stage1/{obj_name}/obj_{obj_id}.glb"},
                 "physics": {"mass": 0.2},
                 "physics_hints": {"material_type": "ceramic"},
                 "articulation": {"type": "revolute"},
@@ -100,7 +102,7 @@ def run_job(
     monkeypatch.setenv("BUCKET", "test-bucket")
     monkeypatch.setenv("SCENE_ID", "interactive_scene")
     monkeypatch.setenv("ASSETS_PREFIX", assets_prefix)
-    monkeypatch.setenv("REGEN3D_PREFIX", f"{assets_prefix}/regen3d")
+    monkeypatch.setenv("STAGE1_PREFIX", f"{assets_prefix}/stage1")
     monkeypatch.setenv("INTERACTIVE_MODE", "glb")
     monkeypatch.setenv("PARTICULATE_MODE", particulate_mode)
     monkeypatch.setenv("ARTICULATION_BACKEND", articulation_backend)

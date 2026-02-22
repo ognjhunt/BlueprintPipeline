@@ -1429,7 +1429,6 @@ def _build_manifest(
     backend_runs: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     source_type_map = {
-        "internal": "text",
         "sage": "text_sage",
         "scenesmith": "text_scenesmith",
         "hybrid_serial": "text_hybrid_serial",
@@ -1686,7 +1685,10 @@ def build_manifest_layout_inventory(
     quality_tier = str(textgen_payload.get("quality_tier") or "standard")
     provider_used = str(textgen_payload.get("provider_used") or "openai")
     seed = int(textgen_payload.get("seed") or 1)
-    text_backend = str(textgen_payload.get("text_backend") or "internal").strip().lower() or "internal"
+    text_backend = (
+        str(textgen_payload.get("text_backend") or "hybrid_serial").strip().lower()
+        or "hybrid_serial"
+    )
     backend_payload = textgen_payload.get("backend")
     backend_runs_raw = backend_payload.get("backends") if isinstance(backend_payload, Mapping) else None
     backend_runs = (
@@ -1733,7 +1735,7 @@ def build_manifest_layout_inventory(
     layout_path.write_text(json.dumps(layout, indent=2), encoding="utf-8")
     inventory_path.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
 
-    completion_marker = assets_root / ".regen3d_complete"
+    completion_marker = assets_root / ".stage1_complete"
     completion_marker.write_text(
         json.dumps(
             {

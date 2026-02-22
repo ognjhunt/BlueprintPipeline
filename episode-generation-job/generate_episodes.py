@@ -14,7 +14,7 @@ Key Architecture Changes from Original:
 4. Motion planning with collision checking - TAMP-style planning
 
 Pipeline Position:
-    3D-RE-GEN → simready → usd-assembly → replicator → isaac-lab → [THIS JOB]
+    Stage 1 text generation → simready → usd-assembly → replicator → isaac-lab → [THIS JOB]
 
 Process (SOTA):
 1. Use Gemini to specify tasks (goals, constraints, keypoints) - NOT trajectories

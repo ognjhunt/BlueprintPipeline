@@ -7,8 +7,10 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import pytest
 
+pytest.importorskip("pydantic")
+
 from tools.error_handling.retry import NonRetryableError
-from fixtures.generate_mock_regen3d import generate_mock_regen3d
+from fixtures.generate_mock_stage1 import generate_mock_stage1
 from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep, StepResult
 
 
@@ -52,7 +54,7 @@ def test_geniesim_mock_mode_rejected_in_production(tmp_path, monkeypatch):
 
 def test_auto_trigger_import_after_submit(temp_test_dir, monkeypatch):
     scene_id = "test_scene"
-    generate_mock_regen3d(
+    generate_mock_stage1(
         output_dir=temp_test_dir,
         scene_id=scene_id,
         environment_type="kitchen",

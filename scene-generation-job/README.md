@@ -154,9 +154,9 @@ Supported model IDs for this job:
 │                              │                                  │
 │                              ▼                                  │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │             Downstream Pipeline (3D-RE-GEN)              │   │
+│  │             Downstream Pipeline (Stage 1 text generation)              │   │
 │  │                                                          │   │
-│  │   image → regen3d → simready → USD → replicator → isaac │   │
+│  │   image → stage1 → simready → USD → replicator → isaac │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -294,6 +294,6 @@ scene-generation-job/
 
 ## Related
 
-- [3D-RE-GEN Pipeline](../workflows/usd-assembly-pipeline.yaml)
+- [Stage 1 text generation Pipeline](../workflows/usd-assembly-pipeline.yaml)
 - [Replicator Bundle Generator](../replicator-job/)
 - [Variation Asset Pipeline](../variation-asset-pipeline-job/)

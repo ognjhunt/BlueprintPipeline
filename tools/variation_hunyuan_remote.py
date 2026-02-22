@@ -8,7 +8,7 @@ Usage:
     python variation_hunyuan_remote.py \
         --image /tmp/variation_inputs/drinking_vessel/reference.png \
         --output /tmp/variation_outputs/drinking_vessel/model.glb \
-        --hunyuan-path /home/nijelhunt1/3D-RE-GEN
+        --hunyuan-path /home/nijelhunt1/Stage 1 text generation
 """
 
 import argparse

@@ -805,7 +805,7 @@ class TestPipelineSelector:
         os.environ["USE_GENIESIM"] = "false"
 
         selector = PipelineSelector()
-        assert selector.get_mode() == PipelineMode.REGEN3D_FIRST
+        assert selector.get_mode() == PipelineMode.STANDARD
         assert selector.get_data_backend() == DataGenerationBackend.BLUEPRINTPIPELINE
         assert is_geniesim_enabled() is False
 

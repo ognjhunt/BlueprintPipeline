@@ -50,7 +50,7 @@ def test_cost_tracker_aggregates_scene_costs(tmp_path: Path) -> None:
     gemini_cost = cost_tracker.track_gemini_call("scene-1", tokens_in=1000, tokens_out=500)
     run_cost = cost_tracker.track_compute(
         "scene-1",
-        "regen3d-job",
+        "stage1-job",
         duration_seconds=120,
         vcpu_count=2,
         memory_gb=4.0,
@@ -68,7 +68,7 @@ def test_cost_tracker_aggregates_scene_costs(tmp_path: Path) -> None:
     assert breakdown.cloud_build == pytest.approx(build_cost)
     assert breakdown.gcs_storage == pytest.approx(storage_cost)
     assert breakdown.geniesim == pytest.approx(geniesim_cost)
-    assert breakdown.by_job["regen3d-job"] == pytest.approx(run_cost)
+    assert breakdown.by_job["stage1-job"] == pytest.approx(run_cost)
 
 
 @pytest.mark.unit

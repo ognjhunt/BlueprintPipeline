@@ -7,11 +7,11 @@ Useful for development, testing, and debugging.
 
 Usage:
     # Generate mock scene and run pipeline
-    python fixtures/generate_mock_regen3d.py --scene-id test_kitchen --output-dir ./test_scenes
+    python fixtures/generate_mock_stage1.py --scene-id test_kitchen --output-dir ./test_scenes
     python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen
 
     # Run with specific steps
-    python tools/run_local_pipeline.py --scene-dir ./scene --steps regen3d,simready,usd
+    python tools/run_local_pipeline.py --scene-dir ./scene --steps text-scene-gen,text-scene-adapter,simready,usd
 
     # Run with validation
     python tools/run_local_pipeline.py --scene-dir ./scene --validate
@@ -26,8 +26,8 @@ Usage:
     python tools/run_local_pipeline.py --scene-dir ./scene --import-poller
 
 Pipeline Steps:
-    0. regen3d-reconstruct - (Optional) Run 3D-RE-GEN on GPU VM (image -> 3D)
-    1. regen3d   - Adapt 3D-RE-GEN outputs to BlueprintPipeline format
+    0. text-scene-gen - Generate text Stage 1 package
+    1. text-scene-adapter - Build canonical Stage 1 artifacts + .stage1_complete
     2. scale     - (Optional) Scale calibration
     3. interactive - Particulate articulation (requires PARTICULATE_ENDPOINT)
     4. simready  - Prepare physics-ready assets
@@ -36,11 +36,12 @@ Pipeline Steps:
     7. replicator - Generate Replicator bundle
     8. variation-gen - Generate variation assets for Genie Sim export
     9. isaac-lab - Generate Isaac Lab task package
-    10. genie-sim-export - Export scene bundle for Genie Sim
-    11. genie-sim-submit - Submit/run Genie Sim generation (API or local)
-    12. genie-sim-import - Import Genie Sim episodes into local bundle
-    13. dataset-delivery - (Optional) Deliver datasets to lab buckets
-    14. validate  - QA validation
+    10. episode-generation - Generate episodes with BlueprintPipeline
+    11. genie-sim-export - Export scene bundle for Genie Sim
+    12. genie-sim-submit - Submit/run Genie Sim generation (API or local)
+    13. genie-sim-import - Import Genie Sim episodes into local bundle
+    14. dataset-delivery - (Optional) Deliver datasets to lab buckets
+    15. validate  - QA validation
 
     Auto-trigger import: By default, a successful genie-sim-submit step
     (status=completed) will automatically run genie-sim-import if it is
@@ -72,12 +73,10 @@ Environment overrides:
     - ADAPTIVE_TIMEOUT_SCENE_COMPLEXITY: Scene complexity for adaptive default timeouts.
     - REQUIRE_BALANCED_ROBOT_EPISODES: Fail validation when cross-robot episode counts mismatch.
     - RELEASE_PATH_RUN: Enforce release-path contracts (requires production mode).
-    - REGEN3D_ALLOW_MATERIALLESS: Dev/test override to bypass Stage 1 material checks.
+    - STAGE1_ALLOW_MATERIALLESS: Dev/test override to bypass Stage 1 material checks.
 
 References:
-- 3D-RE-GEN (arXiv:2512.17459): "image → sim-ready 3D reconstruction"
-  Paper: https://arxiv.org/abs/2512.17459
-  Project: https://3dregen.jdihlmann.com/
+- Stage 1 backends: SceneSmith + SAGE (or hybrid_serial composition)
 
 - DWM (arXiv:2512.17907): Dexterous World Models for egocentric interaction
   Paper: https://arxiv.org/abs/2512.17907
@@ -147,7 +146,16 @@ from tools.error_handling.retry import (
     retry_with_backoff,
 )
 from tools.error_handling.timeout import TimeoutError, timeout_thread
-from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
+try:
+    from tools.inventory_enrichment import enrich_inventory_file, InventoryEnrichmentError
+except Exception:  # pragma: no cover - optional dependency for local/unit-test environments
+    class InventoryEnrichmentError(Exception):
+        """Fallback error when inventory enrichment dependencies are unavailable."""
+
+    def enrich_inventory_file(*_args, **_kwargs):
+        raise InventoryEnrichmentError(
+            "Inventory enrichment dependencies are unavailable (install optional requirements)."
+        )
 from tools.geniesim_adapter.mock_mode import resolve_geniesim_mock_mode
 from tools.lerobot_validation import validate_lerobot_dataset
 from tools.metrics.job_metrics_exporter import export_job_metrics
@@ -197,8 +205,8 @@ def _safe_write_text(path: Path, payload: str, context: str) -> None:
 
 class PipelineStep(str, Enum):
     """Pipeline steps in execution order."""
-    REGEN3D_RECONSTRUCT = "regen3d-reconstruct"  # Run 3D-RE-GEN on remote GPU VM
-    REGEN3D = "regen3d"
+    TEXT_SCENE_GEN = "text-scene-gen"
+    TEXT_SCENE_ADAPTER = "text-scene-adapter"
     SCALE = "scale"
     INTERACTIVE = "interactive"
     SIMREADY = "simready"
@@ -207,6 +215,7 @@ class PipelineStep(str, Enum):
     REPLICATOR = "replicator"
     VARIATION_GEN = "variation-gen"
     ISAAC_LAB = "isaac-lab"
+    EPISODE_GENERATION = "episode-generation"
     GENIESIM_EXPORT = "genie-sim-export"
     GENIESIM_SUBMIT = "genie-sim-submit"
     GENIESIM_IMPORT = "genie-sim-import"
@@ -237,7 +246,8 @@ class LocalPipelineRunner:
 
     # Default step order (free/default workflow)
     DEFAULT_STEPS = [
-        PipelineStep.REGEN3D,
+        PipelineStep.TEXT_SCENE_GEN,
+        PipelineStep.TEXT_SCENE_ADAPTER,
         PipelineStep.SCALE,
         PipelineStep.INTERACTIVE,
         PipelineStep.SIMREADY,
@@ -276,7 +286,7 @@ class LocalPipelineRunner:
         """Initialize the local pipeline runner.
 
         Args:
-            scene_dir: Path to scene directory (contains regen3d/, etc.)
+            scene_dir: Path to scene directory (contains textgen/assets/layout/etc.)
             verbose: Print detailed progress
             skip_interactive: Skip interactive-job (requires external service)
             environment_type: Environment type for policy selection
@@ -336,7 +346,7 @@ class LocalPipelineRunner:
         self._logger = self._configure_logger()
 
         # Setup paths
-        self.regen3d_dir = self.scene_dir / "regen3d"
+        self.stage1_dir = self.scene_dir / "textgen"
         self.assets_dir = self.scene_dir / "assets"
         self.layout_dir = self.scene_dir / "layout"
         self.seg_dir = self.scene_dir / "seg"
@@ -435,19 +445,20 @@ class LocalPipelineRunner:
     ) -> Dict[PipelineStep, List[PipelineStep]]:
         """Return step dependency map for the current run."""
         dependencies: Dict[PipelineStep, List[PipelineStep]] = {
-            PipelineStep.REGEN3D: (
-                [PipelineStep.REGEN3D_RECONSTRUCT]
-                if PipelineStep.REGEN3D_RECONSTRUCT in steps
+            PipelineStep.TEXT_SCENE_ADAPTER: (
+                [PipelineStep.TEXT_SCENE_GEN]
+                if PipelineStep.TEXT_SCENE_GEN in steps
                 else []
             ),
-            PipelineStep.SCALE: [PipelineStep.REGEN3D],
-            PipelineStep.INTERACTIVE: [PipelineStep.REGEN3D],
-            PipelineStep.SIMREADY: [PipelineStep.REGEN3D],
+            PipelineStep.SCALE: [PipelineStep.TEXT_SCENE_ADAPTER],
+            PipelineStep.INTERACTIVE: [PipelineStep.TEXT_SCENE_ADAPTER],
+            PipelineStep.SIMREADY: [PipelineStep.TEXT_SCENE_ADAPTER],
             PipelineStep.USD: [PipelineStep.SIMREADY],
-            PipelineStep.INVENTORY_ENRICHMENT: [PipelineStep.REGEN3D],
+            PipelineStep.INVENTORY_ENRICHMENT: [PipelineStep.TEXT_SCENE_ADAPTER],
             PipelineStep.REPLICATOR: [PipelineStep.USD],
             PipelineStep.VARIATION_GEN: [PipelineStep.REPLICATOR],
             PipelineStep.ISAAC_LAB: [PipelineStep.USD],
+            PipelineStep.EPISODE_GENERATION: [PipelineStep.ISAAC_LAB],
             PipelineStep.DWM: [PipelineStep.USD],
             PipelineStep.DWM_INFERENCE: [PipelineStep.DWM],
             PipelineStep.DREAM2FLOW: [PipelineStep.USD],
@@ -1321,7 +1332,7 @@ class LocalPipelineRunner:
         self,
         step: PipelineStep,
     ) -> Optional[Dict[str, Any]]:
-        if step == PipelineStep.REGEN3D:
+        if step == PipelineStep.TEXT_SCENE_ADAPTER:
             manifest_path = self.assets_dir / "scene_manifest.json"
             if not manifest_path.is_file():
                 return None
@@ -1461,6 +1472,16 @@ class LocalPipelineRunner:
                 "context": {
                     "scene_id": self.scene_id,
                     "isaac_lab_dir": str(self.isaac_lab_dir),
+                },
+            }
+        if step == PipelineStep.EPISODE_GENERATION:
+            return {
+                "checkpoint": QualityGateCheckpoint.EPISODES_GENERATED,
+                "context": {
+                    "scene_id": self.scene_id,
+                    "episodes_prefix": str(self.episodes_dir),
+                    "episode_metadata_path": str(self.episodes_dir / "meta" / "info.json"),
+                    "quality_report_path": str(self.episodes_dir / "quality" / "validation_report.json"),
                 },
             }
         if step == PipelineStep.DWM:
@@ -1970,37 +1991,32 @@ class LocalPipelineRunner:
                 self.log(f"[GCS] ERROR: Failed to download inputs: {exc}", "ERROR")
                 return False
 
-        # Check prerequisites — regen3d/ is only required by steps that
-        # consume raw reconstruction data.  Downstream-only workflows
-        # (e.g. replicator, isaac-lab, episode-gen) that operate from
-        # assets/seg/usd dirs can skip this check.  This also allows
-        # BlueprintCapturePipeline-produced scenes (which store
-        # reconstruction under nurec/ rather than regen3d/) to drive
-        # downstream data-generation steps directly.
-        _regen3d_consuming_steps = {
-            PipelineStep.REGEN3D_RECONSTRUCT,
-            PipelineStep.REGEN3D,
+        # Check prerequisites for Stage 1 text artifacts. Downstream-only
+        # workflows can skip this check if canonical artifacts already exist.
+        _stage1_consuming_steps = {
+            PipelineStep.TEXT_SCENE_GEN,
+            PipelineStep.TEXT_SCENE_ADAPTER,
             PipelineStep.SCALE,
             PipelineStep.INTERACTIVE,
             PipelineStep.VALIDATE,
         }
-        needs_regen3d = bool(set(steps) & _regen3d_consuming_steps)
+        needs_stage1 = bool(set(steps) & _stage1_consuming_steps)
 
-        if not self.regen3d_dir.is_dir():
-            if PipelineStep.REGEN3D_RECONSTRUCT in steps:
-                self.log("regen3d/ dir will be created by regen3d-reconstruct step")
-                self.regen3d_dir.mkdir(parents=True, exist_ok=True)
-            elif needs_regen3d:
-                self.log(f"ERROR: 3D-RE-GEN output not found at {self.regen3d_dir}", "ERROR")
+        if not self.stage1_dir.is_dir():
+            if PipelineStep.TEXT_SCENE_GEN in steps:
+                self.log("textgen/ directory will be created by text-scene-gen step")
+                self.stage1_dir.mkdir(parents=True, exist_ok=True)
+            elif needs_stage1:
+                self.log(f"ERROR: Stage 1 output not found at {self.stage1_dir}", "ERROR")
                 self.log(
-                    "Run: python fixtures/generate_mock_regen3d.py first, "
-                    "or add regen3d-reconstruct to --steps",
+                    "Run: python fixtures/generate_mock_stage1.py first, "
+                    "or add text-scene-gen to --steps",
                     "ERROR",
                 )
                 return False
             else:
                 self.log(
-                    f"regen3d/ not found at {self.regen3d_dir} — "
+                    f"textgen/ not found at {self.stage1_dir} — "
                     "skipping (not required by requested steps)",
                     "WARNING",
                 )
@@ -2168,7 +2184,7 @@ class LocalPipelineRunner:
                             f"[GCS] WARNING: GCS upload failed for {step.value}: {exc}",
                             "WARNING",
                         )
-            if step == PipelineStep.REGEN3D and self._pending_articulation_preflight:
+            if step == PipelineStep.TEXT_SCENE_ADAPTER and self._pending_articulation_preflight:
                 if not self._preflight_articulation_requirements(steps):
                     return False
             return True
@@ -2462,8 +2478,8 @@ class LocalPipelineRunner:
     def _map_jobs_to_steps(self, job_sequence: List[str]) -> List[PipelineStep]:
         """Map pipeline selector job names to local runner steps."""
         mapping = {
-            "regen3d-reconstruct-job": PipelineStep.REGEN3D_RECONSTRUCT,
-            "regen3d-job": PipelineStep.REGEN3D,
+            "text-scene-gen-job": PipelineStep.TEXT_SCENE_GEN,
+            "text-scene-adapter-job": PipelineStep.TEXT_SCENE_ADAPTER,
             "scale-job": PipelineStep.SCALE,
             "interactive-job": PipelineStep.INTERACTIVE,
             "simready-job": PipelineStep.SIMREADY,
@@ -2471,6 +2487,7 @@ class LocalPipelineRunner:
             "replicator-job": PipelineStep.REPLICATOR,
             "variation-gen-job": PipelineStep.VARIATION_GEN,
             "isaac-lab-job": PipelineStep.ISAAC_LAB,
+            "episode-generation-job": PipelineStep.EPISODE_GENERATION,
             "genie-sim-export-job": PipelineStep.GENIESIM_EXPORT,
             "genie-sim-submit-job": PipelineStep.GENIESIM_SUBMIT,
             "genie-sim-import-job": PipelineStep.GENIESIM_IMPORT,
@@ -2489,7 +2506,7 @@ class LocalPipelineRunner:
         """Validate articulation requirements before running steps."""
         manifest_path = self.assets_dir / "scene_manifest.json"
         if not manifest_path.is_file():
-            if PipelineStep.REGEN3D in steps:
+            if PipelineStep.TEXT_SCENE_ADAPTER in steps:
                 self._pending_articulation_preflight = True
                 return True
             return True
@@ -2617,13 +2634,16 @@ class LocalPipelineRunner:
         self.log(f"\n--- Running step: {step.value} ---")
 
         try:
-            if step == PipelineStep.REGEN3D_RECONSTRUCT:
+            if step == PipelineStep.TEXT_SCENE_GEN:
                 result = self._run_with_timeout(
-                    PipelineStep.REGEN3D_RECONSTRUCT,
-                    self._run_regen3d_reconstruct,
+                    PipelineStep.TEXT_SCENE_GEN,
+                    self._run_text_scene_gen,
                 )
-            elif step == PipelineStep.REGEN3D:
-                result = self._run_with_timeout(PipelineStep.REGEN3D, self._run_regen3d_adapter)
+            elif step == PipelineStep.TEXT_SCENE_ADAPTER:
+                result = self._run_with_timeout(
+                    PipelineStep.TEXT_SCENE_ADAPTER,
+                    self._run_text_scene_adapter,
+                )
             elif step == PipelineStep.SCALE:
                 result = self._run_with_retry(PipelineStep.SCALE, self._run_scale)
             elif step == PipelineStep.INTERACTIVE:
@@ -2643,6 +2663,11 @@ class LocalPipelineRunner:
                 result = self._run_with_timeout(PipelineStep.VARIATION_GEN, self._run_variation_gen)
             elif step == PipelineStep.ISAAC_LAB:
                 result = self._run_with_timeout(PipelineStep.ISAAC_LAB, self._run_isaac_lab)
+            elif step == PipelineStep.EPISODE_GENERATION:
+                result = self._run_with_timeout(
+                    PipelineStep.EPISODE_GENERATION,
+                    self._run_episode_generation,
+                )
             elif step == PipelineStep.GENIESIM_EXPORT:
                 result = self._run_with_timeout(
                     PipelineStep.GENIESIM_EXPORT,
@@ -2716,236 +2741,209 @@ class LocalPipelineRunner:
 
         return result
 
-    def _find_input_image(self) -> Optional[Path]:
-        """Find the best source image for regen3d reconstruction."""
-        supported_exts = {".png", ".jpg", ".jpeg"}
-        input_dir = self.scene_dir / "input"
-        candidates: List[Path] = []
+    def _run_text_scene_gen(self) -> StepResult:
+        """Generate text Stage 1 artifacts under textgen/."""
+        from tools.source_pipeline.generator import generate_text_scene_package
+        from tools.source_pipeline.request import (
+            PipelineSourceMode,
+            TextBackend,
+            normalize_scene_request,
+            scene_request_to_dict,
+        )
 
-        if input_dir.is_dir():
-            candidates.extend(
-                path for path in input_dir.iterdir()
-                if path.is_file() and path.suffix.lower() in supported_exts
-            )
-
-        # Backwards compatibility: allow source image in scene root.
-        if not candidates and self.scene_dir.is_dir():
-            candidates.extend(
-                path for path in self.scene_dir.iterdir()
-                if path.is_file() and path.suffix.lower() in supported_exts
-            )
-
-        if not candidates:
-            return None
-
-        preferred_name = None
-        if self._gcs_sync and self._gcs_sync.input_object:
-            preferred_name = Path(self._gcs_sync.input_object).name
-        if preferred_name:
-            for path in candidates:
-                if path.name == preferred_name:
-                    return path
-
-        if len(candidates) > 1:
-            names = ", ".join(path.name for path in sorted(candidates)[:5])
-            self.log(
-                f"Multiple input images found; choosing newest by mtime. Candidates: {names}",
-                "WARNING",
-            )
-
-        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        return candidates[0]
-
-    def _run_regen3d_reconstruct(self) -> StepResult:
-        """Run 3D-RE-GEN reconstruction on a remote GPU VM.
-
-        Takes a source image from scene_dir/input/ and runs the full
-        3D-RE-GEN pipeline (arXiv:2512.17459) to produce 3D assets in
-        the regen3d/ directory.
-        """
-        from tools.regen3d_runner import Regen3DRunner, Regen3DConfig
-
-        # Find input image.
-        input_dir = self.scene_dir / "input"
-        input_image = self._find_input_image()
-
-        if input_image is None:
+        request_path = self.scene_dir / "prompts" / "scene_request.json"
+        if not request_path.is_file():
             return StepResult(
-                step=PipelineStep.REGEN3D_RECONSTRUCT,
+                step=PipelineStep.TEXT_SCENE_GEN,
                 success=False,
                 duration_seconds=0,
-                message=(
-                    f"No input image found. Place an image at "
-                    f"{input_dir}/<any_name>.png|jpg|jpeg"
-                ),
+                message=f"Scene request missing: {request_path}",
             )
 
-        self.log(f"Input image: {input_image}")
+        try:
+            request_payload = _load_json(request_path, "scene request")
+        except NonRetryableError as exc:
+            return StepResult(
+                step=PipelineStep.TEXT_SCENE_GEN,
+                success=False,
+                duration_seconds=0,
+                message=str(exc),
+            )
 
-        # Load reconstruction defaults from configs/regen3d_reconstruct.env
-        regen3d_env_path = Path(__file__).resolve().parents[1] / "configs" / "regen3d_reconstruct.env"
-        if regen3d_env_path.is_file():
-            load_dotenv(dotenv_path=regen3d_env_path, override=False)
-            self.log(f"Loaded REGEN3D env defaults from {regen3d_env_path}")
-        else:
+        default_backend_raw = (os.getenv("TEXT_BACKEND_DEFAULT", "hybrid_serial") or "").strip().lower()
+        if not default_backend_raw:
+            default_backend_raw = TextBackend.HYBRID_SERIAL.value
+        try:
+            default_backend = TextBackend(default_backend_raw)
+        except ValueError:
             self.log(
-                f"REGEN3D env defaults not found at {regen3d_env_path}; using current process env",
+                f"Invalid TEXT_BACKEND_DEFAULT={default_backend_raw}; using hybrid_serial",
                 "WARNING",
             )
+            default_backend = TextBackend.HYBRID_SERIAL
 
-        config = Regen3DConfig.from_env()
-        self.log(
-            "REGEN3D config: "
-            f"vm={config.vm_host} zone={config.vm_zone} repo={config.repo_path} "
-            f"steps={config.steps} timeout_s={config.timeout_s} device={config.device}"
-        )
-        runner = Regen3DRunner(config=config, verbose=self.verbose)
-
-        result = runner.run_reconstruction(
-            input_image=input_image,
-            scene_id=self.scene_id,
-            output_dir=self.regen3d_dir,
-            environment_type=self.environment_type,
-        )
-
-        if not result.success:
+        try:
+            request = normalize_scene_request(
+                request_payload,
+                default_source_mode=PipelineSourceMode.TEXT,
+                default_text_backend=default_backend,
+                max_seeds=parse_int_env(os.getenv("TEXT_GEN_MAX_SEEDS"), default=16, min_value=1, name="TEXT_GEN_MAX_SEEDS"),
+            )
+        except Exception as exc:
             return StepResult(
-                step=PipelineStep.REGEN3D_RECONSTRUCT,
+                step=PipelineStep.TEXT_SCENE_GEN,
                 success=False,
-                duration_seconds=result.duration_seconds,
-                message=f"3D-RE-GEN reconstruction failed: {result.error}",
+                duration_seconds=0,
+                message=f"Invalid scene request: {self._summarize_exception(exc)}",
             )
 
-        self.log(
-            f"3D-RE-GEN reconstruction complete: "
-            f"{result.objects_count} objects in {result.duration_seconds:.1f}s"
+        seed = parse_int_env(os.getenv("TEXT_SEED"), default=1, min_value=1, name="TEXT_SEED")
+        package = generate_text_scene_package(
+            scene_id=self.scene_id,
+            prompt=request.prompt,
+            quality_tier=request.quality_tier,
+            seed=seed,
+            provider_policy=request.provider_policy,
+            constraints=request.constraints,
+            text_backend=request.text_backend.value,
+        )
+
+        textgen_root = self.scene_dir / "textgen"
+        textgen_root.mkdir(parents=True, exist_ok=True)
+        normalized_request = scene_request_to_dict(request)
+
+        _safe_write_text(
+            textgen_root / "request.normalized.json",
+            json.dumps(normalized_request, indent=2),
+            context="normalized scene request",
+        )
+        _safe_write_text(
+            textgen_root / "package.json",
+            json.dumps(package, indent=2),
+            context="text generation package",
+        )
+        _safe_write_text(
+            textgen_root / "placement_graph.json",
+            json.dumps(package.get("placement_graph") or {"relations": []}, indent=2),
+            context="placement graph",
+        )
+        _safe_write_text(
+            textgen_root / "quality_gate_report.json",
+            json.dumps(package.get("quality_gate_report") or {}, indent=2),
+            context="quality gate report",
+        )
+        _safe_write_text(
+            textgen_root / ".textgen_complete",
+            json.dumps(
+                {
+                    "scene_id": self.scene_id,
+                    "status": "completed",
+                    "source_mode": request.source_mode.value,
+                    "text_backend": request.text_backend.value,
+                    "quality_tier": request.quality_tier.value,
+                    "provider_policy": request.provider_policy,
+                    "seed": seed,
+                },
+                indent=2,
+            ),
+            context="text generation completion marker",
         )
 
         return StepResult(
-            step=PipelineStep.REGEN3D_RECONSTRUCT,
+            step=PipelineStep.TEXT_SCENE_GEN,
             success=True,
-            duration_seconds=result.duration_seconds,
-            message=f"3D-RE-GEN reconstruction: {result.objects_count} objects",
+            duration_seconds=0,
+            message="Text scene generation completed",
             outputs={
-                "objects_count": result.objects_count,
-                "output_dir": str(result.output_dir),
-                "input_image": str(input_image),
+                "request_normalized": str(textgen_root / "request.normalized.json"),
+                "package": str(textgen_root / "package.json"),
+                "completion_marker": str(textgen_root / ".textgen_complete"),
             },
         )
 
-    def _run_regen3d_adapter(self) -> StepResult:
-        """Run the 3D-RE-GEN adapter."""
-        from tools.regen3d_adapter import Regen3DAdapter
+    def _run_text_scene_adapter(self) -> StepResult:
+        """Convert textgen package into canonical assets/layout/seg Stage 1 artifacts."""
+        from tools.source_pipeline.adapter import build_manifest_layout_inventory
 
-        adapter = Regen3DAdapter(verbose=self.verbose)
+        request_path = self.scene_dir / "prompts" / "scene_request.json"
+        normalized_request_path = self.scene_dir / "textgen" / "request.normalized.json"
+        package_path = self.scene_dir / "textgen" / "package.json"
 
-        # Load 3D-RE-GEN outputs
-        regen3d_output = adapter.load_regen3d_output(self.regen3d_dir)
-        self.log(f"Loaded {len(regen3d_output.objects)} objects from 3D-RE-GEN")
-
-        # Generate manifest
-        manifest = adapter.create_manifest(
-            regen3d_output,
-            scene_id=self.scene_id,
-            environment_type=self.environment_type,
-        )
-        manifest_path = self.assets_dir / "scene_manifest.json"
-        _safe_write_text(
-            manifest_path,
-            json.dumps(manifest, indent=2),
-            context="scene manifest",
-        )
-        manifest = self._annotate_articulation_requirements(manifest, manifest_path)
-        self.log(f"Wrote manifest: {manifest_path}")
-
-        # Generate layout
-        layout = adapter.create_layout(regen3d_output, apply_scale_factor=1.0)
-        layout_path = self.layout_dir / "scene_layout_scaled.json"
-        _safe_write_text(
-            layout_path,
-            json.dumps(layout, indent=2),
-            context="scene layout",
-        )
-        self.log(f"Wrote layout: {layout_path}")
-
-        # Copy assets
-        asset_paths = adapter.copy_assets(
-            regen3d_output,
-            self.scene_dir,
-            assets_prefix="assets",
-        )
-        self.log(f"Copied {len(asset_paths)} assets")
-
-        # Generate inventory
-        inventory = self._generate_inventory(regen3d_output, manifest=manifest)
-        inventory_path = self.seg_dir / "inventory.json"
-        _safe_write_text(
-            inventory_path,
-            json.dumps(inventory, indent=2),
-            context="inventory",
-        )
-        self.log(f"Wrote inventory: {inventory_path}")
-
-        quality_ok, quality_message, quality_details = self._validate_stage1_quality(
-            regen3d_output=regen3d_output,
-            manifest=manifest,
-            layout=layout,
-        )
-        if self._should_skip_quality_gates():
-            # Stage 1 quality is a gate; allow local/test workflows to proceed when
-            # SKIP_QUALITY_GATES is set (never allowed in production).
-            quality_details = dict(quality_details)
-            quality_details["skipped"] = True
-            quality_details["skip_reason"] = "SKIP_QUALITY_GATES environment override"
-            quality_ok = True
-            quality_message = "Stage 1 quality gate skipped (SKIP_QUALITY_GATES)"
-        quality_report_path = self._write_stage1_quality_report(
-            quality_ok=quality_ok,
-            quality_message=quality_message,
-            quality_details=quality_details,
-        )
-        if not quality_ok:
-            failure_outputs = dict(quality_details)
-            failure_outputs["stage1_quality_report"] = str(quality_report_path)
+        if not request_path.is_file():
             return StepResult(
-                step=PipelineStep.REGEN3D,
+                step=PipelineStep.TEXT_SCENE_ADAPTER,
                 success=False,
                 duration_seconds=0,
-                message=quality_message,
-                outputs=failure_outputs,
+                message=f"Scene request missing: {request_path}",
+            )
+        if not package_path.is_file():
+            return StepResult(
+                step=PipelineStep.TEXT_SCENE_ADAPTER,
+                success=False,
+                duration_seconds=0,
+                message=f"Text generation package missing: {package_path}",
             )
 
-        # Write completion marker
-        marker_path = self.assets_dir / ".regen3d_complete"
-        marker_content = {
-            "status": "complete",
+        try:
+            source_request = (
+                _load_json(normalized_request_path, "normalized scene request")
+                if normalized_request_path.is_file()
+                else _load_json(request_path, "scene request")
+            )
+            textgen_payload = _load_json(package_path, "text generation package")
+            result = build_manifest_layout_inventory(
+                root=self.scene_dir,
+                scene_id=self.scene_id,
+                assets_prefix="assets",
+                layout_prefix="layout",
+                seg_prefix="seg",
+                textgen_payload=textgen_payload,
+                source_request=source_request,
+            )
+        except Exception as exc:
+            self._log_exception_traceback("Text scene adapter failed", exc)
+            return StepResult(
+                step=PipelineStep.TEXT_SCENE_ADAPTER,
+                success=False,
+                duration_seconds=0,
+                message=f"Text scene adapter failed: {self._summarize_exception(exc)}",
+            )
+
+        adapter_summary = {
             "scene_id": self.scene_id,
-            "objects_count": len(regen3d_output.objects),
-            "completed_at": datetime.utcnow().isoformat() + "Z",
+            "status": "completed",
+            "outputs": result,
         }
+        textgen_root = self.scene_dir / "textgen"
+        textgen_root.mkdir(parents=True, exist_ok=True)
         _safe_write_text(
-            marker_path,
-            json.dumps(marker_content, indent=2),
-            context="regen3d completion marker",
+            textgen_root / "adapter_summary.json",
+            json.dumps(adapter_summary, indent=2),
+            context="adapter summary",
+        )
+        _safe_write_text(
+            textgen_root / ".text_adapter_complete",
+            json.dumps(adapter_summary, indent=2),
+            context="adapter completion marker",
         )
 
         return StepResult(
-            step=PipelineStep.REGEN3D,
+            step=PipelineStep.TEXT_SCENE_ADAPTER,
             success=True,
             duration_seconds=0,
-            message="3D-RE-GEN adapter completed",
+            message="Text scene adapter completed",
             outputs={
-                "manifest": str(manifest_path),
-                "layout": str(layout_path),
-                "objects_count": len(regen3d_output.objects),
-                "stage1_quality_report": str(quality_report_path),
+                "manifest": str(self.assets_dir / "scene_manifest.json"),
+                "layout": str(self.layout_dir / "scene_layout_scaled.json"),
+                "inventory": str(self.seg_dir / "inventory.json"),
+                "completion_marker": str(self.assets_dir / ".stage1_complete"),
             },
         )
 
     def _validate_stage1_quality(
         self,
         *,
-        regen3d_output: Any,
+        stage1_output: Any,
         manifest: Dict[str, Any],
         layout: Dict[str, Any],
     ) -> Tuple[bool, str, Dict[str, Any]]:
@@ -2953,8 +2951,8 @@ class LocalPipelineRunner:
         issues: List[str] = []
         details: Dict[str, Any] = {}
 
-        foreground_count = len(getattr(regen3d_output, "objects", []) or [])
-        has_background = getattr(regen3d_output, "background", None) is not None
+        foreground_count = len(getattr(stage1_output, "objects", []) or [])
+        has_background = getattr(stage1_output, "background", None) is not None
         manifest_objects = manifest.get("objects") if isinstance(manifest, dict) else None
         layout_objects = layout.get("objects") if isinstance(layout, dict) else None
 
@@ -2966,15 +2964,15 @@ class LocalPipelineRunner:
         details["layout_object_count"] = (
             len(layout_objects) if isinstance(layout_objects, list) else 0
         )
-        quality_mode = os.getenv("REGEN3D_QUALITY_MODE", "quality").strip().lower()
+        quality_mode = os.getenv("STAGE1_QUALITY_MODE", "quality").strip().lower()
         if quality_mode not in {"quality", "compat"}:
             quality_mode = "quality"
         allow_textureless = parse_bool_env(
-            os.getenv("REGEN3D_ALLOW_TEXTURELESS"),
+            os.getenv("STAGE1_ALLOW_TEXTURELESS"),
             default=False,
         )
         allow_materialless_requested = parse_bool_env(
-            os.getenv("REGEN3D_ALLOW_MATERIALLESS"),
+            os.getenv("STAGE1_ALLOW_MATERIALLESS"),
             default=False,
         )
         allow_materialless = bool(
@@ -2985,50 +2983,50 @@ class LocalPipelineRunner:
         details["allow_materialless_requested"] = bool(allow_materialless_requested)
         details["allow_materialless_override"] = allow_materialless
         if allow_materialless_requested and self._is_production_mode():
-            issues.append("REGEN3D_ALLOW_MATERIALLESS is not allowed in production mode.")
+            issues.append("STAGE1_ALLOW_MATERIALLESS is not allowed in production mode.")
 
         max_objects_quality = parse_int_env(
-            os.getenv("REGEN3D_MAX_OBJECTS_QUALITY"),
+            os.getenv("STAGE1_MAX_OBJECTS_QUALITY"),
             default=18,
             min_value=1,
-            name="REGEN3D_MAX_OBJECTS_QUALITY",
+            name="STAGE1_MAX_OBJECTS_QUALITY",
         )
         max_objects_compat = parse_int_env(
-            os.getenv("REGEN3D_MAX_OBJECTS_COMPAT"),
+            os.getenv("STAGE1_MAX_OBJECTS_COMPAT"),
             default=40,
             min_value=1,
-            name="REGEN3D_MAX_OBJECTS_COMPAT",
+            name="STAGE1_MAX_OBJECTS_COMPAT",
         )
         max_instances_quality = parse_int_env(
-            os.getenv("REGEN3D_MAX_INSTANCES_PER_CLASS_QUALITY"),
+            os.getenv("STAGE1_MAX_INSTANCES_PER_CLASS_QUALITY"),
             default=4,
             min_value=1,
-            name="REGEN3D_MAX_INSTANCES_PER_CLASS_QUALITY",
+            name="STAGE1_MAX_INSTANCES_PER_CLASS_QUALITY",
         )
         max_instances_compat = parse_int_env(
-            os.getenv("REGEN3D_MAX_INSTANCES_PER_CLASS_COMPAT"),
+            os.getenv("STAGE1_MAX_INSTANCES_PER_CLASS_COMPAT"),
             default=10,
             min_value=1,
-            name="REGEN3D_MAX_INSTANCES_PER_CLASS_COMPAT",
+            name="STAGE1_MAX_INSTANCES_PER_CLASS_COMPAT",
         )
         max_masks_quality = parse_int_env(
-            os.getenv("REGEN3D_MAX_MASKS"),
+            os.getenv("STAGE1_MAX_MASKS"),
             default=40,
             min_value=1,
-            name="REGEN3D_MAX_MASKS",
+            name="STAGE1_MAX_MASKS",
         )
         min_mask_ratio_quality = parse_float_env(
-            os.getenv("REGEN3D_MIN_MASK_AREA_RATIO_QUALITY"),
+            os.getenv("STAGE1_MIN_MASK_AREA_RATIO_QUALITY"),
             default=0.0002,
             min_value=0.0,
             max_value=1.0,
-            name="REGEN3D_MIN_MASK_AREA_RATIO_QUALITY",
+            name="STAGE1_MIN_MASK_AREA_RATIO_QUALITY",
         )
         max_tiny_masks_quality = parse_int_env(
-            os.getenv("REGEN3D_MAX_TINY_MASKS_QUALITY"),
+            os.getenv("STAGE1_MAX_TINY_MASKS_QUALITY"),
             default=2,
             min_value=0,
-            name="REGEN3D_MAX_TINY_MASKS_QUALITY",
+            name="STAGE1_MAX_TINY_MASKS_QUALITY",
         )
         details["max_object_limit"] = (
             max_objects_quality if quality_mode == "quality" else max_objects_compat
@@ -3066,7 +3064,7 @@ class LocalPipelineRunner:
 
         class_counts = Counter(
             _class_name_for_object(obj)
-            for obj in (getattr(regen3d_output, "objects", []) or [])
+            for obj in (getattr(stage1_output, "objects", []) or [])
         )
         details["foreground_class_counts"] = dict(class_counts)
         max_instances_limit = (
@@ -3095,7 +3093,7 @@ class LocalPipelineRunner:
             "with_textures": 0,
             "parse_errors": [],
         }
-        for obj in (getattr(regen3d_output, "objects", []) or []):
+        for obj in (getattr(stage1_output, "objects", []) or []):
             mesh_path_value = getattr(obj, "mesh_path", "")
             if not mesh_path_value:
                 continue
@@ -3130,10 +3128,10 @@ class LocalPipelineRunner:
             issues.append(
                 "Object GLBs contain no texture definitions "
                 "(quality mode requires textures unless "
-                "REGEN3D_ALLOW_TEXTURELESS=true)."
+                "STAGE1_ALLOW_TEXTURELESS=true)."
             )
 
-        combined_scene_path = self.regen3d_dir / "glb" / "scene" / "combined_scene.glb"
+        combined_scene_path = self.stage1_dir / "glb" / "scene" / "combined_scene.glb"
         combined_scene_info = self._inspect_glb_metadata(combined_scene_path)
         details["combined_scene"] = {
             "path": str(combined_scene_path),
@@ -3145,7 +3143,7 @@ class LocalPipelineRunner:
         }
         if not combined_scene_info["exists"]:
             issues.append(
-                "Combined scene GLB is missing at regen3d/glb/scene/combined_scene.glb."
+                "Combined scene GLB is missing at assets/*/asset.glb."
             )
         elif combined_scene_info["parse_error"]:
             issues.append(
@@ -3164,11 +3162,11 @@ class LocalPipelineRunner:
             issues.append(
                 "Combined scene GLB contains no texture definitions "
                 "(quality mode requires textures unless "
-                "REGEN3D_ALLOW_TEXTURELESS=true)."
+                "STAGE1_ALLOW_TEXTURELESS=true)."
             )
 
         mask_stats = self._inspect_mask_quality(
-            self.regen3d_dir / "masks",
+            self.stage1_dir / "masks",
             tiny_ratio_threshold=float(min_mask_ratio_quality),
         )
         details["mask_stats"] = mask_stats
@@ -3473,10 +3471,10 @@ class LocalPipelineRunner:
 
     def _generate_inventory(
         self,
-        regen3d_output,
+        stage1_output,
         manifest: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Generate semantic inventory from 3D-RE-GEN output."""
+        """Generate semantic inventory from Stage 1 output."""
         manifest_by_id: Dict[str, Dict[str, Any]] = {}
         if manifest:
             manifest_by_id = {
@@ -3486,7 +3484,7 @@ class LocalPipelineRunner:
             }
 
         objects = []
-        for obj in regen3d_output.objects:
+        for obj in stage1_output.objects:
             manifest_obj = manifest_by_id.get(str(obj.id), {})
             manifest_articulation = manifest_obj.get("articulation") or {}
             articulation_hint = manifest_articulation.get("type")
@@ -3524,7 +3522,7 @@ class LocalPipelineRunner:
             "total_objects": len(objects),
             "objects": objects,
             "metadata": {
-                "source": "regen3d_adapter",
+                "source": "stage1_adapter",
                 "generated_at": datetime.utcnow().isoformat() + "Z",
             },
         }
@@ -3857,7 +3855,6 @@ class LocalPipelineRunner:
         env.update({
             "BUCKET": os.getenv("BUCKET", "local"),
             "ASSETS_PREFIX": str(self.assets_dir),
-            "REGEN3D_PREFIX": str(self.regen3d_dir),
             "SCENE_ID": self.scene_id,
             "PARTICULATE_ENDPOINT": endpoint,
             "PARTICULATE_MODE": particulate_mode,
@@ -3952,7 +3949,7 @@ class LocalPipelineRunner:
                 step=PipelineStep.SIMREADY,
                 success=False,
                 duration_seconds=0,
-                message="Manifest not found - run regen3d step first",
+                message="Manifest not found - run text-scene-adapter step first",
             )
 
         missing_usdz = self._find_missing_usdz_assets()
@@ -4980,6 +4977,81 @@ class LocalPipelineRunner:
                 "Isaac Lab task generation failed",
             )
 
+    def _run_episode_generation(self) -> StepResult:
+        """Run BlueprintPipeline episode generation locally."""
+        start_time = time.time()
+        manifest_path = self.assets_dir / "scene_manifest.json"
+        if not manifest_path.is_file():
+            return StepResult(
+                step=PipelineStep.EPISODE_GENERATION,
+                success=False,
+                duration_seconds=0,
+                message="Manifest not found - run simready/usd first",
+            )
+
+        gcs_scene_dir = self._ensure_gcs_scene_link()
+        if gcs_scene_dir is None:
+            return StepResult(
+                step=PipelineStep.EPISODE_GENERATION,
+                success=False,
+                duration_seconds=0,
+                message="Unable to prepare GCS mount mapping for episode generation "
+                "(check GCS_MOUNT_ROOT)",
+            )
+
+        assets_prefix = f"scenes/{self.scene_id}/assets"
+        episodes_prefix = f"scenes/{self.scene_id}/episodes"
+        env = os.environ.copy()
+        env.update({
+            "BUCKET": env.get("BUCKET", "local"),
+            "SCENE_ID": self.scene_id,
+            "ASSETS_PREFIX": assets_prefix,
+            "EPISODES_PREFIX": episodes_prefix,
+        })
+        env["PYTHONPATH"] = f"{REPO_ROOT}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
+
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "episode-generation-job" / "generate_episodes.py"),
+                ],
+                check=True,
+                env=env,
+                cwd=str(REPO_ROOT),
+            )
+        except subprocess.CalledProcessError as exc:
+            return StepResult(
+                step=PipelineStep.EPISODE_GENERATION,
+                success=False,
+                duration_seconds=time.time() - start_time,
+                message=f"Episode generation failed: {self._summarize_exception(exc)}",
+            )
+        except Exception as exc:
+            return self._handle_step_exception(
+                PipelineStep.EPISODE_GENERATION,
+                exc,
+                "Episode generation failed",
+                duration_seconds=time.time() - start_time,
+            )
+
+        marker_path = self.episodes_dir / ".episodes_complete"
+        if not marker_path.exists():
+            self._write_marker(marker_path, status="completed")
+
+        quality_report = self.episodes_dir / "quality" / "validation_report.json"
+        return StepResult(
+            step=PipelineStep.EPISODE_GENERATION,
+            success=True,
+            duration_seconds=time.time() - start_time,
+            message="Episode generation completed",
+            outputs={
+                "episodes_prefix": str(self.episodes_dir),
+                "completion_marker": str(marker_path),
+                "quality_report": str(quality_report),
+            },
+        )
+
     def _run_geniesim_export(self) -> StepResult:
         """Run Genie Sim export job locally."""
         start_time = time.time()
@@ -4997,7 +5069,7 @@ class LocalPipelineRunner:
         manifest_path = self.assets_dir / "scene_manifest.json"
         try:
             if not manifest_path.is_file():
-                raise NonRetryableError("Manifest not found - run regen3d step first")
+                raise NonRetryableError("Manifest not found - run text-scene-adapter step first")
         except NonRetryableError as exc:
             return StepResult(
                 step=PipelineStep.GENIESIM_EXPORT,
@@ -6504,7 +6576,7 @@ class LocalPipelineRunner:
                     step=PipelineStep.DWM,
                     success=False,
                     duration_seconds=0,
-                    message="Manifest not found - run regen3d step first",
+                    message="Manifest not found - run text-scene-adapter step first",
                 )
 
             # Run DWM preparation
@@ -6638,7 +6710,7 @@ class LocalPipelineRunner:
                     step=PipelineStep.DREAM2FLOW,
                     success=False,
                     duration_seconds=0,
-                    message="Manifest not found - run regen3d step first",
+                    message="Manifest not found - run text-scene-adapter step first",
                 )
 
             # Run Dream2Flow preparation
@@ -6787,17 +6859,18 @@ class LocalPipelineRunner:
 
     def _expected_output_paths(self, step: PipelineStep) -> List[Path]:
         """Expected output paths for checkpoint validation."""
-        if step == PipelineStep.REGEN3D_RECONSTRUCT:
+        if step == PipelineStep.TEXT_SCENE_GEN:
             return [
-                self.regen3d_dir / "scene_info.json",
-                self.regen3d_dir / "objects",
+                self.stage1_dir / "package.json",
+                self.stage1_dir / "request.normalized.json",
+                self.stage1_dir / ".textgen_complete",
             ]
-        if step == PipelineStep.REGEN3D:
+        if step == PipelineStep.TEXT_SCENE_ADAPTER:
             return [
                 self.assets_dir / "scene_manifest.json",
                 self.layout_dir / "scene_layout_scaled.json",
                 self.seg_dir / "inventory.json",
-                self.assets_dir / ".regen3d_complete",
+                self.assets_dir / ".stage1_complete",
             ]
         if step == PipelineStep.SCALE:
             return [self.assets_dir / ".scale_complete"]
@@ -6828,6 +6901,12 @@ class LocalPipelineRunner:
             ]
         if step == PipelineStep.ISAAC_LAB:
             return [self.isaac_lab_dir / ".isaac_lab_complete"]
+        if step == PipelineStep.EPISODE_GENERATION:
+            return [
+                self.episodes_dir / "meta" / "info.json",
+                self.episodes_dir / "quality" / "validation_report.json",
+                self.episodes_dir / ".episodes_complete",
+            ]
         if step == PipelineStep.GENIESIM_EXPORT:
             return [
                 self.geniesim_dir / "scene_graph.json",
@@ -6913,7 +6992,7 @@ def main():
     parser.add_argument(
         "--scene-dir",
         required=True,
-        help="Path to scene directory (contains regen3d/, etc.)",
+        help="Path to scene directory (contains textgen/assets/, etc.)",
     )
     parser.add_argument(
         "--steps",

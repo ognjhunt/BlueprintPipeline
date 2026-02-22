@@ -1143,7 +1143,7 @@ class SceneImageGenerator:
         try:
             bucket = self.storage_client.bucket(self.gcs_bucket)
 
-            # Write the source image marker that triggers 3D-RE-GEN
+            # Write the source image marker that triggers Stage 1 text generation
             marker_path = f"scenes/{scene_id}/.scene_generation_complete"
             marker_blob = bucket.blob(marker_path)
 

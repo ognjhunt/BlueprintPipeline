@@ -2,8 +2,8 @@
 """Offline checks for workflow triggers and a dry-run simulation.
 
 This script validates that:
-- usd-assembly-pipeline listens for 3D-RE-GEN completion markers.
-- A dry-run simulation shows the 3D-RE-GEN pipeline flow.
+- usd-assembly-pipeline listens for Stage 1 completion markers.
+- A dry-run simulation shows the Stage 1 -> Stage 5 pipeline flow.
 
 It is meant to give confidence in the wiring without needing Cloud access.
 """
@@ -32,15 +32,15 @@ def check_patterns(path: Path, expectations: Iterable[Tuple[str, str]]) -> List[
 
 
 def verify_usd_assembly() -> List[str]:
-    """Confirm usd-assembly-pipeline.yaml watches regen3d completion markers."""
+    """Confirm usd-assembly-pipeline.yaml watches Stage 1 completion markers."""
     path = REPO_ROOT / "workflows" / "usd-assembly-pipeline.yaml"
     if not path.exists():
         return [f"USD assembly pipeline not found: {path}"]
 
     expectations = [
         (
-            "GCS finalize comment",
-            r"Trigger: Cloud Storage object finalized event",
+            "Stage 1 completion marker filter",
+            r"assets/\\.stage1_complete",
         ),
         (
             "Simready job invocation",
@@ -87,51 +87,33 @@ def verify_geniesim_export_trigger(scene_id: str = "demo") -> List[str]:
     return []
 
 
-def dry_run_regen3d_pipeline(scene_id: str = "demo", bucket: str = "demo-bucket") -> List[str]:
-    """Simulate the 3D-RE-GEN pipeline flow.
-
-    This is a lightweight representation of the orchestration steps; it
-    creates temporary marker files to prove the ordering of actions.
-    """
+def dry_run_stage1_pipeline(scene_id: str = "demo", bucket: str = "demo-bucket") -> List[str]:
+    """Simulate the text Stage 1 pipeline flow."""
 
     actions: List[str] = []
     with tempfile.TemporaryDirectory() as tmpdir:
         bucket_root = Path(tmpdir)
-        assets_prefix = Path(f"scenes/{scene_id}/assets")
-        assets_dir = bucket_root / assets_prefix
+        scene_prefix = Path(f"scenes/{scene_id}")
+        assets_dir = bucket_root / scene_prefix / "assets"
         assets_dir.mkdir(parents=True, exist_ok=True)
 
-        # Simulate 3D-RE-GEN reconstruction completion
-        regen3d_dir = bucket_root / f"scenes/{scene_id}/regen3d"
-        regen3d_dir.mkdir(parents=True, exist_ok=True)
-        marker = regen3d_dir / "scene_info.json"
-        marker.write_text("{}\n")
-        actions.append(f"Detected 3D-RE-GEN output at {marker.relative_to(bucket_root)} in bucket {bucket}")
+        stage1_marker = assets_dir / ".stage1_complete"
+        stage1_marker.write_text("done\n")
+        actions.append(
+            f"Detected Stage 1 output marker at {stage1_marker.relative_to(bucket_root)} in bucket {bucket}"
+        )
 
-        # 3D-RE-GEN adapter job
-        actions.append("Would invoke regen3d-job to convert 3D-RE-GEN outputs")
-
-        # Scale job (optional)
+        actions.append("Would invoke text-scene-gen-job")
+        actions.append("Would invoke text-scene-adapter-job")
         actions.append("Would invoke scale-job for scale calibration (optional)")
-
-        # Interactive job
         actions.append("Would invoke interactive-job for articulation")
 
-        # Simready job
         simready_marker = assets_dir / ".simready_complete"
         simready_marker.write_text("done\n")
         actions.append("Would invoke simready-job and wait for .simready_complete")
-
-        # USD assembly
         actions.append("Would invoke usd-assembly-job for final assembly")
-
-        # Replicator job
         actions.append("Would invoke replicator-job for domain randomization bundle")
-
-        # Variation gen job
         actions.append("Would invoke variation-gen-job for variation assets")
-
-        # Isaac Lab job
         actions.append("Would invoke isaac-lab-job for training configurations")
 
     return actions
@@ -148,15 +130,15 @@ def main() -> int:
     if geniesim_errors:
         errors.extend(["Genie Sim export: " + e for e in geniesim_errors])
 
-    dry_run_actions = dry_run_regen3d_pipeline()
+    dry_run_actions = dry_run_stage1_pipeline()
 
     if errors:
         print("FAILED checks:\n- " + "\n- ".join(errors))
         return 1
 
     print("Verified triggers and actions:")
-    print("- usd-assembly-pipeline watches completion markers")
-    print("\n3D-RE-GEN Pipeline Dry run (simulated flow):")
+    print("- usd-assembly-pipeline watches Stage 1 completion markers")
+    print("\nStage 1 Pipeline Dry run (simulated flow):")
     for action in dry_run_actions:
         print(f"  * {action}")
 

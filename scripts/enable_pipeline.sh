@@ -78,7 +78,7 @@ check_status() {
     # Check EventArc triggers
     echo "--- EventArc Triggers ---"
 
-    # USD Assembly trigger (fires on .regen3d_complete)
+    # USD Assembly trigger (fires on .stage1_complete)
     USD_TRIGGER=$(gcloud eventarc triggers describe usd-assembly-trigger \
         --location=$REGION --format='value(name)' 2>/dev/null || echo "")
     if [ -n "$USD_TRIGGER" ]; then
@@ -160,7 +160,7 @@ enable_pipeline() {
     echo "The pipeline will now automatically:"
     echo "  1. Generate scenes daily at 8:00 AM (Cloud Scheduler)"
     echo "  2. Process 3D reconstruction (external)"
-    echo "  3. Assemble USD files (on .regen3d_complete)"
+    echo "  3. Assemble USD files (on .stage1_complete)"
     echo "  4. Generate episodes with upsell features (on .usd_complete)"
     echo ""
 }

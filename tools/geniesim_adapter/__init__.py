@@ -28,7 +28,7 @@ Use the local framework for running data collection without a hosted API:
 Architecture:
     BlueprintPipeline handles:
         - Scene image generation (Gemini)
-        - 3D reconstruction (3D-RE-GEN)
+        - 3D reconstruction (Stage 1 text generation)
         - SimReady USD assembly
         - Your own assets (no NC restriction)
         - DWM/Dream2Flow data (unique)

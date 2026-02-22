@@ -14,7 +14,7 @@ Optional overrides:
 ```bash
 python -m tools.cost_tracking.estimate \
   --scene-dir ./scenes/my_scene \
-  --steps regen3d,simready,replicator \
+  --steps stage1,simready,replicator \
   --config ./cost_estimate.json
 ```
 
@@ -40,7 +40,7 @@ The estimator reads JSON config files with optional `rates`, `steps`, and a
     "g5.12xlarge": {"hourly_rate": 4.384, "gpu_count": 4}
   },
   "steps": {
-    "regen3d": {"duration_minutes": 45, "instance_type": "g5.xlarge"},
+    "stage1": {"duration_minutes": 45, "instance_type": "g5.xlarge"},
     "dwm-inference": {"duration_hours": 2, "instance_type": "g5.12xlarge"}
   }
 }

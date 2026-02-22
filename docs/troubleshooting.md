@@ -12,7 +12,7 @@ Common failure modes in BlueprintPipeline and recommended fixes.
 - Service account lacks `run.jobs.run` or `storage.objects.get` permissions.
 
 **Fixes**
-- Verify EventArc trigger filters and that `.regen3d_complete` markers exist.
+- Verify EventArc trigger filters and that `.stage1_complete` markers exist.
 - Ensure the workflow service account has Cloud Run Invoker + Storage Viewer/Writer roles.
 
 ### GCS inputs not found
@@ -24,18 +24,18 @@ Common failure modes in BlueprintPipeline and recommended fixes.
 
 **Fixes**
 - Confirm environment variables and final GCS paths.
-- Re-run `fixtures/generate_mock_regen3d.py` or `tools/run_local_pipeline.py` with the expected output directory.
+- Re-run `fixtures/generate_mock_stage1.py` or `tools/run_local_pipeline.py` with the expected output directory.
 
-## regen3d-job
+## text-scene-adapter-job
 
 ### Missing `scene_layout_scaled.json`
 **Symptoms**: Downstream jobs fail validation or crash on layout load.
 
 **Likely causes**
-- 3D-RE-GEN export incomplete or corrupted.
+- Stage 1 text generation export incomplete or corrupted.
 
 **Fixes**
-- Re-run the regen3d export and verify `scene_info.json`, `pose.json`, and `bounds.json` exist for each object.
+- Re-run the stage1 export and verify `scene_info.json`, `pose.json`, and `bounds.json` exist for each object.
 - Validate the output with `python tools/run_local_pipeline.py --validate`.
 
 ## simready-job
@@ -217,6 +217,6 @@ docker run --rm usd-assembly-job:smoke python -c "from pxr import Usd, UsdGeom, 
 
 ## Quick checks
 
-- Verify `.regen3d_complete` exists before running downstream jobs.
+- Verify `.stage1_complete` exists before running downstream jobs.
 - Confirm `scene_manifest.json`, `scene_layout_scaled.json`, and `scene.usda` are created.
 - Run `python tests/test_pipeline_e2e.py` for end-to-end validation.

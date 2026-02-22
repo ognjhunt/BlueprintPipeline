@@ -173,7 +173,7 @@ Example scene storage path: `gs://blueprint-8c1ca.appspot.com/scenes/{SCENE_ID}`
 The Smart Placement Engine integrates with the existing pipeline:
 
 ```
-scene-generation-job → 3D-RE-GEN → smart-placement-engine → replicator-job → isaac-lab
+scene-generation-job → Stage 1 text generation → smart-placement-engine → replicator-job → isaac-lab
                                            ↓
                                   variation-asset-pipeline-job
 ```

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The asset catalog subsystem indexes NVIDIA/3D-RE-GEN asset packs, builds searchable metadata catalogs, generates embeddings for semantic search, and ingests structured asset metadata into Firestore/vector stores. It powers asset lookup and semantic matching in asset-heavy pipeline steps.【F:tools/asset_catalog/__init__.py†L1-L23】【F:tools/asset_catalog/catalog_builder.py†L1-L39】
+The asset catalog subsystem indexes NVIDIA/Stage 1 text generation asset packs, builds searchable metadata catalogs, generates embeddings for semantic search, and ingests structured asset metadata into Firestore/vector stores. It powers asset lookup and semantic matching in asset-heavy pipeline steps.【F:tools/asset_catalog/__init__.py†L1-L23】【F:tools/asset_catalog/catalog_builder.py†L1-L39】
 
 ## Public entrypoints
 

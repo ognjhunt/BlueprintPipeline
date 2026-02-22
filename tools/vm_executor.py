@@ -1,7 +1,7 @@
 """Remote VM execution abstraction for GPU workloads.
 
 Provides SSH/SCP utilities for running commands on a remote GCE VM,
-designed for 3D-RE-GEN reconstruction but reusable for any GPU step.
+designed for Stage 1 text generation reconstruction but reusable for any GPU step.
 
 Uses gcloud compute ssh/scp to avoid managing SSH keys directly.
 """
@@ -211,11 +211,11 @@ class VMExecutor:
                     if key.fileobj is proc.stdout:
                         stdout_lines.append(line)
                         if self.verbose:
-                            print(f"[3D-RE-GEN] {line}", end="")
+                            print(f"[Stage 1 text generation] {line}", end="")
                     else:
                         stderr_lines.append(line)
                         if self.verbose:
-                            print(f"[3D-RE-GEN:err] {line}", end="")
+                            print(f"[Stage 1 text generation:err] {line}", end="")
 
             # Drain remaining output
             remaining_out = proc.stdout.read()

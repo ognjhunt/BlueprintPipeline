@@ -10,7 +10,6 @@ resources:
   - isaac-lab-job.yaml
   - meshy-job.yaml
   - objects-job.yaml
-  - regen3d-job.yaml
   - replicator-job.yaml
   - scale-job.yaml
   - scene-batch-job.yaml

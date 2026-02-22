@@ -22,7 +22,7 @@ DWM generates realistic videos showing plausible hand-scene interaction dynamics
 This job runs as part of the BlueprintPipeline:
 
 ```
-Image → 3D-RE-GEN → BlueprintPipeline → ... → DWM Preparation → DWM Bundles
+Image → Stage 1 text generation → BlueprintPipeline → ... → DWM Preparation → DWM Bundles
 ```
 
 ## Dependencies & Availability
@@ -51,10 +51,10 @@ python dwm-preparation-job/prepare_dwm_bundle.py \
 
 ### Cloud Auto-Trigger (Production)
 
-The job auto-triggers when 3D-RE-GEN completes via EventArc:
+The job auto-triggers when Stage 1 text generation completes via EventArc:
 
 ```
-.regen3d_complete marker uploaded
+.stage1_complete marker uploaded
         ↓ (EventArc trigger)
 dwm-preparation-pipeline workflow
         ↓
@@ -240,4 +240,4 @@ DWM itself (from paper):
 
 - **DWM Paper**: [arXiv:2512.17907](https://arxiv.org/abs/2512.17907)
 - **DWM Project**: [snuvclab.github.io/dwm](https://snuvclab.github.io/dwm/)
-- **3D-RE-GEN**: [3dregen.jdihlmann.com](https://3dregen.jdihlmann.com/)
+- **Stage 1 text generation**: [3dregen.jdihlmann.com](https://3dregen.jdihlmann.com/)

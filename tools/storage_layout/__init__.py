@@ -46,7 +46,7 @@ Canonical Layout:
             reward_functions.py           # Reward implementations
 
 Pipeline Jobs and Their Output Locations:
-    regen3d-job      → assets/scene_manifest.json, layout/scene_layout_scaled.json, seg/inventory.json
+    text-scene-adapter-job      → assets/scene_manifest.json, layout/scene_layout_scaled.json, seg/inventory.json
     scale-job        → layout/scene_layout_scaled.json (updated)
     interactive-job  → assets/interactive/obj_{id}/*.urdf
     simready-job     → assets/obj_{id}/simready.usda

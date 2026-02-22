@@ -330,8 +330,8 @@ Future updates should consider:
 - Exponential backoff retry logic on critical job launches (5 retries: 1s initial, 60s max)
 - Standardized timeout values for each job
 - Retry policy documentation with detailed specifications
-- Added retry logic to: dream2flow (both jobs), dwm (both jobs), variation-assets (both jobs), objects, scale, regen3d-import
-- Exponential backoff marker polling: regen3d (1s→30s) and simready (5s→60s)
+- Added retry logic to: dream2flow (both jobs), dwm (both jobs), variation-assets (both jobs), objects, scale, stage1-import
+- Exponential backoff marker polling: stage1 (1s→30s) and simready (5s→60s)
 - Environment variable standardization (GOOGLE_CLOUD_PROJECT_ID)
 - .assets_ready marker producer (scale-pipeline)
 - Race condition documentation for parallel pipeline execution

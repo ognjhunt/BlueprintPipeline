@@ -51,8 +51,6 @@ spec:
               value: "${SCENE_ID}"
             - name: ASSETS_PREFIX
               value: "scenes/$(SCENE_ID)/assets"
-            - name: REGEN3D_PREFIX
-              value: "scenes/$(SCENE_ID)/regen3d"
             - name: MULTIVIEW_PREFIX
               value: "${MULTIVIEW_PREFIX}"
             - name: PIPELINE_ENV

@@ -23,7 +23,7 @@ This guide shows how to integrate the newly implemented features into the Genie 
 ### Usage in Pipeline Jobs
 
 ```python
-# In any pipeline job (e.g., regen3d-job, simready-job, episode-generation-job)
+# In any pipeline job (e.g., text-scene-adapter-job, simready-job, episode-generation-job)
 
 from tools.metrics.pipeline_metrics import get_metrics
 
@@ -31,7 +31,7 @@ from tools.metrics.pipeline_metrics import get_metrics
 metrics = get_metrics()
 
 # Track job execution
-with metrics.track_job("regen3d-job", scene_id):
+with metrics.track_job("text-scene-adapter-job", scene_id):
     # Your job logic here
     process_scene(scene_id)
 
@@ -134,7 +134,7 @@ tracker.track_gemini_call(
 # Track compute costs
 tracker.track_compute(
     scene_id=scene_id,
-    job_name="regen3d-job",
+    job_name="text-scene-adapter-job",
     duration_seconds=120.0,
     vcpu_count=2,
     memory_gb=4.0
@@ -173,12 +173,12 @@ def run_pipeline(scene_id: str):
 
     # Track each job's compute cost
     job_start = time.time()
-    run_regen3d_job(scene_id)
+    run_stage1_job(scene_id)
     job_duration = time.time() - job_start
 
     tracker.track_compute(
         scene_id=scene_id,
-        job_name="regen3d-job",
+        job_name="text-scene-adapter-job",
         duration_seconds=job_duration,
         vcpu_count=2,
         memory_gb=4.0

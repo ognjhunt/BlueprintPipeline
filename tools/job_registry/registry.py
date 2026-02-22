@@ -1,31 +1,4 @@
-"""
-Job Registry Implementation.
-
-Tracks all pipeline jobs for the 3D-RE-GEN-based BlueprintPipeline.
-
-3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
-"image → sim-ready 3D reconstruction" with explicit physical constraints.
-
-Pipeline Jobs (3D-RE-GEN-first approach):
-    - regen3d-job: Adapter for 3D-RE-GEN outputs
-    - interactive-job: Articulation detection using Particulate
-    - simready-job: Physics + manipulation hints
-    - usd-assembly-job: USD scene assembly
-    - replicator-job: Domain randomization scripts
-    - variation-gen-job: Variation asset generation
-    - isaac-lab-job: Isaac Lab task generation
-    - scale-job: Optional scale calibration
-
-Reference:
-- Paper: https://arxiv.org/abs/2512.17459
-- Project: https://3dregen.jdihlmann.com/
-- GitHub: https://github.com/cgtuebingen/3D-RE-GEN
-
-Module exports:
-    - JOBS: A stable, read-only tuple of all JobInfo entries.
-    - JOBS_BY_NAME: A name → JobInfo mapping for quick access.
-    Import these for callers that don't need to instantiate JobRegistry directly.
-"""
+"""Job registry for text-first Stage 1 (SceneSmith/SAGE)."""
 
 from __future__ import annotations
 
@@ -39,46 +12,46 @@ from tools.config.env import parse_bool_env
 
 class JobStatus(str, Enum):
     """Status of a job in the pipeline."""
-    ACTIVE = "active"              # Fully operational, primary path
-    NEW = "new"                    # Newly added for 3D-RE-GEN pipeline
-    EXPERIMENTAL = "experimental"  # Under development
+
+    ACTIVE = "active"
+    NEW = "new"
+    EXPERIMENTAL = "experimental"
 
 
 class JobCategory(str, Enum):
     """Category of job in the pipeline."""
-    ENRICHMENT = "enrichment"      # Asset enrichment
-    ASSEMBLY = "assembly"          # Scene assembly
-    GENERATION = "generation"      # Synthetic data generation
-    TRAINING = "training"          # Training preparation
-    ADAPTER = "adapter"            # Pipeline adapters
+
+    ENRICHMENT = "enrichment"
+    ASSEMBLY = "assembly"
+    GENERATION = "generation"
+    TRAINING = "training"
+    ADAPTER = "adapter"
 
 
 class PipelineMode(str, Enum):
     """Pipeline execution mode."""
-    REGEN3D_FIRST = "regen3d_first"  # Use 3D-RE-GEN pipeline (default)
+
+    STANDARD = "standard"
 
 
 @dataclass
 class JobInfo:
     """Information about a pipeline job."""
+
     name: str
     description: str
     status: JobStatus
     category: JobCategory
 
-    # Entry point information
     entry_script: str
     docker_image: Optional[str] = None
 
-    # Environment variables
     required_env_vars: List[str] = field(default_factory=list)
     optional_env_vars: List[str] = field(default_factory=list)
 
-    # Dependencies
     depends_on: List[str] = field(default_factory=list)
     outputs: List[str] = field(default_factory=list)
 
-    # Notes
     migration_notes: Optional[str] = None
 
     @property
@@ -87,17 +60,13 @@ class JobInfo:
 
 
 class JobRegistry:
-    """Central registry for all pipeline jobs.
-
-    Tracks job status for the 3D-RE-GEN-based pipeline.
-    """
+    """Central registry for all pipeline jobs."""
 
     def __init__(self):
         self._jobs: Dict[str, JobInfo] = {}
         self._initialize_jobs()
 
     def _initialize_jobs(self):
-        """Initialize the job registry with all known jobs."""
         enable_experimental = parse_bool_env(os.getenv("ENABLE_EXPERIMENTAL_PIPELINE"), default=False) is True
         enable_dwm = enable_experimental or (
             parse_bool_env(os.getenv("ENABLE_DWM"), default=False) is True
@@ -106,52 +75,53 @@ class JobRegistry:
             parse_bool_env(os.getenv("ENABLE_DREAM2FLOW"), default=False) is True
         )
 
-        # =====================================================================
-        # 3D-RE-GEN PIPELINE JOBS
-        # =====================================================================
+        self._jobs["text-scene-gen-job"] = JobInfo(
+            name="text-scene-gen-job",
+            description="Generate text Stage 1 package from scene request",
+            status=JobStatus.NEW,
+            category=JobCategory.GENERATION,
+            entry_script="text-scene-gen-job/generate_text_scene.py",
+            docker_image="text-scene-gen-job",
+            required_env_vars=["BUCKET", "SCENE_ID"],
+            optional_env_vars=["TEXT_BACKEND_DEFAULT", "TEXT_BACKEND_ALLOWLIST", "TEXT_GEN_MAX_SEEDS"],
+            outputs=[
+                "textgen/package.json",
+                "textgen/request.normalized.json",
+                "textgen/.textgen_complete",
+            ],
+            migration_notes="Stage 1 source generation using SceneSmith/SAGE backends.",
+        )
 
-        self._jobs["regen3d-job"] = JobInfo(
-            name="regen3d-job",
-            description="Adapter converting 3D-RE-GEN outputs to BlueprintPipeline format",
+        self._jobs["text-scene-adapter-job"] = JobInfo(
+            name="text-scene-adapter-job",
+            description="Build canonical Stage 1 assets/layout/seg artifacts",
             status=JobStatus.NEW,
             category=JobCategory.ADAPTER,
-            entry_script="regen3d-job/regen3d_adapter_job.py",
-            docker_image="regen3d-job",
-            required_env_vars=["SCENE_ID", "REGEN3D_PREFIX", "ASSETS_PREFIX", "LAYOUT_PREFIX"],
-            optional_env_vars=["GEMINI_API_KEY", "OPENAI_API_KEY", "TRUST_REGEN3D_SCALE"],
-            depends_on=["regen3d-reconstruction"],
+            entry_script="text-scene-adapter-job/adapt_text_scene.py",
+            docker_image="text-scene-adapter-job",
+            required_env_vars=["BUCKET", "SCENE_ID"],
+            optional_env_vars=["ASSETS_PREFIX", "LAYOUT_PREFIX", "SEG_PREFIX"],
+            depends_on=["text-scene-gen-job"],
             outputs=[
                 "assets/scene_manifest.json",
                 "layout/scene_layout_scaled.json",
                 "seg/inventory.json",
-                "assets/obj_*/asset.glb",
+                "assets/.stage1_complete",
             ],
-            migration_notes=(
-                "This adapter is the critical integration layer between 3D-RE-GEN "
-                "and the rest of the BlueprintPipeline. 3D-RE-GEN uses 4-DoF ground "
-                "constraints and background bounding for sim-ready placement."
-            ),
+            migration_notes="Canonical Stage 1 completion marker is assets/.stage1_complete.",
         )
 
         self._jobs["interactive-job"] = JobInfo(
             name="interactive-job",
-            description="Articulation bridge using Particulate (fast mesh-based, ~10s)",
+            description="Articulation bridge using Particulate",
             status=JobStatus.ACTIVE,
             category=JobCategory.ENRICHMENT,
             entry_script="interactive-job/run_interactive_assets.py",
             docker_image="interactive-job",
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX"],
-            optional_env_vars=[
-                "PARTICULATE_ENDPOINT",    # Particulate service URL
-                "DISALLOW_PLACEHOLDER_URDF",
-                "TIMEOUT_SECONDS",
-            ],
-            depends_on=["regen3d-job"],
+            optional_env_vars=["PARTICULATE_ENDPOINT", "DISALLOW_PLACEHOLDER_URDF", "TIMEOUT_SECONDS"],
+            depends_on=["text-scene-adapter-job"],
             outputs=["assets/interactive/obj_*/articulated.usda"],
-            migration_notes=(
-                "Uses Particulate (arXiv:2512.11798) for fast feed-forward "
-                "mesh articulation detection."
-            ),
         )
 
         self._jobs["simready-job"] = JobInfo(
@@ -163,15 +133,20 @@ class JobRegistry:
             docker_image="simready-job",
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX"],
             optional_env_vars=["GEMINI_API_KEY", "OPENAI_API_KEY", "SIMREADY_ADD_PROXY_COLLIDER"],
-            depends_on=["regen3d-job", "interactive-job"],
-            outputs=[
-                "assets/obj_*/simready.usda",
-                "assets/obj_*/metadata.json",
-            ],
-            migration_notes=(
-                "Supports both Gemini and OpenAI for physics estimation. "
-                "3D-RE-GEN materials provide additional hints for friction/roughness."
-            ),
+            depends_on=["text-scene-adapter-job", "interactive-job"],
+            outputs=["assets/obj_*/simready.usda", "assets/obj_*/metadata.json"],
+        )
+
+        self._jobs["scale-job"] = JobInfo(
+            name="scale-job",
+            description="Scale calibration and reference object detection",
+            status=JobStatus.ACTIVE,
+            category=JobCategory.ENRICHMENT,
+            entry_script="scale-job/calibrate_scale.py",
+            docker_image="scale-job",
+            required_env_vars=["BUCKET", "SCENE_ID", "LAYOUT_PREFIX"],
+            depends_on=["text-scene-adapter-job"],
+            outputs=["layout/scene_layout_scaled.json"],
         )
 
         self._jobs["usd-assembly-job"] = JobInfo(
@@ -184,9 +159,6 @@ class JobRegistry:
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX", "LAYOUT_PREFIX", "USD_PREFIX"],
             depends_on=["simready-job"],
             outputs=["usd/scene.usda"],
-            migration_notes=(
-                "Reads layout from 3D-RE-GEN adapter output."
-            ),
         )
 
         self._jobs["replicator-job"] = JobInfo(
@@ -204,10 +176,6 @@ class JobRegistry:
                 "replicator/policies/*.py",
                 "replicator/variation_assets/manifest.json",
             ],
-            migration_notes=(
-                "Reads inventory from seg/inventory.json. "
-                "Supports OpenAI as alternative to Gemini for scene analysis."
-            ),
         )
 
         self._jobs["variation-gen-job"] = JobInfo(
@@ -221,9 +189,6 @@ class JobRegistry:
             optional_env_vars=["GEMINI_API_KEY", "OPENAI_API_KEY", "MAX_ASSETS"],
             depends_on=["replicator-job"],
             outputs=["variation_assets/*/reference.png", "variation_assets/variation_assets.json"],
-            migration_notes=(
-                "Supports OpenAI DALL-E as alternative to Gemini for image generation."
-            ),
         )
 
         self._jobs["isaac-lab-job"] = JobInfo(
@@ -236,15 +201,7 @@ class JobRegistry:
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX", "REPLICATOR_PREFIX"],
             optional_env_vars=["POLICIES", "ENVIRONMENT_TYPE"],
             depends_on=["replicator-job"],
-            outputs=[
-                "isaac_lab/env_cfg.py",
-                "isaac_lab/task_*.py",
-                "isaac_lab/train_cfg.yaml",
-            ],
-            migration_notes=(
-                "Generates Isaac Lab training configurations. "
-                "Uses the same PolicyTarget concepts as replicator-job."
-            ),
+            outputs=["isaac_lab/env_cfg.py", "isaac_lab/task_*.py", "isaac_lab/train_cfg.yaml"],
         )
 
         self._jobs["episode-generation-job"] = JobInfo(
@@ -255,63 +212,62 @@ class JobRegistry:
             entry_script="episode-generation-job/generate_episodes.py",
             docker_image="episode-generation-job",
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX", "EPISODES_PREFIX"],
-            optional_env_vars=[
-                "ROBOT_TYPE",            # franka, ur10, fetch (default: franka)
-                "EPISODES_PER_VARIATION",  # default: 10
-                "MAX_VARIATIONS",        # default: all
-                "FPS",                   # default: 30
-                "USE_LLM",               # default: true
-                "GEMINI_API_KEY",
-            ],
+            optional_env_vars=["ROBOT_TYPE", "EPISODES_PER_VARIATION", "MAX_VARIATIONS", "FPS", "USE_LLM", "GEMINI_API_KEY"],
             depends_on=["replicator-job", "isaac-lab-job"],
             outputs=[
                 "episodes/lerobot/meta/info.json",
                 "episodes/lerobot/data/chunk-*/episode_*.parquet",
                 "episodes/manifests/generation_manifest.json",
             ],
-            migration_notes=(
-                "Generates manipulation episodes for each scene variation. "
-                "Uses AI (Gemini) for motion planning, outputs LeRobot v2.0 format. "
-                "Sellable alongside scenes for plug-and-play RL training."
-            ),
         )
 
-        self._jobs["quality-gate-job"] = JobInfo(
-            name="quality-gate-job",
-            description="Evaluates production SLIs and enforces quality gates on episode outputs",
-            status=JobStatus.NEW,
-            category=JobCategory.TRAINING,
-            entry_script="tools/quality_gates/sli_gate_runner.py",
-            docker_image="quality-gate-job",
-            required_env_vars=["BUCKET", "SCENE_ID", "EPISODES_PREFIX"],
-            optional_env_vars=["DATA_ROOT", "QUALITY_GATE_REPORT_PATH"],
-            depends_on=["episode-generation-job"],
-            outputs=["episodes/quality/quality_gate_report.json"],
-            migration_notes=(
-                "Runs quality gates using dataset_quality_manifest.json and "
-                "generation_manifest.json to block production runs when SLIs fall below thresholds."
-            ),
-        )
-
-        self._jobs["scale-job"] = JobInfo(
-            name="scale-job",
-            description="Scale calibration and reference object detection",
+        self._jobs["genie-sim-export-job"] = JobInfo(
+            name="genie-sim-export-job",
+            description="Exports pipeline outputs to Genie Sim format",
             status=JobStatus.ACTIVE,
-            category=JobCategory.ENRICHMENT,
-            entry_script="scale-job/calibrate_scale.py",
-            docker_image="scale-job",
-            required_env_vars=["BUCKET", "SCENE_ID", "LAYOUT_PREFIX"],
-            depends_on=["regen3d-job"],
-            outputs=["layout/scene_layout_scaled.json"],
-            migration_notes=(
-                "Optional if TRUST_REGEN3D_SCALE=true. "
-                "Otherwise runs after regen3d-job to calibrate metric scale."
-            ),
+            category=JobCategory.TRAINING,
+            entry_script="genie-sim-export-job/export_to_geniesim.py",
+            docker_image="genie-sim-export-job",
+            required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX"],
+            depends_on=["variation-gen-job"],
+            outputs=["geniesim/export_manifest.json", "geniesim/scene_graph.json"],
         )
 
-        # =====================================================================
-        # ISAAC LAB-ARENA INTEGRATION JOBS
-        # =====================================================================
+        self._jobs["genie-sim-submit-job"] = JobInfo(
+            name="genie-sim-submit-job",
+            description="Submits Genie Sim jobs and tracks execution",
+            status=JobStatus.ACTIVE,
+            category=JobCategory.TRAINING,
+            entry_script="genie-sim-submit-job/submit_job.py",
+            docker_image="genie-sim-submit-job",
+            required_env_vars=["BUCKET", "SCENE_ID", "GENIESIM_PREFIX"],
+            depends_on=["genie-sim-export-job"],
+            outputs=["geniesim/job.json", "geniesim/.geniesim_submitted"],
+        )
+
+        self._jobs["genie-sim-import-job"] = JobInfo(
+            name="genie-sim-import-job",
+            description="Imports Genie Sim generated artifacts back into pipeline",
+            status=JobStatus.ACTIVE,
+            category=JobCategory.TRAINING,
+            entry_script="genie-sim-import-job/import_results.py",
+            docker_image="genie-sim-import-job",
+            required_env_vars=["BUCKET", "SCENE_ID", "GENIESIM_PREFIX"],
+            depends_on=["genie-sim-submit-job"],
+            outputs=["geniesim/.geniesim_import_complete"],
+        )
+
+        self._jobs["dataset-delivery-job"] = JobInfo(
+            name="dataset-delivery-job",
+            description="Delivers curated dataset bundles to configured storage targets",
+            status=JobStatus.ACTIVE,
+            category=JobCategory.TRAINING,
+            entry_script="dataset-delivery-job/deliver_dataset.py",
+            docker_image="dataset-delivery-job",
+            required_env_vars=["BUCKET", "SCENE_ID"],
+            depends_on=["genie-sim-import-job"],
+            outputs=["geniesim/.dataset_delivery_complete"],
+        )
 
         self._jobs["arena-export-job"] = JobInfo(
             name="arena-export-job",
@@ -321,13 +277,7 @@ class JobRegistry:
             entry_script="arena-export-job/arena_export_job.py",
             docker_image="arena-export-job",
             required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX"],
-            optional_env_vars=[
-                "USE_LLM_AFFORDANCES",    # Enable Gemini for affordance detection
-                "ENABLE_HUB_REGISTRATION",  # Register with LeRobot Hub
-                "HUB_NAMESPACE",          # Hugging Face namespace
-                "GEMINI_API_KEY",
-                "HF_TOKEN",               # For Hub registration
-            ],
+            optional_env_vars=["USE_LLM_AFFORDANCES", "ENABLE_HUB_REGISTRATION", "HUB_NAMESPACE", "GEMINI_API_KEY", "HF_TOKEN"],
             depends_on=["isaac-lab-job", "usd-assembly-job"],
             outputs=[
                 "arena/arena_manifest.json",
@@ -336,17 +286,7 @@ class JobRegistry:
                 "arena/asset_registry.json",
                 "arena/hub_config.yaml",
             ],
-            migration_notes=(
-                "Isaac Lab-Arena integration for standardized policy evaluation. "
-                "Detects affordances (Openable, Graspable, Turnable, etc.) and "
-                "generates Arena-compatible tasks. Supports LeRobot Hub registration. "
-                "Reference: https://developer.nvidia.com/isaac/lab-arena"
-            ),
         )
-
-        # =====================================================================
-        # DWM PIPELINE JOBS (arXiv:2512.17907)
-        # =====================================================================
 
         if enable_dwm:
             self._jobs["dwm-preparation-job"] = JobInfo(
@@ -357,23 +297,9 @@ class JobRegistry:
                 entry_script="dwm-preparation-job/entrypoint.py",
                 docker_image="dwm-preparation-job",
                 required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX", "DWM_PREFIX"],
-                optional_env_vars=[
-                    "USD_PREFIX",
-                    "REPLICATOR_PREFIX",
-                    "DWM_MODEL_PATH",
-                    "SKIP_DWM",
-                    "RENDER_BACKEND",
-                ],
-                depends_on=["regen3d-job"],
-                outputs=[
-                    "dwm/*/manifest.json",
-                    "dwm/*/video/*.mp4",
-                    "dwm/dwm_bundles_manifest.json",
-                ],
-                migration_notes=(
-                    "DWM (arXiv:2512.17907) generates egocentric interaction bundles "
-                    "for dexterous world models. Inference job remains experimental."
-                ),
+                optional_env_vars=["USD_PREFIX", "REPLICATOR_PREFIX", "DWM_MODEL_PATH", "SKIP_DWM", "RENDER_BACKEND"],
+                depends_on=["usd-assembly-job"],
+                outputs=["dwm/*/manifest.json", "dwm/*/video/*.mp4", "dwm/dwm_bundles_manifest.json"],
             )
 
             self._jobs["dwm-inference-job"] = JobInfo(
@@ -384,24 +310,10 @@ class JobRegistry:
                 entry_script="dwm-preparation-job/inference_entrypoint.py",
                 docker_image="dwm-preparation-job",
                 required_env_vars=["BUCKET", "SCENE_ID", "DWM_PREFIX"],
-                optional_env_vars=[
-                    "DWM_CHECKPOINT_PATH",
-                    "OVERWRITE",
-                ],
+                optional_env_vars=["DWM_CHECKPOINT_PATH", "OVERWRITE"],
                 depends_on=["dwm-preparation-job"],
-                outputs=[
-                    "dwm/*/inference_video.mp4",
-                    "dwm/.dwm_inference_complete",
-                ],
-                migration_notes=(
-                    "Runs DWM inference on prepared bundles. "
-                    "Model availability may require internal checkpoints."
-                ),
+                outputs=["dwm/*/inference_video.mp4", "dwm/.dwm_inference_complete"],
             )
-
-        # =====================================================================
-        # DREAM2FLOW PIPELINE JOBS (arXiv:2512.24766)
-        # =====================================================================
 
         if enable_dream2flow:
             self._jobs["dream2flow-preparation-job"] = JobInfo(
@@ -412,17 +324,8 @@ class JobRegistry:
                 entry_script="dream2flow-preparation-job/entrypoint.py",
                 docker_image="dream2flow-preparation-job",
                 required_env_vars=["BUCKET", "SCENE_ID", "ASSETS_PREFIX", "DREAM2FLOW_PREFIX"],
-                optional_env_vars=[
-                    "USD_PREFIX",
-                    "NUM_TASKS",
-                    "RESOLUTION_WIDTH",
-                    "RESOLUTION_HEIGHT",
-                    "NUM_FRAMES",
-                    "FPS",
-                    "ROBOT",
-                    "VIDEO_API_ENDPOINT",
-                ],
-                depends_on=["regen3d-job"],
+                optional_env_vars=["USD_PREFIX", "NUM_TASKS", "RESOLUTION_WIDTH", "RESOLUTION_HEIGHT", "NUM_FRAMES", "FPS", "ROBOT", "VIDEO_API_ENDPOINT"],
+                depends_on=["usd-assembly-job"],
                 outputs=[
                     "dream2flow/*/manifest.json",
                     "dream2flow/*/video/*.mp4",
@@ -430,11 +333,6 @@ class JobRegistry:
                     "dream2flow/*/trajectory/*.json",
                     "dream2flow/dream2flow_bundles_manifest.json",
                 ],
-                migration_notes=(
-                    "Dream2Flow (arXiv:2512.24766) uses video diffusion to imagine task "
-                    "execution, then extracts 3D object flow as embodiment-agnostic goal/reward. "
-                    "Scaffolding ready - full implementation pending model release."
-                ),
             )
 
             self._jobs["dream2flow-inference-job"] = JobInfo(
@@ -445,98 +343,71 @@ class JobRegistry:
                 entry_script="dream2flow-preparation-job/dream2flow_inference_job.py",
                 docker_image="dream2flow-preparation-job",
                 required_env_vars=["BUCKET", "SCENE_ID", "DREAM2FLOW_PREFIX"],
-                optional_env_vars=[
-                    "VIDEO_API_ENDPOINT",
-                    "VIDEO_CHECKPOINT_PATH",
-                    "OVERWRITE",
-                ],
+                optional_env_vars=["VIDEO_API_ENDPOINT", "VIDEO_CHECKPOINT_PATH", "OVERWRITE"],
                 depends_on=["dream2flow-preparation-job"],
-                outputs=[
-                    "dream2flow/*/inference_video.mp4",
-                    "dream2flow/.dream2flow_inference_complete",
-                ],
-                migration_notes=(
-                    "Runs Dream2Flow model inference on prepared bundles. "
-                    "Currently uses placeholder generation - will be updated when "
-                    "Dream2Flow model is publicly released."
-                ),
+                outputs=["dream2flow/*/inference_video.mp4", "dream2flow/.dream2flow_inference_complete"],
             )
 
     def get_job(self, name: str) -> Optional[JobInfo]:
-        """Get job information by name."""
         return self._jobs.get(name)
 
     def get_all_jobs(self) -> List[JobInfo]:
-        """Get all registered jobs."""
         return list(self._jobs.values())
 
     def get_jobs_by_status(self, status: JobStatus) -> List[JobInfo]:
-        """Get jobs with a specific status."""
         return [j for j in self._jobs.values() if j.status == status]
 
     def get_jobs_by_category(self, category: JobCategory) -> List[JobInfo]:
-        """Get jobs in a specific category."""
         return [j for j in self._jobs.values() if j.category == category]
 
     def get_active_jobs(self) -> List[JobInfo]:
-        """Get all active jobs."""
         return [j for j in self._jobs.values() if j.is_active]
 
-    def is_regen3d_ready(self) -> bool:
-        """Check if 3D-RE-GEN pipeline is ready (all required jobs exist)."""
-        required_jobs = ["regen3d-job"]
-        for name in required_jobs:
-            job = self.get_job(name)
-            if not job:
-                return False
-        return True
+    def is_stage1_ready(self) -> bool:
+        required_jobs = ["text-scene-gen-job", "text-scene-adapter-job"]
+        return all(self.get_job(name) is not None for name in required_jobs)
 
     def get_pipeline_mode(self) -> PipelineMode:
-        """Get current pipeline mode from environment."""
-        return PipelineMode.REGEN3D_FIRST
+        return PipelineMode.STANDARD
 
     def get_job_sequence(self) -> List[str]:
-        """Get the recommended job execution sequence."""
         return [
-            "regen3d-reconstruction",  # External 3D-RE-GEN
-            "regen3d-job",
-            "scale-job",  # Optional
+            "text-scene-gen-job",
+            "text-scene-adapter-job",
+            "scale-job",
             "interactive-job",
             "simready-job",
             "usd-assembly-job",
             "replicator-job",
             "variation-gen-job",
             "isaac-lab-job",
-            "arena-export-job",  # Isaac Lab-Arena integration (affordances + tasks)
-            "episode-generation-job",  # Generates training episodes
+            "arena-export-job",
+            "episode-generation-job",
         ]
 
     def print_status_report(self):
-        """Print a status report of all jobs."""
         print("\n" + "=" * 70)
         print("BlueprintPipeline Job Registry Status Report")
         print("=" * 70)
 
         print(f"\nPipeline Mode: {self.get_pipeline_mode().value}")
-        print(f"3D-RE-GEN Ready: {self.is_regen3d_ready()}")
+        print(f"Text Stage 1 Ready: {self.is_stage1_ready()}")
 
         print("\n--- ACTIVE JOBS ---")
         for job in self.get_jobs_by_status(JobStatus.ACTIVE):
-            print(f"  [{job.status.value:12}] {job.name:20} - {job.description[:40]}...")
+            print(f"  [{job.status.value:12}] {job.name:24} - {job.description[:40]}...")
 
-        print("\n--- NEW JOBS (3D-RE-GEN Pipeline) ---")
+        print("\n--- NEW JOBS ---")
         for job in self.get_jobs_by_status(JobStatus.NEW):
-            print(f"  [{job.status.value:12}] {job.name:20} - {job.description[:40]}...")
+            print(f"  [{job.status.value:12}] {job.name:24} - {job.description[:40]}...")
 
         print("\n" + "=" * 70)
 
 
-# Singleton instance
 _registry: Optional[JobRegistry] = None
 
 
 def get_registry() -> JobRegistry:
-    """Get the global job registry instance."""
     global _registry
     if _registry is None:
         _registry = JobRegistry()

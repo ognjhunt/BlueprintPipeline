@@ -1,14 +1,14 @@
 # dwm-preparation-pipeline.yaml
 #
 # Google Cloud Workflows pipeline that:
-#   1. Triggers on completion marker file from regen3d-job (.regen3d_complete)
+#   1. Triggers on completion marker file from text-scene-adapter-job (.stage1_complete)
 #   2. Runs dwm-preparation-job to generate DWM conditioning bundles
 #   3. Writes .dwm_complete marker when finished
 #
-# Trigger: Cloud Storage object finalized event for .regen3d_complete
+# Trigger: Cloud Storage object finalized event for .stage1_complete
 #
 # NOTE: This pipeline runs in parallel with usd-assembly-pipeline and dream2flow-preparation-pipeline
-# (all trigger on the same .regen3d_complete marker). This is safe because:
+# (all trigger on the same .stage1_complete marker). This is safe because:
 # - Each pipeline writes to different output prefixes (dwm/*, usd/*, dream2flow/*)
 # - Each pipeline uses a distinct lock object, so only duplicate runs of the same pipeline are blocked
 # - Idempotency checks prevent duplicate processing
@@ -52,11 +52,11 @@ main:
           - enableDwm: '${sys.get_env("ENABLE_DWM") != null and text.lower(sys.get_env("ENABLE_DWM")) == "true"}'
         next: filter_completion_markers
 
-    # Filter for .regen3d_complete marker files
+    # Filter for .stage1_complete marker files
     # This runs in parallel with usd-assembly-pipeline on the same trigger, with a pipeline-specific lock
     - filter_completion_markers:
         switch:
-          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.regen3d_complete$")}'
+          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.stage1_complete$")}'
             next: derive
         next: skip
 

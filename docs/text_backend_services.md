@@ -9,7 +9,15 @@ Stage 1 calls two optional HTTP endpoints:
 - `SAGE_SERVER_URL` -> `POST /v1/refine`
 
 If endpoints are set and reachable, Stage 1 uses them.
-If unreachable, Stage 1 falls back to internal generation/refinement logic.
+Source-orchestrator deployments now default to strict live mode for SceneSmith/SAGE:
+- `SCENESMITH_LIVE_REQUIRED=true`
+- `SAGE_LIVE_REQUIRED=true`
+
+With strict mode enabled, missing or unreachable live endpoints fail fast (no silent fallback).
+Override per backend when needed:
+- `SCENESMITH_LIVE_REQUIRED=false` to allow SceneSmith fallback
+- `SAGE_LIVE_REQUIRED=false` to allow SAGE fallback
+- `TEXT_ENFORCE_LIVE_BACKENDS=true` to force both regardless of per-backend flags
 
 ## Service wrappers in this repo
 

@@ -362,7 +362,7 @@ class PipelineMetricsCollector:
         metrics = PipelineMetricsCollector()
 
         # Track a job
-        with metrics.track_job("regen3d-job", "scene_001"):
+        with metrics.track_job("text-scene-adapter-job", "scene_001"):
             # Process scene
             metrics.objects_processed.inc(15, labels={"scene_id": "scene_001"})
 
@@ -644,12 +644,12 @@ class PipelineMetricsCollector:
         """Context manager to track job execution.
 
         Args:
-            job_name: Name of the job (e.g., "regen3d-job")
+            job_name: Name of the job (e.g., "text-scene-adapter-job")
             scene_id: Scene identifier
             variant: Optional A/B testing variant label
 
         Example:
-            with metrics.track_job("regen3d-job", "scene_001"):
+            with metrics.track_job("text-scene-adapter-job", "scene_001"):
                 # Process scene
                 pass
         """
@@ -868,7 +868,7 @@ def get_metrics() -> PipelineMetricsCollector:
         from tools.metrics.pipeline_metrics import get_metrics
 
         metrics = get_metrics()
-        with metrics.track_job("regen3d-job", "scene_001"):
+        with metrics.track_job("text-scene-adapter-job", "scene_001"):
             # Process scene
             pass
     """

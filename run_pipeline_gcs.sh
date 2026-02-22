@@ -14,7 +14,7 @@
 #     1739220750732768
 #
 # Default steps:
-#   regen3d-reconstruct,regen3d
+#   text-scene-gen,text-scene-adapter
 # =============================================================================
 
 set -euo pipefail
@@ -23,7 +23,7 @@ SCENE_ID="${1:?Usage: $0 <scene_id> <bucket> <object_name> <generation> [steps]}
 BUCKET="${2:?Usage: $0 <scene_id> <bucket> <object_name> <generation> [steps]}"
 OBJECT_NAME="${3:?Usage: $0 <scene_id> <bucket> <object_name> <generation> [steps]}"
 OBJECT_GENERATION="${4:?Usage: $0 <scene_id> <bucket> <object_name> <generation> [steps]}"
-STEPS="${5:-regen3d-reconstruct,regen3d}"
+STEPS="${5:-text-scene-gen,text-scene-adapter}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCENE_DIR="/tmp/blueprint_scenes/${SCENE_ID}"
@@ -187,18 +187,6 @@ echo "Scene dir:         ${SCENE_DIR}"
 echo "Log file:          ${LOG_FILE}"
 echo "Started:           $(timestamp_utc)"
 echo "============================================================"
-
-# ─── Load environment config ──────────────────────────────────────────────────
-ENV_FILE="${SCRIPT_DIR}/configs/regen3d_reconstruct.env"
-if [ -f "${ENV_FILE}" ]; then
-    echo "[GCS-Runner] Loading config from ${ENV_FILE}"
-    set -a
-    # shellcheck source=configs/regen3d_reconstruct.env
-    source "${ENV_FILE}"
-    set +a
-else
-    echo "[GCS-Runner] WARNING: Config not found at ${ENV_FILE}"
-fi
 
 # ─── Generation guard / latest-wins arbitration ───────────────────────────────
 lock_state

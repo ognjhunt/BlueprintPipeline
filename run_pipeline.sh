@@ -14,6 +14,7 @@ cd "$(dirname "$0")"
 # ── Parse arguments ──
 SCENE_DIR="./test_scenes/scenes/lightwheel_kitchen"
 ENV_FILE="configs/realism_strict.env"
+DATA_BACKEND="auto"
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -24,6 +25,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --env-file)
       ENV_FILE="$2"
+      shift 2
+      ;;
+    --backend)
+      DATA_BACKEND="$2"
       shift 2
       ;;
     *)
@@ -58,6 +63,30 @@ export GENIESIM_PORT=50051
 export GENIESIM_SKIP_DEFAULT_LIGHTING=1
 unset SKIP_QUALITY_GATES 2>/dev/null || true
 
+# ── Resolve backend mode ──
+if [[ "${DATA_BACKEND}" == "auto" ]]; then
+  _use_geniesim_raw="$(printf '%s' "${USE_GENIESIM:-true}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${_use_geniesim_raw}" == "false" || "${_use_geniesim_raw}" == "0" || "${_use_geniesim_raw}" == "no" || "${_use_geniesim_raw}" == "off" ]]; then
+    DATA_BACKEND="episode"
+  else
+    DATA_BACKEND="geniesim"
+  fi
+fi
+
+STEP_ARGS=()
+case "${DATA_BACKEND}" in
+  geniesim)
+    STEP_ARGS=(--steps genie-sim-submit --force-rerun genie-sim-submit --use-geniesim)
+    ;;
+  episode|blueprint|isaac)
+    STEP_ARGS=(--steps isaac-lab --force-rerun isaac-lab)
+    ;;
+  *)
+    echo "ERROR: --backend must be one of auto|geniesim|episode (or blueprint|isaac), got '${DATA_BACKEND}'" >&2
+    exit 1
+    ;;
+esac
+
 # ── Ensure host Xorg is running for RGB capture ──
 if [ "${SKIP_RGB_CAPTURE:-true}" = "false" ] && [ "${ENABLE_CAMERAS:-0}" = "1" ]; then
   if [ ! -S /tmp/.X11-unix/X99 ]; then
@@ -85,32 +114,34 @@ if [ "${SKIP_RGB_CAPTURE:-true}" = "false" ] && [ "${ENABLE_CAMERAS:-0}" = "1" ]
 fi
 
 # ── gRPC readiness check (use clean PYTHONPATH to avoid import conflicts) ──
-echo "[run_pipeline] Checking gRPC readiness on ${GENIESIM_HOST}:${GENIESIM_PORT}..."
-_grpc_ready=0
-for i in $(seq 1 30); do
-  if PYTHONPATH="" python3 -c "import grpc,sys; ch=grpc.insecure_channel('${GENIESIM_HOST}:${GENIESIM_PORT}'); grpc.channel_ready_future(ch).result(timeout=2); sys.exit(0)" 2>/dev/null; then
-    _grpc_ready=1
-    break
+if [[ "${DATA_BACKEND}" == "geniesim" ]]; then
+  echo "[run_pipeline] Checking gRPC readiness on ${GENIESIM_HOST}:${GENIESIM_PORT}..."
+  _grpc_ready=0
+  for i in $(seq 1 30); do
+    if PYTHONPATH="" python3 -c "import grpc,sys; ch=grpc.insecure_channel('${GENIESIM_HOST}:${GENIESIM_PORT}'); grpc.channel_ready_future(ch).result(timeout=2); sys.exit(0)" 2>/dev/null; then
+      _grpc_ready=1
+      break
+    fi
+    echo "  Waiting for gRPC... (attempt $i/30)"
+    sleep 5
+  done
+  if [ "$_grpc_ready" = "0" ]; then
+    echo "ERROR: gRPC not ready after 150s" >&2
+    exit 1
   fi
-  echo "  Waiting for gRPC... (attempt $i/30)"
-  sleep 5
-done
-if [ "$_grpc_ready" = "0" ]; then
-  echo "ERROR: gRPC not ready after 150s" >&2
-  exit 1
+  echo "[run_pipeline] gRPC ready"
 fi
-echo "[run_pipeline] gRPC ready"
 
 # ── Run ──
 LOG="/tmp/pipeline_strict.log"
 echo "[run_pipeline] Starting pipeline (log: $LOG)"
 echo "[run_pipeline] Scene: ${SCENE_DIR}"
+echo "[run_pipeline] Backend: ${DATA_BACKEND}"
 echo "[run_pipeline] RGB: SKIP_RGB_CAPTURE=${SKIP_RGB_CAPTURE:-unset}, ENABLE_CAMERAS=${ENABLE_CAMERAS:-unset}"
 nohup python3 tools/run_local_pipeline.py \
   --scene-dir "${SCENE_DIR}" \
-  --steps genie-sim-submit \
-  --force-rerun genie-sim-submit \
-  --use-geniesim --fail-fast \
+  "${STEP_ARGS[@]}" \
+  --fail-fast \
   "${EXTRA_ARGS[@]}" \
   > "$LOG" 2>&1 &
 PID=$!

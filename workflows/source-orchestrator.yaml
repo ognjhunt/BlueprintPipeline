@@ -7,13 +7,11 @@
 #
 # Behavior:
 #   - source_mode=text: run text Stage 1 jobs, then Stage 2-5
-#   - source_mode=image: delegate to image compatibility path
-#   - source_mode=auto: prefer text, fallback to image when configured and available
 #
-# Stage 2-5 remains canonical and unchanged:
+# Stage 2-5 remains canonical, with backend-aware Stage 4:
 #   - usd-assembly-pipeline
 #   - variation-assets-pipeline
-#   - genie-sim-export-pipeline
+#   - genie-sim-export-pipeline OR episode-generation-pipeline
 #   - arena-export-pipeline (required by default; env-tunable)
 
 main:
@@ -35,7 +33,7 @@ main:
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - defaultSourceMode: '${text.to_lower(default(sys.get_env("DEFAULT_SOURCE_MODE"), "text"))}'
           - textBackendDefault: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_DEFAULT"), "hybrid_serial"))}'
-          - textBackendAllowlist: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial"))}'
+          - textBackendAllowlist: '${text.to_lower(text.replace_all(default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "scenesmith,sage,hybrid_serial"), " ", ""))}'
           - textGenRuntime: '${text.to_lower(default(sys.get_env("TEXT_GEN_RUNTIME"), "vm"))}'
           - textSceneGenJobName: '${default(sys.get_env("TEXT_SCENE_GEN_JOB_NAME"), "text-scene-gen-job")}'
           - textSceneAdapterJobName: '${default(sys.get_env("TEXT_SCENE_ADAPTER_JOB_NAME"), "text-scene-adapter-job")}'
@@ -94,12 +92,7 @@ main:
           - textHunyuanTimeoutSeconds: '${default(sys.get_env("TEXT_HUNYUAN_TIMEOUT_SECONDS"), "1800")}'
           - textHunyuanPollSeconds: '${default(sys.get_env("TEXT_HUNYUAN_POLL_SECONDS"), "10")}'
           - textGenMaxSeeds: '${int(default(sys.get_env("TEXT_GEN_MAX_SEEDS"), "16"))}'
-          - textGenEnableImageFallback: '${text.to_lower(default(sys.get_env("TEXT_GEN_ENABLE_IMAGE_FALLBACK"), "true")) == "true"}'
           - arenaExportRequired: '${text.to_lower(default(sys.get_env("ARENA_EXPORT_REQUIRED"), "true")) == "true"}'
-          - imagePathMode: '${text.to_lower(default(sys.get_env("IMAGE_PATH_MODE"), "orchestrator"))}'
-          - imageOrchestratorWorkflow: '${default(sys.get_env("IMAGE_ORCHESTRATOR_WORKFLOW_NAME"), "image-to-scene-orchestrator")}'
-          - imageLegacyWorkflow: '${default(sys.get_env("IMAGE_LEGACY_WORKFLOW_NAME"), "image-to-scene-pipeline")}'
-          - imageLegacyWaitSeconds: '${int(default(sys.get_env("IMAGE_LEGACY_CHAIN_WAIT_SECONDS"), "7200"))}'
           - textVmName: '${default(sys.get_env("TEXT_GEN_VM_NAME"), "isaac-sim-ubuntu-b")}'
           - textVmZone: '${default(sys.get_env("TEXT_GEN_VM_ZONE"), "us-east1-b")}'
           - textVmRepoDir: '${default(sys.get_env("TEXT_GEN_VM_REPO_DIR"), "~/BlueprintPipeline")}'
@@ -108,12 +101,16 @@ main:
 
     - extract_env_more2:
         assign:
+          - textBackendRuntimeJsonRaw: '${default(sys.get_env("TEXT_BACKEND_RUNTIME_JSON"), "{}")}'
           - sageRuntimeMode: '${text.to_lower(default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun"))}'
           - sageServerUrl: '${default(sys.get_env("SAGE_SERVER_URL"), "")}'
           - sageTimeoutSeconds: '${default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
           - scenesmithRuntimeMode: '${text.to_lower(default(sys.get_env("SCENESMITH_RUNTIME_MODE"), "cloudrun"))}'
           - scenesmithServerUrl: '${default(sys.get_env("SCENESMITH_SERVER_URL"), "")}'
           - scenesmithTimeoutSeconds: '${default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
+          - scenesmithLiveRequired: '${text.to_lower(default(sys.get_env("SCENESMITH_LIVE_REQUIRED"), "true"))}'
+          - sageLiveRequired: '${text.to_lower(default(sys.get_env("SAGE_LIVE_REQUIRED"), "true"))}'
+          - textEnforceLiveBackends: '${text.to_lower(default(sys.get_env("TEXT_ENFORCE_LIVE_BACKENDS"), "false"))}'
           - textSageActionDemoEnabled: '${text.to_lower(default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false"))}'
           - workflowName: "source-orchestrator"
           - startTime: '${time.format(sys.now())}'
@@ -122,13 +119,46 @@ main:
           - cloudrunFallbackCount: 0
           - lockAcquired: false
           - requestSourceMode: "unknown"
-          - requestTextBackend: "scenesmith"
+          - requestTextBackend: ${textBackendDefault}
+          - requestForcesEpisode: false
+          - useGeniesimOverrideRaw: null
           - qualityTier: "standard"
           - providerPolicy: "openrouter_qwen_primary"
           - vmErrMessage: ""
           - errorCode: ""
           - errorMsg: ""
           - failedStage: ""
+        next: parse_text_backend_runtime_json
+
+    - parse_text_backend_runtime_json:
+        try:
+          assign:
+            - textBackendRuntimeConfig: '${json.decode(textBackendRuntimeJsonRaw)}'
+        except:
+          as: textBackendRuntimeParseErr
+          steps:
+            - log_text_backend_runtime_parse_warning:
+                call: sys.log
+                args:
+                  text: '${"[source-orchestrator] Failed to parse TEXT_BACKEND_RUNTIME_JSON: " + textBackendRuntimeParseErr.message + " (using direct env defaults)"}'
+                  severity: "WARNING"
+            - set_empty_text_backend_runtime_config:
+                assign:
+                  - textBackendRuntimeConfig: '${json.decode("{}")}'
+        next: apply_text_backend_runtime_overrides
+
+    - apply_text_backend_runtime_overrides:
+        assign:
+          - sageRuntimeMode: '${text.to_lower(string(default(map.get(textBackendRuntimeConfig, "SAGE_RUNTIME_MODE"), sageRuntimeMode)))}'
+          - sageServerUrl: '${string(default(map.get(textBackendRuntimeConfig, "SAGE_SERVER_URL"), sageServerUrl))}'
+          - sageTimeoutSeconds: '${string(default(map.get(textBackendRuntimeConfig, "SAGE_TIMEOUT_SECONDS"), sageTimeoutSeconds))}'
+          - scenesmithRuntimeMode: '${text.to_lower(string(default(map.get(textBackendRuntimeConfig, "SCENESMITH_RUNTIME_MODE"), scenesmithRuntimeMode)))}'
+          - scenesmithServerUrl: '${string(default(map.get(textBackendRuntimeConfig, "SCENESMITH_SERVER_URL"), scenesmithServerUrl))}'
+          - scenesmithTimeoutSeconds: '${string(default(map.get(textBackendRuntimeConfig, "SCENESMITH_TIMEOUT_SECONDS"), scenesmithTimeoutSeconds))}'
+          - scenesmithLiveRequired: '${text.to_lower(string(default(map.get(textBackendRuntimeConfig, "SCENESMITH_LIVE_REQUIRED"), scenesmithLiveRequired)))}'
+          - sageLiveRequired: '${text.to_lower(string(default(map.get(textBackendRuntimeConfig, "SAGE_LIVE_REQUIRED"), sageLiveRequired)))}'
+          - textEnforceLiveBackends: '${text.to_lower(string(default(map.get(textBackendRuntimeConfig, "TEXT_ENFORCE_LIVE_BACKENDS"), textEnforceLiveBackends)))}'
+          - textSageActionDemoEnabled: '${text.to_lower(string(default(map.get(textBackendRuntimeConfig, "TEXT_SAGE_ACTION_DEMO_ENABLED"), textSageActionDemoEnabled)))}'
         next: filter_prompt_requests
 
     - filter_prompt_requests:
@@ -146,6 +176,7 @@ main:
           - failureMarker: '${scenePrefix + "/.source_orchestrator_failed"}'
           - variantsIndexObject: '${scenePrefix + "/variants/index.json"}'
           - geniesimCompleteObject: '${scenePrefix + "/geniesim/.geniesim_complete"}'
+          - episodesCompleteObject: '${scenePrefix + "/episodes/.episodes_complete"}'
           - lockObject: '${scenePrefix + "/locks/source-orchestrator-" + objectGeneration + ".lock"}'
         next: acquire_lock
 
@@ -236,23 +267,13 @@ main:
             - requestSchemaVersion: '${string(default(map.get(sceneRequest, "schema_version"), ""))}'
             - requestSceneId: '${string(default(map.get(sceneRequest, "scene_id"), ""))}'
             - requestSourceMode: '${text.to_lower(string(default(map.get(sceneRequest, "source_mode"), defaultSourceMode)))}'
-            - requestTextBackendRaw: '${text.to_lower(string(default(map.get(sceneRequest, "text_backend"), textBackendDefault)))}'
+            - requestTextBackendRaw: '${text.replace_all(text.to_lower(string(default(map.get(sceneRequest, "text_backend"), textBackendDefault))), " ", "")}'
             - requestTextBackend: '${if(requestTextBackendRaw == "", textBackendDefault, requestTextBackendRaw)}'
-            - primarySourceMode: '${if(requestSourceMode == "auto", "text", requestSourceMode)}'
             - qualityTier: '${text.to_lower(string(default(map.get(sceneRequest, "quality_tier"), "standard")))}'
             - providerPolicy: '${string(default(map.get(sceneRequest, "provider_policy"), "openrouter_qwen_primary"))}'
             - seedCount: '${int(default(map.get(sceneRequest, "seed_count"), 1))}'
             - prompt: '${string(default(map.get(sceneRequest, "prompt"), ""))}'
             - constraints: '${default(map.get(sceneRequest, "constraints"), json.decode("{}"))}'
-            - fallbackConfig: '${default(map.get(sceneRequest, "fallback"), json.decode("{}"))}'
-            - allowImageFallbackRaw: '${default(map.get(fallbackConfig, "allow_image_fallback"), true)}'
-            - allowImageFallbackString: '${text.to_lower(string(allowImageFallbackRaw))}'
-            - allowImageFallbackRequest: '${allowImageFallbackString != "false" and allowImageFallbackString != "0" and allowImageFallbackString != "no" and allowImageFallbackString != "off"}'
-            - allowImageFallback: '${allowImageFallbackRequest and textGenEnableImageFallback}'
-            - imagePayload: '${default(map.get(sceneRequest, "image"), json.decode("{}"))}'
-            - imageGcsUri: '${string(default(map.get(imagePayload, "gcs_uri"), ""))}'
-            - imageGeneration: '${if(map.get(imagePayload, "generation") != null, string(map.get(imagePayload, "generation")), objectGeneration)}'
-            - imageObjectCandidate: '${if(imageGcsUri == "", "", if(text.match_regex(imageGcsUri, "^gs://"), if(text.match_regex(imageGcsUri, "^gs://" + bucket + "/"), text.replace_all(imageGcsUri, "gs://" + bucket + "/", ""), ""), imageGcsUri))}'
         except:
           as: requestParseErr
           steps:
@@ -270,25 +291,23 @@ main:
             next: invalid_request
           - condition: '${requestSceneId == "" or requestSceneId != sceneId}'
             next: invalid_request
-          - condition: '${requestSourceMode != "text" and requestSourceMode != "image" and requestSourceMode != "auto"}'
+          - condition: '${requestSourceMode != "text"}'
             next: invalid_request
-          - condition: '${requestSourceMode != "image" and (requestTextBackend != "internal" and requestTextBackend != "scenesmith" and requestTextBackend != "sage" and requestTextBackend != "hybrid_serial")}'
+          - condition: '${requestTextBackend != "scenesmith" and requestTextBackend != "sage" and requestTextBackend != "hybrid_serial"}'
             next: invalid_request
-          - condition: '${requestSourceMode != "image" and not(text.match_regex("," + textBackendAllowlist + ",", ".*," + requestTextBackend + ",.*"))}'
+          - condition: '${not(text.match_regex("," + textBackendAllowlist + ",", ".*," + requestTextBackend + ",.*"))}'
             next: invalid_request
           - condition: '${qualityTier != "standard" and qualityTier != "premium"}'
             next: invalid_request
           - condition: '${providerPolicy != "openai_primary" and providerPolicy != "openrouter_qwen_primary"}'
             next: invalid_request
-          - condition: '${(requestSourceMode == "text" or requestSourceMode == "auto") and prompt == ""}'
-            next: invalid_request
-          - condition: '${requestSourceMode == "image" and imageGcsUri == ""}'
+          - condition: '${prompt == ""}'
             next: invalid_request
           - condition: '${seedCount < 1}'
             next: invalid_request
           - condition: '${seedCount > textGenMaxSeeds}'
             next: invalid_request
-        next: source_mode_switch
+        next: derive_request_backend_override
 
     - invalid_request:
         assign:
@@ -297,67 +316,11 @@ main:
           - failedStage: "source_request_validation"
         next: write_failure_and_raise
 
-    - source_mode_switch:
-        switch:
-          - condition: '${primarySourceMode == "image"}'
-            next: run_image_mode
-        next: init_text_mode
-
-    - run_image_mode:
-        switch:
-          - condition: '${imageObjectCandidate != "" and text.match_regex(imageObjectCandidate, "^scenes/[^/]+/images/[^/]+\\.([Pp][Nn][Gg]|[Jj][Pp][Ee]?[Gg])$")}'
-            next: delegate_image_mode
-        next: invalid_image_path
-
-    - invalid_image_path:
+    - derive_request_backend_override:
         assign:
-          - errorCode: "invalid_image_uri"
-          - errorMsg: '${"Image source_mode requested but image.gcs_uri is invalid or not in bucket " + bucket + ": " + imageGcsUri}'
-          - failedStage: "source_request_validation"
-        next: write_failure_and_raise
-
-    - delegate_image_mode:
-        call: run_image_path_compat
-        args:
-          projectId: ${projectId}
-          region: ${region}
-          bucket: ${bucket}
-          imageObject: ${imageObjectCandidate}
-          generation: ${imageGeneration}
-          imagePathMode: ${imagePathMode}
-          imageOrchestratorWorkflow: ${imageOrchestratorWorkflow}
-          imageLegacyWorkflow: ${imageLegacyWorkflow}
-          geniesimCompleteObject: ${geniesimCompleteObject}
-          legacyWaitTimeoutSeconds: ${imageLegacyWaitSeconds}
-        result: imageResult
-        next: write_completion_marker_image
-
-    - write_completion_marker_image:
-        call: googleapis.storage.v1.objects.insert
-        args:
-          bucket: ${bucket}
-          name: ${completionMarker}
-          uploadType: "media"
-          body: '${"{\"scene_id\":\"" + sceneId + "\",\"status\":\"completed\",\"source_type\":\"image\",\"timestamp\":\"" + time.format(sys.now()) + "\"}"}'
-        next: release_lock_before_done_image
-
-    - release_lock_before_done_image:
-        call: release_source_lock_if_needed
-        args:
-          bucket: ${bucket}
-          lockObject: ${lockObject}
-          lockAcquired: ${lockAcquired}
-        next: done_image
-
-    - done_image:
-        return:
-          status: "SUCCESS"
-          source_type: "image"
-          scene_id: ${sceneId}
-          seed_count: ${seedCount}
-          fallback_used: false
-          image_path_mode: ${imageResult.mode}
-          image_workflow: ${imageResult.workflow_name}
+          - requestForcesEpisode: '${requestTextBackend == "scenesmith" or requestTextBackend == "sage" or requestTextBackend == "hybrid_serial"}'
+          - useGeniesimOverrideRaw: '${if(requestForcesEpisode, "false", null)}'
+        next: init_text_mode
 
     - init_text_mode:
         assign:
@@ -384,10 +347,7 @@ main:
           - childSegPrefix: '${childScenePrefix + "/seg"}'
         next: process_text_seed
 
-    # NOTE: Fail-fast fallback behavior — if ANY seed fails in this loop,
-    # the except block jumps to fallback_to_image_mode (when enabled).
-    # Remaining seeds are NOT retried individually. The image path replaces
-    # the entire text generation for the parent scene_id.
+    # Fail fast: if any child seed fails, abort orchestration for the scene.
     - process_text_seed:
         try:
           steps:
@@ -402,7 +362,17 @@ main:
                   bucket: ${bucket}
                   name: ${childRequestObject}
                   uploadType: "media"
-                  body: '${"{\"schema_version\":\"v1\",\"scene_id\":\"" + childSceneId + "\",\"source_mode\":\"text\",\"text_backend\":\"" + requestTextBackend + "\",\"prompt\":" + json.encode(prompt) + ",\"quality_tier\":\"" + qualityTier + "\",\"seed_count\":1,\"provider_policy\":\"" + providerPolicy + "\"}"}'
+                  body: '${json.encode({
+                    "schema_version": "v1",
+                    "scene_id": childSceneId,
+                    "source_mode": "text",
+                    "text_backend": requestTextBackend,
+                    "prompt": prompt,
+                    "quality_tier": qualityTier,
+                    "seed_count": 1,
+                    "provider_policy": providerPolicy,
+                    "constraints": constraints
+                  })}'
                 next: run_text_stage1_for_child
             - run_text_stage1_for_child:
                 call: run_text_stage1_for_child
@@ -473,6 +443,16 @@ main:
                   textVmZone: ${textVmZone}
                   textVmRepoDir: ${textVmRepoDir}
                   textVmTimeoutSeconds: ${textVmTimeoutSeconds}
+                  sageRuntimeMode: ${sageRuntimeMode}
+                  sageServerUrl: ${sageServerUrl}
+                  sageTimeoutSeconds: ${sageTimeoutSeconds}
+                  scenesmithRuntimeMode: ${scenesmithRuntimeMode}
+                  scenesmithServerUrl: ${scenesmithServerUrl}
+                  scenesmithTimeoutSeconds: ${scenesmithTimeoutSeconds}
+                  scenesmithLiveRequired: ${scenesmithLiveRequired}
+                  sageLiveRequired: ${sageLiveRequired}
+                  textEnforceLiveBackends: ${textEnforceLiveBackends}
+                  textSageActionDemoEnabled: ${textSageActionDemoEnabled}
                 result: textStageResult
                 next: maybe_count_runtime_fallback
             - maybe_count_runtime_fallback:
@@ -492,7 +472,7 @@ main:
                   bucket: ${bucket}
                   sceneId: ${childSceneId}
                   arenaExportRequired: ${arenaExportRequired}
-                  imagePathMode: ${imagePathMode}
+                  useGeniesimOverrideRaw: ${useGeniesimOverrideRaw}
                 result: downstreamStatus
                 next: append_variant_entry
             - append_variant_entry:
@@ -508,10 +488,6 @@ main:
                 args:
                   text: '${"Text source failed for child " + childSceneId + ": " + textSeedErr.message}'
                   severity: "ERROR"
-            - maybe_fallback_switch:
-                switch:
-                  - condition: '${allowImageFallback and imageObjectCandidate != "" and text.match_regex(imageObjectCandidate, "^scenes/[^/]+/images/[^/]+\\.([Pp][Nn][Gg]|[Jj][Pp][Ee]?[Gg])$")}'
-                    next: fallback_to_image_mode
             - set_text_failure_error:
                 assign:
                   - errorCode: "text_stage_failed"
@@ -524,55 +500,6 @@ main:
         assign:
           - seedIndex: ${seedIndex + 1}
         next: text_seed_loop_check
-
-    - fallback_to_image_mode:
-        call: run_image_path_compat
-        args:
-          projectId: ${projectId}
-          region: ${region}
-          bucket: ${bucket}
-          imageObject: ${imageObjectCandidate}
-          generation: ${imageGeneration}
-          imagePathMode: ${imagePathMode}
-          imageOrchestratorWorkflow: ${imageOrchestratorWorkflow}
-          imageLegacyWorkflow: ${imageLegacyWorkflow}
-          geniesimCompleteObject: ${geniesimCompleteObject}
-          legacyWaitTimeoutSeconds: ${imageLegacyWaitSeconds}
-        result: imageFallbackResult
-        next: write_completion_marker_fallback
-
-    - write_completion_marker_fallback:
-        assign:
-          - fallbackUsed: true
-        next: write_completion_marker_fallback_object
-
-    - write_completion_marker_fallback_object:
-        call: googleapis.storage.v1.objects.insert
-        args:
-          bucket: ${bucket}
-          name: ${completionMarker}
-          uploadType: "media"
-          body: '${"{\"scene_id\":\"" + sceneId + "\",\"status\":\"completed\",\"source_type\":\"image_fallback\",\"timestamp\":\"" + time.format(sys.now()) + "\"}"}'
-        next: release_lock_before_done_fallback
-
-    - release_lock_before_done_fallback:
-        call: release_source_lock_if_needed
-        args:
-          bucket: ${bucket}
-          lockObject: ${lockObject}
-          lockAcquired: ${lockAcquired}
-        next: done_fallback
-
-    - done_fallback:
-        return:
-          status: "SUCCESS"
-          source_type: "image_fallback"
-          scene_id: ${sceneId}
-          seed_count: ${seedCount}
-          completed_variants: ${completedVariants}
-          fallback_used: true
-          image_path_mode: ${imageFallbackResult.mode}
-          image_workflow: ${imageFallbackResult.workflow_name}
 
     - write_variants_index:
         switch:
@@ -780,13 +707,89 @@ run_workflow_and_wait:
 
 
 run_stage2_to_stage5:
-  params: [projectId, region, bucket, sceneId, arenaExportRequired, imagePathMode]
+  params: [projectId, region, bucket, sceneId, arenaExportRequired, useGeniesimOverrideRaw]
   steps:
     - derive:
         assign:
           - scenePrefix: '${"scenes/" + sceneId}'
           - geniesimState: "SKIPPED"
+          - episodeState: "SKIPPED"
           - arenaState: "SKIPPED"
+          - useGeniesimEnvRaw: '${text.to_lower(string(default(sys.get_env("USE_GENIESIM"), "true")))}'
+          - useGeniesim: '${not(useGeniesimEnvRaw == "false" or useGeniesimEnvRaw == "0" or useGeniesimEnvRaw == "no" or useGeniesimEnvRaw == "off")}'
+          - useGeniesimOverrideRawStr: '${text.to_lower(string(default(useGeniesimOverrideRaw, "")))}'
+          - hasUseGeniesimOverride: '${useGeniesimOverrideRaw != null and useGeniesimOverrideRawStr != ""}'
+        next: request_override_switch
+
+    - request_override_switch:
+        switch:
+          - condition: ${hasUseGeniesimOverride}
+            next: apply_request_backend_override
+        next: read_scene_backend_config
+
+    - apply_request_backend_override:
+        assign:
+          - useGeniesim: '${not(useGeniesimOverrideRawStr == "false" or useGeniesimOverrideRawStr == "0" or useGeniesimOverrideRawStr == "no" or useGeniesimOverrideRawStr == "off")}'
+        next: configure_stage4_and_stage5
+
+    - read_scene_backend_config:
+        try:
+          call: googleapis.storage.v1.objects.get
+          args:
+            bucket: ${bucket}
+            object: '${scenePrefix + "/config.json"}'
+            alt: "media"
+          result: sceneConfigRaw
+        except:
+          as: sceneConfigErr
+          steps:
+            - scene_config_missing_switch:
+                switch:
+                  - condition: '${sceneConfigErr.code == 404}'
+                    next: configure_stage4_and_stage5
+                next: log_scene_config_read_warning
+            - log_scene_config_read_warning:
+                call: sys.log
+                args:
+                  text: '${"[source-orchestrator] Failed to read scene config for " + sceneId + ": " + sceneConfigErr.message + " (using USE_GENIESIM env fallback)"}'
+                  severity: "WARNING"
+                next: configure_stage4_and_stage5
+        next: parse_scene_backend_config
+
+    - parse_scene_backend_config:
+        try:
+          assign:
+            - sceneConfig: ${json.decode(sceneConfigRaw)}
+            - sceneUseGeniesimRaw: '${default(map.get(sceneConfig, "use_geniesim"), null)}'
+            - sceneUseGeniesimRawStr: '${text.to_lower(string(default(sceneUseGeniesimRaw, "")))}'
+        except:
+          as: sceneConfigParseErr
+          steps:
+            - log_scene_config_parse_warning:
+                call: sys.log
+                args:
+                  text: '${"[source-orchestrator] Failed to parse scene config for " + sceneId + ": " + sceneConfigParseErr.message + " (using USE_GENIESIM env fallback)"}'
+                  severity: "WARNING"
+                next: configure_stage4_and_stage5
+        next: apply_scene_backend_override
+
+    - apply_scene_backend_override:
+        switch:
+          - condition: '${sceneUseGeniesimRaw == null}'
+            next: configure_stage4_and_stage5
+        next: set_scene_backend_override
+
+    - set_scene_backend_override:
+        assign:
+          - useGeniesim: '${not(sceneUseGeniesimRawStr == "false" or sceneUseGeniesimRawStr == "0" or sceneUseGeniesimRawStr == "no" or sceneUseGeniesimRawStr == "off")}'
+        next: configure_stage4_and_stage5
+
+    - configure_stage4_and_stage5:
+        assign:
+          - dataBackend: '${if(useGeniesim, "geniesim", "episode_generation")}'
+          - stage4WorkflowName: '${if(useGeniesim, "genie-sim-export-pipeline", "episode-generation-pipeline")}'
+          - stage4TriggerObject: '${if(useGeniesim, scenePrefix + "/variation_assets/.variation_pipeline_complete", scenePrefix + "/usd/.usd_complete")}'
+          - stage5TriggerObject: '${if(useGeniesim, scenePrefix + "/geniesim/.geniesim_complete", scenePrefix + "/usd/.usd_complete")}'
         next: validate_stage1_outputs
 
     # Pre-Stage 2: validate that Stage 1 produced the required scene_manifest.json
@@ -819,7 +822,7 @@ run_stage2_to_stage5:
           argument:
             data:
               bucket: ${bucket}
-              name: '${scenePrefix + "/assets/.regen3d_complete"}'
+              name: '${scenePrefix + "/assets/.stage1_complete"}'
             interactive_failure_policy: "hybrid_strict"
             require_replicator: true
             require_isaac: true
@@ -840,38 +843,58 @@ run_stage2_to_stage5:
             enable_stage3_isaac_refresh: true
             require_isaac: true
         result: variationResult
-        next: downstream_execution_mode_switch
-
-    - downstream_execution_mode_switch:
-        switch:
-          - condition: '${imagePathMode == "legacy_chain"}'
-            next: delegate_stage4_stage5_to_eventarc
         next: run_stage4
-
-    - delegate_stage4_stage5_to_eventarc:
-        assign:
-          - geniesimState: "DELEGATED_TO_EVENTARC"
-          - arenaState: "DELEGATED_TO_EVENTARC"
-        next: return_summary
 
     - run_stage4:
         call: run_workflow_and_wait
         args:
           projectId: ${projectId}
           region: ${region}
-          workflowName: "genie-sim-export-pipeline"
+          workflowName: ${stage4WorkflowName}
           pollIntervalSeconds: 30
           argument:
             data:
               bucket: ${bucket}
-              name: '${scenePrefix + "/variation_assets/.variation_pipeline_complete"}'
-        result: geniesimResult
-        next: set_stage4_success
+              name: ${stage4TriggerObject}
+        result: stage4Result
+        next: set_stage4_status
+
+    - set_stage4_status:
+        try:
+          assign:
+            - stage4StatusCandidate: '${text.to_upper(string(default(map.get(stage4Result.result, "status"), "")))}'
+            - stage4Status: '${if(stage4StatusCandidate == "", "UNKNOWN", stage4StatusCandidate)}'
+        except:
+          as: stage4StatusErr
+          steps:
+            - set_stage4_status_scalar_fallback:
+                assign:
+                  - stage4StatusScalar: '${text.to_upper(string(default(stage4Result.result, "UNKNOWN")))}'
+                  - stage4Status: '${if(stage4StatusScalar == "SUCCESS" or stage4StatusScalar == "SKIPPED", stage4StatusScalar, "UNKNOWN")}'
+        next: stage4_status_switch
+
+    - stage4_status_switch:
+        switch:
+          - condition: '${stage4Status == "SUCCESS"}'
+            next: set_stage4_success
+          - condition: '${stage4Status == "SKIPPED"}'
+            next: set_stage4_skipped
+        next: raise_stage4_non_success
 
     - set_stage4_success:
         assign:
-          - geniesimState: "SUCCEEDED"
+          - geniesimState: '${if(dataBackend == "geniesim", "SUCCEEDED", "SKIPPED")}'
+          - episodeState: '${if(dataBackend == "episode_generation", "SUCCEEDED", "SKIPPED")}'
         next: run_stage5_requirement_switch
+
+    - set_stage4_skipped:
+        assign:
+          - geniesimState: '${if(dataBackend == "geniesim", "SKIPPED", "SKIPPED")}'
+          - episodeState: '${if(dataBackend == "episode_generation", "SKIPPED", "SKIPPED")}'
+        next: run_stage5_requirement_switch
+
+    - raise_stage4_non_success:
+        raise: '${"Stage 4 workflow " + stage4WorkflowName + " returned non-success status for scene " + sceneId + " (status=" + stage4Status + ", data_backend=" + dataBackend + ")"}'
 
     - run_stage5_requirement_switch:
         switch:
@@ -889,7 +912,7 @@ run_stage2_to_stage5:
           argument:
             data:
               bucket: ${bucket}
-              name: '${scenePrefix + "/geniesim/.geniesim_complete"}'
+              name: ${stage5TriggerObject}
         result: arenaRequiredResult
         next: set_required_arena_status
 
@@ -923,7 +946,7 @@ run_stage2_to_stage5:
             argument:
               data:
                 bucket: ${bucket}
-                name: '${scenePrefix + "/geniesim/.geniesim_complete"}'
+                name: ${stage5TriggerObject}
           result: arenaResult
         except:
           as: arenaErr
@@ -979,13 +1002,15 @@ run_stage2_to_stage5:
           scene_id: ${sceneId}
           usd_assembly: "SUCCEEDED"
           variation_assets: "SUCCEEDED"
+          data_backend: ${dataBackend}
           geniesim_export: ${geniesimState}
+          episode_generation: ${episodeState}
           arena_export: ${arenaState}
           arena_required: ${arenaExportRequired}
 
 
 run_text_stage1_for_child:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenRuntime, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenRuntime, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds, sageRuntimeMode, sageServerUrl, sageTimeoutSeconds, scenesmithRuntimeMode, scenesmithServerUrl, scenesmithTimeoutSeconds, scenesmithLiveRequired, sageLiveRequired, textEnforceLiveBackends, textSageActionDemoEnabled]
   steps:
     - init_runtime_defaults:
         assign:
@@ -1023,6 +1048,16 @@ run_text_stage1_for_child:
             textGenUseLlm: ${textGenUseLlm}
             textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
             textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+            sageRuntimeMode: ${sageRuntimeMode}
+            sageServerUrl: ${sageServerUrl}
+            sageTimeoutSeconds: ${sageTimeoutSeconds}
+            scenesmithRuntimeMode: ${scenesmithRuntimeMode}
+            scenesmithServerUrl: ${scenesmithServerUrl}
+            scenesmithTimeoutSeconds: ${scenesmithTimeoutSeconds}
+            scenesmithLiveRequired: ${scenesmithLiveRequired}
+            sageLiveRequired: ${sageLiveRequired}
+            textEnforceLiveBackends: ${textEnforceLiveBackends}
+            textSageActionDemoEnabled: ${textSageActionDemoEnabled}
           result: runpodResult
         except:
           as: runpodErr
@@ -1058,6 +1093,16 @@ run_text_stage1_for_child:
           textGenUseLlm: ${textGenUseLlm}
           textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
           textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+          sageRuntimeMode: ${sageRuntimeMode}
+          sageServerUrl: ${sageServerUrl}
+          sageTimeoutSeconds: ${sageTimeoutSeconds}
+          scenesmithRuntimeMode: ${scenesmithRuntimeMode}
+          scenesmithServerUrl: ${scenesmithServerUrl}
+          scenesmithTimeoutSeconds: ${scenesmithTimeoutSeconds}
+          scenesmithLiveRequired: ${scenesmithLiveRequired}
+          sageLiveRequired: ${sageLiveRequired}
+          textEnforceLiveBackends: ${textEnforceLiveBackends}
+          textSageActionDemoEnabled: ${textSageActionDemoEnabled}
           textAssetRetrievalEnabled: ${textAssetRetrievalEnabled}
           textAssetLibraryPrefixes: ${textAssetLibraryPrefixes}
           textAssetLibraryMaxFiles: ${textAssetLibraryMaxFiles}
@@ -1137,6 +1182,16 @@ run_text_stage1_for_child:
             textGenUseLlm: ${textGenUseLlm}
             textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
             textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+            sageRuntimeMode: ${sageRuntimeMode}
+            sageServerUrl: ${sageServerUrl}
+            sageTimeoutSeconds: ${sageTimeoutSeconds}
+            scenesmithRuntimeMode: ${scenesmithRuntimeMode}
+            scenesmithServerUrl: ${scenesmithServerUrl}
+            scenesmithTimeoutSeconds: ${scenesmithTimeoutSeconds}
+            scenesmithLiveRequired: ${scenesmithLiveRequired}
+            sageLiveRequired: ${sageLiveRequired}
+            textEnforceLiveBackends: ${textEnforceLiveBackends}
+            textSageActionDemoEnabled: ${textSageActionDemoEnabled}
             textAssetRetrievalEnabled: ${textAssetRetrievalEnabled}
             textAssetLibraryPrefixes: ${textAssetLibraryPrefixes}
             textAssetLibraryMaxFiles: ${textAssetLibraryMaxFiles}
@@ -1221,6 +1276,16 @@ run_text_stage1_for_child:
           textGenUseLlm: ${textGenUseLlm}
           textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
           textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+          sageRuntimeMode: ${sageRuntimeMode}
+          sageServerUrl: ${sageServerUrl}
+          sageTimeoutSeconds: ${sageTimeoutSeconds}
+          scenesmithRuntimeMode: ${scenesmithRuntimeMode}
+          scenesmithServerUrl: ${scenesmithServerUrl}
+          scenesmithTimeoutSeconds: ${scenesmithTimeoutSeconds}
+          scenesmithLiveRequired: ${scenesmithLiveRequired}
+          sageLiveRequired: ${sageLiveRequired}
+          textEnforceLiveBackends: ${textEnforceLiveBackends}
+          textSageActionDemoEnabled: ${textSageActionDemoEnabled}
           textAssetRetrievalEnabled: ${textAssetRetrievalEnabled}
           textAssetLibraryPrefixes: ${textAssetLibraryPrefixes}
           textAssetLibraryMaxFiles: ${textAssetLibraryMaxFiles}
@@ -1299,6 +1364,16 @@ run_text_stage1_for_child:
           textGenUseLlm: ${textGenUseLlm}
           textGenLlmMaxAttempts: ${textGenLlmMaxAttempts}
           textGenLlmRetryBackoffSeconds: ${textGenLlmRetryBackoffSeconds}
+          sageRuntimeMode: ${sageRuntimeMode}
+          sageServerUrl: ${sageServerUrl}
+          sageTimeoutSeconds: ${sageTimeoutSeconds}
+          scenesmithRuntimeMode: ${scenesmithRuntimeMode}
+          scenesmithServerUrl: ${scenesmithServerUrl}
+          scenesmithTimeoutSeconds: ${scenesmithTimeoutSeconds}
+          scenesmithLiveRequired: ${scenesmithLiveRequired}
+          sageLiveRequired: ${sageLiveRequired}
+          textEnforceLiveBackends: ${textEnforceLiveBackends}
+          textSageActionDemoEnabled: ${textSageActionDemoEnabled}
           textAssetRetrievalEnabled: ${textAssetRetrievalEnabled}
           textAssetLibraryPrefixes: ${textAssetLibraryPrefixes}
           textAssetLibraryMaxFiles: ${textAssetLibraryMaxFiles}
@@ -1357,7 +1432,7 @@ run_text_stage1_for_child:
 
 
 run_text_jobs_on_runpod:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, sageRuntimeMode, sageServerUrl, sageTimeoutSeconds, scenesmithRuntimeMode, scenesmithServerUrl, scenesmithTimeoutSeconds, scenesmithLiveRequired, sageLiveRequired, textEnforceLiveBackends, textSageActionDemoEnabled]
   steps:
     - init_runpod_timeout:
         assign:
@@ -1399,10 +1474,17 @@ run_text_jobs_on_runpod:
                     - '${"TEXT_GEN_LLM_MAX_ATTEMPTS=" + textGenLlmMaxAttempts}'
                     - '${"TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=" + textGenLlmRetryBackoffSeconds}'
                     - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "hybrid_serial")}'
-                    - '${"TEXT_BACKEND_ALLOWLIST=" + default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
-                    - '${"SCENESMITH_TIMEOUT_SECONDS=" + default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
-                    - '${"SAGE_TIMEOUT_SECONDS=" + default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
-                    - '${"TEXT_SAGE_ACTION_DEMO_ENABLED=" + default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false")}'
+                    - '${"TEXT_BACKEND_ALLOWLIST=" + default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "scenesmith,sage,hybrid_serial")}'
+                    - '${"SAGE_RUNTIME_MODE=" + sageRuntimeMode}'
+                    - '${"SAGE_SERVER_URL=" + sageServerUrl}'
+                    - '${"SAGE_TIMEOUT_SECONDS=" + sageTimeoutSeconds}'
+                    - '${"SCENESMITH_RUNTIME_MODE=" + scenesmithRuntimeMode}'
+                    - '${"SCENESMITH_SERVER_URL=" + scenesmithServerUrl}'
+                    - '${"SCENESMITH_TIMEOUT_SECONDS=" + scenesmithTimeoutSeconds}'
+                    - '${"SCENESMITH_LIVE_REQUIRED=" + scenesmithLiveRequired}'
+                    - '${"SAGE_LIVE_REQUIRED=" + sageLiveRequired}'
+                    - '${"TEXT_ENFORCE_LIVE_BACKENDS=" + textEnforceLiveBackends}'
+                    - '${"TEXT_SAGE_ACTION_DEMO_ENABLED=" + textSageActionDemoEnabled}'
                     - '${"RUNPOD_API_KEY=" + default(sys.get_env("RUNPOD_API_KEY"), "")}'
                     - '${"OPENAI_API_KEY=" + default(sys.get_env("OPENAI_API_KEY"), "")}'
                     - '${"GOOGLE_API_KEY=" + default(sys.get_env("BP_GOOGLE_API_KEY"), "")}'
@@ -1529,11 +1611,14 @@ run_text_jobs_on_runpod:
                               "TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS": os.environ["TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS"],
                               "TEXT_BACKEND_DEFAULT": os.environ["TEXT_BACKEND_DEFAULT"],
                               "TEXT_BACKEND_ALLOWLIST": os.environ["TEXT_BACKEND_ALLOWLIST"],
-                              "SAGE_RUNTIME_MODE": "vm",
-                              "SAGE_SERVER_URL": "http://127.0.0.1:8082/v1/refine",
+                              "SAGE_RUNTIME_MODE": os.environ.get("SAGE_RUNTIME_MODE", "vm"),
+                              "SAGE_SERVER_URL": os.environ.get("SAGE_SERVER_URL", "http://127.0.0.1:8082/v1/refine"),
                               "SAGE_TIMEOUT_SECONDS": os.environ.get("SAGE_TIMEOUT_SECONDS", "900"),
-                              "SCENESMITH_RUNTIME_MODE": "vm",
-                              "SCENESMITH_SERVER_URL": "http://127.0.0.1:8081/v1/generate",
+                              "SCENESMITH_LIVE_REQUIRED": os.environ.get("SCENESMITH_LIVE_REQUIRED", "true"),
+                              "SAGE_LIVE_REQUIRED": os.environ.get("SAGE_LIVE_REQUIRED", "true"),
+                              "TEXT_ENFORCE_LIVE_BACKENDS": os.environ.get("TEXT_ENFORCE_LIVE_BACKENDS", "false"),
+                              "SCENESMITH_RUNTIME_MODE": os.environ.get("SCENESMITH_RUNTIME_MODE", "vm"),
+                              "SCENESMITH_SERVER_URL": os.environ.get("SCENESMITH_SERVER_URL", "http://127.0.0.1:8081/v1/generate"),
                               "SCENESMITH_TIMEOUT_SECONDS": os.environ.get("SCENESMITH_TIMEOUT_SECONDS", "1800"),
                               "TEXT_SAGE_ACTION_DEMO_ENABLED": os.environ.get("TEXT_SAGE_ACTION_DEMO_ENABLED", "false"),
                               "TEXT_GEN_RUNTIME": "runpod",
@@ -1784,7 +1869,7 @@ run_text_jobs_on_runpod:
 
 
 run_text_jobs_on_cloudrun:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds, sageRuntimeMode, sageServerUrl, sageTimeoutSeconds, scenesmithRuntimeMode, scenesmithServerUrl, scenesmithTimeoutSeconds, scenesmithLiveRequired, sageLiveRequired, textEnforceLiveBackends, textSageActionDemoEnabled]
   steps:
     - run_text_gen_job:
         call: run_cloud_run_job_and_wait
@@ -1823,21 +1908,27 @@ run_text_jobs_on_cloudrun:
             - name: TEXT_BACKEND_DEFAULT
               value: '${default(sys.get_env("TEXT_BACKEND_DEFAULT"), "hybrid_serial")}'
             - name: TEXT_BACKEND_ALLOWLIST
-              value: '${default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
+              value: '${default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "scenesmith,sage,hybrid_serial")}'
             - name: SAGE_RUNTIME_MODE
-              value: '${default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun")}'
+              value: ${sageRuntimeMode}
             - name: SAGE_SERVER_URL
-              value: '${default(sys.get_env("SAGE_SERVER_URL"), "")}'
+              value: ${sageServerUrl}
             - name: SAGE_TIMEOUT_SECONDS
-              value: '${default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
+              value: ${sageTimeoutSeconds}
+            - name: SCENESMITH_LIVE_REQUIRED
+              value: ${scenesmithLiveRequired}
+            - name: SAGE_LIVE_REQUIRED
+              value: ${sageLiveRequired}
+            - name: TEXT_ENFORCE_LIVE_BACKENDS
+              value: ${textEnforceLiveBackends}
             - name: SCENESMITH_RUNTIME_MODE
-              value: '${default(sys.get_env("SCENESMITH_RUNTIME_MODE"), "cloudrun")}'
+              value: ${scenesmithRuntimeMode}
             - name: SCENESMITH_SERVER_URL
-              value: '${default(sys.get_env("SCENESMITH_SERVER_URL"), "")}'
+              value: ${scenesmithServerUrl}
             - name: SCENESMITH_TIMEOUT_SECONDS
-              value: '${default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
+              value: ${scenesmithTimeoutSeconds}
             - name: TEXT_SAGE_ACTION_DEMO_ENABLED
-              value: '${default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false")}'
+              value: ${textSageActionDemoEnabled}
         result: textGenStatus
         next: run_text_adapter_job
 
@@ -1963,7 +2054,7 @@ run_text_jobs_on_cloudrun:
 
 
 run_text_jobs_on_vm:
-  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds]
+  params: [projectId, region, bucket, childSceneId, childRequestObject, childTextgenPrefix, childAssetsPrefix, childLayoutPrefix, childSegPrefix, seedIndex, textGenMaxSeeds, textGenStandardProfile, textGenPremiumProfile, textGenUseLlm, textGenLlmMaxAttempts, textGenLlmRetryBackoffSeconds, textAssetRetrievalEnabled, textAssetLibraryPrefixes, textAssetLibraryMaxFiles, textAssetLibraryMinScore, textAssetRetrievalMode, textAssetAnnEnabled, textAssetAnnTopK, textAssetAnnMinScore, textAssetAnnMaxRerank, textAssetAnnNamespace, textAssetLexicalFallbackEnabled, textAssetRolloutStatePrefix, textAssetRolloutMinDecisions, textAssetRolloutMinHitRate, textAssetRolloutMaxErrorRate, textAssetRolloutMaxP95Ms, textAssetEmbeddingQueuePrefix, textAssetEmbeddingProcessedPrefix, textAssetEmbeddingFailedPrefix, textAssetEmbeddingModel, vectorStoreProvider, vectorStoreProjectId, vectorStoreLocation, vectorStoreNamespace, vectorStoreDimension, vertexIndexEndpoint, vertexDeployedIndexId, textAssetCatalogEnabled, textAssetReplicationEnabled, textAssetReplicationQueuePrefix, textAssetReplicationTarget, textAssetReplicationTargetPrefix, textAssetGenerationEnabled, textAssetGenerationProvider, textAssetGenerationProviderChain, textAssetGeneratedCacheEnabled, textAssetGeneratedCachePrefix, textSam3dApiHost, textSam3dTextEndpoints, textSam3dTimeoutSeconds, textSam3dPollSeconds, textHunyuanApiHost, textHunyuanTextEndpoints, textHunyuanTimeoutSeconds, textHunyuanPollSeconds, textVmName, textVmZone, textVmRepoDir, textVmTimeoutSeconds, sageRuntimeMode, sageServerUrl, sageTimeoutSeconds, scenesmithRuntimeMode, scenesmithServerUrl, scenesmithTimeoutSeconds, scenesmithLiveRequired, sageLiveRequired, textEnforceLiveBackends, textSageActionDemoEnabled]
   steps:
     - run_text_jobs_via_cloud_build:
         try:
@@ -1991,14 +2082,17 @@ run_text_jobs_on_vm:
                     - '${"TEXT_GEN_LLM_MAX_ATTEMPTS=" + textGenLlmMaxAttempts}'
                     - '${"TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=" + textGenLlmRetryBackoffSeconds}'
                     - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "hybrid_serial")}'
-                    - '${"TEXT_BACKEND_ALLOWLIST=" + default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
-                    - '${"SAGE_RUNTIME_MODE=" + default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun")}'
-                    - '${"SAGE_SERVER_URL=" + default(sys.get_env("SAGE_SERVER_URL"), "")}'
-                    - '${"SAGE_TIMEOUT_SECONDS=" + default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
-                    - '${"SCENESMITH_RUNTIME_MODE=" + default(sys.get_env("SCENESMITH_RUNTIME_MODE"), "cloudrun")}'
-                    - '${"SCENESMITH_SERVER_URL=" + default(sys.get_env("SCENESMITH_SERVER_URL"), "")}'
-                    - '${"SCENESMITH_TIMEOUT_SECONDS=" + default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
-                    - '${"TEXT_SAGE_ACTION_DEMO_ENABLED=" + default(sys.get_env("TEXT_SAGE_ACTION_DEMO_ENABLED"), "false")}'
+                    - '${"TEXT_BACKEND_ALLOWLIST=" + default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "scenesmith,sage,hybrid_serial")}'
+                    - '${"SAGE_RUNTIME_MODE=" + sageRuntimeMode}'
+                    - '${"SAGE_SERVER_URL=" + sageServerUrl}'
+                    - '${"SAGE_TIMEOUT_SECONDS=" + sageTimeoutSeconds}'
+                    - '${"SCENESMITH_LIVE_REQUIRED=" + scenesmithLiveRequired}'
+                    - '${"SAGE_LIVE_REQUIRED=" + sageLiveRequired}'
+                    - '${"TEXT_ENFORCE_LIVE_BACKENDS=" + textEnforceLiveBackends}'
+                    - '${"SCENESMITH_RUNTIME_MODE=" + scenesmithRuntimeMode}'
+                    - '${"SCENESMITH_SERVER_URL=" + scenesmithServerUrl}'
+                    - '${"SCENESMITH_TIMEOUT_SECONDS=" + scenesmithTimeoutSeconds}'
+                    - '${"TEXT_SAGE_ACTION_DEMO_ENABLED=" + textSageActionDemoEnabled}'
                     - '${"TEXT_ASSET_RETRIEVAL_ENABLED=" + textAssetRetrievalEnabled}'
                     - '${"TEXT_ASSET_LIBRARY_PREFIXES=" + textAssetLibraryPrefixes}'
                     - '${"TEXT_ASSET_LIBRARY_MAX_FILES=" + textAssetLibraryMaxFiles}'
@@ -2068,6 +2162,9 @@ run_text_jobs_on_vm:
                       SAGE_RUNTIME_MODE_Q=$(printf '%q' "${SAGE_RUNTIME_MODE}")
                       SAGE_SERVER_URL_Q=$(printf '%q' "${SAGE_SERVER_URL}")
                       SAGE_TIMEOUT_SECONDS_Q=$(printf '%q' "${SAGE_TIMEOUT_SECONDS}")
+                      SCENESMITH_LIVE_REQUIRED_Q=$(printf '%q' "${SCENESMITH_LIVE_REQUIRED}")
+                      SAGE_LIVE_REQUIRED_Q=$(printf '%q' "${SAGE_LIVE_REQUIRED}")
+                      TEXT_ENFORCE_LIVE_BACKENDS_Q=$(printf '%q' "${TEXT_ENFORCE_LIVE_BACKENDS}")
                       SCENESMITH_RUNTIME_MODE_Q=$(printf '%q' "${SCENESMITH_RUNTIME_MODE}")
                       SCENESMITH_SERVER_URL_Q=$(printf '%q' "${SCENESMITH_SERVER_URL}")
                       SCENESMITH_TIMEOUT_SECONDS_Q=$(printf '%q' "${SCENESMITH_TIMEOUT_SECONDS}")
@@ -2121,7 +2218,7 @@ run_text_jobs_on_vm:
                       LAYOUT_PREFIX_Q=$(printf '%q' "${LAYOUT_PREFIX}")
                       SEG_PREFIX_Q=$(printf '%q' "${SEG_PREFIX}")
 
-                      REMOTE_CMD="cd ${VM_REPO_DIR} && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} TEXT_SEED=${TEXT_SEED_Q} DEFAULT_SOURCE_MODE=text TEXT_GEN_MAX_SEEDS=${TEXT_GEN_MAX_SEEDS_Q} TEXT_GEN_STANDARD_PROFILE=${TEXT_GEN_STANDARD_PROFILE_Q} TEXT_GEN_PREMIUM_PROFILE=${TEXT_GEN_PREMIUM_PROFILE_Q} TEXT_GEN_USE_LLM=${TEXT_GEN_USE_LLM_Q} TEXT_GEN_LLM_MAX_ATTEMPTS=${TEXT_GEN_LLM_MAX_ATTEMPTS_Q} TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q} TEXT_BACKEND_DEFAULT=${TEXT_BACKEND_DEFAULT_Q} TEXT_BACKEND_ALLOWLIST=${TEXT_BACKEND_ALLOWLIST_Q} SAGE_RUNTIME_MODE=${SAGE_RUNTIME_MODE_Q} SAGE_SERVER_URL=${SAGE_SERVER_URL_Q} SAGE_TIMEOUT_SECONDS=${SAGE_TIMEOUT_SECONDS_Q} SCENESMITH_RUNTIME_MODE=${SCENESMITH_RUNTIME_MODE_Q} SCENESMITH_SERVER_URL=${SCENESMITH_SERVER_URL_Q} SCENESMITH_TIMEOUT_SECONDS=${SCENESMITH_TIMEOUT_SECONDS_Q} TEXT_SAGE_ACTION_DEMO_ENABLED=${TEXT_SAGE_ACTION_DEMO_ENABLED_Q} TEXT_GEN_RUNTIME=vm python text-scene-gen-job/generate_text_scene.py && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} ASSETS_PREFIX=${ASSETS_PREFIX_Q} LAYOUT_PREFIX=${LAYOUT_PREFIX_Q} SEG_PREFIX=${SEG_PREFIX_Q} TEXT_ASSET_RETRIEVAL_ENABLED=${TEXT_ASSET_RETRIEVAL_ENABLED_Q} TEXT_ASSET_LIBRARY_PREFIXES=${TEXT_ASSET_LIBRARY_PREFIXES_Q} TEXT_ASSET_LIBRARY_MAX_FILES=${TEXT_ASSET_LIBRARY_MAX_FILES_Q} TEXT_ASSET_LIBRARY_MIN_SCORE=${TEXT_ASSET_LIBRARY_MIN_SCORE_Q} TEXT_ASSET_RETRIEVAL_MODE=${TEXT_ASSET_RETRIEVAL_MODE_Q} TEXT_ASSET_ANN_ENABLED=${TEXT_ASSET_ANN_ENABLED_Q} TEXT_ASSET_ANN_TOP_K=${TEXT_ASSET_ANN_TOP_K_Q} TEXT_ASSET_ANN_MIN_SCORE=${TEXT_ASSET_ANN_MIN_SCORE_Q} TEXT_ASSET_ANN_MAX_RERANK=${TEXT_ASSET_ANN_MAX_RERANK_Q} TEXT_ASSET_ANN_NAMESPACE=${TEXT_ASSET_ANN_NAMESPACE_Q} TEXT_ASSET_LEXICAL_FALLBACK_ENABLED=${TEXT_ASSET_LEXICAL_FALLBACK_ENABLED_Q} TEXT_ASSET_ROLLOUT_STATE_PREFIX=${TEXT_ASSET_ROLLOUT_STATE_PREFIX_Q} TEXT_ASSET_ROLLOUT_MIN_DECISIONS=${TEXT_ASSET_ROLLOUT_MIN_DECISIONS_Q} TEXT_ASSET_ROLLOUT_MIN_HIT_RATE=${TEXT_ASSET_ROLLOUT_MIN_HIT_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE=${TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_P95_MS=${TEXT_ASSET_ROLLOUT_MAX_P95_MS_Q} TEXT_ASSET_EMBEDDING_QUEUE_PREFIX=${TEXT_ASSET_EMBEDDING_QUEUE_PREFIX_Q} TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX=${TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX_Q} TEXT_ASSET_EMBEDDING_FAILED_PREFIX=${TEXT_ASSET_EMBEDDING_FAILED_PREFIX_Q} TEXT_ASSET_EMBEDDING_MODEL=${TEXT_ASSET_EMBEDDING_MODEL_Q} VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER_Q} VECTOR_STORE_PROJECT_ID=${VECTOR_STORE_PROJECT_ID_Q} VECTOR_STORE_LOCATION=${VECTOR_STORE_LOCATION_Q} VECTOR_STORE_NAMESPACE=${VECTOR_STORE_NAMESPACE_Q} VECTOR_STORE_DIMENSION=${VECTOR_STORE_DIMENSION_Q} VERTEX_INDEX_ENDPOINT=${VERTEX_INDEX_ENDPOINT_Q} VERTEX_DEPLOYED_INDEX_ID=${VERTEX_DEPLOYED_INDEX_ID_Q} TEXT_ASSET_CATALOG_ENABLED=${TEXT_ASSET_CATALOG_ENABLED_Q} TEXT_ASSET_REPLICATION_ENABLED=${TEXT_ASSET_REPLICATION_ENABLED_Q} TEXT_ASSET_REPLICATION_QUEUE_PREFIX=${TEXT_ASSET_REPLICATION_QUEUE_PREFIX_Q} TEXT_ASSET_REPLICATION_TARGET=${TEXT_ASSET_REPLICATION_TARGET_Q} TEXT_ASSET_REPLICATION_TARGET_PREFIX=${TEXT_ASSET_REPLICATION_TARGET_PREFIX_Q} TEXT_ASSET_GENERATION_ENABLED=${TEXT_ASSET_GENERATION_ENABLED_Q} TEXT_ASSET_GENERATION_PROVIDER=${TEXT_ASSET_GENERATION_PROVIDER_Q} TEXT_ASSET_GENERATION_PROVIDER_CHAIN=${TEXT_ASSET_GENERATION_PROVIDER_CHAIN_Q} TEXT_ASSET_GENERATED_CACHE_ENABLED=${TEXT_ASSET_GENERATED_CACHE_ENABLED_Q} TEXT_ASSET_GENERATED_CACHE_PREFIX=${TEXT_ASSET_GENERATED_CACHE_PREFIX_Q} TEXT_SAM3D_API_HOST=${TEXT_SAM3D_API_HOST_Q} TEXT_SAM3D_TEXT_ENDPOINTS=${TEXT_SAM3D_TEXT_ENDPOINTS_Q} TEXT_SAM3D_TIMEOUT_SECONDS=${TEXT_SAM3D_TIMEOUT_SECONDS_Q} TEXT_SAM3D_POLL_SECONDS=${TEXT_SAM3D_POLL_SECONDS_Q} TEXT_HUNYUAN_API_HOST=${TEXT_HUNYUAN_API_HOST_Q} TEXT_HUNYUAN_TEXT_ENDPOINTS=${TEXT_HUNYUAN_TEXT_ENDPOINTS_Q} TEXT_HUNYUAN_TIMEOUT_SECONDS=${TEXT_HUNYUAN_TIMEOUT_SECONDS_Q} TEXT_HUNYUAN_POLL_SECONDS=${TEXT_HUNYUAN_POLL_SECONDS_Q} python text-scene-adapter-job/adapt_text_scene.py"
+                      REMOTE_CMD="cd ${VM_REPO_DIR} && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} TEXT_SEED=${TEXT_SEED_Q} DEFAULT_SOURCE_MODE=text TEXT_GEN_MAX_SEEDS=${TEXT_GEN_MAX_SEEDS_Q} TEXT_GEN_STANDARD_PROFILE=${TEXT_GEN_STANDARD_PROFILE_Q} TEXT_GEN_PREMIUM_PROFILE=${TEXT_GEN_PREMIUM_PROFILE_Q} TEXT_GEN_USE_LLM=${TEXT_GEN_USE_LLM_Q} TEXT_GEN_LLM_MAX_ATTEMPTS=${TEXT_GEN_LLM_MAX_ATTEMPTS_Q} TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=${TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS_Q} TEXT_BACKEND_DEFAULT=${TEXT_BACKEND_DEFAULT_Q} TEXT_BACKEND_ALLOWLIST=${TEXT_BACKEND_ALLOWLIST_Q} SAGE_RUNTIME_MODE=${SAGE_RUNTIME_MODE_Q} SAGE_SERVER_URL=${SAGE_SERVER_URL_Q} SAGE_TIMEOUT_SECONDS=${SAGE_TIMEOUT_SECONDS_Q} SCENESMITH_LIVE_REQUIRED=${SCENESMITH_LIVE_REQUIRED_Q} SAGE_LIVE_REQUIRED=${SAGE_LIVE_REQUIRED_Q} TEXT_ENFORCE_LIVE_BACKENDS=${TEXT_ENFORCE_LIVE_BACKENDS_Q} SCENESMITH_RUNTIME_MODE=${SCENESMITH_RUNTIME_MODE_Q} SCENESMITH_SERVER_URL=${SCENESMITH_SERVER_URL_Q} SCENESMITH_TIMEOUT_SECONDS=${SCENESMITH_TIMEOUT_SECONDS_Q} TEXT_SAGE_ACTION_DEMO_ENABLED=${TEXT_SAGE_ACTION_DEMO_ENABLED_Q} TEXT_GEN_RUNTIME=vm python text-scene-gen-job/generate_text_scene.py && BUCKET=${BUCKET_Q} SCENE_ID=${SCENE_ID_Q} REQUEST_OBJECT=${REQUEST_OBJECT_Q} TEXTGEN_PREFIX=${TEXTGEN_PREFIX_Q} ASSETS_PREFIX=${ASSETS_PREFIX_Q} LAYOUT_PREFIX=${LAYOUT_PREFIX_Q} SEG_PREFIX=${SEG_PREFIX_Q} TEXT_ASSET_RETRIEVAL_ENABLED=${TEXT_ASSET_RETRIEVAL_ENABLED_Q} TEXT_ASSET_LIBRARY_PREFIXES=${TEXT_ASSET_LIBRARY_PREFIXES_Q} TEXT_ASSET_LIBRARY_MAX_FILES=${TEXT_ASSET_LIBRARY_MAX_FILES_Q} TEXT_ASSET_LIBRARY_MIN_SCORE=${TEXT_ASSET_LIBRARY_MIN_SCORE_Q} TEXT_ASSET_RETRIEVAL_MODE=${TEXT_ASSET_RETRIEVAL_MODE_Q} TEXT_ASSET_ANN_ENABLED=${TEXT_ASSET_ANN_ENABLED_Q} TEXT_ASSET_ANN_TOP_K=${TEXT_ASSET_ANN_TOP_K_Q} TEXT_ASSET_ANN_MIN_SCORE=${TEXT_ASSET_ANN_MIN_SCORE_Q} TEXT_ASSET_ANN_MAX_RERANK=${TEXT_ASSET_ANN_MAX_RERANK_Q} TEXT_ASSET_ANN_NAMESPACE=${TEXT_ASSET_ANN_NAMESPACE_Q} TEXT_ASSET_LEXICAL_FALLBACK_ENABLED=${TEXT_ASSET_LEXICAL_FALLBACK_ENABLED_Q} TEXT_ASSET_ROLLOUT_STATE_PREFIX=${TEXT_ASSET_ROLLOUT_STATE_PREFIX_Q} TEXT_ASSET_ROLLOUT_MIN_DECISIONS=${TEXT_ASSET_ROLLOUT_MIN_DECISIONS_Q} TEXT_ASSET_ROLLOUT_MIN_HIT_RATE=${TEXT_ASSET_ROLLOUT_MIN_HIT_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE=${TEXT_ASSET_ROLLOUT_MAX_ERROR_RATE_Q} TEXT_ASSET_ROLLOUT_MAX_P95_MS=${TEXT_ASSET_ROLLOUT_MAX_P95_MS_Q} TEXT_ASSET_EMBEDDING_QUEUE_PREFIX=${TEXT_ASSET_EMBEDDING_QUEUE_PREFIX_Q} TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX=${TEXT_ASSET_EMBEDDING_PROCESSED_PREFIX_Q} TEXT_ASSET_EMBEDDING_FAILED_PREFIX=${TEXT_ASSET_EMBEDDING_FAILED_PREFIX_Q} TEXT_ASSET_EMBEDDING_MODEL=${TEXT_ASSET_EMBEDDING_MODEL_Q} VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER_Q} VECTOR_STORE_PROJECT_ID=${VECTOR_STORE_PROJECT_ID_Q} VECTOR_STORE_LOCATION=${VECTOR_STORE_LOCATION_Q} VECTOR_STORE_NAMESPACE=${VECTOR_STORE_NAMESPACE_Q} VECTOR_STORE_DIMENSION=${VECTOR_STORE_DIMENSION_Q} VERTEX_INDEX_ENDPOINT=${VERTEX_INDEX_ENDPOINT_Q} VERTEX_DEPLOYED_INDEX_ID=${VERTEX_DEPLOYED_INDEX_ID_Q} TEXT_ASSET_CATALOG_ENABLED=${TEXT_ASSET_CATALOG_ENABLED_Q} TEXT_ASSET_REPLICATION_ENABLED=${TEXT_ASSET_REPLICATION_ENABLED_Q} TEXT_ASSET_REPLICATION_QUEUE_PREFIX=${TEXT_ASSET_REPLICATION_QUEUE_PREFIX_Q} TEXT_ASSET_REPLICATION_TARGET=${TEXT_ASSET_REPLICATION_TARGET_Q} TEXT_ASSET_REPLICATION_TARGET_PREFIX=${TEXT_ASSET_REPLICATION_TARGET_PREFIX_Q} TEXT_ASSET_GENERATION_ENABLED=${TEXT_ASSET_GENERATION_ENABLED_Q} TEXT_ASSET_GENERATION_PROVIDER=${TEXT_ASSET_GENERATION_PROVIDER_Q} TEXT_ASSET_GENERATION_PROVIDER_CHAIN=${TEXT_ASSET_GENERATION_PROVIDER_CHAIN_Q} TEXT_ASSET_GENERATED_CACHE_ENABLED=${TEXT_ASSET_GENERATED_CACHE_ENABLED_Q} TEXT_ASSET_GENERATED_CACHE_PREFIX=${TEXT_ASSET_GENERATED_CACHE_PREFIX_Q} TEXT_SAM3D_API_HOST=${TEXT_SAM3D_API_HOST_Q} TEXT_SAM3D_TEXT_ENDPOINTS=${TEXT_SAM3D_TEXT_ENDPOINTS_Q} TEXT_SAM3D_TIMEOUT_SECONDS=${TEXT_SAM3D_TIMEOUT_SECONDS_Q} TEXT_SAM3D_POLL_SECONDS=${TEXT_SAM3D_POLL_SECONDS_Q} TEXT_HUNYUAN_API_HOST=${TEXT_HUNYUAN_API_HOST_Q} TEXT_HUNYUAN_TEXT_ENDPOINTS=${TEXT_HUNYUAN_TEXT_ENDPOINTS_Q} TEXT_HUNYUAN_TIMEOUT_SECONDS=${TEXT_HUNYUAN_TIMEOUT_SECONDS_Q} TEXT_HUNYUAN_POLL_SECONDS=${TEXT_HUNYUAN_POLL_SECONDS_Q} python text-scene-adapter-job/adapt_text_scene.py"
 
                       gcloud compute ssh "${VM_NAME}" \
                         --project="${PROJECT_ID}" \
@@ -2203,131 +2300,6 @@ run_text_jobs_on_vm:
           status: "SUCCEEDED"
           runtime_used: "vm"
           build_id: ${vmBuildId}
-
-
-run_image_path_compat:
-  params: [projectId, region, bucket, imageObject, generation, imagePathMode, imageOrchestratorWorkflow, imageLegacyWorkflow, geniesimCompleteObject, legacyWaitTimeoutSeconds]
-  steps:
-    - mode_switch:
-        switch:
-          - condition: '${imagePathMode == "orchestrator"}'
-            next: run_orchestrator_workflow
-          - condition: '${imagePathMode == "legacy_chain"}'
-            next: run_legacy_workflow
-        next: invalid_image_mode
-
-    - run_orchestrator_workflow:
-        call: run_workflow_and_wait
-        args:
-          projectId: ${projectId}
-          region: ${region}
-          workflowName: ${imageOrchestratorWorkflow}
-          pollIntervalSeconds: 30
-          argument:
-            data:
-              bucket: ${bucket}
-              name: ${imageObject}
-              generation: ${generation}
-        result: orchestratorResult
-        next: return_orchestrator_result
-
-    - return_orchestrator_result:
-        return:
-          mode: "orchestrator"
-          workflow_name: ${imageOrchestratorWorkflow}
-          workflow_execution: ${orchestratorResult.name}
-          waited_for_downstream: false
-
-    - run_legacy_workflow:
-        call: run_workflow_and_wait
-        args:
-          projectId: ${projectId}
-          region: ${region}
-          workflowName: ${imageLegacyWorkflow}
-          pollIntervalSeconds: 30
-          argument:
-            data:
-              bucket: ${bucket}
-              name: ${imageObject}
-              generation: ${generation}
-        result: legacyWorkflowResult
-        next: wait_for_legacy_downstream
-
-    - wait_for_legacy_downstream:
-        call: wait_for_gcs_marker
-        args:
-          bucket: ${bucket}
-          object: ${geniesimCompleteObject}
-          timeoutSeconds: ${legacyWaitTimeoutSeconds}
-          pollIntervalSeconds: 30
-        result: legacyDownstreamMarker
-        next: return_legacy_result
-
-    - return_legacy_result:
-        return:
-          mode: "legacy_chain"
-          workflow_name: ${imageLegacyWorkflow}
-          workflow_execution: ${legacyWorkflowResult.name}
-          waited_for_downstream: true
-          downstream_marker: ${geniesimCompleteObject}
-
-    - invalid_image_mode:
-        raise: '${"Unsupported IMAGE_PATH_MODE: " + imagePathMode}'
-
-
-wait_for_gcs_marker:
-  params: [bucket, object, timeoutSeconds, pollIntervalSeconds]
-  steps:
-    - init_timer:
-        assign:
-          - waitStartTime: '${time.format(sys.now())}'
-        next: poll_marker
-
-    - poll_marker:
-        try:
-          call: googleapis.storage.v1.objects.get
-          args:
-            bucket: ${bucket}
-            object: ${object}
-            alt: "media"
-          result: markerPayload
-        except:
-          as: markerErr
-          steps:
-            - marker_not_found_switch:
-                switch:
-                  - condition: '${markerErr.code == 404}'
-                    next: check_wait_timeout
-                next: marker_read_error
-            - marker_read_error:
-                raise: '${"Failed to read marker " + object + ": " + markerErr.message}'
-        next: return_marker
-
-    - check_wait_timeout:
-        assign:
-          - waitNow: '${time.format(sys.now())}'
-          - waitElapsedSeconds: '${time.parse(waitNow) - time.parse(waitStartTime)}'
-        next: wait_timeout_switch
-
-    - wait_timeout_switch:
-        switch:
-          - condition: '${waitElapsedSeconds >= timeoutSeconds}'
-            next: wait_timeout_error
-        next: wait_before_poll
-
-    - wait_before_poll:
-        call: sys.sleep
-        args:
-          seconds: ${pollIntervalSeconds}
-        next: poll_marker
-
-    - wait_timeout_error:
-        raise: '${"Timed out waiting for marker " + object + " after " + string(timeoutSeconds) + " seconds"}'
-
-    - return_marker:
-        return:
-          object: ${object}
-          payload: ${markerPayload}
 
 
 release_source_lock_if_needed:

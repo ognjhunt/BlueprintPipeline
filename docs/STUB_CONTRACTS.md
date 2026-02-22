@@ -2,111 +2,65 @@
 
 This document defines the **explicit stub boundaries** used by BlueprintPipeline’s
 free/default smoke tests. It captures the minimum file layout, schemas, and required
-fields for (a) **3D‑RE‑GEN inputs** and (b) **Genie Sim gRPC responses** so that
+fields for (a) **Stage 1 text generation inputs** and (b) **Genie Sim gRPC responses** so that
 tests can run without external services.
 
-## 1) 3D‑RE‑GEN Input Stub (Fixtures)
+## 1) Stage 1 Output Stub (Fixtures)
 
-**Boundary:** `scenes/{scene_id}/regen3d/` is produced by 3D‑RE‑GEN and treated as
-an external dependency. The fixture `fixtures/generate_mock_regen3d.py` generates
-the stubbed outputs consumed by the pipeline.
-Canonical JSON schemas live in `fixtures/contracts/`:
-- `regen3d_scene_info.schema.json`
-- `regen3d_object_pose.schema.json`
-- `regen3d_object_bounds.schema.json`
-- `regen3d_object_material.schema.json`
-- `regen3d_camera_intrinsics.schema.json`
-- `regen3d_camera_extrinsics.schema.json`
+**Boundary:** `scenes/{scene_id}/` Stage 1 outputs are treated as an external
+dependency for smoke tests. The fixture `fixtures/generate_mock_stage1.py`
+generates the canonical outputs consumed by downstream jobs.
+Canonical request schema lives in `fixtures/contracts/`:
+- `scene_request_v1.schema.json`
 
 ### Required Directory Layout
 
 ```
-scenes/{scene_id}/regen3d/
-├── scene_info.json
-├── objects/
-│   └── {object_id}/
-│       ├── mesh.glb
-│       ├── pose.json
-│       ├── bounds.json
-│       └── material.json
-├── background/
-│   ├── mesh.glb
-│   ├── pose.json
-│   └── bounds.json
-└── camera/
-    ├── intrinsics.json
-    └── extrinsics.json
+scenes/{scene_id}/
+├── textgen/
+│   ├── package.json
+│   ├── request.normalized.json
+│   └── .textgen_complete
+├── assets/
+│   ├── scene_manifest.json
+│   ├── .stage1_complete
+│   └── objects/{object_id}/mesh.glb
+├── layout/
+│   └── scene_layout_scaled.json
+└── seg/
+    └── inventory.json
 ```
 
-### Minimal Schemas (Required Fields)
+### Minimal Required Fields
 
-**`scene_info.json`**
+**`assets/.stage1_complete`**
 ```json
 {
   "scene_id": "string",
-  "image_size": [width, height],
-  "coordinate_frame": "y_up",
-  "meters_per_unit": 1.0,
-  "confidence": 0.0,
-  "version": "1.0",
-  "environment_type": "kitchen|office|warehouse",
-  "reconstruction_method": "3d-re-gen",
-  "generated_at": "ISO-8601 timestamp"
+  "status": "completed",
+  "marker_type": "stage1_complete",
+  "timestamp": "ISO-8601 timestamp"
 }
 ```
 
-**`objects/{object_id}/pose.json`**
+**`assets/scene_manifest.json`**
 ```json
 {
-  "transform_matrix": [[4x4 numbers]],
-  "translation": [x, y, z],
-  "rotation_quaternion": [w, x, y, z],
-  "scale": [sx, sy, sz],
-  "confidence": 0.0,
-  "is_floor_contact": true
+  "scene_id": "string",
+  "scene": {},
+  "objects": [
+    {
+      "id": "string",
+      "category": "string",
+      "asset": {"path": "assets/objects/<id>/mesh.glb"}
+    }
+  ]
 }
 ```
 
-**`objects/{object_id}/bounds.json`**
-```json
-{
-  "min": [x, y, z],
-  "max": [x, y, z],
-  "center": [x, y, z],
-  "size": [sx, sy, sz]
-}
-```
-
-**`objects/{object_id}/material.json`**
-```json
-{
-  "base_color": [r, g, b],
-  "metallic": 0.0,
-  "roughness": 0.5,
-  "material_type": "generic"
-}
-```
-
-**`background/pose.json`** and **`background/bounds.json`** follow the same schema as
-object pose/bounds. The background `mesh.glb` can be any valid GLB.
-
-**`camera/intrinsics.json`**
-```json
-{
-  "matrix": [[3x3 numbers]],
-  "width": 1920,
-  "height": 1080
-}
-```
-
-**`camera/extrinsics.json`**
-```json
-{ "matrix": [[4x4 numbers]] }
-```
-
-**Minimum Contract:** The pipeline requires `scene_info.json`, per-object `mesh.glb`,
-`pose.json`, `bounds.json`, and the `objects/` directory. The background and camera
-files are required by the tests but optional for downstream adapters if not used.
+**Minimum Contract:** The pipeline requires `assets/scene_manifest.json`,
+`layout/scene_layout_scaled.json`, `seg/inventory.json`, and
+`assets/.stage1_complete`.
 
 ---
 

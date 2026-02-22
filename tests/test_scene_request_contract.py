@@ -16,7 +16,6 @@ def test_scene_request_schema_accepts_valid_text_request() -> None:
         "quality_tier": "standard",
         "seed_count": 2,
         "provider_policy": "openai_primary",
-        "fallback": {"allow_image_fallback": True},
     }
     validate_json_schema(payload, schema)
 
@@ -48,20 +47,19 @@ def test_scene_request_schema_rejects_unknown_source_mode() -> None:
         validate_json_schema(payload, schema)
 
 
-def test_scene_request_schema_accepts_valid_image_request() -> None:
+def test_scene_request_schema_rejects_image_source_mode() -> None:
     schema = load_schema("scene_request_v1.schema.json")
     payload = {
         "schema_version": "v1",
         "scene_id": "scene_img_001",
         "source_mode": "image",
-        "image": {
-            "gcs_uri": "gs://bucket/scenes/scene_img_001/images/photo.png",
-        },
+        "prompt": "A room",
     }
-    validate_json_schema(payload, schema)
+    with pytest.raises((ValueError, Exception)):
+        validate_json_schema(payload, schema)
 
 
-def test_scene_request_schema_accepts_auto_mode() -> None:
+def test_scene_request_schema_rejects_auto_source_mode() -> None:
     schema = load_schema("scene_request_v1.schema.json")
     payload = {
         "schema_version": "v1",
@@ -69,11 +67,9 @@ def test_scene_request_schema_accepts_auto_mode() -> None:
         "source_mode": "auto",
         "text_backend": "hybrid_serial",
         "prompt": "A warehouse for robotic bin picking",
-        "image": {
-            "gcs_uri": "gs://bucket/scenes/scene_auto_001/images/scan.jpg",
-        },
     }
-    validate_json_schema(payload, schema)
+    with pytest.raises((ValueError, Exception)):
+        validate_json_schema(payload, schema)
 
 
 def test_scene_request_schema_declares_no_additional_properties() -> None:

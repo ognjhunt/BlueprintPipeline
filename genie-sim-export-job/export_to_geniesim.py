@@ -17,7 +17,7 @@ This job:
 9. Outputs files ready for Genie Sim data generation
 
 Pipeline Position:
-    3D-RE-GEN → simready → usd-assembly → replicator → [THIS JOB] → Genie Sim
+    Stage 1 text generation → simready → usd-assembly → replicator → [THIS JOB] → Genie Sim
 
 Enhanced Features (DEFAULT: ENABLED):
     - Multi-robot embodiment data (franka, g2, ur10, gr1, fetch, etc.)

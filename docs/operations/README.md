@@ -42,11 +42,11 @@ Use this workflow when export artifacts (e.g., `scene.usda`, replicator outputs)
 
 1. **Confirm upstream inputs**
    - Validate that `scene_manifest.json` and layout files exist in the expected GCS prefixes.
-   - If needed, regenerate sample outputs using `fixtures/generate_mock_regen3d.py`.
+   - If needed, regenerate sample outputs using `fixtures/generate_mock_stage1.py`.
 2. **Re-run validation locally**
    - `python tools/run_local_pipeline.py --validate` to catch missing assets or invalid transforms.
 3. **Reprocess the scene**
-   - Remove completion markers (e.g., `.regen3d_complete`) or partial outputs, then rerun the workflow.
+   - Remove completion markers (e.g., `.stage1_complete`) or partial outputs, then rerun the workflow.
    - See cleanup commands in [`docs/rollback.md`](../rollback.md).
 4. **Escalate if exporter is unhealthy**
    - For Genie Sim exports, run `python -m tools.geniesim_adapter.geniesim_healthcheck --json` and follow the
@@ -134,7 +134,7 @@ continue. The gate expects the following assets to exist by exact name:
 ## Operational entrypoints and scripts
 
 - Local pipeline validation: [`tools/run_local_pipeline.py`](../../tools/run_local_pipeline.py)
-- Regen3d mock export generator: [`fixtures/generate_mock_regen3d.py`](../../fixtures/generate_mock_regen3d.py)
+- Regen3d mock export generator: [`fixtures/generate_mock_stage1.py`](../../fixtures/generate_mock_stage1.py)
 - Genie Sim health check: [`tools/geniesim_adapter/geniesim_healthcheck.py`](../../tools/geniesim_adapter/geniesim_healthcheck.py)
 - Genie Sim server/health check: [`tools/geniesim_adapter/geniesim_server.py`](../../tools/geniesim_adapter/geniesim_server.py)
 - Production validation harness: [`scripts/run_production_e2e_validation.py`](../../scripts/run_production_e2e_validation.py)

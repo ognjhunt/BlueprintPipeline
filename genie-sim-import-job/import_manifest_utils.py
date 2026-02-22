@@ -78,7 +78,7 @@ PIPELINE_VERSION_KEYS = [
 
 UPSTREAM_VERSION_KEYS = {
     "genie_sim": ["GENIE_SIM_VERSION", "GENIE_SIM_BUILD"],
-    "regen3d": ["REGEN3D_VERSION", "THREED_REGEN_VERSION", "REGEN_VERSION"],
+    "stage1": ["STAGE1_VERSION", "TEXT_STAGE1_VERSION"],
 }
 
 _NULL_TOKENS = {"", "unknown", "none", "null", "n/a", "na"}

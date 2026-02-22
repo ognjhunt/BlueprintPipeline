@@ -364,7 +364,10 @@ main:
         next: stop_for_circuit_breaker
 
     - stop_for_circuit_breaker:
-        return: ${"Circuit breaker open for scene " + sceneId + ". Skipping Genie Sim export."}
+        return:
+          status: "SKIPPED"
+          scene_id: ${sceneId}
+          reason: '${"Circuit breaker open for scene " + sceneId + ". Skipping Genie Sim export."}'
 
     - log_canary_routing:
         call: sys.log
@@ -403,7 +406,10 @@ main:
         next: stop_for_rollback
 
     - stop_for_rollback:
-        return: ${"Rollback marker present at " + canaryRollbackObject + ". Skipping Genie Sim export."}
+        return:
+          status: "SKIPPED"
+          scene_id: ${sceneId}
+          reason: '${"Rollback marker present at " + canaryRollbackObject + ". Skipping Genie Sim export."}'
 
     - init_region_health:
         assign:

@@ -498,7 +498,7 @@ It is intended as a starting point for API coverage and may be expanded with cla
 - `build_embedding`
 - `build_embedding_text`
 - `index_pack`
-- `index_regen3d_assets`
+- `index_stage1_assets`
 - `load_pack_assets`
 - `main`
 - `map_type_to_role`
@@ -550,10 +550,10 @@ It is intended as a starting point for API coverage and may be expanded with cla
 
 - `generate_scene_report`
 
-### tools/regen3d_adapter/adapter.py
+### tools/source_pipeline/adapter.py
 
-- `layout_from_regen3d`
-- `manifest_from_regen3d`
+- `layout_from_stage1`
+- `manifest_from_stage1`
 
 ### tools/run_first_10_scenes.py
 
@@ -700,7 +700,7 @@ Environment flags:
 ### tools/verify_workflow_triggers_and_dryrun.py
 
 - `check_patterns`
-- `dry_run_regen3d_pipeline`
+- `dry_run_stage1_pipeline`
 - `main`
 - `verify_geniesim_export_trigger`
 - `verify_usd_assembly`

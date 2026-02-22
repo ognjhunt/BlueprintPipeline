@@ -85,20 +85,23 @@ def _profile_for_tier(tier: QualityTier) -> str:
 
 
 def _resolve_text_backend(request_backend: TextBackend) -> str:
-    allowlist_raw = os.getenv("TEXT_BACKEND_ALLOWLIST", "internal,scenesmith,sage,hybrid_serial")
+    allowlist_raw = os.getenv("TEXT_BACKEND_ALLOWLIST", "scenesmith,sage,hybrid_serial")
     allowlist = {token.strip().lower() for token in allowlist_raw.split(",") if token.strip()}
     if not allowlist:
-        allowlist = {"internal", "scenesmith", "sage", "hybrid_serial"}
+        allowlist = {"scenesmith", "sage", "hybrid_serial"}
 
     override = (os.getenv("TEXT_BACKEND") or "").strip().lower()
     selected = override or request_backend.value
-    if selected not in allowlist:
-        logger.warning(
-            "[TEXT-GEN] text backend %s not in allowlist %s; falling back to internal",
-            selected,
-            sorted(allowlist),
+    valid_backends = {backend.value for backend in TextBackend}
+    if selected not in valid_backends:
+        raise ValueError(
+            f"text backend must be one of {sorted(valid_backends)}, got {selected!r}"
         )
-        return "internal"
+    if selected not in allowlist:
+        raise ValueError(
+            f"text backend {selected!r} is not allowed by "
+            f"TEXT_BACKEND_ALLOWLIST={','.join(sorted(allowlist))!r}"
+        )
     return selected
 
 
@@ -116,7 +119,7 @@ def _parse_default_text_backend(raw: str) -> TextBackend:
 def _emit_sage_action_demo(output_root: Path, *, package: Dict[str, Any], scene_id: str, seed: int) -> Dict[str, Any]:
     if not _is_truthy(os.getenv("TEXT_SAGE_ACTION_DEMO_ENABLED"), default=False):
         return {"enabled": False, "emitted": False}
-    backend = str(package.get("text_backend") or "internal").lower()
+    backend = str(package.get("text_backend") or TextBackend.HYBRID_SERIAL.value).lower()
     if backend not in {"sage", "hybrid_serial"}:
         return {"enabled": True, "emitted": False, "reason": "backend_not_sage"}
 
@@ -260,9 +263,6 @@ def main(argv: list[str] | None = None) -> int:
         default_text_backend=default_text_backend,
         max_seeds=max_seeds,
     )
-
-    if request.source_mode == PipelineSourceMode.IMAGE:
-        raise ValueError("text-scene-gen-job received source_mode=image; route to image pipeline instead")
 
     if seed < 1:
         raise ValueError(f"TEXT_SEED must be >= 1, got {seed}")

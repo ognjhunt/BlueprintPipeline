@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Interactive Asset Pipeline for 3D-RE-GEN Integration.
+Interactive Asset Pipeline for Stage 1 Integration.
 
-This job processes 3D assets (GLB meshes) from 3D-RE-GEN to add articulation
+This job processes 3D assets (GLB meshes) from Stage 1 to add articulation
 data using a multi-backend articulation pipeline.
 
 The pipeline:
@@ -11,8 +11,8 @@ The pipeline:
 3. Runs an automatic simulation-backed "critic" to validate open/close + self-collision
 4. Retries with the next backend when the critic fails (quality + automation)
 
-Designed for the 3D-RE-GEN pipeline:
-    3D-RE-GEN → interactive-job → simready-job → usd-assembly-job
+Designed for the Stage 1 pipeline:
+    Stage 1 → interactive-job → simready-job → usd-assembly-job
 
 Environment Variables:
     BUCKET: GCS bucket name
@@ -25,7 +25,7 @@ Environment Variables:
     APPROVED_PARTICULATE_MODELS: Comma-separated allowlist for local Particulate models (default: pat_b)
     PARTICULATE_UP_DIR: Optional coordinate frame hint passed through to Particulate (e.g. "Y" or "Z")
     ARTICULATION_BACKEND: "infinigen", "physx_anything", "particulate", "heuristic", or "auto" (default)
-    REGEN3D_PREFIX: Optional path to 3D-RE-GEN outputs (default: same as ASSETS_PREFIX)
+    Stage 1 GLBs are resolved from canonical assets paths under ASSETS_PREFIX.
     INTERACTIVE_MODE: "glb" (default) or "image" for legacy crop-based processing
     PIPELINE_ENV: Pipeline environment (e.g., "production") for production guardrails
     DISALLOW_PLACEHOLDER_URDF: "true" to fail if placeholder URDFs are generated
@@ -101,7 +101,7 @@ PARTICULATE_REQUEST_TIMEOUT = 120  # 2 min (inference takes ~10s)
 MAX_RETRIES = 3
 
 # Processing modes
-MODE_GLB = "glb"      # 3D-RE-GEN GLB mesh input (default)
+MODE_GLB = "glb"      # Stage 1 GLB mesh input (default)
 MODE_IMAGE = "image"  # Legacy crop image input
 
 PARTICULATE_MODE_REMOTE = "remote"
@@ -863,7 +863,7 @@ def find_glb_file(obj_dir: Path, obj_id: str) -> Optional[Path]:
     """
     Find GLB mesh file for an object.
 
-    3D-RE-GEN outputs meshes as:
+    Stage 1 outputs meshes as:
     - obj_{id}.glb (direct output)
     - mesh.glb (alternative naming)
     - part.glb (from Particulate)
@@ -2364,7 +2364,7 @@ def _resolve_backend_plan_for_object(
 def process_object(
     obj: dict,
     assets_root: Path,
-    regen3d_root: Path,
+    stage1_root: Path,
     multiview_root: Path,
     particulate_endpoint: Optional[str],
     particulate_mode: str,
@@ -2381,7 +2381,7 @@ def process_object(
     Process a single interactive object using configured articulation backend.
 
     Pipeline:
-    1. Find GLB mesh from 3D-RE-GEN
+    1. Find GLB mesh from Stage 1
     2. Run Particulate or heuristic articulation
     3. Materialize outputs (mesh + URDF)
     4. Generate manifest with joint summary
@@ -2417,18 +2417,18 @@ def process_object(
         "articulation_hint": articulation_hint,
     }
 
-    # Find GLB mesh from 3D-RE-GEN
+    # Find GLB mesh from Stage 1
     glb_path: Optional[Path] = None
-    regen3d_obj_dir = regen3d_root / obj_name
+    stage1_obj_dir = stage1_root / obj_name
 
     if mode == MODE_GLB:
-        glb_path = find_glb_file(regen3d_obj_dir, obj_id)
+        glb_path = find_glb_file(stage1_obj_dir, obj_id)
 
         if glb_path:
             log(f"Found GLB: {glb_path}", obj_id=obj_name)
             result["input_glb"] = str(glb_path)
         else:
-            log(f"No GLB found in {regen3d_obj_dir}", "WARNING", obj_name)
+            log(f"No GLB found in {stage1_obj_dir}", "WARNING", obj_name)
 
     # Particulate requires GLB - if not found, try alternative locations
     if not glb_path or not glb_path.is_file():
@@ -2460,7 +2460,7 @@ def process_object(
     # Determine best available reference image for PhysX-Anything (if enabled).
     crop_image = None
     try:
-        search_dir = glb_path.parent if glb_path and glb_path.is_file() else regen3d_obj_dir
+        search_dir = glb_path.parent if glb_path and glb_path.is_file() else stage1_obj_dir
         crop_image = find_crop_image(search_dir, multiview_root, obj_id)
     except Exception:
         crop_image = None
@@ -2857,7 +2857,6 @@ def main() -> None:
     scene_id = os.environ["SCENE_ID"]
     assets_prefix = os.getenv("ASSETS_PREFIX", "")
     multiview_prefix = os.getenv("MULTIVIEW_PREFIX", "")
-    regen3d_prefix = os.getenv("REGEN3D_PREFIX", "")  # 3D-RE-GEN output path
 
     # Particulate endpoint
     particulate_endpoint = os.getenv("PARTICULATE_ENDPOINT", "")
@@ -2900,7 +2899,7 @@ def main() -> None:
     root = Path("/mnt/gcs")
     assets_root = root / assets_prefix
     multiview_root = root / multiview_prefix if multiview_prefix else assets_root / "multiview"
-    regen3d_root = root / regen3d_prefix if regen3d_prefix else assets_root / "regen3d"
+    stage1_root = assets_root
 
     # Load scene assets manifest (prefer canonical scene_manifest.json)
     scene_assets = load_manifest_or_scene_assets(assets_root)
@@ -2948,7 +2947,7 @@ def main() -> None:
     log(f"Bucket: {bucket}")
     log(f"Scene ID: {scene_id}")
     log(f"Assets: {assets_root}")
-    log(f"3D-RE-GEN: {regen3d_root}")
+    log(f"Stage 1: {stage1_root}")
     log(f"Multiview: {multiview_root}")
     log(f"Particulate Mode: {particulate_mode}")
     log(f"Particulate Endpoint: {particulate_endpoint or '(none - static mode)'}")
@@ -2984,7 +2983,6 @@ def main() -> None:
     config_context = {
         "assets_prefix": assets_prefix,
         "multiview_prefix": multiview_prefix or None,
-        "regen3d_prefix": regen3d_prefix or None,
         "mode": mode,
         "particulate_mode": particulate_mode,
         "production_mode": production_mode,
@@ -3277,7 +3275,7 @@ def main() -> None:
             result = process_object(
                 obj=obj,
                 assets_root=assets_root,
-                regen3d_root=regen3d_root,
+                stage1_root=stage1_root,
                 multiview_root=multiview_root,
                 particulate_endpoint=particulate_endpoint,
                 particulate_mode=particulate_mode,

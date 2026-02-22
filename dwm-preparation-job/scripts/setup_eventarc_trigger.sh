@@ -2,7 +2,7 @@
 # Setup EventArc trigger for DWM preparation pipeline
 #
 # This script creates an EventArc trigger that invokes the dwm-preparation-pipeline
-# workflow whenever a .regen3d_complete marker file is uploaded to GCS.
+# workflow whenever a .stage1_complete marker file is uploaded to GCS.
 #
 # Usage:
 #   ./setup_eventarc_trigger.sh <project_id> <bucket_name>
@@ -94,11 +94,11 @@ echo "Trigger created: ${TRIGGER_NAME}"
 echo "Workflow: ${WORKFLOW_NAME}"
 echo "Bucket: ${BUCKET}"
 echo ""
-echo "The pipeline will now trigger when .regen3d_complete markers are uploaded to:"
-echo "  gs://${BUCKET}/scenes/{scene_id}/assets/.regen3d_complete"
+echo "The pipeline will now trigger when .stage1_complete markers are uploaded to:"
+echo "  gs://${BUCKET}/scenes/{scene_id}/assets/.stage1_complete"
 echo ""
 echo "To test manually:"
-echo "  echo 'test' | gsutil cp - gs://${BUCKET}/scenes/test_scene/assets/.regen3d_complete"
+echo "  echo 'test' | gsutil cp - gs://${BUCKET}/scenes/test_scene/assets/.stage1_complete"
 echo ""
 echo "To view trigger:"
 echo "  gcloud eventarc triggers describe ${TRIGGER_NAME} --location=${REGION}"

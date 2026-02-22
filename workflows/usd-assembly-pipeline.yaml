@@ -1,7 +1,7 @@
 # usd-assembly-pipeline.yaml
 #
 # Google Cloud Workflows pipeline that:
-#   1. Triggers on completion marker file from regen3d-job
+#   1. Triggers on completion marker file from text-scene-adapter-job
 #   2. Runs usd-assembly-job in CONVERT_ONLY mode to convert GLB->USDZ before simready
 #   3. Runs simready-job to prepare simulation-ready assets (now sees USD-compatible files)
 #   4. Runs interactive-job when required articulated objects are present
@@ -9,15 +9,15 @@
 #   6. Runs replicator-job to generate Replicator bundle for Isaac Sim domain randomization
 #   7. Runs isaac-lab-job baseline task package generation
 #
-# Trigger: Cloud Storage object finalized event for .regen3d_complete
+# Trigger: Cloud Storage object finalized event for .stage1_complete
 #
 # NOTE: This pipeline runs in parallel with dwm-preparation-pipeline and dream2flow-preparation-pipeline
-# (all trigger on the same .regen3d_complete marker). This is safe because:
+# (all trigger on the same .stage1_complete marker). This is safe because:
 # - Each pipeline writes to different output prefixes (usd/*, dwm/*, dream2flow/*)
 # - Each pipeline uses a distinct lock object, so only duplicate runs of the same pipeline are blocked
 # - Idempotency checks prevent duplicate processing
 #
-# 3D-RE-GEN (arXiv:2512.17459) is a modular, compositional pipeline for
+# Stage 1 text generation (arXiv:2512.17459) is a modular, compositional pipeline for
 # "image → sim-ready 3D reconstruction" with explicit physical constraints.
 # Reference: https://3dregen.jdihlmann.com/
 #
@@ -44,7 +44,7 @@ main:
 
     - filter_completion_markers:
         switch:
-          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.regen3d_complete$")}'
+          - condition: '${text.match_regex(object, "^scenes/.+/assets/\\.stage1_complete$")}'
             next: derive
         next: skip
 
@@ -130,7 +130,7 @@ main:
     - log_start:
         call: sys.log
         args:
-          text: '${"USD assembly triggered for scene " + sceneId + " (3D-RE-GEN) - starting pre-simready GLB->USDZ conversion"}'
+          text: '${"USD assembly triggered for scene " + sceneId + " (Stage 1 text generation) - starting pre-simready GLB->USDZ conversion"}'
           severity: "INFO"
         next: init_convert_metrics
 

@@ -12,7 +12,7 @@ Run a full production end-to-end validation for a scene, including workflow exec
 | `region` | Workflow region | `us-central1` |
 | `variation_assets_marker` | GCS marker for Genie Sim export trigger | `scenes/<scene_id>/variation_assets/.variation_pipeline_complete` |
 | `usd_marker` | GCS marker for episode generation trigger | `scenes/<scene_id>/usd/.usd_complete` |
-| `regen3d_marker` | GCS marker for DWM prep trigger | `scenes/<scene_id>/assets/.regen3d_complete` |
+| `stage1_marker` | GCS marker for DWM prep trigger | `scenes/<scene_id>/assets/.stage1_complete` |
 
 ## Production Flags (No Mock Fallbacks)
 Set `PIPELINE_ENV=production` and enable the following quality toggles for production validation runs
@@ -161,7 +161,7 @@ scores, and episode durations.
 **Workflow:** `dwm-preparation-pipeline`
 
 **Inputs**
-- Marker: `scenes/<scene_id>/assets/.regen3d_complete`
+- Marker: `scenes/<scene_id>/assets/.stage1_complete`
 
 **Expected GCS Artifacts**
 - `scenes/<scene_id>/dwm/.dwm_complete`

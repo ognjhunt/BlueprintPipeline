@@ -61,8 +61,8 @@ class Paths:
     RANDOMIZATIONS = "isaac_lab/randomizations.py"
     REWARD_FUNCTIONS = "isaac_lab/reward_functions.py"
 
-    # 3D-RE-GEN reconstruction (regen3d-reconstruct step)
-    REGEN3D_DIR = "regen3d"
+    # Stage 1 source inputs
+    STAGE1_INPUT_DIR = "input"
     IMAGES_DIR = "images"
     IMAGES_ROOM = "images/room.png"
 

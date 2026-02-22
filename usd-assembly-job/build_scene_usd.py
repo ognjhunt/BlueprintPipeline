@@ -317,7 +317,7 @@ def matrix_from_obb(obb: Dict) -> Optional[np.ndarray]:
     """Build a 4x4 transform matrix from an OBB (Oriented Bounding Box) record. OBB to Transform Conversion
     ===================================
 
-    Input OBB format (from regen3d_adapter/adapter.py):
+    Input OBB format (from source_pipeline/adapter.py):
         obb["R"]      -> 3x3 rotation matrix [row0, row1, row2]
         obb["center"] -> 3D center position [x, y, z]
         obb["extents"] -> Half-sizes [hx, hy, hz] (used separately for mesh scaling)

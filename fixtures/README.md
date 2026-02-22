@@ -5,7 +5,7 @@ Fixtures and generators for mock data and contracts used by tests and local deve
 
 ## Primary entrypoints
 - `generate_mock_geniesim_local.py`
-- `generate_mock_regen3d.py`
+- `generate_mock_stage1.py`
 - `contracts/` fixture contracts
 
 ## Required inputs / outputs

@@ -9,7 +9,7 @@ This diagram highlights the runtime services and external dependencies reference
 flowchart TB
     %% Job runners
     subgraph Jobs[Pipeline Jobs]
-        regen3djob["regen3d-job"]
+        stage1job["text-scene-adapter-job"]
         interactivejob["interactive-job"]
         simreadyjob["simready-job"]
         usdasmbjob["usd-assembly-job"]
@@ -29,12 +29,12 @@ flowchart TB
     geniesimgrpc["Genie Sim gRPC Server\n(local-only)"]
     isaacsim["Isaac Sim Runtime"]
     llm["LLM Providers\n(Gemini/OpenAI)"]
-    regen3dext["3D-RE-GEN\n(external capture)"]
+    stage1ext["Stage 1 text generation\n(external capture)"]
 
     %% Data flow
-    regen3dext --> regen3djob
-    regen3djob --> gcs
-    regen3djob --> interactivejob
+    stage1ext --> stage1job
+    stage1job --> gcs
+    stage1job --> interactivejob
     interactivejob --> particulate
     interactivejob --> gcs
 

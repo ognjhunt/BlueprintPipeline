@@ -6,12 +6,12 @@ For a summary of recent changes, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Overview
 
-BlueprintPipeline converts scene reconstructions (from [3D-RE-GEN](https://arxiv.org/abs/2512.17459)) into:
+BlueprintPipeline converts scene reconstructions (from [Stage 1 text generation](https://arxiv.org/abs/2512.17459)) into:
 - **SimReady USD scenes** for Isaac Sim
 - **Replicator bundles** for domain randomization
 - **Isaac Lab task packages** for RL training
 
-3D-RE-GEN is a modular, compositional pipeline for "image → sim-ready 3D reconstruction" with explicit physical constraints:
+Stage 1 text generation is a modular, compositional pipeline for "image → sim-ready 3D reconstruction" with explicit physical constraints:
 - 4-DoF ground-alignment for floor-contact objects
 - Background bounding constraint for anti-penetration
 - A-Q (Application-Querying) for scene-aware occlusion completion
@@ -19,7 +19,7 @@ BlueprintPipeline converts scene reconstructions (from [3D-RE-GEN](https://arxiv
 **Reference:**
 - Paper: https://arxiv.org/abs/2512.17459
 - Project: https://3dregen.jdihlmann.com/
-- GitHub: https://github.com/cgtuebingen/3D-RE-GEN (code pending release)
+- GitHub: https://github.com/cgtuebingen/Stage 1 text generation (code pending release)
 
 ## Documentation
 
@@ -38,7 +38,7 @@ environment variables, then set one or both of the cost thresholds below:
 ## Pipeline Architecture
 
 ``` 
-image → 3D-RE-GEN → regen3d-job → simready-job → interactive-job → usd-assembly-job → replicator-job → isaac-lab-job (baseline)
+image → Stage 1 text generation → text-scene-adapter-job → simready-job → interactive-job → usd-assembly-job → replicator-job → isaac-lab-job (baseline)
                                                                                                                 ↓
                                                                                                   variation-assets-pipeline
                                                                                               (variation-gen → simready → isaac refresh)
@@ -74,12 +74,12 @@ below; if you don't have them, use the lightweight path in step 2b.
 - Genie Sim gRPC server running at `GENIESIM_HOST:GENIESIM_PORT` (default `localhost:50051`).
 
 ```bash
-# 1. Generate mock 3D-RE-GEN outputs
-python fixtures/generate_mock_regen3d.py --scene-id test_kitchen --output-dir ./test_scenes
+# 1. Generate mock Stage 1 text generation outputs
+python fixtures/generate_mock_stage1.py --scene-id test_kitchen --output-dir ./test_scenes
 
 # 2. Run the local pipeline (default Genie Sim path)
 python tools/run_local_pipeline.py --scene-dir ./test_scenes/scenes/test_kitchen --validate
-# Default steps: regen3d → scale → interactive → simready → usd → replicator →
+# Default steps: stage1 → scale → interactive → simready → usd → replicator →
 # variation-gen → genie-sim-export → genie-sim-submit → genie-sim-import
 
 # 2b. Lightweight local run without Genie Sim
@@ -243,7 +243,7 @@ The pipeline runs on Google Cloud using:
 - **Cloud Run Jobs** for each pipeline step
 - **Cloud Workflows** for orchestration (`workflows/usd-assembly-pipeline.yaml`)
 - **Cloud Storage** for scene data
-- **EventArc** for triggering (on `.regen3d_complete` marker)
+- **EventArc** for triggering (on `.stage1_complete` marker)
 
 See the deployment runbook for step-by-step infrastructure, secrets, and workflow activation guidance:
 [`docs/deployment_runbook.md`](docs/deployment_runbook.md).
@@ -259,7 +259,7 @@ ensure OpenUSD is installed so the USD assembly job can import `pxr`.
 
 | Job | Purpose | Inputs | Outputs |
 |-----|---------|--------|---------|
-| `regen3d-job` | Adapt 3D-RE-GEN outputs | 3D-RE-GEN meshes + poses | `scene_manifest.json`, `scene_layout_scaled.json` |
+| `text-scene-adapter-job` | Adapt Stage 1 text generation outputs | Stage 1 text generation meshes + poses | `scene_manifest.json`, `scene_layout_scaled.json` |
 | `interactive-job` | Add articulation (Particulate) | GLB meshes | URDF + segmented meshes |
 | `simready-job` | Add physics properties | Manifest | `simready.usda` per object |
 | `usd-assembly-job` | Build final USD scene | Manifest + layout | `scene.usda` |
@@ -274,7 +274,7 @@ After running the pipeline, each scene has:
 scenes/{scene_id}/
 ├── input/
 │   └── room.jpg                    # Source image
-├── regen3d/                        # 3D-RE-GEN reconstruction
+├── stage1/                        # Stage 1 text generation reconstruction
 │   ├── scene_info.json
 │   ├── objects/
 │   │   └── obj_{id}/
@@ -284,7 +284,7 @@ scenes/{scene_id}/
 │   └── background/
 ├── assets/
 │   ├── scene_manifest.json         # Canonical manifest
-│   ├── .regen3d_complete           # Completion marker
+│   ├── .stage1_complete           # Completion marker
 │   ├── .interactive_complete       # Articulation completion marker (when run)
 │   ├── .interactive_summary.json   # Articulation diagnostics
 │   └── obj_{id}/
@@ -344,7 +344,7 @@ so ensure your prefixes match that convention when configuring jobs.
 | `LAYOUT_PREFIX` | Layout path | `scenes/{id}/layout` |
 | `USD_PREFIX` | USD output path | `scenes/{id}/usd` |
 | `REPLICATOR_PREFIX` | Replicator path | `scenes/{id}/replicator` |
-| `REGEN3D_PREFIX` | 3D-RE-GEN path | `scenes/{id}/regen3d` |
+| `STAGE1_PREFIX` | Stage 1 text generation path | `scenes/{id}/stage1` |
 | `ENVIRONMENT_TYPE` | Environment hint | `generic` |
 | `PARTICULATE_ENDPOINT` | Particulate articulation service URL | - |
 | `LLM_PROVIDER` | LLM provider (`gemini`/`openai`/`auto`) | `auto` |
@@ -414,7 +414,7 @@ python -m pytest tests/test_pipeline_e2e.py::test_full_pipeline -v
 # Run local pipeline with specific steps
 python tools/run_local_pipeline.py \
     --scene-dir ./scenes/test \
-    --steps regen3d,simready,usd \
+    --steps stage1,simready,usd \
     --validate
 ```
 
@@ -434,7 +434,7 @@ pytest -m optional_dep -v
 ### Staging Isaac Sim E2E (Labs pre-production)
 
 Before production rollouts, labs should run the staging E2E harness against a
-real 3D-RE-GEN reconstruction and Isaac Sim. This validates the full handoff
+real Stage 1 text generation reconstruction and Isaac Sim. This validates the full handoff
 from reconstruction → USD → Isaac Sim loading without relying on mocks.
 
 Staging checklist (labs pre-production):
@@ -488,10 +488,10 @@ for step in range(1000):
 
 ## External Dependencies
 
-- **3D-RE-GEN**: Scene reconstruction (code pending release ~Q1 2025)
+- **Stage 1 text generation**: Scene reconstruction (code pending release ~Q1 2025)
   - Paper: https://arxiv.org/abs/2512.17459
   - Project: https://3dregen.jdihlmann.com/
-  - GitHub: https://github.com/cgtuebingen/3D-RE-GEN
+  - GitHub: https://github.com/cgtuebingen/Stage 1 text generation
 - **Particulate**: Fast mesh articulation detection (~10s per object)
 - **Isaac Sim/Lab**: NVIDIA simulation platform
 - **Omniverse Replicator**: Synthetic data generation

@@ -12,7 +12,7 @@ Contract Structure:
         manifest.json              # Master list of variation assets
         {asset_name}/
             reference.png          # Reference image (from variation-gen-job)
-            asset.glb              # 3D model (from 3D-RE-GEN)
+            asset.glb              # 3D model (from Stage 1 text generation)
             asset.usdz             # USD-converted model (from usd-assembly)
             simready.usda          # Physics-ready wrapper (from simready-job)
             metadata.json          # Physics + semantic metadata

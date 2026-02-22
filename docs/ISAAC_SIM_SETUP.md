@@ -145,7 +145,7 @@ print(f'Replicator available: {integration.has_replicator()}')
 
 ## Staging E2E Validation (Labs pre-production)
 
-Labs should run the staging harness against **real** 3D-RE-GEN reconstructions
+Labs should run the staging harness against **real** Stage 1 text generation reconstructions
 inside Isaac Sim before a production rollout. This exercises the real pipeline
 handoff and confirms USD scenes load in Isaac Sim with the live backend.
 

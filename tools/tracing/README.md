@@ -35,7 +35,7 @@ from tools.tracing import trace_job, set_trace_attribute, init_tracing
 init_tracing(service_name="blueprint-pipeline")
 
 # Trace a job
-with trace_job("regen3d-job", scene_id="scene_001"):
+with trace_job("text-scene-adapter-job", scene_id="scene_001"):
     # Your processing code
     process_scene()
 
@@ -155,8 +155,8 @@ if __name__ == "__main__":
     run_job_with_dead_letter_queue(
         main,
         scene_id="scene_001",
-        job_type="regen3d-job",
-        step="regen3d",
+        job_type="text-scene-adapter-job",
+        step="text-stage1",
     )
 ```
 
@@ -216,7 +216,7 @@ with trace_job("my-job"):
 
 ## Best Practices
 
-1. **Use descriptive span names**: `job:regen3d-job` not `process`
+1. **Use descriptive span names**: `job:text-scene-adapter-job` not `process`
 2. **Add meaningful attributes**: Scene IDs, object counts, modes
 3. **Trace at job boundaries**: Not individual function calls (too granular)
 4. **Propagate context**: Use inject/extract for cross-service calls
@@ -237,8 +237,8 @@ from tools.tracing import trace_job
 
 metrics = get_metrics()
 
-with trace_job("regen3d-job", scene_id="scene_001"):
-    with metrics.track_job("regen3d-job", "scene_001"):
+with trace_job("text-scene-adapter-job", scene_id="scene_001"):
+    with metrics.track_job("text-scene-adapter-job", "scene_001"):
         # Both metrics and traces are collected
         process_scene()
 ```

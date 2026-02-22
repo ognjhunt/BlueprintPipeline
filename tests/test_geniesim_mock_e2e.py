@@ -16,14 +16,16 @@ warnings.filterwarnings(
 
 import pytest
 
-from fixtures.generate_mock_regen3d import generate_mock_regen3d
+pytest.importorskip("pydantic")
+
+from fixtures.generate_mock_stage1 import generate_mock_stage1
 from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
 
 
 @pytest.mark.e2e
 def test_geniesim_mock_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     scene_id = "mock_geniesim_scene"
-    generate_mock_regen3d(
+    generate_mock_stage1(
         output_dir=tmp_path,
         scene_id=scene_id,
         environment_type="kitchen",
@@ -52,8 +54,8 @@ def test_geniesim_mock_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("FIREBASE_UPLOAD_PREFIX", "local-datasets")
     monkeypatch.setenv("DISABLE_ARTICULATED_ASSETS", "true")
     monkeypatch.setenv("SKIP_QUALITY_GATES", "true")
-    monkeypatch.setenv("REGEN3D_ALLOW_MATERIALLESS", "true")
-    monkeypatch.setenv("REGEN3D_ALLOW_TEXTURELESS", "true")
+    monkeypatch.setenv("STAGE1_ALLOW_MATERIALLESS", "true")
+    monkeypatch.setenv("STAGE1_ALLOW_TEXTURELESS", "true")
 
     # Mock the geniesim export job
     def fake_run_geniesim_export_job(
@@ -189,7 +191,7 @@ def test_geniesim_mock_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     )
 
     steps = [
-        PipelineStep.REGEN3D,
+        PipelineStep.TEXT_SCENE_ADAPTER,
         PipelineStep.SIMREADY,
         PipelineStep.USD,
         PipelineStep.GENIESIM_EXPORT,

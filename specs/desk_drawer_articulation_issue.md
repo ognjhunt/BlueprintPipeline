@@ -11,7 +11,7 @@ The wooden desk in the bedroom scene has visible drawers (see reference photo `b
 ## Root Causes (3 layers)
 
 ### 1. Stage 1 — Gemini labeling misses articulation
-Gemini auto-labeled the object `wooden_desk` instead of something like `desk_with_drawers` or `console_table_with_drawers`. The labeling prompt in `tools/regen3d_runner/config_template.yaml` doesn't explicitly ask Gemini to flag articulated parts (drawers, doors, hinges).
+Gemini auto-labeled the object `wooden_desk` instead of something like `desk_with_drawers` or `console_table_with_drawers`. The labeling prompt in `tools/source_pipeline/generator.py` doesn't explicitly ask Gemini to flag articulated parts (drawers, doors, hinges).
 
 ### 2. No interactive step in local pipeline
 `tools/run_local_pipeline.py` has no `PipelineStep.INTERACTIVE` at all. The interactive step only exists in the cloud orchestrator:
@@ -31,7 +31,7 @@ Hunyuan3D-2 generates a unified mesh from a single reference image. Even if Part
 |------|------|
 | `interactive-job/run_interactive_assets.py` | Cloud interactive step (Particulate + heuristic fallback) |
 | `workflows/interactive-pipeline.yaml` | Cloud Run workflow definition |
-| `tools/regen3d_runner/config_template.yaml` | Gemini labeling prompts (lines ~20-80) |
+| `tools/source_pipeline/generator.py` | Gemini labeling prompts (lines ~20-80) |
 | `tools/run_local_pipeline.py` | Local pipeline — **no INTERACTIVE step exists** |
 | `scenes/ChIJBc5E5wTjrIkRKrrWR_meHbc/assets/` | Current scene assets (solid desk GLB) |
 

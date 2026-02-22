@@ -9,11 +9,11 @@ through BlueprintPipeline with:
 - Customer success metrics
 
 Prerequisites:
-- 3D-RE-GEN outputs must be available (scene_manifest.json, meshes, etc.)
+- Stage 1 text generation outputs must be available (scene_manifest.json, meshes, etc.)
 
 Usage:
-    # With 3D-RE-GEN outputs
-    python tools/run_first_10_scenes.py --input-dir ./regen3d_outputs
+    # With Stage 1 text generation outputs
+    python tools/run_first_10_scenes.py --input-dir ./text-stage1_outputs
 
     # Test mode (uses mock data)
     python tools/run_first_10_scenes.py --test-mode
@@ -164,7 +164,7 @@ class First10ScenesRunner:
     def _process_scene(self, scene: SceneConfig) -> PipelineResult:
         """Process a single scene through the pipeline.
 
-        Expects 3D-RE-GEN outputs to be available at scene.input_path.
+        Expects Stage 1 text generation outputs to be available at scene.input_path.
         """
         start_time = time.time()
 
@@ -179,8 +179,8 @@ class First10ScenesRunner:
         )
         update_pipeline_status(delivery_id, "processing")
 
-        # Step 1: Validate 3D-RE-GEN outputs exist
-        self.log("Step 1: Checking 3D-RE-GEN outputs")
+        # Step 1: Validate Stage 1 text generation outputs exist
+        self.log("Step 1: Checking Stage 1 text generation outputs")
         manifest_path = scene.input_path / "scene_manifest.json"
         if not manifest_path.exists():
             # Also check assets subdirectory
@@ -190,7 +190,7 @@ class First10ScenesRunner:
             return PipelineResult(
                 scene_id=scene.scene_id,
                 success=False,
-                error="3D-RE-GEN outputs not found (missing scene_manifest.json)",
+                error="Stage 1 text generation outputs not found (missing scene_manifest.json)",
                 delivery_id=delivery_id,
             )
 
@@ -536,13 +536,13 @@ class {task.title().replace("_", "")}Task:
 
 
 def create_test_scenes(output_dir: Path) -> List[SceneConfig]:
-    """Create test scene configurations with mock 3D-RE-GEN outputs."""
+    """Create test scene configurations with mock Stage 1 text generation outputs."""
     test_dir = output_dir / "test_inputs"
     test_dir.mkdir(parents=True, exist_ok=True)
 
     scenes = []
 
-    # Create 10 test scenes with mock 3D-RE-GEN outputs
+    # Create 10 test scenes with mock Stage 1 text generation outputs
     scene_types = [
         ("kitchen_001", "kitchen", ["pick_place", "open_drawer"]),
         ("kitchen_002", "kitchen", ["pick_place", "pour"]),
@@ -560,7 +560,7 @@ def create_test_scenes(output_dir: Path) -> List[SceneConfig]:
         scene_dir = test_dir / scene_id
         scene_dir.mkdir(exist_ok=True)
 
-        # Create mock 3D-RE-GEN manifest
+        # Create mock Stage 1 text generation manifest
         manifest = {
             "version": "1.0.0",
             "scene_id": scene_id,
@@ -606,7 +606,7 @@ def main():
     parser.add_argument(
         "--input-dir",
         type=Path,
-        help="Directory with 3D-RE-GEN outputs",
+        help="Directory with Stage 1 text generation outputs",
     )
     parser.add_argument(
         "--output-dir",
@@ -648,10 +648,10 @@ def main():
 
     # Get scenes to process
     if args.test_mode:
-        print("Running in TEST MODE with mock 3D-RE-GEN data\n")
+        print("Running in TEST MODE with mock Stage 1 text generation data\n")
         scenes = create_test_scenes(args.output_dir)
     elif args.input_dir:
-        # Discover scenes in input directory (expect 3D-RE-GEN outputs)
+        # Discover scenes in input directory (expect Stage 1 text generation outputs)
         scenes = []
         for scene_dir in sorted(args.input_dir.iterdir()):
             if scene_dir.is_dir():

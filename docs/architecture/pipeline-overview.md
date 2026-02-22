@@ -8,11 +8,11 @@ This overview diagram aligns with the job naming and flow described in:
 ```mermaid
 flowchart LR
     %% External inputs
-    source["Source Images / Capture"] --> regen3d["regen3d-job\n(scene manifest + layout)"]
+    source["Source Images / Capture"] --> stage1["text-scene-adapter-job\n(scene manifest + layout)"]
 
     %% Core asset preparation
-    regen3d --> interactive["interactive-job\n(articulation + URDF)"]
-    regen3d --> simready["simready-job\n(physics + USD prep)"]
+    stage1 --> interactive["interactive-job\n(articulation + URDF)"]
+    stage1 --> simready["simready-job\n(physics + USD prep)"]
     interactive --> simready
 
     %% Scene assembly

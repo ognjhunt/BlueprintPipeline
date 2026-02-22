@@ -17,7 +17,7 @@ class ScaleSource(str, Enum):
     """Source of scale authority."""
     USER_ANCHOR = "user_anchor"          # User provided known dimension
     SCALE_JOB = "scale_job"              # Computed by scale-job with calibration
-    REGEN3D = "regen3d"                  # From 3D-RE-GEN reconstruction
+    STAGE1 = "stage1"                    # From Stage 1 generation output
     LAYOUT_JOB = "layout_job"            # Historic: from legacy reconstruction
     REFERENCE_OBJECT = "reference_object" # Inferred from known object types
     DEFAULT = "default"                   # Default heuristic
@@ -139,19 +139,19 @@ class ScaleAuthority:
         layout: Optional[Dict[str, Any]] = None,
         manifest: Optional[Dict[str, Any]] = None,
         user_anchor: Optional[Dict[str, float]] = None,
-        regen3d_scale: Optional[float] = None,
+        stage1_scale: Optional[float] = None,
         reference_objects: Optional[List[str]] = None,
-        trust_regen3d: bool = False,
+        trust_stage1: bool = False,
     ) -> ScaleConfig:
         """Compute authoritative scale configuration.
 
         Args:
-            layout: Scene layout data (from 3D-RE-GEN or legacy sources)
+            layout: Scene layout data (from Stage 1 or legacy sources)
             manifest: Scene manifest data
             user_anchor: User-provided scale anchor {object_id: dimension_m}
-            regen3d_scale: Scale factor from 3D-RE-GEN (if available)
+            stage1_scale: Scale factor from Stage 1 output (if available)
             reference_objects: List of object types to use for scale inference
-            trust_regen3d: If True, prefer 3D-RE-GEN scale
+            trust_stage1: If True, prefer Stage 1 scale
 
         Returns:
             ScaleConfig with authoritative scale information
@@ -174,14 +174,14 @@ class ScaleAuthority:
                     notes="From previous scale-job calibration",
                 )
 
-        # 3. 3D-RE-GEN scale (if trusted)
-        if trust_regen3d and regen3d_scale is not None:
+        # 3. Stage 1 scale (if trusted)
+        if trust_stage1 and stage1_scale is not None:
             return ScaleConfig(
-                meters_per_unit=regen3d_scale,
-                scale_factor=regen3d_scale,
-                source=ScaleSource.REGEN3D,
+                meters_per_unit=stage1_scale,
+                scale_factor=stage1_scale,
+                source=ScaleSource.STAGE1,
                 confidence=0.7,
-                notes="From 3D-RE-GEN reconstruction",
+                notes="From Stage 1 generation output",
             )
 
         # 4. Infer from reference objects

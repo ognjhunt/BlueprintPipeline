@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+pytest.importorskip("pydantic")
+
 from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
 
 
@@ -16,8 +20,8 @@ def test_geniesim_full_flow_e2e(tmp_path, monkeypatch):
     (assets_dir / "scene_manifest.json").write_text(
         json.dumps({"scene": {"id": scene_id}, "objects": []})
     )
-    # Create regen3d dir so the prerequisite check passes
-    (scene_dir / "regen3d").mkdir(parents=True, exist_ok=True)
+    # Create stage1 dir so the prerequisite check passes
+    (scene_dir / "stage1").mkdir(parents=True, exist_ok=True)
     # Create simready/usd markers so dependency checks pass
     (assets_dir / ".simready_complete").write_text("ok")
     (assets_dir / ".usd_assembly_complete").write_text("ok")

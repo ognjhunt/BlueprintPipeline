@@ -4,7 +4,7 @@ Generates reference images locally via Gemini 3.0 Pro Image, then
 runs Hunyuan3D-2/2.1 on a remote GPU VM for 3D mesh generation.
 Physics metadata is estimated locally from mesh volume + category defaults.
 
-Reuses VMExecutor from tools/regen3d_runner/vm_executor.py for SSH/SCP.
+Reuses VMExecutor from tools/vm_executor.py for SSH/SCP.
 """
 
 from __future__ import annotations
@@ -143,7 +143,7 @@ class VariationAssetRunner:
     @property
     def vm(self):
         if self._vm is None:
-            from tools.regen3d_runner.vm_executor import VMExecutor, VMConfig
+            from tools.vm_executor import VMExecutor, VMConfig
             self._vm = VMExecutor(
                 VMConfig(host=self.vm_host, zone=self.vm_zone),
                 verbose=True,
@@ -253,9 +253,7 @@ class VariationAssetRunner:
         """Find Hunyuan3D install on the VM."""
         candidates = [
             "/home/nijelhunt1/Hunyuan3D-2.1",
-            "/home/nijelhunt1/3D-RE-GEN",
             "/home/nijelhunt_1/Hunyuan3D-2.1",
-            "/home/nijelhunt_1/3D-RE-GEN",
         ]
         for path in candidates:
             rc, _, _ = self.vm.ssh_exec(
@@ -273,7 +271,6 @@ class VariationAssetRunner:
         # Check relative to hunyuan_path first, then known locations
         candidates = [
             f"{self.hunyuan_path}/venv_py310/bin/python",
-            "/home/nijelhunt1/3D-RE-GEN/venv_py310/bin/python",
             "/home/nijelhunt1/Hunyuan3D-2.1/venv_py310/bin/python",
         ]
         for path in candidates:

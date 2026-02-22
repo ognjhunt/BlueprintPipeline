@@ -112,7 +112,7 @@ steps:
         gcloud workflows deploy dwm-preparation-pipeline \
           --location=${_REGION} \
           --source=workflows/dwm-preparation-pipeline.yaml \
-          --description="DWM conditioning bundle preparation pipeline (triggered by .regen3d_complete)"
+          --description="DWM conditioning bundle preparation pipeline (triggered by .stage1_complete)"
 
 images:
   - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_JOB_NAME}:${SHORT_SHA}'

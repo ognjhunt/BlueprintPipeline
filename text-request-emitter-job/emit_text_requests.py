@@ -39,12 +39,6 @@ GCS_ROOT = Path("/mnt/gcs")
 JOB_NAME = "text-request-emitter-job"
 
 
-def _is_truthy(raw: Optional[str], default: bool = False) -> bool:
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
 def _load_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
     if not path.is_file():
         return dict(default)
@@ -139,10 +133,10 @@ def main() -> int:
         os.getenv("TEXT_AUTONOMY_PROVIDER_POLICY", "openrouter_qwen_primary").strip()
         or "openrouter_qwen_primary"
     )
-    text_backend = os.getenv("TEXT_AUTONOMY_TEXT_BACKEND", "scenesmith").strip().lower() or "scenesmith"
-    if text_backend not in {"internal", "scenesmith", "sage", "hybrid_serial"}:
+    text_backend = os.getenv("TEXT_AUTONOMY_TEXT_BACKEND", "hybrid_serial").strip().lower() or "hybrid_serial"
+    if text_backend not in {"scenesmith", "sage", "hybrid_serial"}:
         raise ValueError(
-            "TEXT_AUTONOMY_TEXT_BACKEND must be internal|scenesmith|sage|hybrid_serial, "
+            "TEXT_AUTONOMY_TEXT_BACKEND must be scenesmith|sage|hybrid_serial, "
             f"got {text_backend!r}"
         )
     quality_tier = os.getenv("TEXT_AUTONOMY_QUALITY_TIER", "premium").strip().lower() or "premium"
@@ -159,7 +153,6 @@ def main() -> int:
     if seed_count < 1:
         raise ValueError(f"TEXT_AUTONOMY_SEED_COUNT must be >= 1, got {seed_count}")
 
-    allow_image_fallback = _is_truthy(os.getenv("TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK"), default=False)
     timezone_name = os.getenv("TEXT_AUTONOMY_TIMEZONE", "America/New_York")
     run_date = _resolve_run_date(timezone_name, os.getenv("TEXT_AUTONOMY_RUN_DATE", "").strip())
 
@@ -242,12 +235,19 @@ def main() -> int:
             "seed_count": seed_count,
             "constraints": constraints,
             "provider_policy": provider_policy,
-            "fallback": {
-                "allow_image_fallback": allow_image_fallback,
-            },
         }
 
         _write_json(GCS_ROOT / request_object, request_payload)
+        if text_backend in {"scenesmith", "sage", "hybrid_serial"}:
+            scene_config_object = f"scenes/{scene_id}/config.json"
+            scene_config_path = GCS_ROOT / scene_config_object
+            scene_config_payload = _load_json(scene_config_path, default={})
+            scene_config_payload["schema_version"] = str(
+                scene_config_payload.get("schema_version") or "v1"
+            )
+            scene_config_payload["scene_id"] = str(scene_config_payload.get("scene_id") or scene_id)
+            scene_config_payload["use_geniesim"] = False
+            _write_json(scene_config_path, scene_config_payload)
 
         emitted_entries.append(
             {

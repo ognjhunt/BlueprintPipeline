@@ -26,7 +26,8 @@ def test_default_steps_without_selector_excludes_dream2flow(monkeypatch, tmp_pat
     steps = runner._resolve_default_steps()
 
     assert steps == [
-        PipelineStep.REGEN3D,
+        PipelineStep.TEXT_SCENE_GEN,
+        PipelineStep.TEXT_SCENE_ADAPTER,
         PipelineStep.SCALE,
         PipelineStep.INTERACTIVE,
         PipelineStep.SIMREADY,
@@ -87,3 +88,45 @@ def test_production_enables_checkpoint_hashes(monkeypatch, tmp_path):
     )
 
     assert runner.enable_checkpoint_hashes is True
+
+
+def test_episode_generation_job_maps_to_local_step_without_unsupported_warning(tmp_path):
+    from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
+
+    runner = LocalPipelineRunner(
+        scene_dir=tmp_path,
+        verbose=False,
+        skip_interactive=True,
+        environment_type="kitchen",
+        enable_dwm=False,
+        enable_dream2flow=False,
+    )
+    log_messages = []
+    runner.log = lambda msg, level="INFO": log_messages.append((level, msg))  # type: ignore[assignment]
+
+    steps = runner._map_jobs_to_steps(["episode-generation-job"])
+
+    assert steps == [PipelineStep.EPISODE_GENERATION]
+    assert not any("unsupported local job" in msg for _level, msg in log_messages)
+
+
+def test_episode_generation_step_dependency_and_expected_outputs(tmp_path):
+    from tools.run_local_pipeline import LocalPipelineRunner, PipelineStep
+
+    runner = LocalPipelineRunner(
+        scene_dir=tmp_path,
+        verbose=False,
+        skip_interactive=True,
+        environment_type="kitchen",
+        enable_dwm=False,
+        enable_dream2flow=False,
+    )
+
+    deps = runner._resolve_step_dependencies(
+        [PipelineStep.ISAAC_LAB, PipelineStep.EPISODE_GENERATION]
+    )
+    assert deps[PipelineStep.EPISODE_GENERATION] == [PipelineStep.ISAAC_LAB]
+
+    expected_outputs = runner._expected_output_paths(PipelineStep.EPISODE_GENERATION)
+    assert runner.episodes_dir / ".episodes_complete" in expected_outputs
+    assert runner.episodes_dir / "quality" / "validation_report.json" in expected_outputs

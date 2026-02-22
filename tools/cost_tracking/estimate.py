@@ -17,8 +17,12 @@ DEFAULT_INSTANCE_RATES: Dict[str, Dict[str, float]] = {
 }
 
 BASE_STEP_CONFIG: Dict[str, Dict[str, Any]] = {
-    "regen3d": {
+    "text-scene-gen": {
         "duration_minutes": 45,
+        "instance_type": "g5.xlarge",
+    },
+    "text-scene-adapter": {
+        "duration_minutes": 10,
         "instance_type": "g5.xlarge",
     },
     "simready": {
