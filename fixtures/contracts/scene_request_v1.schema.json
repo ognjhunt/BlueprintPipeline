@@ -55,8 +55,8 @@
     },
     "provider_policy": {
       "type": "string",
-      "enum": ["openai_primary"],
-      "default": "openai_primary"
+      "enum": ["openai_primary", "openrouter_qwen_primary"],
+      "default": "openrouter_qwen_primary"
     },
     "fallback": {
       "type": "object",

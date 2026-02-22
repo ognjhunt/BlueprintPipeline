@@ -99,7 +99,7 @@ from tools.camera_io import coerce_rgb_frame
 from tools.config.production_mode import resolve_production_mode
 from tools.lerobot_format import LeRobotExportFormat, parse_lerobot_export_format
 
-from trajectory_solver import JointTrajectory, JointState, RobotConfig, ROBOT_CONFIGS
+from trajectory_solver import JointTrajectory, JointState, RobotConfig, ROBOT_CONFIGS, robot_config_to_dict
 
 # Import reward computation
 try:
@@ -422,6 +422,15 @@ def write_nvidia_alignment_metadata_files(
             },
         },
     }
+    _emb_robot_type = info_payload.get("robot_type") or "franka"
+    _emb_robot_cfg = ROBOT_CONFIGS.get(_emb_robot_type, ROBOT_CONFIGS.get("franka"))
+    _emb_joint_info: Dict[str, Any] = {}
+    if _emb_robot_cfg is not None:
+        try:
+            _emb_joint_info = robot_config_to_dict(_emb_robot_cfg)
+        except Exception:
+            pass
+
     embodiment_payload = {
         "version": "1.0",
         "requested_robot": (
@@ -434,12 +443,20 @@ def write_nvidia_alignment_metadata_files(
             or info_payload.get("runtime_robot")
             or info_payload.get("robot_type")
         ),
-        "robot_type": info_payload.get("robot_type"),
+        "robot_type": _emb_robot_type,
         "camera_rig_profile": (
             dataset_info_payload.get("camera_rig_profile")
             or info_payload.get("camera_rig_profile")
             or "nvidia_3cam"
         ),
+        # Cross-embodiment training fields: full joint semantics from RobotConfig.
+        "num_joints": _emb_joint_info.get("num_joints", 0),
+        "arm_joint_names": _emb_joint_info.get("joint_names", []),
+        "gripper_joint_names": _emb_joint_info.get("gripper_joint_names", []),
+        "joint_limits": _emb_joint_info.get("joint_limits", {}),
+        "gripper_limits": _emb_joint_info.get("gripper_limits", []),
+        "default_joint_positions": _emb_joint_info.get("default_joint_positions", []),
+        "urdf_path": _emb_joint_info.get("urdf_path", ""),
     }
 
     _write_json_file(meta_dir / "modality.json", modality_payload, record_checksum=record_checksum)

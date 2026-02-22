@@ -136,7 +136,10 @@ def _build_context(payload: Mapping[str, Any]) -> TextGenerationContext:
     prompt = str(payload.get("prompt") or "").strip()
     quality_tier = _parse_quality_tier(payload.get("quality_tier"))
     seed = _safe_int(payload.get("seed"), default=1)
-    provider_policy = str(payload.get("provider_policy") or "openai_primary").strip() or "openai_primary"
+    provider_policy = (
+        str(payload.get("provider_policy") or "openrouter_qwen_primary").strip()
+        or "openrouter_qwen_primary"
+    )
     constraints = _as_constraints(payload.get("constraints"))
     return TextGenerationContext(
         scene_id=scene_id,

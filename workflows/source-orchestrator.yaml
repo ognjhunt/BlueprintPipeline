@@ -124,7 +124,7 @@ main:
           - requestSourceMode: "unknown"
           - requestTextBackend: "scenesmith"
           - qualityTier: "standard"
-          - providerPolicy: "openai_primary"
+          - providerPolicy: "openrouter_qwen_primary"
           - vmErrMessage: ""
           - errorCode: ""
           - errorMsg: ""
@@ -240,7 +240,7 @@ main:
             - requestTextBackend: '${if(requestTextBackendRaw == "", textBackendDefault, requestTextBackendRaw)}'
             - primarySourceMode: '${if(requestSourceMode == "auto", "text", requestSourceMode)}'
             - qualityTier: '${text.to_lower(string(default(map.get(sceneRequest, "quality_tier"), "standard")))}'
-            - providerPolicy: '${string(default(map.get(sceneRequest, "provider_policy"), "openai_primary"))}'
+            - providerPolicy: '${string(default(map.get(sceneRequest, "provider_policy"), "openrouter_qwen_primary"))}'
             - seedCount: '${int(default(map.get(sceneRequest, "seed_count"), 1))}'
             - prompt: '${string(default(map.get(sceneRequest, "prompt"), ""))}'
             - constraints: '${default(map.get(sceneRequest, "constraints"), json.decode("{}"))}'
@@ -278,7 +278,7 @@ main:
             next: invalid_request
           - condition: '${qualityTier != "standard" and qualityTier != "premium"}'
             next: invalid_request
-          - condition: '${providerPolicy != "openai_primary"}'
+          - condition: '${providerPolicy != "openai_primary" and providerPolicy != "openrouter_qwen_primary"}'
             next: invalid_request
           - condition: '${(requestSourceMode == "text" or requestSourceMode == "auto") and prompt == ""}'
             next: invalid_request
@@ -1489,6 +1489,7 @@ run_text_jobs_on_runpod:
                           paper_passthrough_keys = [
                               "SCENESMITH_PAPER_BACKEND",
                               "SCENESMITH_PAPER_MODEL",
+                              "SCENESMITH_PAPER_MODEL_CHAIN",
                               "SCENESMITH_PAPER_OPENAI_API",
                               "SCENESMITH_PAPER_OPENAI_API_KEY",
                               "SCENESMITH_PAPER_OPENAI_BASE_URL",

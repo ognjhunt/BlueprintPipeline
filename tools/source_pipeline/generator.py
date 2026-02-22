@@ -43,6 +43,16 @@ class LLMPlanResult:
 
 
 @dataclass(frozen=True)
+class LLMProviderAttempt:
+    provider: str
+    provider_name: str
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    default_headers: Optional[Dict[str, str]] = None
+
+
+@dataclass(frozen=True)
 class TextGenerationContext:
     scene_id: str
     prompt: str
@@ -99,12 +109,125 @@ OBJECT_SUBSTITUTIONS: Dict[str, List[str]] = {
 }
 
 
+_DEFAULT_OPENROUTER_MODEL_CHAIN = "qwen/qwen3.5-397b-a17b,moonshotai/kimi-k2.5"
+
+
+def _parse_model_chain(raw: str) -> List[str]:
+    value = raw.strip()
+    if not value:
+        return []
+
+    models: List[str] = []
+    if value.startswith("["):
+        try:
+            payload = json.loads(value)
+            if isinstance(payload, list):
+                models = [str(item).strip() for item in payload if str(item).strip()]
+        except Exception:
+            models = []
+    else:
+        models = [part.strip() for part in value.split(",") if part.strip()]
+
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for model in models:
+        if model in seen:
+            continue
+        seen.add(model)
+        deduped.append(model)
+    return deduped
+
+
+def _openrouter_model_chain() -> List[str]:
+    raw = (
+        os.getenv("TEXT_OPENROUTER_MODEL_CHAIN", "").strip()
+        or _DEFAULT_OPENROUTER_MODEL_CHAIN
+    )
+    parsed = _parse_model_chain(raw)
+    if parsed:
+        return parsed
+    return _parse_model_chain(_DEFAULT_OPENROUTER_MODEL_CHAIN)
+
+
+def _openrouter_api_key() -> str:
+    return (
+        os.getenv("TEXT_OPENROUTER_API_KEY", "").strip()
+        or os.getenv("OPENROUTER_API_KEY", "").strip()
+    )
+
+
+def _openrouter_base_url() -> str:
+    return (
+        os.getenv("TEXT_OPENROUTER_BASE_URL", "").strip()
+        or os.getenv("OPENROUTER_BASE_URL", "").strip()
+        or "https://openrouter.ai/api/v1"
+    )
+
+
+def _openrouter_default_headers() -> Optional[Dict[str, str]]:
+    referer = os.getenv("TEXT_OPENROUTER_HTTP_REFERER", "").strip()
+    title = os.getenv("TEXT_OPENROUTER_APP_TITLE", "").strip()
+    headers: Dict[str, str] = {}
+    if referer:
+        headers["HTTP-Referer"] = referer
+    if title:
+        headers["X-Title"] = title
+    if headers:
+        return headers
+    return None
+
+
+def resolve_llm_attempt_chain(policy: str) -> List[LLMProviderAttempt]:
+    """Resolve ordered LLM attempt chain for generation."""
+
+    if policy == "openrouter_qwen_primary":
+        attempts: List[LLMProviderAttempt] = []
+        openrouter_key = _openrouter_api_key()
+        openrouter_headers = _openrouter_default_headers()
+        if openrouter_key:
+            for model in _openrouter_model_chain():
+                attempts.append(
+                    LLMProviderAttempt(
+                        provider="openai",
+                        provider_name=f"openrouter:{model}",
+                        model=model,
+                        api_key=openrouter_key,
+                        base_url=_openrouter_base_url(),
+                        default_headers=openrouter_headers,
+                    )
+                )
+
+        include_legacy = _is_truthy(
+            os.getenv("TEXT_OPENROUTER_INCLUDE_LEGACY_FALLBACK"),
+            default=True,
+        )
+        if include_legacy:
+            attempts.extend(
+                [
+                    LLMProviderAttempt(provider="openai", provider_name="openai"),
+                    LLMProviderAttempt(provider="anthropic", provider_name="anthropic"),
+                ]
+            )
+        return attempts
+
+    if policy == "openai_primary":
+        return [
+            LLMProviderAttempt(provider="openai", provider_name="openai"),
+            LLMProviderAttempt(provider="gemini", provider_name="gemini"),
+            LLMProviderAttempt(provider="anthropic", provider_name="anthropic"),
+        ]
+
+    return [
+        LLMProviderAttempt(provider="openai", provider_name="openai"),
+        LLMProviderAttempt(provider="gemini", provider_name="gemini"),
+        LLMProviderAttempt(provider="anthropic", provider_name="anthropic"),
+    ]
+
+
 def resolve_provider_chain(policy: str) -> List[str]:
     """Resolve ordered provider chain for generation."""
 
-    if policy == "openai_primary":
-        return ["openai", "gemini", "anthropic"]
-    return ["openai", "gemini", "anthropic"]
+    return [attempt.provider_name for attempt in resolve_llm_attempt_chain(policy)]
 
 
 def _is_truthy(raw: Optional[str], *, default: bool) -> bool:
@@ -892,7 +1015,7 @@ def _llm_retry_config() -> Tuple[int, float]:
 def _try_llm_plan(
     *,
     prompt: str,
-    provider_chain: Sequence[str],
+    attempt_chain: Sequence[LLMProviderAttempt],
     quality_tier: QualityTier,
 ) -> LLMPlanResult:
     """Attempt an LLM-generated scene plan; fall back to deterministic templates."""
@@ -937,34 +1060,47 @@ def _try_llm_plan(
     failure_reason: Optional[str] = None
 
     for round_idx in range(1, max_attempts + 1):
-        for provider_name in provider_chain:
-            provider = provider_map.get(provider_name)
+        for attempt in attempt_chain:
+            provider = provider_map.get(attempt.provider)
             if provider is None:
                 continue
 
             llm_attempts += 1
             try:
-                client = create_llm_client(provider=provider, fallback_enabled=False, reasoning_effort=effort)
+                client_kwargs: Dict[str, Any] = {
+                    "provider": provider,
+                    "fallback_enabled": False,
+                    "reasoning_effort": effort,
+                }
+                if attempt.model:
+                    client_kwargs["model"] = attempt.model
+                if attempt.api_key:
+                    client_kwargs["api_key"] = attempt.api_key
+                if attempt.base_url:
+                    client_kwargs["base_url"] = attempt.base_url
+                if attempt.default_headers:
+                    client_kwargs["default_headers"] = dict(attempt.default_headers)
+                client = create_llm_client(**client_kwargs)
                 response = client.generate(
                     prompt=f"{system_prompt}\n\nUser prompt: {prompt}",
                     json_output=True,
                 )
                 text = (response.text or "").strip()
                 if not text:
-                    failure_reason = f"{provider_name}:empty_response"
+                    failure_reason = f"{attempt.provider_name}:empty_response"
                     continue
 
                 payload = json.loads(text)
                 if isinstance(payload, dict) and isinstance(payload.get("objects"), list):
                     return LLMPlanResult(
                         payload=payload,
-                        provider=provider_name,
+                        provider=attempt.provider_name,
                         attempts=llm_attempts,
                         failure_reason=None,
                     )
-                failure_reason = f"{provider_name}:invalid_payload"
+                failure_reason = f"{attempt.provider_name}:invalid_payload"
             except Exception as exc:
-                failure_reason = f"{provider_name}:{exc.__class__.__name__}"
+                failure_reason = f"{attempt.provider_name}:{exc.__class__.__name__}"
                 continue
 
         if round_idx < max_attempts and retry_backoff_seconds > 0:
@@ -992,12 +1128,13 @@ def _generate_internal_scene_package(
     constraints = constraints or {}
     started_at = time.time()
 
-    provider_chain = resolve_provider_chain(provider_policy)
-    provider_decision = ProviderDecision(provider=provider_chain[0], policy=provider_policy, used_llm=False)
+    attempt_chain = resolve_llm_attempt_chain(provider_policy)
+    default_provider = attempt_chain[0].provider_name if attempt_chain else "none"
+    provider_decision = ProviderDecision(provider=default_provider, policy=provider_policy, used_llm=False)
 
     llm_plan = _try_llm_plan(
         prompt=prompt,
-        provider_chain=provider_chain,
+        attempt_chain=attempt_chain,
         quality_tier=quality_tier,
     )
     llm_payload = llm_plan.payload

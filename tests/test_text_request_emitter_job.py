@@ -100,3 +100,35 @@ def test_text_request_emitter_daily_lock_prevents_duplicate_emits(tmp_path: Path
     assert second_index["scene_ids"] == first_scene_ids
     lock_file = gcs_root / "automation/text_daily/locks/2026-02-12.lock"
     assert lock_file.is_file()
+
+
+def test_text_request_emitter_defaults_to_openrouter_policy(tmp_path: Path, monkeypatch) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    module = _load_module(
+        "text_request_emitter_job_default_policy_test",
+        repo_root / "text-request-emitter-job" / "emit_text_requests.py",
+    )
+
+    gcs_root = tmp_path / "gcs"
+    monkeypatch.setattr(module, "GCS_ROOT", gcs_root)
+
+    monkeypatch.setenv("BUCKET", "test-bucket")
+    monkeypatch.setenv("TEXT_AUTONOMY_STORAGE_MODE", "filesystem")
+    monkeypatch.setenv("TEXT_AUTONOMY_STATE_PREFIX", "automation/text_daily")
+    monkeypatch.setenv("TEXT_AUTONOMY_TIMEZONE", "America/New_York")
+    monkeypatch.setenv("TEXT_AUTONOMY_RUN_DATE", "2026-02-13")
+    monkeypatch.setenv("TEXT_DAILY_QUOTA", "1")
+    monkeypatch.delenv("TEXT_AUTONOMY_PROVIDER_POLICY", raising=False)
+    monkeypatch.setenv("TEXT_AUTONOMY_TEXT_BACKEND", "scenesmith")
+    monkeypatch.setenv("TEXT_AUTONOMY_QUALITY_TIER", "premium")
+    monkeypatch.setenv("TEXT_PROMPT_USE_LLM", "false")
+
+    assert module.main() == 0
+
+    emitted_index = json.loads(
+        (gcs_root / "automation/text_daily/runs/2026-02-13/emitted_requests.json").read_text(encoding="utf-8")
+    )
+    scene_id = emitted_index["scene_ids"][0]
+    request_path = gcs_root / f"scenes/{scene_id}/prompts/scene_request.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert request["provider_policy"] == "openrouter_qwen_primary"

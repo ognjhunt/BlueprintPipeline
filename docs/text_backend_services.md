@@ -65,6 +65,13 @@ When `TEXT_GEN_RUNTIME=vm`, `setup-source-orchestrator-trigger.sh` now defaults 
 - `SAGE_RUNTIME_MODE=vm`
 - `SAGE_SERVER_URL=http://127.0.0.1:8082/v1/refine`
 
+OpenRouter-first Stage-1 policy controls:
+- `TEXT_AUTONOMY_PROVIDER_POLICY=openrouter_qwen_primary`
+- `TEXT_OPENROUTER_API_KEY` (fallback: `OPENROUTER_API_KEY`)
+- `TEXT_OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`)
+- `TEXT_OPENROUTER_MODEL_CHAIN` (default `qwen/qwen3.5-397b-a17b,moonshotai/kimi-k2.5`)
+- `TEXT_OPENROUTER_INCLUDE_LEGACY_FALLBACK` (default `true`)
+
 Then redeploy source orchestrator trigger/workflow:
 
 ```bash
@@ -146,7 +153,8 @@ Or official SceneSmith paper stack (still through same local endpoint):
 - `SCENESMITH_PAPER_PYTHON_BIN=<python in official scenesmith venv>`
 - Optional:
   - `SCENESMITH_PAPER_BACKEND=openai|gemini|anthropic` (default `openai`)
-  - `SCENESMITH_PAPER_MODEL=<backend-specific model id>`
+  - `SCENESMITH_PAPER_MODEL=<backend-specific model id>` (highest precedence)
+  - `SCENESMITH_PAPER_MODEL_CHAIN=<comma list or JSON list of model ids>`
   - `SCENESMITH_PAPER_TIMEOUT_SECONDS=5400`
   - `SCENESMITH_PAPER_KEEP_RUN_DIR=false`
 
@@ -158,7 +166,7 @@ export SCENESMITH_SERVICE_MODE=paper_stack
 export SCENESMITH_PAPER_REPO_DIR=/home/nijelhunt1/scenesmith
 export SCENESMITH_PAPER_PYTHON_BIN=/home/nijelhunt1/scenesmith/.venv/bin/python
 export SCENESMITH_PAPER_BACKEND=openai
-export SCENESMITH_PAPER_MODEL=gpt-4o
+export SCENESMITH_PAPER_MODEL_CHAIN=qwen/qwen3.5-397b-a17b,moonshotai/kimi-k2.5
 ./scripts/start_text_backend_services.sh restart
 ```
 
@@ -188,6 +196,6 @@ Example:
   "prompt": "A cluttered kitchen where a robot moves a bowl to a shelf",
   "quality_tier": "standard",
   "seed_count": 1,
-  "provider_policy": "openai_primary"
+  "provider_policy": "openrouter_qwen_primary"
 }
 ```

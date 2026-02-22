@@ -214,7 +214,36 @@ def _normalize_paper_openai_api(raw: str | None) -> str:
     raise ValueError(f"Unsupported SCENESMITH_PAPER_OPENAI_API={raw!r} (expected 'responses' or 'chat_completions')")
 
 
-def _apply_paper_openai_env_overrides(env: Dict[str, str]) -> None:
+def _parse_model_chain(raw: str | None) -> List[str]:
+    value = str(raw or "").strip()
+    if not value:
+        return []
+    if value.startswith("["):
+        parsed = json.loads(value)
+        if not isinstance(parsed, list):
+            raise ValueError("SCENESMITH_PAPER_MODEL_CHAIN JSON must be a list")
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _resolve_paper_model_attempts() -> List[str]:
+    explicit_model = str(os.getenv("SCENESMITH_PAPER_MODEL", "")).strip()
+    if explicit_model:
+        return [explicit_model]
+
+    chain = _parse_model_chain(os.getenv("SCENESMITH_PAPER_MODEL_CHAIN"))
+    if chain:
+        return chain
+
+    # Empty string means "let upstream/default model resolve".
+    return [""]
+
+
+def _apply_paper_openai_env_overrides(
+    env: Dict[str, str],
+    *,
+    model_override: str | None = None,
+) -> None:
     """Apply paper-stack scoped OpenAI/Agents SDK overrides for the subprocess.
 
     This lets the parent process keep its own OpenAI config while the official
@@ -233,8 +262,11 @@ def _apply_paper_openai_env_overrides(env: Dict[str, str]) -> None:
     if tracing_key:
         env["OPENAI_TRACING_KEY"] = tracing_key
 
-    # Bridge SCENESMITH_PAPER_MODEL into the OpenAI Agents SDK default model.
-    model = str(os.getenv("SCENESMITH_PAPER_MODEL", "")).strip()
+    # Bridge selected model into the OpenAI Agents SDK default model.
+    if model_override is None:
+        model = str(os.getenv("SCENESMITH_PAPER_MODEL", "")).strip()
+    else:
+        model = str(model_override).strip()
     if model:
         env["OPENAI_DEFAULT_MODEL"] = model
         # Some stacks read OPENAI_MODEL instead.
@@ -623,101 +655,147 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
 
     scene_id = str(payload.get("scene_id") or "scene").strip() or "scene"
     scene_name = _slug(scene_id, default="scene")
-    run_dir = _run_root(scene_name)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    root_run_dir = _run_root(scene_name)
+    root_run_dir.mkdir(parents=True, exist_ok=True)
+    model_attempts = _resolve_paper_model_attempts()
 
     keep_run_dir = _is_truthy(os.getenv("SCENESMITH_PAPER_KEEP_RUN_DIR"), default=False)
     force_generated_assets = _is_truthy(os.getenv("SCENESMITH_PAPER_ALL_SAM3D"), default=False) or _is_truthy(
         os.getenv("SCENESMITH_PAPER_FORCE_GENERATED_ASSETS"),
         default=False,
     )
+    attempt_records: List[Dict[str, Any]] = []
 
     try:
-        overrides = _hydra_overrides(payload=payload, run_dir=run_dir, scene_name=scene_name)
-        env = os.environ.copy()
-        env.setdefault("PYTHONUNBUFFERED", "1")
-        _apply_paper_openai_env_overrides(env)
+        for attempt_index, selected_model in enumerate(model_attempts, start=1):
+            run_dir = (
+                root_run_dir
+                if len(model_attempts) == 1
+                else root_run_dir / f"attempt-{attempt_index:02d}"
+            )
+            run_dir.mkdir(parents=True, exist_ok=True)
 
-        openai_api = str(env.get("SCENESMITH_PAPER_OPENAI_API", "")).strip().lower()
-        if openai_api:
-            cmd: List[str] = [python_bin, "-c", _OPENAI_API_WRAPPER] + overrides
-        else:
-            cmd = [python_bin, "main.py"] + overrides
-
-        completed = subprocess.run(
-            cmd,
-            cwd=str(repo_dir),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=max(30, timeout),
-            check=False,
-        )
-        if completed.returncode != 0:
-            stdout_tail = (completed.stdout or "")[-4000:]
-            stderr_tail = (completed.stderr or "")[-4000:]
-            raise RuntimeError(
-                "Official SceneSmith failed "
-                f"(exit={completed.returncode}). stdout_tail={stdout_tail!r} stderr_tail={stderr_tail!r}"
+            overrides = _hydra_overrides(payload=payload, run_dir=run_dir, scene_name=scene_name)
+            env = os.environ.copy()
+            env.setdefault("PYTHONUNBUFFERED", "1")
+            _apply_paper_openai_env_overrides(
+                env,
+                model_override=selected_model if selected_model else None,
             )
 
-        house_state_path = _find_house_state(run_dir, scene_name)
-        house_state = _load_house_state(house_state_path)
-        raw_objects = _collect_raw_objects(house_state)
-        if not raw_objects:
-            raise RuntimeError(f"Official SceneSmith returned zero objects (house_state={house_state_path})")
-        critic_outputs, critic_summary = _collect_critic_outputs(
-            run_dir=run_dir,
-            house_state=house_state,
-            house_state_path=house_state_path,
-        )
+            openai_api = str(env.get("SCENESMITH_PAPER_OPENAI_API", "")).strip().lower()
+            if openai_api:
+                cmd: List[str] = [python_bin, "-c", _OPENAI_API_WRAPPER] + overrides
+            else:
+                cmd = [python_bin, "main.py"] + overrides
 
-        objects = [
-            _object_from_house_state(
-                item,
-                idx,
-                force_generated_assets=force_generated_assets,
+            completed = subprocess.run(
+                cmd,
+                cwd=str(repo_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=max(30, timeout),
+                check=False,
             )
-            for idx, item in enumerate(raw_objects, start=1)
-        ]
-        constraints = payload.get("constraints")
-        room_type = (
-            str(constraints.get("room_type") or "generic_room")
-            if isinstance(constraints, Mapping)
-            else "generic_room"
-        )
+            if completed.returncode != 0:
+                stdout_tail = (completed.stdout or "")[-4000:]
+                stderr_tail = (completed.stderr or "")[-4000:]
+                attempt_records.append(
+                    {
+                        "attempt": attempt_index,
+                        "model": selected_model,
+                        "status": "failed",
+                        "exit_code": int(completed.returncode),
+                        "error": (
+                            "Official SceneSmith failed "
+                            f"(exit={completed.returncode}). "
+                            f"stdout_tail={stdout_tail!r} stderr_tail={stderr_tail!r}"
+                        ),
+                    }
+                )
+                continue
 
-        response: Dict[str, Any] = {
-            "schema_version": "v1",
-            "request_id": str(payload.get("request_id") or ""),
-            "room_type": room_type,
-            "objects": objects,
-            "used_llm": True,
-            "llm_attempts": 1,
-            "fallback_strategy": "none",
-            "paper_stack": {
-                "enabled": True,
-                "repo_dir": str(repo_dir),
-                "run_dir": str(run_dir),
-                "house_state_path": str(house_state_path),
-                "object_count": len(objects),
-                "backend": str(os.getenv("SCENESMITH_PAPER_BACKEND", "openai")),
-                "model": str(os.getenv("SCENESMITH_PAPER_MODEL", "")),
-                "critic_found_keys": critic_summary.get("found_keys", []),
-                "critic_source_files": critic_summary.get("source_files", []),
-            },
-        }
-        if critic_outputs:
-            response["critic_outputs"] = critic_outputs
-            # Also expose common fields at top-level for compatibility with consumers
-            # that read these directly.
-            for key in _CRITIC_PAYLOAD_KEYS:
-                if key in critic_outputs:
-                    response[key] = critic_outputs[key]
-        return response
+            house_state_path = _find_house_state(run_dir, scene_name)
+            house_state = _load_house_state(house_state_path)
+            raw_objects = _collect_raw_objects(house_state)
+            if not raw_objects:
+                attempt_records.append(
+                    {
+                        "attempt": attempt_index,
+                        "model": selected_model,
+                        "status": "failed",
+                        "error": f"Official SceneSmith returned zero objects (house_state={house_state_path})",
+                    }
+                )
+                continue
+            critic_outputs, critic_summary = _collect_critic_outputs(
+                run_dir=run_dir,
+                house_state=house_state,
+                house_state_path=house_state_path,
+            )
+
+            objects = [
+                _object_from_house_state(
+                    item,
+                    idx,
+                    force_generated_assets=force_generated_assets,
+                )
+                for idx, item in enumerate(raw_objects, start=1)
+            ]
+            constraints = payload.get("constraints")
+            room_type = (
+                str(constraints.get("room_type") or "generic_room")
+                if isinstance(constraints, Mapping)
+                else "generic_room"
+            )
+
+            attempt_records.append(
+                {
+                    "attempt": attempt_index,
+                    "model": selected_model,
+                    "status": "succeeded",
+                }
+            )
+
+            response: Dict[str, Any] = {
+                "schema_version": "v1",
+                "request_id": str(payload.get("request_id") or ""),
+                "room_type": room_type,
+                "objects": objects,
+                "used_llm": True,
+                "llm_attempts": 1,
+                "fallback_strategy": "none",
+                "paper_stack": {
+                    "enabled": True,
+                    "repo_dir": str(repo_dir),
+                    "run_dir": str(run_dir),
+                    "house_state_path": str(house_state_path),
+                    "object_count": len(objects),
+                    "backend": str(os.getenv("SCENESMITH_PAPER_BACKEND", "openai")),
+                    "model": str(os.getenv("SCENESMITH_PAPER_MODEL", "")),
+                    "model_selected": selected_model,
+                    "model_attempts": attempt_records,
+                    "critic_found_keys": critic_summary.get("found_keys", []),
+                    "critic_source_files": critic_summary.get("source_files", []),
+                },
+            }
+            if critic_outputs:
+                response["critic_outputs"] = critic_outputs
+                # Also expose common fields at top-level for compatibility with consumers
+                # that read these directly.
+                for key in _CRITIC_PAYLOAD_KEYS:
+                    if key in critic_outputs:
+                        response[key] = critic_outputs[key]
+            return response
+
+        raise RuntimeError(
+            "Official SceneSmith failed for all model attempts: "
+            + json.dumps(attempt_records, separators=(",", ":"))
+        )
     finally:
-        if run_dir.exists() and not keep_run_dir:
-            shutil.rmtree(run_dir, ignore_errors=True)
+        if root_run_dir.exists() and not keep_run_dir:
+            shutil.rmtree(root_run_dir, ignore_errors=True)
 
 
 def _read_stdin_payload() -> Dict[str, Any]:

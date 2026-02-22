@@ -1970,12 +1970,27 @@ class LocalPipelineRunner:
                 self.log(f"[GCS] ERROR: Failed to download inputs: {exc}", "ERROR")
                 return False
 
-        # Check prerequisites
+        # Check prerequisites — regen3d/ is only required by steps that
+        # consume raw reconstruction data.  Downstream-only workflows
+        # (e.g. replicator, isaac-lab, episode-gen) that operate from
+        # assets/seg/usd dirs can skip this check.  This also allows
+        # BlueprintCapturePipeline-produced scenes (which store
+        # reconstruction under nurec/ rather than regen3d/) to drive
+        # downstream data-generation steps directly.
+        _regen3d_consuming_steps = {
+            PipelineStep.REGEN3D_RECONSTRUCT,
+            PipelineStep.REGEN3D,
+            PipelineStep.SCALE,
+            PipelineStep.INTERACTIVE,
+            PipelineStep.VALIDATE,
+        }
+        needs_regen3d = bool(set(steps) & _regen3d_consuming_steps)
+
         if not self.regen3d_dir.is_dir():
             if PipelineStep.REGEN3D_RECONSTRUCT in steps:
                 self.log("regen3d/ dir will be created by regen3d-reconstruct step")
                 self.regen3d_dir.mkdir(parents=True, exist_ok=True)
-            else:
+            elif needs_regen3d:
                 self.log(f"ERROR: 3D-RE-GEN output not found at {self.regen3d_dir}", "ERROR")
                 self.log(
                     "Run: python fixtures/generate_mock_regen3d.py first, "
@@ -1983,6 +1998,12 @@ class LocalPipelineRunner:
                     "ERROR",
                 )
                 return False
+            else:
+                self.log(
+                    f"regen3d/ not found at {self.regen3d_dir} — "
+                    "skipping (not required by requested steps)",
+                    "WARNING",
+                )
 
         if not self._preflight_articulation_requirements(steps):
             return False

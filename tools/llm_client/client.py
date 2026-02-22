@@ -889,6 +889,8 @@ class OpenAIClient(LLMClient):
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         reasoning_effort: str = "high",
+        base_url: Optional[str] = None,
+        default_headers: Optional[Dict[str, str]] = None,
         **kwargs
     ):
         super().__init__(model=model, **kwargs)
@@ -908,11 +910,29 @@ class OpenAIClient(LLMClient):
 
         # Reasoning effort: none, low, medium, high
         self.reasoning_effort = reasoning_effort
+        self.base_url = (base_url or os.getenv("OPENAI_BASE_URL", "").strip()) or None
+        self.default_headers = dict(default_headers) if default_headers else None
 
         try:
             from openai import OpenAI
             self._openai = OpenAI
-            self._client = OpenAI(api_key=self.api_key)
+            client_kwargs: Dict[str, Any] = {"api_key": self.api_key}
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            if self.default_headers:
+                client_kwargs["default_headers"] = self.default_headers
+
+            try:
+                self._client = OpenAI(**client_kwargs)
+            except TypeError:
+                # Older SDK versions may not accept default_headers/base_url.
+                fallback_kwargs = dict(client_kwargs)
+                fallback_kwargs.pop("default_headers", None)
+                try:
+                    self._client = OpenAI(**fallback_kwargs)
+                except TypeError:
+                    fallback_kwargs.pop("base_url", None)
+                    self._client = OpenAI(**fallback_kwargs)
         except ImportError:
             raise ImportError("openai package is required for OpenAI support")
 

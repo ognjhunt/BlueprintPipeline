@@ -285,3 +285,86 @@ def test_hydra_overrides_supports_delimited_extra_overrides(
 
     assert "furniture_agent.context_image_generation.enabled=true" in overrides
     assert "experiment.num_workers=2" in overrides
+
+
+@pytest.mark.unit
+def test_official_scenesmith_model_chain_retries_until_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module("scenesmith_paper_command_model_chain_module", "scenesmith-service/scenesmith_paper_command.py")
+
+    repo_dir = tmp_path / "scenesmith"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "main.py").write_text("# placeholder\n", encoding="utf-8")
+
+    run_root = tmp_path / "paper-run-chain"
+    monkeypatch.setattr(module, "_run_root", lambda _scene_id: run_root)
+
+    call_count = {"value": 0}
+
+    def _fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        call_count["value"] += 1
+        cmd = args[0]
+        run_dir = None
+        for token in cmd:
+            if isinstance(token, str) and token.startswith("hydra.run.dir="):
+                run_dir = Path(token.split("=", 1)[1])
+                break
+        if run_dir is None:
+            raise RuntimeError("hydra.run.dir override missing in command")
+
+        if call_count["value"] == 1:
+            class _FailResult:
+                returncode = 1
+                stdout = "first attempt failed"
+                stderr = "failure"
+
+            return _FailResult()
+
+        output_dir = run_dir / "outputs" / "scene_demo_chain" / "scene_000" / "combined_house"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        house_state = {
+            "objects": [
+                {
+                    "id": "table_001",
+                    "semantic_class": "table",
+                    "extent": {"x": 1.2, "y": 0.8, "z": 0.7},
+                    "pose": {
+                        "position": {"x": 0.3, "y": 0.0, "z": -0.2},
+                        "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                    },
+                    "floor_object": True,
+                }
+            ]
+        }
+        (output_dir / "house_state.json").write_text(json.dumps(house_state), encoding="utf-8")
+
+        class _SuccessResult:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return _SuccessResult()
+
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
+    monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
+    monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "true")
+    monkeypatch.delenv("SCENESMITH_PAPER_MODEL", raising=False)
+    monkeypatch.setenv("SCENESMITH_PAPER_MODEL_CHAIN", "model-a,model-b")
+
+    response = module._run_official_scenesmith(
+        {
+            "scene_id": "scene_demo_chain",
+            "prompt": "A table in a room",
+        }
+    )
+
+    assert response["paper_stack"]["model_selected"] == "model-b"
+    attempts = response["paper_stack"]["model_attempts"]
+    assert len(attempts) == 2
+    assert attempts[0]["model"] == "model-a"
+    assert attempts[0]["status"] == "failed"
+    assert attempts[1]["model"] == "model-b"
+    assert attempts[1]["status"] == "succeeded"

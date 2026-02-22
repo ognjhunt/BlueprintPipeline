@@ -92,7 +92,7 @@ payload = {
     'quality_tier': '${QUALITY_TIER}',
     'seed': 1,
     'constraints': {'object_density': 'high'},
-    'provider_policy': 'openai_primary'
+    'provider_policy': 'openrouter_qwen_primary'
 }
 with open('${WORK_DIR}/scene_request.json', 'w') as f:
     json.dump(payload, f, indent=2)

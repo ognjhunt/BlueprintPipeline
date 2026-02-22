@@ -43,8 +43,9 @@ if [[ -f "${SECRETS_ENV_PATH}" ]]; then
   log "Loaded secrets env: ${SECRETS_ENV_PATH}"
 fi
 
-if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-  log "ERROR: OPENAI_API_KEY is required."
+OPENAI_API_KEY_EFFECTIVE="${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-}}"
+if [[ -z "${OPENAI_API_KEY_EFFECTIVE}" ]]; then
+  log "ERROR: OPENAI_API_KEY or OPENROUTER_API_KEY is required."
   exit 2
 fi
 if [[ -z "${NGC_API_KEY:-}" ]]; then
@@ -60,8 +61,13 @@ if [[ -z "${TRELLIS_SERVER_URL:-}" ]]; then
   exit 2
 fi
 
-OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+OPENAI_BASE_URL="${OPENAI_BASE_URL:-${OPENROUTER_BASE_URL:-https://api.openai.com/v1}}"
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o}"
+OPENAI_MODEL_QWEN="${OPENAI_MODEL_QWEN:-qwen/qwen3.5-397b-a17b}"
+OPENAI_MODEL_OPENAI="${OPENAI_MODEL_OPENAI:-moonshotai/kimi-k2.5}"
+OPENAI_MODEL_GLMV="${OPENAI_MODEL_GLMV:-${OPENAI_MODEL}}"
+OPENAI_MODEL_CLAUDE="${OPENAI_MODEL_CLAUDE:-${OPENAI_MODEL}}"
+export OPENAI_API_KEY_EFFECTIVE
 
 log "Preflight: GPU visibility"
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -164,9 +170,9 @@ log "Writing SAGE client key.json"
 python3 - <<PY
 import json, os, pathlib
 client_key = {
-  "API_TOKEN": os.environ["OPENAI_API_KEY"],
+  "API_TOKEN": os.environ["OPENAI_API_KEY_EFFECTIVE"],
   "API_URL_QWEN": os.environ.get("OPENAI_BASE_URL", "${OPENAI_BASE_URL}"),
-  "MODEL_NAME": os.environ.get("OPENAI_MODEL", "${OPENAI_MODEL}"),
+  "MODEL_NAME": os.environ.get("OPENAI_MODEL_QWEN", "qwen/qwen3.5-397b-a17b"),
 }
 path = pathlib.Path("${SAGE_DIR}/client/key.json")
 path.write_text(json.dumps(client_key, indent=4) + "\\n", encoding="utf-8")
@@ -177,17 +183,20 @@ PY
 log "Writing SAGE server key.json"
 python3 - <<PY
 import json, os, pathlib
-model = os.environ.get("OPENAI_MODEL", "${OPENAI_MODEL}")
+model_qwen = os.environ.get("OPENAI_MODEL_QWEN", "qwen/qwen3.5-397b-a17b")
+model_openai = os.environ.get("OPENAI_MODEL_OPENAI", "moonshotai/kimi-k2.5")
+model_glmv = os.environ.get("OPENAI_MODEL_GLMV", os.environ.get("OPENAI_MODEL", "${OPENAI_MODEL}"))
+model_claude = os.environ.get("OPENAI_MODEL_CLAUDE", os.environ.get("OPENAI_MODEL", "${OPENAI_MODEL}"))
 server_key = {
   "ANTHROPIC_API_KEY": "",
-  "API_TOKEN": os.environ["OPENAI_API_KEY"],
+  "API_TOKEN": os.environ["OPENAI_API_KEY_EFFECTIVE"],
   "API_URL_QWEN": os.environ.get("OPENAI_BASE_URL", "${OPENAI_BASE_URL}"),
   "API_URL_OPENAI": os.environ.get("OPENAI_BASE_URL", "${OPENAI_BASE_URL}"),
   "MODEL_DICT": {
-    "qwen": model,
-    "openai": model,
-    "glmv": model,
-    "claude": model,
+    "qwen": model_qwen,
+    "openai": model_openai,
+    "glmv": model_glmv,
+    "claude": model_claude,
   },
   "TRELLIS_SERVER_URL": os.environ["TRELLIS_SERVER_URL"],
   "FLUX_SERVER_URL": "",

@@ -436,7 +436,7 @@ cd workflows
 
 TEXT_DAILY_QUOTA=1 \
 TEXT_AUTONOMY_TIMEZONE=America/New_York \
-TEXT_AUTONOMY_PROVIDER_POLICY=openai_primary \
+TEXT_AUTONOMY_PROVIDER_POLICY=openrouter_qwen_primary \
 TEXT_AUTONOMY_TEXT_BACKEND=scenesmith \
 TEXT_AUTONOMY_QUALITY_TIER=premium \
 bash setup-text-autonomy-scheduler.sh <project_id> <bucket> <region>
@@ -456,6 +456,10 @@ Daily autonomy env vars:
 - `TEXT_AUTONOMY_EMITTER_TIMEOUT_SECONDS`
 - `TEXT_AUTONOMY_SOURCE_WAIT_TIMEOUT_SECONDS`
 - `TEXT_AUTONOMY_SOURCE_WAIT_POLL_SECONDS`
+- `TEXT_OPENROUTER_API_KEY` (fallback to `OPENROUTER_API_KEY`)
+- `TEXT_OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`)
+- `TEXT_OPENROUTER_MODEL_CHAIN` (default `qwen/qwen3.5-397b-a17b,moonshotai/kimi-k2.5`)
+- `TEXT_OPENROUTER_INCLUDE_LEGACY_FALLBACK` (default `true`)
 
 Auto-pause behavior:
 - State object: `automation/text_daily/state.json`

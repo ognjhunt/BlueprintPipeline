@@ -108,3 +108,20 @@ def test_build_prompt_constraints_metadata_contains_required_fields(monkeypatch)
     assert payload["prompt_hash"] == result.prompt_hash
     assert payload["dimensions"] == result.dimensions
     assert isinstance(payload["tags"], list)
+
+
+def test_generate_prompt_supports_openrouter_policy_without_llm(monkeypatch) -> None:
+    monkeypatch.setenv("TEXT_PROMPT_USE_LLM", "false")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("TEXT_OPENROUTER_API_KEY", raising=False)
+
+    result = generate_prompt(
+        run_date="2026-02-13",
+        slot_index=1,
+        provider_policy="openrouter_qwen_primary",
+        recent_prompts=[],
+    )
+
+    assert isinstance(result.prompt, str)
+    assert result.prompt_hash
+    assert result.used_llm is False

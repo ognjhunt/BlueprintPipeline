@@ -84,7 +84,7 @@ Core fields:
 - `quality_tier` (`standard` | `premium`)
 - `seed_count` (>= 1)
 - `image.gcs_uri` (required for `image` mode)
-- `provider_policy` (`openai_primary`)
+- `provider_policy` (`openrouter_qwen_primary` | `openai_primary`)
 - `fallback.allow_image_fallback` (default `true`)
 
 **Note:** Dream2Flow and DWM workflows are experimental and remain disabled by
@@ -147,6 +147,10 @@ Genie Sim workflows record idempotency markers in GCS to prevent duplicate submi
 - `TEXT_GEN_USE_LLM`: enables LLM-first scene planning in Stage 1. Defaults to `true`.
 - `TEXT_GEN_LLM_MAX_ATTEMPTS`: max LLM planning retry rounds in Stage 1. Defaults to `3`.
 - `TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS`: Stage 1 LLM retry backoff base seconds. Defaults to `2`.
+- `TEXT_OPENROUTER_API_KEY`: OpenRouter API key override for `openrouter_qwen_primary` (falls back to `OPENROUTER_API_KEY`).
+- `TEXT_OPENROUTER_BASE_URL`: OpenRouter-compatible base URL for Stage 1 OpenAI-compatible calls. Defaults to `https://openrouter.ai/api/v1`.
+- `TEXT_OPENROUTER_MODEL_CHAIN`: ordered OpenRouter model attempts (comma-list or JSON list). Defaults to `qwen/qwen3.5-397b-a17b,moonshotai/kimi-k2.5`.
+- `TEXT_OPENROUTER_INCLUDE_LEGACY_FALLBACK`: append legacy Stage 1 provider fallbacks (`openai`, `anthropic`) after OpenRouter attempts. Defaults to `true`.
 - `TEXT_ASSET_RETRIEVAL_ENABLED`: text adapter retrieval toggle before placeholder fallback. Defaults to `true`.
 - `TEXT_ASSET_LIBRARY_PREFIXES`: comma-separated library prefixes under bucket mount for retrieval (e.g. `scenes,asset-library`). Defaults to `scenes`.
 - `TEXT_ASSET_LIBRARY_MAX_FILES`: scan cap for retrieval index build in text adapter. Defaults to `2500`.

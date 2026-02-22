@@ -57,12 +57,12 @@ class SceneRequestV1:
     seed_count: int = 1
     image: Optional[SceneRequestImage] = None
     constraints: Dict[str, Any] = field(default_factory=dict)
-    provider_policy: str = "openai_primary"
+    provider_policy: str = "openrouter_qwen_primary"
     fallback: SceneRequestFallback = field(default_factory=SceneRequestFallback)
 
 
 _ALLOWED_SCHEMA_VERSIONS = {"v1"}
-_ALLOWED_PROVIDER_POLICIES = {"openai_primary"}
+_ALLOWED_PROVIDER_POLICIES = {"openai_primary", "openrouter_qwen_primary"}
 
 
 def _as_bool(value: Any, *, default: bool) -> bool:
@@ -201,7 +201,10 @@ def normalize_scene_request(
     else:
         raise ValueError("constraints must be an object when provided")
 
-    provider_policy = str(payload.get("provider_policy", "openai_primary")).strip() or "openai_primary"
+    provider_policy = (
+        str(payload.get("provider_policy", "openrouter_qwen_primary")).strip()
+        or "openrouter_qwen_primary"
+    )
     if provider_policy not in _ALLOWED_PROVIDER_POLICIES:
         raise ValueError(
             f"provider_policy must be one of {sorted(_ALLOWED_PROVIDER_POLICIES)}, got {provider_policy!r}"

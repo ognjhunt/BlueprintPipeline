@@ -21,6 +21,21 @@ def test_scene_request_schema_accepts_valid_text_request() -> None:
     validate_json_schema(payload, schema)
 
 
+def test_scene_request_schema_accepts_openrouter_policy() -> None:
+    schema = load_schema("scene_request_v1.schema.json")
+    payload = {
+        "schema_version": "v1",
+        "scene_id": "scene_124",
+        "source_mode": "text",
+        "text_backend": "scenesmith",
+        "prompt": "A modern kitchen for robot pick-and-place tasks",
+        "quality_tier": "standard",
+        "seed_count": 1,
+        "provider_policy": "openrouter_qwen_primary",
+    }
+    validate_json_schema(payload, schema)
+
+
 def test_scene_request_schema_rejects_unknown_source_mode() -> None:
     schema = load_schema("scene_request_v1.schema.json")
     payload = {

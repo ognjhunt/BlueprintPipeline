@@ -1367,6 +1367,8 @@ def main() -> None:
     plan_bundle = {
         "run_id": run_id,
         "layout_id": args.layout_id,
+        "robot_type": "ridgeback_franka",
+        "arm_robot_type": "franka",
         "results_dir": str(Path(args.results_dir)),
         "pose_aug_name": args.pose_aug_name,
         "headless": bool(args.headless),

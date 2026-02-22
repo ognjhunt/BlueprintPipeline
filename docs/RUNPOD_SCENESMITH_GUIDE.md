@@ -1,12 +1,12 @@
 # Running SceneSmith on RunPod (Stage 1 Only)
 
-Step-by-step guide to run the SceneSmith text-to-scene pipeline on a RunPod pod with SAM3D assets and OpenRouter/Minimax LLM.
+Step-by-step guide to run the SceneSmith text-to-scene pipeline on a RunPod pod with SAM3D assets and OpenRouter Qwen3.5/Kimi K2.5 routing.
 
 ## Prerequisites
 
 - RunPod pod with **L40S GPU** (48GB VRAM) — `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04` image
 - API keys:
-  - `OPENROUTER_API_KEY` — routes to Minimax M2.5 via OpenRouter
+  - `OPENROUTER_API_KEY` — routes to Qwen3.5/Kimi K2.5 via OpenRouter
   - `GOOGLE_API_KEY` — for Gemini context image generation
   - `HF_TOKEN` (optional) — for downloading SAM3D checkpoints from HuggingFace
   - `GITHUB_TOKEN` (optional) — for cloning private BlueprintPipeline repo
@@ -232,7 +232,7 @@ export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
 
 Then pass model override:
 ```
-+model=minimax/minimax-m2.5
++model=qwen/qwen3.5-397b-a17b
 ```
 
 Or SceneSmith reads `OPENAI_API_KEY` + `OPENAI_BASE_URL` directly.

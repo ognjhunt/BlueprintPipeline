@@ -10,7 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .generator import resolve_provider_chain
+from .generator import LLMProviderAttempt, resolve_llm_attempt_chain
 
 DEFAULT_PROMPT_MATRIX_PATH = Path(__file__).resolve().parents[2] / "configs" / "text_prompt_matrix.json"
 
@@ -235,7 +235,7 @@ def _expand_prompt_with_llm(
     *,
     base_prompt: str,
     tags: Sequence[str],
-    provider_chain: Sequence[str],
+    attempt_chain: Sequence[LLMProviderAttempt],
 ) -> Tuple[str, bool, int, Optional[str], Optional[str]]:
     if not _llm_prompt_enabled():
         return base_prompt, False, 0, "llm_disabled", None
@@ -258,13 +258,26 @@ def _expand_prompt_with_llm(
     )
 
     for round_idx in range(1, max_attempts + 1):
-        for provider_name in provider_chain:
-            provider_enum = _provider_name_to_enum(provider_name, LLMProvider)
+        for attempt in attempt_chain:
+            provider_enum = _provider_name_to_enum(attempt.provider, LLMProvider)
             if provider_enum is None:
                 continue
             attempts += 1
             try:
-                client = create_llm_client(provider=provider_enum, fallback_enabled=False, reasoning_effort=effort)
+                client_kwargs: Dict[str, Any] = {
+                    "provider": provider_enum,
+                    "fallback_enabled": False,
+                    "reasoning_effort": effort,
+                }
+                if attempt.model:
+                    client_kwargs["model"] = attempt.model
+                if attempt.api_key:
+                    client_kwargs["api_key"] = attempt.api_key
+                if attempt.base_url:
+                    client_kwargs["base_url"] = attempt.base_url
+                if attempt.default_headers:
+                    client_kwargs["default_headers"] = dict(attempt.default_headers)
+                client = create_llm_client(**client_kwargs)
                 response = client.generate(
                     prompt=(
                         f"{system_prompt}\n\n"
@@ -276,15 +289,15 @@ def _expand_prompt_with_llm(
                 )
                 response_text = (response.text or "").strip()
                 if not response_text:
-                    failure_reason = f"{provider_name}:empty_response"
+                    failure_reason = f"{attempt.provider_name}:empty_response"
                     continue
                 payload = json.loads(response_text)
                 prompt = payload.get("prompt") if isinstance(payload, dict) else None
                 if isinstance(prompt, str) and prompt.strip():
-                    return prompt.strip(), True, attempts, None, provider_name
-                failure_reason = f"{provider_name}:missing_prompt"
+                    return prompt.strip(), True, attempts, None, attempt.provider_name
+                failure_reason = f"{attempt.provider_name}:missing_prompt"
             except Exception as exc:
-                failure_reason = f"{provider_name}:{exc.__class__.__name__}"
+                failure_reason = f"{attempt.provider_name}:{exc.__class__.__name__}"
                 continue
 
         if round_idx < max_attempts and retry_backoff_seconds > 0:
@@ -314,7 +327,7 @@ def generate_prompt(
     windowed_recent = list(recent_prompts)[-dedupe_window:]
     recent_hashes = set(_extract_recent_hashes(windowed_recent))
 
-    provider_chain = resolve_provider_chain(provider_policy)
+    attempt_chain = resolve_llm_attempt_chain(provider_policy)
 
     best_candidate: Optional[PromptGenerationResult] = None
     best_novelty = -1.0
@@ -340,7 +353,7 @@ def generate_prompt(
         expanded_prompt, used_llm, llm_attempts, llm_failure_reason, llm_provider = _expand_prompt_with_llm(
             base_prompt=base_prompt,
             tags=tags,
-            provider_chain=provider_chain,
+            attempt_chain=attempt_chain,
         )
 
         prompt_hash = _hash_prompt(expanded_prompt)

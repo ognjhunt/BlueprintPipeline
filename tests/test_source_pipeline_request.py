@@ -28,7 +28,7 @@ def test_normalize_scene_request_defaults_to_text_standard() -> None:
     assert request.text_backend == TextBackend.SCENESMITH
     assert request.quality_tier == QualityTier.STANDARD
     assert request.seed_count == 1
-    assert request.provider_policy == "openai_primary"
+    assert request.provider_policy == "openrouter_qwen_primary"
     assert request.fallback.allow_image_fallback is True
 
 
@@ -197,6 +197,19 @@ def test_scene_request_to_dict_roundtrip() -> None:
     assert serialized["constraints"] == {"room_type": "lab"}
     assert serialized["fallback"]["allow_image_fallback"] is False
     assert serialized["image"] is None
+
+
+def test_normalize_scene_request_accepts_legacy_openai_primary_policy() -> None:
+    request = normalize_scene_request(
+        {
+            "schema_version": "v1",
+            "scene_id": "scene_legacy_policy",
+            "source_mode": "text",
+            "prompt": "A room",
+            "provider_policy": "openai_primary",
+        }
+    )
+    assert request.provider_policy == "openai_primary"
 
 
 def test_normalize_rejects_seed_count_zero() -> None:

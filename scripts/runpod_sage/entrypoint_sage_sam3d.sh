@@ -11,15 +11,20 @@
 #   6. Keeps container alive (tail -f)
 #
 # Required env vars:
-#   OPENAI_API_KEY  — OpenAI API key
+#   OPENAI_API_KEY or OPENROUTER_API_KEY — OpenAI-compatible API key
 #
 # Recommended env vars:
 #   GEMINI_API_KEY  — Gemini API key (primary image gen backend)
 #   SLURM_JOB_ID   — Used by SAGE MCP port hashing (default: 12345)
 #
 # Optional env vars:
-#   OPENAI_MODEL         — Model name (default: gpt-5.1)
-#   OPENAI_BASE_URL      — Base URL (default: https://api.openai.com/v1)
+#   OPENAI_MODEL         — Legacy fallback model name (default: gpt-5.1)
+#   OPENAI_BASE_URL      — Base URL (default: OPENROUTER_BASE_URL or https://api.openai.com/v1)
+#   OPENROUTER_BASE_URL  — OpenRouter base URL (default: https://openrouter.ai/api/v1)
+#   OPENAI_MODEL_QWEN    — qwen model (default: qwen/qwen3.5-397b-a17b)
+#   OPENAI_MODEL_OPENAI  — openai slot model (default: moonshotai/kimi-k2.5)
+#   OPENAI_MODEL_GLMV    — glmv slot model (default: OPENAI_MODEL)
+#   OPENAI_MODEL_CLAUDE  — claude slot model (default: OPENAI_MODEL)
 #   ANTHROPIC_API_KEY    — Claude API key
 #   SAM3D_IMAGE_BACKEND  — gemini or openai (default: gemini)
 #   SAM3D_PORT           — SAM3D server port (default: 8080)
@@ -38,7 +43,11 @@ MCP_RESOLVER="${BP_DIR}/scripts/runpod_sage/mcp_extension_paths.py"
 SAM3D_PORT=${SAM3D_PORT:-8080}
 SLURM_JOB_ID=${SLURM_JOB_ID:-12345}
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.1}"
-OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+OPENAI_BASE_URL="${OPENAI_BASE_URL:-${OPENROUTER_BASE_URL:-https://api.openai.com/v1}}"
+OPENAI_MODEL_QWEN="${OPENAI_MODEL_QWEN:-qwen/qwen3.5-397b-a17b}"
+OPENAI_MODEL_OPENAI="${OPENAI_MODEL_OPENAI:-moonshotai/kimi-k2.5}"
+OPENAI_MODEL_GLMV="${OPENAI_MODEL_GLMV:-${OPENAI_MODEL}}"
+OPENAI_MODEL_CLAUDE="${OPENAI_MODEL_CLAUDE:-${OPENAI_MODEL}}"
 SAM3D_IMAGE_BACKEND="${SAM3D_IMAGE_BACKEND:-gemini}"
 SAM3D_TEXTURE_BAKING="${SAM3D_TEXTURE_BAKING:-1}"
 SKIP_PATCHES="${SKIP_PATCHES:-0}"
@@ -120,7 +129,7 @@ fi
 # ── 1. Write key.json files from env vars ────────────────────────────────────
 log "Writing SAGE key.json files..."
 
-OPENAI_API_KEY_EFFECTIVE="${OPENAI_API_KEY:-${API_TOKEN:-}}"
+OPENAI_API_KEY_EFFECTIVE="${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-${API_TOKEN:-}}}"
 GEMINI_API_KEY_EFFECTIVE="${GEMINI_API_KEY:-}"
 ANTHROPIC_API_KEY_EFFECTIVE="${ANTHROPIC_API_KEY:-}"
 
@@ -138,7 +147,7 @@ import json, os, pathlib
 client_key = {
     "API_TOKEN": os.environ.get("OPENAI_API_KEY_EFFECTIVE", ""),
     "API_URL_QWEN": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-    "MODEL_NAME": os.environ.get("OPENAI_MODEL", "gpt-5.1"),
+    "MODEL_NAME": os.environ.get("OPENAI_MODEL_QWEN", "qwen/qwen3.5-397b-a17b"),
 }
 path = pathlib.Path("${SAGE_DIR}/client/key.json")
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,17 +156,20 @@ path.chmod(0o600)
 print(f"  wrote {path}")
 
 # Server key.json
-model = os.environ.get("OPENAI_MODEL", "gpt-5.1")
+model_qwen = os.environ.get("OPENAI_MODEL_QWEN", "qwen/qwen3.5-397b-a17b")
+model_openai = os.environ.get("OPENAI_MODEL_OPENAI", "moonshotai/kimi-k2.5")
+model_glmv = os.environ.get("OPENAI_MODEL_GLMV", os.environ.get("OPENAI_MODEL", "gpt-5.1"))
+model_claude = os.environ.get("OPENAI_MODEL_CLAUDE", os.environ.get("OPENAI_MODEL", "gpt-5.1"))
 server_key = {
     "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY_EFFECTIVE", ""),
     "API_TOKEN": os.environ.get("OPENAI_API_KEY_EFFECTIVE", ""),
     "API_URL_QWEN": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     "API_URL_OPENAI": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     "MODEL_DICT": {
-        "qwen": model,
-        "openai": model,
-        "glmv": model,
-        "claude": model,
+        "qwen": model_qwen,
+        "openai": model_openai,
+        "glmv": model_glmv,
+        "claude": model_claude,
     },
     "TRELLIS_SERVER_URL": f"http://localhost:{os.environ.get('SAM3D_PORT', '8080')}",
     "FLUX_SERVER_URL": "",
@@ -171,8 +183,8 @@ print(f"  wrote {path}")
 PYEOF
     log "key.json files written."
 else
-    log "WARNING: OPENAI_API_KEY/API_TOKEN not set. key.json not written."
-    log "  Set it before running SAGE: export OPENAI_API_KEY=sk-... (or API_TOKEN=...)"
+    log "WARNING: OPENAI_API_KEY/OPENROUTER_API_KEY/API_TOKEN not set. key.json not written."
+    log "  Set it before running SAGE: export OPENAI_API_KEY=... or OPENROUTER_API_KEY=..."
 fi
 
 # ── 1b. Fix spconv if needed (cu120 → cu124 for CUDA 12.4) ────────────────

@@ -117,7 +117,7 @@ cat > /tmp/scene_request.json <<'JSON'
   "prompt": "A cluttered kitchen where a robot moves a bowl to a shelf",
   "quality_tier": "standard",
   "seed_count": 1,
-  "provider_policy": "openai_primary"
+  "provider_policy": "openrouter_qwen_primary"
 }
 JSON
 

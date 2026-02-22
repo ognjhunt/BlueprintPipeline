@@ -790,6 +790,7 @@ def _prepare_stage7_output_dir(output_dir: Path) -> Dict[str, Any]:
         output_dir / "capture_manifest.json",
         output_dir / "quality_report.json",
         output_dir / "artifact_manifest.json",
+        output_dir / "embodiment_manifest.json",
     ]
     for path in singleton_files:
         if path.exists():
@@ -1466,6 +1467,37 @@ def main() -> None:
     bundle = _load_json(bundle_path)
     _enforce_bundle_runtime_parity(bundle, args)
 
+    # --- Embodiment config: try to import from trajectory_solver, fall back inline ---
+    # Must run before Isaac Sim init so _robot_config_dict is always available.
+    _ts_path = str(Path(BP_DIR) / "episode-generation-job")
+    try:
+        if _ts_path not in sys.path:
+            sys.path.insert(0, _ts_path)
+        from trajectory_solver import FRANKA_CONFIG, robot_config_to_dict as _rcd  # type: ignore
+        _robot_config_dict = _rcd(
+            FRANKA_CONFIG,
+            urdf_path=str(Path(BP_DIR) / "tools/geniesim_adapter/robot_assets/robots/franka/panda.urdf"),
+        )
+        _log("Embodiment config loaded from trajectory_solver.FRANKA_CONFIG")
+    except Exception as _import_err:
+        _log(f"WARNING: Could not import trajectory_solver for embodiment metadata: {_import_err}")
+        _robot_config_dict = {
+            "robot_type": "franka",
+            "num_joints": 7,
+            "joint_names": [
+                "panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4",
+                "panda_joint5", "panda_joint6", "panda_joint7",
+            ],
+            "joint_limits": {
+                "lower": [-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973],
+                "upper": [2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973],
+            },
+            "default_joint_positions": [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
+            "gripper_joint_names": ["panda_finger_joint1", "panda_finger_joint2"],
+            "gripper_limits": [0.0, 0.04],
+            "urdf_path": "",
+        }
+
     run_id = str(bundle.get("run_id") or os.environ.get("SAGE_RUN_ID", "")).strip()
     if not run_id:
         msg = (
@@ -1566,6 +1598,9 @@ def main() -> None:
         demo_metadata: Dict[str, Any] = {
             "run_id": run_id,
             "layout_id": layout_id,
+            "robot_type": _robot_config_dict.get("robot_type", "franka"),
+            "platform": "ridgeback_franka",
+            "arm_joint_names": _robot_config_dict.get("joint_names", []),
             "num_demos": 0,
             "demos": [],
             "provenance": runtime_provenance,
@@ -1823,9 +1858,34 @@ def main() -> None:
             rgb_b.attach([render_b])
             depth_b.attach([render_b])
 
+            # Camera intrinsics: computed from known USD camera parameters.
+            # focal_length=35mm (set in _define_camera), sensor_width=20.955mm (Isaac Sim default).
+            _focal_mm = 35.0
+            _sensor_w_mm = 20.955
+            _fx = (_focal_mm / _sensor_w_mm) * width
+            _fy = _fx  # square pixels
+            _cx = width / 2.0
+            _cy = height / 2.0
+            _intrinsics = {
+                "fx": _fx, "fy": _fy, "cx": _cx, "cy": _cy,
+                "focal_length_mm": _focal_mm, "sensor_width_mm": _sensor_w_mm,
+                "width": width, "height": height,
+            }
             cameras_manifest["cameras"] = [
-                {"camera_id": "agentview", "prim_path": cam_a},
-                {"camera_id": "agentview_2", "prim_path": cam_b},
+                {
+                    "camera_id": "agentview",
+                    "prim_path": cam_a,
+                    "position_world": [w * 0.5, 0.5, h * 0.85],
+                    "look_at_world": center.tolist(),
+                    "intrinsics": _intrinsics,
+                },
+                {
+                    "camera_id": "agentview_2",
+                    "prim_path": cam_b,
+                    "position_world": [w * 0.5, l - 0.5, h * 0.85],
+                    "look_at_world": center.tolist(),
+                    "intrinsics": _intrinsics,
+                },
             ]
             cameras_manifest["depth_annotator"] = depth_name
             return (
@@ -1869,6 +1929,8 @@ def main() -> None:
         demo_global_idx = 0
         warmup_sensor_checks: List[Dict[str, Any]] = []
         expected_scene_names: List[str] = []
+        # Will be populated by _init_dynamic_control() on first variant; used for embodiment HDF5.
+        runtime_dof_names: List[str] = _robot_config_dict.get("joint_names", [])
         for variant_json, demo_list in by_variant.items():
             variant_path = _resolve_variant_json_path(variant_json, layout_dir=layout_dir)
             expected_scene_names.append(f"scene_{variant_path.stem}.usd")
@@ -2021,6 +2083,7 @@ def main() -> None:
                     _log(f"WARNING: {msg}")
 
             dc, art, dof_names = _init_dynamic_control(robot_articulation)
+            runtime_dof_names = list(dof_names)  # persist across variants for embodiment metadata
 
             for demo in demo_list:
                 demo_idx = int(demo["demo_idx"])
@@ -2610,6 +2673,43 @@ def main() -> None:
         _write_root_scalar(quality_grp, "joint_effort_abs_max", run_joint_effort_abs_max)
         _write_root_scalar(quality_grp, "strict_sensors", bool(args.strict_sensors))
 
+        # --- Embodiment identity: makes dataset self-describing for cross-embodiment training ---
+        import h5py  # noqa: PLC0415 — local import mirrors pattern used elsewhere in this file
+        emb_grp = metadata_grp.create_group("embodiment")
+        emb_grp.attrs["robot_type"] = _robot_config_dict.get("robot_type", "franka")
+        emb_grp.attrs["platform"] = "ridgeback_franka"
+        emb_grp.attrs["urdf_path"] = _robot_config_dict.get("urdf_path", "")
+        emb_grp.attrs["num_joints"] = _robot_config_dict.get("num_joints", 7)
+        _vlen_str = h5py.special_dtype(vlen=str)
+        emb_grp.create_dataset(
+            "arm_joint_names",
+            data=np.array(_robot_config_dict.get("joint_names", []), dtype=object),
+            dtype=_vlen_str,
+        )
+        emb_grp.create_dataset(
+            "runtime_dof_names",
+            data=np.array(runtime_dof_names, dtype=object),
+            dtype=_vlen_str,
+        )
+        emb_grp.create_dataset(
+            "gripper_joint_names",
+            data=np.array(_robot_config_dict.get("gripper_joint_names", []), dtype=object),
+            dtype=_vlen_str,
+        )
+        _jl = _robot_config_dict.get("joint_limits", {})
+        if _jl.get("lower"):
+            emb_grp.create_dataset(
+                "joint_limits_lower",
+                data=np.array(_jl["lower"], dtype=np.float32),
+            )
+            emb_grp.create_dataset(
+                "joint_limits_upper",
+                data=np.array(_jl["upper"], dtype=np.float32),
+            )
+        _gl = _robot_config_dict.get("gripper_limits", [0.0, 0.04])
+        emb_grp.attrs["gripper_limit_min"] = float(_gl[0])
+        emb_grp.attrs["gripper_limit_max"] = float(_gl[1])
+
         h5.flush()
         h5.close()
         h5 = None
@@ -2699,9 +2799,36 @@ def main() -> None:
         demo_metadata_path = output_dir / "demo_metadata.json"
         step_decomp_path = output_dir / "step_decomposition.json"
         capture_manifest_path = output_dir / "capture_manifest.json"
+        embodiment_manifest_path = output_dir / "embodiment_manifest.json"
         _write_json(demo_metadata_path, demo_metadata)
         _write_json(step_decomp_path, step_decomp)
         _write_json(capture_manifest_path, cameras_manifest)
+
+        # --- Write embodiment_manifest.json ---
+        _usd_path_str = ""
+        try:
+            _usd_path_str = str(_resolve_ridgeback_franka_usd())
+        except Exception:
+            pass
+        embodiment_manifest: Dict[str, Any] = {
+            "version": "1.0",
+            "run_id": run_id,
+            "layout_id": layout_id,
+            "robot_type": _robot_config_dict.get("robot_type", "franka"),
+            "platform": "ridgeback_franka",
+            "arm_joint_names": _robot_config_dict.get("joint_names", []),
+            "runtime_dof_names": runtime_dof_names,
+            "joint_limits": _robot_config_dict.get("joint_limits", {}),
+            "default_joint_positions": _robot_config_dict.get("default_joint_positions", []),
+            "gripper_joint_names": _robot_config_dict.get("gripper_joint_names", []),
+            "gripper_limits": _robot_config_dict.get("gripper_limits", [0.0, 0.04]),
+            "num_joints": _robot_config_dict.get("num_joints", 7),
+            "urdf_path": _robot_config_dict.get("urdf_path", ""),
+            "usd_path": _usd_path_str,
+            "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        _write_json(embodiment_manifest_path, embodiment_manifest)
+
         _write_json(quality_report_path, quality_report)
 
         artifact_manifest: Dict[str, Any] = {
@@ -2723,6 +2850,7 @@ def main() -> None:
             demo_metadata_path,
             step_decomp_path,
             capture_manifest_path,
+            embodiment_manifest_path,
             quality_report_path,
         ]
         for path in core_paths:

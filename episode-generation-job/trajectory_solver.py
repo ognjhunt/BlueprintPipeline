@@ -496,6 +496,29 @@ def get_robot_info(robot_type: str) -> Dict[str, Any]:
     }
 
 
+def robot_config_to_dict(config: "RobotConfig", urdf_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Serialize a RobotConfig to a JSON-safe dict for embodiment manifests.
+
+    This is the canonical serialization for cross-embodiment metadata. Use this
+    to write embodiment identity into HDF5 attributes and sidecar JSON files so
+    that datasets are self-describing and usable for cross-embodiment training.
+    """
+    return {
+        "robot_type": config.name,
+        "num_joints": config.num_joints,
+        "joint_names": list(config.joint_names),
+        "joint_limits": {
+            "lower": config.joint_limits_lower.tolist(),
+            "upper": config.joint_limits_upper.tolist(),
+        },
+        "default_joint_positions": config.default_joint_positions.tolist(),
+        "gripper_joint_names": list(config.gripper_joint_names),
+        "gripper_limits": list(config.gripper_limits),
+        "urdf_path": urdf_path or "",
+    }
+
+
 # =============================================================================
 # Data Models
 # =============================================================================

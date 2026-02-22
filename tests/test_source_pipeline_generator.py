@@ -19,6 +19,7 @@ from tools.source_pipeline.generator import (
     _physics_hints,
     _room_template,
     generate_text_scene_package,
+    resolve_llm_attempt_chain,
     resolve_provider_chain,
 )
 from tools.source_pipeline.request import QualityTier
@@ -198,6 +199,36 @@ def test_articulated_objects_marked_as_retrieved() -> None:
 def test_resolve_provider_chain_openai_primary() -> None:
     chain = resolve_provider_chain("openai_primary")
     assert chain == ["openai", "gemini", "anthropic"]
+
+
+def test_resolve_provider_chain_openrouter_primary_prefers_openrouter_models(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.delenv("TEXT_OPENROUTER_MODEL_CHAIN", raising=False)
+    chain = resolve_provider_chain("openrouter_qwen_primary")
+    assert chain[:2] == [
+        "openrouter:qwen/qwen3.5-397b-a17b",
+        "openrouter:moonshotai/kimi-k2.5",
+    ]
+    assert "openai" in chain
+    assert "anthropic" in chain
+
+
+def test_resolve_provider_chain_openrouter_without_key_uses_legacy_fallbacks(monkeypatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("TEXT_OPENROUTER_API_KEY", raising=False)
+    chain = resolve_provider_chain("openrouter_qwen_primary")
+    assert chain == ["openai", "anthropic"]
+
+
+def test_resolve_llm_attempt_chain_openrouter_respects_include_legacy(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setenv("TEXT_OPENROUTER_INCLUDE_LEGACY_FALLBACK", "false")
+    attempts = resolve_llm_attempt_chain("openrouter_qwen_primary")
+    providers = [attempt.provider_name for attempt in attempts]
+    assert providers == [
+        "openrouter:qwen/qwen3.5-397b-a17b",
+        "openrouter:moonshotai/kimi-k2.5",
+    ]
 
 
 def test_room_template_returns_non_empty_for_known_types() -> None:

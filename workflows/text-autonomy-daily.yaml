@@ -31,7 +31,7 @@ main:
           - emitterTimeoutSeconds: '${int(default(sys.get_env("TEXT_AUTONOMY_EMITTER_TIMEOUT_SECONDS"), "900"))}'
           - dailyQuota: '${int(default(sys.get_env("TEXT_DAILY_QUOTA"), "1"))}'
           - pauseAfterConsecutiveFails: '${int(default(sys.get_env("TEXT_DAILY_PAUSE_AFTER_CONSEC_FAILS"), "3"))}'
-          - providerPolicy: '${default(sys.get_env("TEXT_AUTONOMY_PROVIDER_POLICY"), "openai_primary")}'
+          - providerPolicy: '${default(sys.get_env("TEXT_AUTONOMY_PROVIDER_POLICY"), "openrouter_qwen_primary")}'
           - qualityTier: '${default(sys.get_env("TEXT_AUTONOMY_QUALITY_TIER"), "premium")}'
           - allowImageFallback: '${text.lower(default(sys.get_env("TEXT_AUTONOMY_ALLOW_IMAGE_FALLBACK"), "false")) == "true"}'
           - seedCount: '${int(default(sys.get_env("TEXT_AUTONOMY_SEED_COUNT"), "1"))}'
