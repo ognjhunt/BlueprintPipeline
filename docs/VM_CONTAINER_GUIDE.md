@@ -26,7 +26,7 @@ Current workflow routing (deployed):
 - Workflow: `source-orchestrator` (region `us-central1`)
 - Trigger: `scene-request-source-orchestrator-trigger`
 - Bucket: `blueprint-8c1ca.appspot.com`
-- Default backend: `scenesmith`
+- Default backend: `sage`
 - Runtime: `vm`
 
 ### How it works
@@ -34,8 +34,8 @@ Current workflow routing (deployed):
 1. Upload `scenes/<scene_id>/prompts/scene_request.json`.
 2. Eventarc triggers `source-orchestrator`.
 3. Stage 1 text generation runs on VM (`TEXT_GEN_RUNTIME=vm`).
-4. Generator backend `scenesmith` runs (`/v1/generate`).
-   - Optional: set `text_backend` to `hybrid_serial` for SceneSmith -> SAGE chaining.
+4. Generator backend `sage` runs (internal generation + `/v1/refine` if `SAGE_SERVER_URL` is set).
+   - Optional: set `text_backend` to `scenesmith` for SceneSmith-only or `hybrid_serial` for SceneSmith -> SAGE chaining.
 5. Adapter and Stage 2-5 continue as normal (`scene_manifest.json` contract unchanged).
 
 ### Start/restart text backend services on VM

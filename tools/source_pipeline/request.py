@@ -51,7 +51,7 @@ class SceneRequestV1:
     schema_version: str
     scene_id: str
     source_mode: PipelineSourceMode = PipelineSourceMode.TEXT
-    text_backend: TextBackend = TextBackend.SCENESMITH
+    text_backend: TextBackend = TextBackend.SAGE
     prompt: Optional[str] = None
     quality_tier: QualityTier = QualityTier.STANDARD
     seed_count: int = 1
@@ -157,7 +157,7 @@ def normalize_scene_request(
     payload: Mapping[str, Any],
     *,
     default_source_mode: PipelineSourceMode = PipelineSourceMode.TEXT,
-    default_text_backend: TextBackend = TextBackend.SCENESMITH,
+    default_text_backend: TextBackend = TextBackend.SAGE,
     max_seeds: int = 16,
 ) -> SceneRequestV1:
     """Validate and normalize scene_request.json payload into SceneRequestV1."""

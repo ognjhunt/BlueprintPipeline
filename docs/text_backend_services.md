@@ -55,7 +55,7 @@ Set in workflow deploy environment:
 ```bash
 SCENESMITH_SERVER_URL=http://127.0.0.1:8081/v1/generate
 SAGE_SERVER_URL=http://127.0.0.1:8082/v1/refine
-TEXT_BACKEND_DEFAULT=scenesmith
+TEXT_BACKEND_DEFAULT=sage
 TEXT_GEN_RUNTIME=vm
 ```
 

@@ -105,12 +105,12 @@ def _resolve_text_backend(request_backend: TextBackend) -> str:
 def _parse_default_text_backend(raw: str) -> TextBackend:
     normalized = raw.strip().lower()
     if normalized == "":
-        return TextBackend.SCENESMITH
+        return TextBackend.SAGE
     try:
         return TextBackend(normalized)
     except ValueError:
-        logger.warning("[TEXT-GEN] Invalid TEXT_BACKEND_DEFAULT=%s, using scenesmith", raw)
-        return TextBackend.SCENESMITH
+        logger.warning("[TEXT-GEN] Invalid TEXT_BACKEND_DEFAULT=%s, using sage", raw)
+        return TextBackend.SAGE
 
 
 def _emit_sage_action_demo(output_root: Path, *, package: Dict[str, Any], scene_id: str, seed: int) -> Dict[str, Any]:
@@ -245,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     request_object = os.getenv("REQUEST_OBJECT", f"scenes/{scene_id}/prompts/scene_request.json")
     textgen_prefix = os.getenv("TEXTGEN_PREFIX", f"scenes/{scene_id}/textgen")
     default_source_mode = os.getenv("DEFAULT_SOURCE_MODE", "text").strip().lower()
-    default_text_backend = _parse_default_text_backend(os.getenv("TEXT_BACKEND_DEFAULT", "scenesmith"))
+    default_text_backend = _parse_default_text_backend(os.getenv("TEXT_BACKEND_DEFAULT", "sage"))
     max_seeds = int(os.getenv("TEXT_GEN_MAX_SEEDS", "16"))
     seed = int(os.getenv("TEXT_SEED", "1"))
 

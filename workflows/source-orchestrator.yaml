@@ -34,7 +34,7 @@ main:
           - projectId: '${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}'
           - region: ${default(sys.get_env("WORKFLOW_REGION"), "us-central1")}
           - defaultSourceMode: '${text.to_lower(default(sys.get_env("DEFAULT_SOURCE_MODE"), "text"))}'
-          - textBackendDefault: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_DEFAULT"), "scenesmith"))}'
+          - textBackendDefault: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage"))}'
           - textBackendAllowlist: '${text.to_lower(default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial"))}'
           - textGenRuntime: '${text.to_lower(default(sys.get_env("TEXT_GEN_RUNTIME"), "vm"))}'
           - textSceneGenJobName: '${default(sys.get_env("TEXT_SCENE_GEN_JOB_NAME"), "text-scene-gen-job")}'
@@ -1398,7 +1398,7 @@ run_text_jobs_on_runpod:
                     - '${"TEXT_GEN_USE_LLM=" + textGenUseLlm}'
                     - '${"TEXT_GEN_LLM_MAX_ATTEMPTS=" + textGenLlmMaxAttempts}'
                     - '${"TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=" + textGenLlmRetryBackoffSeconds}'
-                    - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "scenesmith")}'
+                    - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage")}'
                     - '${"TEXT_BACKEND_ALLOWLIST=" + default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
                     - '${"SCENESMITH_TIMEOUT_SECONDS=" + default(sys.get_env("SCENESMITH_TIMEOUT_SECONDS"), "1800")}'
                     - '${"SAGE_TIMEOUT_SECONDS=" + default(sys.get_env("SAGE_TIMEOUT_SECONDS"), "900")}'
@@ -1821,7 +1821,7 @@ run_text_jobs_on_cloudrun:
             - name: TEXT_GEN_RUNTIME
               value: "cloudrun"
             - name: TEXT_BACKEND_DEFAULT
-              value: '${default(sys.get_env("TEXT_BACKEND_DEFAULT"), "scenesmith")}'
+              value: '${default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage")}'
             - name: TEXT_BACKEND_ALLOWLIST
               value: '${default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
             - name: SAGE_RUNTIME_MODE
@@ -1990,7 +1990,7 @@ run_text_jobs_on_vm:
                     - '${"TEXT_GEN_USE_LLM=" + textGenUseLlm}'
                     - '${"TEXT_GEN_LLM_MAX_ATTEMPTS=" + textGenLlmMaxAttempts}'
                     - '${"TEXT_GEN_LLM_RETRY_BACKOFF_SECONDS=" + textGenLlmRetryBackoffSeconds}'
-                    - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "scenesmith")}'
+                    - '${"TEXT_BACKEND_DEFAULT=" + default(sys.get_env("TEXT_BACKEND_DEFAULT"), "sage")}'
                     - '${"TEXT_BACKEND_ALLOWLIST=" + default(sys.get_env("TEXT_BACKEND_ALLOWLIST"), "internal,scenesmith,sage,hybrid_serial")}'
                     - '${"SAGE_RUNTIME_MODE=" + default(sys.get_env("SAGE_RUNTIME_MODE"), "cloudrun")}'
                     - '${"SAGE_SERVER_URL=" + default(sys.get_env("SAGE_SERVER_URL"), "")}'
