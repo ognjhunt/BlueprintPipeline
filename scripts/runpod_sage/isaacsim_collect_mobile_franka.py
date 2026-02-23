@@ -425,6 +425,7 @@ def _runtime_provenance(
         "SAGE_ISAAC_RENDERER": os.environ.get("SAGE_ISAAC_RENDERER", ""),
         "SAGE_ISAAC_MULTI_GPU": os.environ.get("SAGE_ISAAC_MULTI_GPU", ""),
         "SAGE_ISAAC_MAX_GPU_COUNT": os.environ.get("SAGE_ISAAC_MAX_GPU_COUNT", ""),
+        "SAGE_STAGE7_HEADLESS_MODE": os.environ.get("SAGE_STAGE7_HEADLESS_MODE", ""),
     }
     return {
         "run_id": run_id,
@@ -437,6 +438,7 @@ def _runtime_provenance(
         "sensor_failure_policy_effective": sensor_failure_policy,
         "args": {
             "headless": bool(args.headless),
+            "headless_mode": str(getattr(args, "headless_mode", "auto")),
             "enable_cameras": bool(args.enable_cameras),
             "strict": bool(args.strict),
             "strict_sensors": bool(getattr(args, "strict_sensors", False)),
@@ -460,7 +462,23 @@ def _runtime_provenance(
             "domain_rand_enabled": _env_bool("SAGE_DOMAIN_RAND", default=False),
         },
         "env": env_snapshot,
-    }
+}
+
+
+def _resolve_headless_mode(requested_mode: str) -> Tuple[bool, str]:
+    mode = str(requested_mode or "auto").strip().lower()
+    if mode not in {"auto", "headless", "windowed", "streaming"}:
+        mode = "auto"
+    if mode == "headless":
+        return True, "headless"
+    if mode == "windowed":
+        return False, "windowed"
+    if mode == "streaming":
+        return True, "streaming"
+    has_display = bool(str(os.environ.get("DISPLAY", "")).strip())
+    if has_display:
+        return False, "windowed"
+    return True, "headless"
 
 
 def _ensure_extension(ext_name: str) -> None:
@@ -469,6 +487,55 @@ def _ensure_extension(ext_name: str) -> None:
     em = omni.kit.app.get_app().get_extension_manager()
     # This is synchronous and works in standalone.
     em.set_extension_enabled_immediate(ext_name, True)
+
+
+def _configure_streaming_mode(*, requested_port: int) -> Dict[str, Any]:
+    """
+    Best-effort livestream/WebRTC setup for unattended "streaming" mode.
+
+    This does not block waiting for any client attach; it only enables common
+    streaming extensions/settings so the renderer follows a full-app path.
+    """
+    report: Dict[str, Any] = {
+        "requested_port": int(requested_port),
+        "enabled_extensions": [],
+        "extension_errors": [],
+        "applied_settings": {},
+        "setting_errors": [],
+    }
+    ext_candidates = (
+        "omni.kit.livestream.core",
+        "omni.kit.livestream.webrtc",
+        "omni.services.streaming.manager",
+        "omni.kit.streamsdk.plugins",
+    )
+    for ext in ext_candidates:
+        try:
+            _ensure_extension(ext)
+            report["enabled_extensions"].append(ext)
+        except Exception as exc:
+            report["extension_errors"].append(f"{ext}:{exc}")
+
+    try:
+        import carb
+
+        settings = carb.settings.get_settings()
+        settings_to_apply = {
+            "/app/livestream/enabled": True,
+            "/exts/omni.kit.livestream.webrtc/port": int(requested_port),
+            "/exts/omni.services.streamclient.webrtc/port": int(requested_port),
+            "/exts/omni.services.streaming.manager/webrtc_port": int(requested_port),
+        }
+        for key, value in settings_to_apply.items():
+            try:
+                settings.set(key, value)
+                report["applied_settings"][key] = value
+            except Exception as exc:
+                report["setting_errors"].append(f"{key}:{exc}")
+    except Exception as exc:
+        report["setting_errors"].append(f"carb.settings_unavailable:{exc}")
+
+    return report
 
 
 async def _convert_mesh_to_usd(in_file: str, out_file: str, *, load_materials: bool = True) -> bool:
@@ -878,10 +945,25 @@ def _read_robot_dof_observation(
 ) -> Dict[str, Any]:
     from omni.isaac.dynamic_control import _dynamic_control
 
+    # Log resolved flag constants once for diagnostics.
+    if not getattr(_read_robot_dof_observation, "_dc_flags_logged", False):
+        _read_robot_dof_observation._dc_flags_logged = True
+        for _flag_name in ("STATE_POS", "STATE_VEL", "STATE_EFFORT", "STATE_ALL", "STATE_NONE"):
+            _log(f"DynamicControl flag: {_flag_name} = {getattr(_dynamic_control, _flag_name, 'MISSING')}")
+
     n = len(dof_names)
     zeros = np.zeros((max(1, len(arm_idx)),), dtype=np.float32)
     try:
-        state_flags = int(getattr(_dynamic_control, "STATE_ALL", 0))
+        # Default 7 = STATE_POS(1) | STATE_VEL(2) | STATE_EFFORT(4) so that
+        # velocity and effort fields are populated, not stale initial values.
+        state_flags_raw = getattr(_dynamic_control, "STATE_ALL", 7)
+        try:
+            state_flags = int(state_flags_raw)
+        except Exception:
+            state_flags = 7
+        if state_flags <= 0:
+            _log(f"WARNING: Invalid STATE_ALL={state_flags_raw!r}; forcing state_flags=7")
+            state_flags = 7
         states = dc.get_articulation_dof_states(art, state_flags)
     except Exception:
         return {
@@ -912,9 +994,15 @@ def _read_robot_dof_observation(
     grip_eff = [abs(float(eff_full[i])) for i in finger_idx if 0 <= int(i) < int(eff_full.shape[0])]
     gripper_force = float(sum(grip_eff))
     source = "physx" if had_effort_signal else "missing_effort_signal"
+
+    # Actual joint positions (measured, may differ slightly from commanded targets).
+    pos_full = _extract_state_vector(states, "pos", "position")
+    arm_pos = _slice_with_bounds(pos_full, arm_idx, arm_width) if pos_full is not None else None
+
     return {
         "arm_vel": arm_vel,
         "arm_effort": arm_eff,
+        "arm_pos": arm_pos,
         "gripper_force": gripper_force,
         "source": source,
     }
@@ -1434,6 +1522,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Isaac Sim collector (mobile_franka)")
     parser.add_argument("--plan_bundle", required=True)
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument(
+        "--headless-mode",
+        choices=["auto", "headless", "windowed", "streaming"],
+        default=os.getenv("SAGE_STAGE7_HEADLESS_MODE", "auto"),
+        help="Stage 7 display mode policy; auto chooses windowed when DISPLAY is available.",
+    )
     parser.add_argument("--headless", dest="headless", action="store_true", default=True)
     parser.add_argument("--no-headless", dest="headless", action="store_false")
     parser.add_argument("--enable_cameras", dest="enable_cameras", action="store_true", default=True)
@@ -1495,6 +1589,10 @@ def main() -> None:
         default=os.getenv("SAGE_SENSOR_FAILURE_POLICY", "auto"),
     )
     args, unknown_args = parser.parse_known_args()
+    resolved_headless, resolved_mode = _resolve_headless_mode(str(args.headless_mode))
+    args.headless = bool(resolved_headless)
+    args.headless_mode = str(resolved_mode)
+    os.environ["SAGE_STAGE7_HEADLESS_MODE"] = str(resolved_mode)
     if args.min_rgb_std_override is not None:
         args.sensor_min_rgb_std = float(args.min_rgb_std_override)
     sensor_failure_policy = _resolve_sensor_failure_policy(
@@ -1630,6 +1728,20 @@ def main() -> None:
             _log(f"WARNING: failed to configure Replicator capture_on_play: {rep_cfg_err}")
 
         _configure_local_assets_root()
+        if str(getattr(args, "headless_mode", "")).strip().lower() == "streaming":
+            try:
+                stream_port = int(os.getenv("SAGE_STAGE7_STREAMING_PORT", "49100"))
+            except Exception:
+                stream_port = 49100
+            stream_report = _configure_streaming_mode(requested_port=stream_port)
+            _log(
+                "Streaming mode setup: "
+                f"port={stream_report.get('requested_port')} "
+                f"enabled_ext={stream_report.get('enabled_extensions')} "
+                f"ext_errors={stream_report.get('extension_errors')} "
+                f"settings={stream_report.get('applied_settings')} "
+                f"setting_errors={stream_report.get('setting_errors')}"
+            )
 
         # Headless RTX render quality: disable DLSS (causes upscale artifacts at
         # low resolution), use direct lighting to avoid noisy path-tracing, and
@@ -1672,6 +1784,22 @@ def main() -> None:
                 )
             except Exception as rtx_err:
                 _log(f"WARNING: Could not apply headless RTX settings: {rtx_err}")
+
+            # Headless viewport creation: the RGB annotator may need an active
+            # viewport to produce non-black frames. Explicitly create one.
+            try:
+                import omni.kit.viewport.utility as viewport_util
+
+                vp = viewport_util.get_active_viewport()
+                if vp is None:
+                    vp = viewport_util.create_viewport_window(
+                        "headless_capture", width=width, height=height
+                    )
+                    _log(f"Created headless viewport window: {width}x{height}")
+                else:
+                    _log(f"Reusing existing viewport: {vp}")
+            except Exception as vp_err:
+                _log(f"WARNING: Headless viewport creation failed (non-fatal): {vp_err}")
 
         # HDF5 output (atomic: write temp then rename).
         if h5_tmp_path.exists():
@@ -1992,7 +2120,8 @@ def main() -> None:
         demos = bundle.get("demos", []) or []
         _log(
             f"collector start: run_id={run_id} layout_id={layout_id} demos={len(demos)} "
-            f"headless={args.headless} cameras={args.enable_cameras} strict={args.strict} "
+            f"headless={args.headless} headless_mode={args.headless_mode} "
+            f"cameras={args.enable_cameras} strict={args.strict} "
             f"warmup={args.render_warmup_frames} retry={args.camera_retry_steps} "
             f"strict_sensors={args.strict_sensors} "
             f"rgb_std_min={args.sensor_min_rgb_std} depth_std_min={args.sensor_min_depth_std} "
@@ -2114,7 +2243,13 @@ def main() -> None:
                             depth_name = "depth"
                             cameras_manifest["depth_annotator"] = "depth"
                             cameras_manifest["depth_fallback_reason"] = "headless_rtx_failure"
-                            _log(f"Switched to rasterized 'depth' annotator successfully")
+                            # Rasterized depth requires Replicator stepping each frame
+                            # to update the z-buffer; world.step alone leaves it stale.
+                            replicator_step_each_frame = True
+                            _log(
+                                f"Switched to rasterized 'depth' annotator successfully; "
+                                f"forced replicator_step_each_frame=True"
+                            )
                         except Exception as fb_err:
                             msg = (
                                 "Rasterized depth fallback also failed. "
@@ -2236,24 +2371,29 @@ def main() -> None:
                     raise RuntimeError(f"Trajectory length mismatch for demo {demo_idx}: base={base.shape[0]} arm={arm.shape[0]}")
 
                 T = int(base.shape[0])
+                if T <= 0:
+                    raise RuntimeError(f"Empty trajectory length for demo {demo_idx}")
                 arm_idx, finger_idx = _resolve_dof_groups(dof_names)
                 arm_width = int(arm.shape[1]) if (arm.ndim == 2 and int(arm.shape[1]) > 0) else max(1, len(arm_idx))
                 arm_vel_hist = np.zeros((T, arm_width), dtype=np.float32)
                 arm_eff_hist = np.zeros((T, arm_width), dtype=np.float32)
+                arm_pos_actual = np.zeros((T, arm_width), dtype=np.float32)
                 gripper_force_hist = np.zeros((T, 1), dtype=np.float32)
                 gripper_contact_hist = np.zeros((T, 1), dtype=np.float32)
                 dynamics_source_counts: Dict[str, int] = {}
 
                 actions = np.concatenate([arm, base, grip.reshape(T, 1)], axis=1).astype(np.float32)
-                states = actions.copy()
+                # States will be built from actual readback after replay loop.
                 rewards = np.zeros((T,), dtype=np.float32)
+                rewards[-1] = 1.0  # Binary success reward (robomimic convention)
                 dones = np.zeros((T,), dtype=np.bool_)
                 dones[-1] = True
 
                 # Create demo group + datasets early so we can stream-write large camera tensors.
+                # States placeholder: overwritten after replay with actual readback.
                 demo_name = f"demo_{demo_global_idx}"
                 grp = h5["data"].create_group(demo_name)
-                grp.create_dataset("states", data=states, compression="gzip", compression_opts=4)
+                grp.create_dataset("states", shape=actions.shape, dtype=np.float32, compression="gzip", compression_opts=4)
                 grp.create_dataset("actions", data=actions, compression="gzip", compression_opts=4)
                 grp.create_dataset("rewards", data=rewards)
                 grp.create_dataset("dones", data=dones)
@@ -2395,11 +2535,15 @@ def main() -> None:
                     },
                 }
                 frame_qc_records: List[Dict[str, Any]] = []
+                physics_substeps = max(1, int(os.getenv("SAGE_PHYSICS_SUBSTEPS_PER_FRAME", "4")))
                 for t in range(T):
                     _set_robot_root_pose(stage, robot_xform, float(base[t, 0]), float(base[t, 1]), float(base[t, 2]))
                     _apply_joint_targets(dc, art, dof_names, arm[t], float(grip[t]))
-                    # Step once so robot joints update.
-                    world.step(render=True)
+                    # Multiple substeps let the PD controller converge so that
+                    # velocity and effort readbacks reflect real dynamics.
+                    # Only the final substep renders to keep capture in sync.
+                    for _sub in range(physics_substeps):
+                        world.step(render=(_sub == physics_substeps - 1))
 
                     # Carry logic for object transport:
                     # - physics: attach a fixed joint between EE and object
@@ -2481,6 +2625,12 @@ def main() -> None:
                     if arm_eff.size > 0:
                         w = min(int(arm_eff.size), int(arm_width))
                         arm_eff_hist[t, :w] = arm_eff[:w]
+                    arm_pos_readback = dyn_obs.get("arm_pos")
+                    if arm_pos_readback is not None and arm_pos_readback.size > 0:
+                        w = min(int(arm_pos_readback.size), int(arm_width))
+                        arm_pos_actual[t, :w] = arm_pos_readback[:w]
+                    else:
+                        arm_pos_actual[t] = arm[t, :arm_width]  # fallback to commanded
                     grip_force = float(dyn_obs.get("gripper_force", 0.0))
                     gripper_force_hist[t, 0] = grip_force
                     contact_from_force = (
@@ -2631,6 +2781,64 @@ def main() -> None:
                             }
                         )
 
+                # Write actual measured states: [actual_arm_pos, base_pose, gripper_width].
+                actual_states = np.concatenate(
+                    [arm_pos_actual, base, grip.reshape(T, 1)], axis=1
+                ).astype(np.float32)
+                grp["states"][:] = actual_states
+
+                # --- Frozen-observation runtime validation ---
+                frozen_checks: Dict[str, Any] = {}
+                vel_std = np.std(arm_vel_hist, axis=0) if arm_vel_hist.shape[0] > 1 else np.zeros(arm_vel_hist.shape[1:])
+                vel_all_frozen = bool(np.all(vel_std < 1e-6))
+                frozen_checks["joint_vel_frozen"] = vel_all_frozen
+                frozen_checks["joint_vel_std_per_joint"] = vel_std.tolist()
+
+                eff_std = np.std(arm_eff_hist, axis=0) if arm_eff_hist.shape[0] > 1 else np.zeros(arm_eff_hist.shape[1:])
+                eff_all_frozen = bool(np.all(eff_std < 1e-6))
+                frozen_checks["joint_effort_frozen"] = eff_all_frozen
+                frozen_checks["joint_effort_std_per_joint"] = eff_std.tolist()
+
+                force_std = float(np.std(gripper_force_hist))
+                frozen_checks["gripper_force_frozen"] = bool(force_std < 1e-8)
+                frozen_checks["gripper_force_std"] = force_std
+
+                if args.enable_cameras and T > 5:
+                    depth_sample_idxs = [0, T // 2, T - 1]
+                    depth_samples = [cam_dsets["agentview_depth"][i] for i in depth_sample_idxs]
+                    depth_pairwise_diff = float(np.max(np.abs(
+                        np.asarray(depth_samples[0], dtype=np.float32)
+                        - np.asarray(depth_samples[-1], dtype=np.float32)
+                    )))
+                    frozen_checks["depth_frozen"] = bool(depth_pairwise_diff < 1e-5)
+                    frozen_checks["depth_max_pairwise_diff"] = depth_pairwise_diff
+
+                    rgb_samples = [cam_dsets["agentview_rgb"][i] for i in depth_sample_idxs]
+                    frozen_checks["rgb_all_black"] = all(float(np.max(s)) == 0.0 for s in rgb_samples)
+
+                sensor_qc["frozen_observations"] = frozen_checks
+                frozen_failures: List[str] = []
+                if vel_all_frozen:
+                    frozen_failures.append("joint_vel_frozen")
+                if eff_all_frozen:
+                    frozen_failures.append("joint_effort_frozen")
+                if bool(frozen_checks.get("gripper_force_frozen")):
+                    frozen_failures.append("gripper_force_frozen")
+                if args.enable_cameras and bool(frozen_checks.get("depth_frozen")):
+                    frozen_failures.append("depth_frozen")
+                if args.enable_cameras and bool(frozen_checks.get("rgb_all_black")):
+                    frozen_failures.append("rgb_all_black")
+                if frozen_failures:
+                    msg = (
+                        f"FROZEN OBSERVATIONS for demo {demo_idx}: "
+                        f"failures={frozen_failures} "
+                        f"vel_std={vel_std.tolist()} eff_std={eff_std.tolist()} "
+                        f"force_std={force_std}"
+                    )
+                    if bool(args.strict_sensors) or sensor_failure_policy == "fail":
+                        raise RuntimeError(msg)
+                    _log(f"WARNING: {msg}")
+
                 # Additional dynamics/contact observations (non-breaking extra keys).
                 obs_grp.create_dataset("robot_joint_vel", data=arm_vel_hist.astype(np.float32), compression="gzip", compression_opts=4)
                 obs_grp.create_dataset("robot_joint_effort", data=arm_eff_hist.astype(np.float32), compression="gzip", compression_opts=4)
@@ -2772,6 +2980,24 @@ def main() -> None:
         run_gripper_contact_ratio = float(np.mean(gripper_contact_ratio_values)) if gripper_contact_ratio_values else 0.0
         run_joint_effort_abs_max = float(max(joint_effort_abs_max_values)) if joint_effort_abs_max_values else 0.0
 
+        # Aggregate frozen-observation stats across all demos.
+        frozen_vel_demos = sum(
+            1 for d in demo_metadata.get("demos", [])
+            if (d.get("sensor_qc", {}).get("frozen_observations", {}).get("joint_vel_frozen"))
+        )
+        frozen_eff_demos = sum(
+            1 for d in demo_metadata.get("demos", [])
+            if (d.get("sensor_qc", {}).get("frozen_observations", {}).get("joint_effort_frozen"))
+        )
+        frozen_depth_demos = sum(
+            1 for d in demo_metadata.get("demos", [])
+            if (d.get("sensor_qc", {}).get("frozen_observations", {}).get("depth_frozen"))
+        )
+        frozen_rgb_demos = sum(
+            1 for d in demo_metadata.get("demos", [])
+            if (d.get("sensor_qc", {}).get("frozen_observations", {}).get("rgb_all_black"))
+        )
+
         metadata_grp = h5.create_group("metadata")
         prov_grp = metadata_grp.create_group("provenance")
         _write_root_scalar(prov_grp, "run_id", str(run_id))
@@ -2866,6 +3092,7 @@ def main() -> None:
             "layout_id": layout_id,
             "status": quality_status,
             "strict": bool(args.strict),
+            "headless_mode": str(args.headless_mode),
             "strict_sensors": bool(args.strict_sensors),
             "sensor_failure_policy": sensor_failure_policy,
             "quality_report_path": str(quality_report_path),
@@ -2888,6 +3115,13 @@ def main() -> None:
                 "rgb_std_min": run_rgb_std,
                 "gripper_contact_ratio_mean": run_gripper_contact_ratio,
                 "joint_effort_abs_max": run_joint_effort_abs_max,
+                "frozen_observations": {
+                    "joint_vel_frozen_demos": frozen_vel_demos,
+                    "joint_effort_frozen_demos": frozen_eff_demos,
+                    "depth_frozen_demos": frozen_depth_demos,
+                    "rgb_all_black_demos": frozen_rgb_demos,
+                    "total_demos": int(demo_global_idx),
+                },
             },
             "stale_cleanup": cleanup_report,
             "artifact_contract": {

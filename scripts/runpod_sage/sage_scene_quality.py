@@ -448,6 +448,11 @@ def _profile_pass(metrics: Dict[str, Any], profile: _Profile) -> Tuple[bool, Lis
     errors: List[str] = []
     if n <= 0:
         errors.append("room_has_zero_objects")
+        _log(
+            f"  room_has_zero_objects: metrics keys={sorted(metrics.keys())}, "
+            f"raw num_objects={metrics.get('num_objects')!r}, "
+            f"source={metrics.get('source_path', 'unknown')}"
+        )
         return False, errors
 
     if profile.require_manipulable and int(metrics.get("num_manipulable", 0) or 0) < 1:
@@ -901,6 +906,13 @@ def _iter_target_jsons(layout_dir: Path, pose_aug_name: str) -> List[Path]:
     return out
 
 
+def _count_generation_meshes(layout_dir: Path) -> int:
+    gen_dir = layout_dir / "generation"
+    if not gen_dir.exists():
+        return 0
+    return len(list(gen_dir.glob("*.obj")))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="SAGE scene quality gates + repairs (CPU-only)")
     parser.add_argument("--layout_dir", required=True, help="Path to SAGE layout dir (results/layout_*)")
@@ -934,6 +946,7 @@ def main() -> int:
     per_file: List[Dict[str, Any]] = []
     all_pass = True
     any_changed = False
+    generation_mesh_count = _count_generation_meshes(layout_dir)
     for path in targets:
         try:
             payload = _load_json(path)
@@ -951,6 +964,28 @@ def main() -> int:
             max_corrected_ratio=float(args.max_corrected_ratio),
         )
         rep["path"] = str(path)
+
+        # Schema/parser consistency guard: if we see generated meshes but parsed zero
+        # objects, fail explicitly as a parser/schema issue instead of scene quality.
+        after_metrics = rep.get("after") if isinstance(rep, dict) else {}
+        num_objects_after = int((after_metrics or {}).get("num_objects", 0) or 0)
+        if generation_mesh_count > 0 and num_objects_after <= 0:
+            schema_err = "schema_inconsistency_zero_objects_with_generation_meshes"
+            errs = list(rep.get("errors_after", []) or [])
+            if schema_err not in errs:
+                errs.append(schema_err)
+            rep["errors_after"] = errs
+            rep["pass_after"] = False
+            rep["schema_error"] = {
+                "reason": schema_err,
+                "generation_mesh_count": int(generation_mesh_count),
+                "parsed_num_objects": int(num_objects_after),
+            }
+            _log(
+                f"{path.name}: schema inconsistency detected "
+                f"(generation_mesh_count={generation_mesh_count}, parsed_num_objects={num_objects_after})"
+            )
+
         per_file.append(rep)
         any_changed = any_changed or bool(rep.get("changed"))
         all_pass = all_pass and bool(rep.get("pass_after"))

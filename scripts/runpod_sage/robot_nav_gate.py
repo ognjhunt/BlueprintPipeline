@@ -121,7 +121,32 @@ def _find_first_by_tokens(objects: Sequence[Mapping[str, Any]], tokens: Iterable
     return None
 
 
-def _infer_anchor_ids(layout: Mapping[str, Any], objects: Sequence[Mapping[str, Any]]) -> Tuple[Optional[str], Optional[str], str]:
+def _extract_task_targets(task_desc: str) -> Tuple[Optional[str], Optional[str]]:
+    raw = str(task_desc or "").lower()
+    if not raw:
+        return None, None
+    task = " ".join(raw.replace("_", " ").split())
+    pick_hint: Optional[str] = None
+    place_hint: Optional[str] = None
+    for tok in _SMALL_PICK_TOKENS:
+        if tok in task:
+            pick_hint = tok
+            break
+    for tok in _SURFACE_TOKENS:
+        if tok in task:
+            place_hint = tok
+            break
+    return pick_hint, place_hint
+
+
+def _infer_anchor_ids(
+    layout: Mapping[str, Any],
+    objects: Sequence[Mapping[str, Any]],
+    *,
+    pick_object_id: Optional[str],
+    place_surface_id: Optional[str],
+    task_desc: str,
+) -> Tuple[Optional[str], Optional[str], str]:
     pa = layout.get("policy_analysis")
     if not isinstance(pa, Mapping):
         pa = {}
@@ -131,18 +156,48 @@ def _infer_anchor_ids(layout: Mapping[str, Any], objects: Sequence[Mapping[str, 
         utd = layout.get("updated_task_decomposition")
 
     pick_id: Optional[str] = None
-    place_surface_id: Optional[str] = None
+    place_id: Optional[str] = None
+    pick_source = "heuristic"
+    place_source = "heuristic"
+
+    pick_override = str(pick_object_id or "").strip()
+    place_override = str(place_surface_id or "").strip()
+    if pick_override and _find_by_id(objects, pick_override) is not None:
+        pick_id = pick_override
+        pick_source = "cli_override"
+    if place_override and _find_by_id(objects, place_override) is not None:
+        place_id = place_override
+        place_source = "cli_override"
+
     if isinstance(utd, list):
         for step in utd:
             if not isinstance(step, Mapping):
                 continue
             action = _norm(step.get("action"))
-            if "pick" in action and step.get("target_object_id"):
-                pick_id = str(step.get("target_object_id"))
-            if "place" in action and step.get("location_object_id"):
-                place_surface_id = str(step.get("location_object_id"))
+            if not pick_id and "pick" in action and step.get("target_object_id"):
+                maybe = str(step.get("target_object_id"))
+                if _find_by_id(objects, maybe) is not None:
+                    pick_id = maybe
+                    pick_source = "task_decomposition"
+            if not place_id and "place" in action and step.get("location_object_id"):
+                maybe = str(step.get("location_object_id"))
+                if _find_by_id(objects, maybe) is not None:
+                    place_id = maybe
+                    place_source = "task_decomposition"
 
-    if not pick_id or not place_surface_id:
+    pick_hint, place_hint = _extract_task_targets(task_desc)
+    if not pick_id and pick_hint:
+        pick = _find_first_by_tokens(objects, (pick_hint,))
+        if pick and pick.get("id") is not None:
+            pick_id = str(pick.get("id"))
+            pick_source = "task_desc"
+    if not place_id and place_hint:
+        place = _find_first_by_tokens(objects, (place_hint,))
+        if place and place.get("id") is not None:
+            place_id = str(place.get("id"))
+            place_source = "task_desc"
+
+    if not pick_id or not place_id:
         mros = pa.get("minimum_required_objects")
         if isinstance(mros, list):
             for mro in mros:
@@ -154,24 +209,27 @@ def _infer_anchor_ids(layout: Mapping[str, Any], objects: Sequence[Mapping[str, 
                     continue
                 if not pick_id and any(tok in obj_type for tok in _SMALL_PICK_TOKENS):
                     pick_id = str(ids[0])
-                if not place_surface_id and any(tok in obj_type for tok in _SURFACE_TOKENS):
-                    place_surface_id = str(ids[0])
+                    pick_source = "minimum_required_objects"
+                if not place_id and any(tok in obj_type for tok in _SURFACE_TOKENS):
+                    place_id = str(ids[0])
+                    place_source = "minimum_required_objects"
 
     if not pick_id:
         pick = _find_first_by_tokens(objects, _SMALL_PICK_TOKENS)
         if pick and pick.get("id") is not None:
             pick_id = str(pick.get("id"))
-    if not place_surface_id:
+            pick_source = "heuristic"
+    if not place_id:
         place = _find_first_by_tokens(objects, _SURFACE_TOKENS)
         if place and place.get("id") is not None:
-            place_surface_id = str(place.get("id"))
+            place_id = str(place.get("id"))
+            place_source = "heuristic"
 
-    source = "heuristic"
-    if isinstance(utd, list):
-        source = "task_decomposition"
-    elif isinstance(pa.get("minimum_required_objects"), list):
-        source = "minimum_required_objects"
-    return pick_id, place_surface_id, source
+    if pick_source == place_source:
+        source = pick_source
+    else:
+        source = f"mixed:{pick_source}+{place_source}"
+    return pick_id, place_id, source
 
 
 def _build_grid(room_w: float, room_l: float, res: float) -> Tuple[int, int, List[List[bool]]]:
@@ -301,16 +359,31 @@ def run_gate(
     pick_radius_max_m: float,
     robot_radius_m: float,
     obstacle_min_size_m: float,
+    pick_object_id: Optional[str] = None,
+    place_surface_id: Optional[str] = None,
+    task_desc: str = "",
+    require_non_heuristic: bool = False,
 ) -> Dict[str, Any]:
     objects = _get_objects(layout)
     room_w, room_l = _room_dims(layout)
-    pick_id, place_id, anchor_source = _infer_anchor_ids(layout, objects)
+    pick_id, place_id, anchor_source = _infer_anchor_ids(
+        layout,
+        objects,
+        pick_object_id=pick_object_id,
+        place_surface_id=place_surface_id,
+        task_desc=task_desc,
+    )
 
     report: Dict[str, Any] = {
         "status": "fail",
         "anchor_source": anchor_source,
+        "anchor_override": {
+            "pick_object_id": str(pick_object_id or ""),
+            "place_surface_id": str(place_surface_id or ""),
+        },
         "pick_object_id": pick_id,
         "place_surface_id": place_id,
+        "task_desc": str(task_desc or ""),
         "grid_res_m": grid_res_m,
         "room_dims_m": {"width": room_w, "length": room_l},
         "robot_radius_m": robot_radius_m,
@@ -320,6 +393,9 @@ def run_gate(
 
     if not pick_id or not place_id:
         report["reason"] = "anchors_missing"
+        return report
+    if require_non_heuristic and "heuristic" in str(anchor_source):
+        report["reason"] = "heuristic_anchor_source_disallowed"
         return report
 
     pick_obj = _find_by_id(objects, pick_id)
@@ -421,6 +497,14 @@ def main() -> int:
     ap.add_argument("--pick_radius_max_m", type=float, default=1.40)
     ap.add_argument("--robot_radius_m", type=float, default=0.0, help="Override inflated robot radius (m); 0=auto")
     ap.add_argument("--obstacle_min_size_m", type=float, default=0.25)
+    ap.add_argument("--pick-object-id", default="", help="Explicit pick object id override")
+    ap.add_argument("--place-surface-id", default="", help="Explicit place surface id override")
+    ap.add_argument("--task-desc", default="", help="Task text used for anchor resolution")
+    ap.add_argument(
+        "--require-non-heuristic",
+        action="store_true",
+        help="Fail if anchor source falls back to heuristics",
+    )
     args = ap.parse_args()
 
     layout_path = Path(args.layout_json)
@@ -435,6 +519,10 @@ def main() -> int:
         pick_radius_max_m=max(float(args.pick_radius_min_m) + 0.1, float(args.pick_radius_max_m)),
         robot_radius_m=_robot_radius_m(float(args.robot_radius_m)),
         obstacle_min_size_m=max(0.05, float(args.obstacle_min_size_m)),
+        pick_object_id=str(args.pick_object_id or ""),
+        place_surface_id=str(args.place_surface_id or ""),
+        task_desc=str(args.task_desc or ""),
+        require_non_heuristic=bool(args.require_non_heuristic),
     )
 
     if args.report_path:

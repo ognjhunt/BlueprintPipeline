@@ -1,4 +1,7 @@
 import argparse
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -82,6 +85,16 @@ def test_sensor_failure_policy_resolution():
     assert c._resolve_sensor_failure_policy(strict=True, requested="auto") == "fail"
     assert c._resolve_sensor_failure_policy(strict=False, requested="auto") == "warn"
     assert c._resolve_sensor_failure_policy(strict=True, requested="warn") == "warn"
+
+
+@pytest.mark.unit
+def test_collector_resolve_headless_mode_streaming(monkeypatch):
+    from scripts.runpod_sage import isaacsim_collect_mobile_franka as c
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+    headless, mode = c._resolve_headless_mode("streaming")
+    assert headless is True
+    assert mode == "streaming"
 
 
 @pytest.mark.unit
@@ -239,6 +252,7 @@ def test_stage7_command_env_assembly_defaults(monkeypatch, tmp_path):
     assert cmd[:3] == ["/tmp/isaacsim_env/bin/python3", "-P", str(collector)]
     assert "--strict" in cmd
     assert "--strict-sensors" in cmd
+    assert "--headless-mode" in cmd
     assert "--headless" in cmd
     assert "--enable_cameras" in cmd
     assert "--export-scene-usd" in cmd
@@ -261,6 +275,217 @@ def test_stage7_command_env_assembly_defaults(monkeypatch, tmp_path):
     assert env["SAGE_ENFORCE_BUNDLE_STRICT"] == "1"
     assert env["SAGE_RUN_ID"] == "run_test_123"
     assert "CUDA_VISIBLE_DEVICES" not in env
+
+
+@pytest.mark.unit
+def test_stage7_command_env_streaming_mode(monkeypatch, tmp_path):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    monkeypatch.setenv("SAGE_STAGE7_HEADLESS_MODE", "streaming")
+    monkeypatch.setenv("SAGE_STAGE7_STREAMING_PORT", "49100")
+    args = argparse.Namespace(
+        isaacsim_py="/tmp/isaacsim_env/bin/python3",
+        headless=True,
+        stage7_headless_mode="streaming",
+        enable_cameras=True,
+        strict=False,
+    )
+    collector = tmp_path / "collector.py"
+    collector.write_text("print('collector')\n", encoding="utf-8")
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("{}\n", encoding="utf-8")
+    output_dir = tmp_path / "demos"
+
+    cmd, env = s._build_stage7_command_and_env(
+        args=args,
+        collector=collector,
+        plan_path=plan_path,
+        output_dir=output_dir,
+        run_id="run_test_streaming",
+    )
+
+    assert "--headless-mode" in cmd
+    assert "streaming" in cmd
+    assert "--headless" in cmd
+    assert env["SAGE_STAGE7_HEADLESS_MODE"] == "streaming"
+
+
+@pytest.mark.unit
+def test_stage7_probe_mode_order_auto_without_display(monkeypatch):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+    modes = s._resolve_stage7_probe_mode_order(
+        requested_mode="auto",
+        mode_order_raw="auto",
+        env={},
+        streaming_enabled=True,
+    )
+    assert modes == ["streaming", "headless"]
+
+
+@pytest.mark.unit
+def test_stage7_probe_mode_order_auto_with_display(monkeypatch):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    env = {"DISPLAY": ":0"}
+    monkeypatch.setattr(s, "_display_server_ready_for_mode_probe", lambda _env: True)
+    modes = s._resolve_stage7_probe_mode_order(
+        requested_mode="auto",
+        mode_order_raw="auto",
+        env=env,
+        streaming_enabled=True,
+    )
+    assert modes == ["windowed", "streaming", "headless"]
+
+
+@pytest.mark.unit
+def test_stage7_probe_mode_order_explicit_streaming_disabled_raises():
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    with pytest.raises(RuntimeError):
+        s._resolve_stage7_probe_mode_order(
+            requested_mode="streaming",
+            mode_order_raw="auto",
+            env={},
+            streaming_enabled=False,
+        )
+
+
+@pytest.mark.unit
+def test_stage7_probe_selects_first_passing_mode(monkeypatch, tmp_path):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    plan_path = tmp_path / "plan_bundle.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "layout_id": "layout_x",
+                "strict": True,
+                "enable_cameras": True,
+                "demos": [{"demo_idx": 0}, {"demo_idx": 1}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    collector = tmp_path / "collector.py"
+    collector.write_text("print('collector')\n", encoding="utf-8")
+    output_root = tmp_path / "probe"
+    report_path = tmp_path / "quality" / "stage7_mode_probe.json"
+    args = argparse.Namespace(
+        layout_id="layout_x",
+        isaacsim_py="/tmp/isaacsim_env/bin/python3",
+        headless=True,
+        stage7_headless_mode="auto",
+        enable_cameras=True,
+        strict=True,
+    )
+
+    monkeypatch.setenv("SAGE_STAGE7_MODE_ORDER", "streaming,headless")
+    monkeypatch.setenv("SAGE_STAGE7_PROBE_DEMOS", "1")
+    monkeypatch.setenv("SAGE_STAGE7_PROBE_TIMEOUT_S", "10")
+    monkeypatch.setenv("SAGE_STAGE7_PROBE_KEEP_ARTIFACTS", "1")
+    monkeypatch.setenv("SAGE_STAGE7_STREAMING_ENABLED", "1")
+
+    def _fake_build(*, args, collector, plan_path, output_dir, run_id):
+        return (
+            ["/tmp/fake_python", "-P", str(collector), "--output_dir", str(output_dir), "--headless-mode", str(args.stage7_headless_mode)],
+            {"SAGE_STAGE7_HEADLESS_MODE": str(args.stage7_headless_mode)},
+        )
+
+    outcomes = {"streaming": (1, False, 1.2), "headless": (0, False, 1.0)}
+
+    def _fake_run(*, cmd, env, cwd, log_path, timeout_s):
+        mode = str(env.get("SAGE_STAGE7_HEADLESS_MODE", ""))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("probe-log\n", encoding="utf-8")
+        return outcomes[mode]
+
+    def _fake_contract(*, output_dir, expected_demos, enable_cameras, require_valid_rgb):
+        mode = Path(output_dir).name.replace("mode_", "")
+        if mode == "headless":
+            return True, []
+        return False, ["rgb_std_min=0.0"]
+
+    monkeypatch.setattr(s, "_build_stage7_command_and_env", _fake_build)
+    monkeypatch.setattr(s, "_run_stage7_probe_process", _fake_run)
+    monkeypatch.setattr(s, "_stage7_output_contract_ok", _fake_contract)
+    monkeypatch.setattr(
+        s,
+        "_read_json_if_exists",
+        lambda path: {"status": "pass", "summary": {"rgb_std_min": 12.0}, "video_report": {"exported_demos": 1}},
+    )
+
+    report = s.run_stage7_rgb_mode_probe(
+        args=args,
+        collector=collector,
+        plan_path=plan_path,
+        output_root=output_root,
+        report_path=report_path,
+        run_id="run_probe_pass",
+    )
+
+    assert report["status"] == "pass"
+    assert report["selected_mode"] == "headless"
+    assert report_path.exists()
+
+
+@pytest.mark.unit
+def test_stage7_probe_all_modes_fail(monkeypatch, tmp_path):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    plan_path = tmp_path / "plan_bundle.json"
+    plan_path.write_text(
+        json.dumps({"layout_id": "layout_x", "strict": True, "enable_cameras": True, "demos": [{"demo_idx": 0}]}),
+        encoding="utf-8",
+    )
+    collector = tmp_path / "collector.py"
+    collector.write_text("print('collector')\n", encoding="utf-8")
+    output_root = tmp_path / "probe"
+    report_path = tmp_path / "quality" / "stage7_mode_probe.json"
+    args = argparse.Namespace(
+        layout_id="layout_x",
+        isaacsim_py="/tmp/isaacsim_env/bin/python3",
+        headless=True,
+        stage7_headless_mode="auto",
+        enable_cameras=True,
+        strict=True,
+    )
+
+    monkeypatch.setenv("SAGE_STAGE7_MODE_ORDER", "streaming,headless")
+    monkeypatch.setenv("SAGE_STAGE7_PROBE_DEMOS", "1")
+    monkeypatch.setenv("SAGE_STAGE7_PROBE_TIMEOUT_S", "10")
+    monkeypatch.setenv("SAGE_STAGE7_PROBE_KEEP_ARTIFACTS", "1")
+    monkeypatch.setenv("SAGE_STAGE7_STREAMING_ENABLED", "1")
+
+    monkeypatch.setattr(
+        s,
+        "_build_stage7_command_and_env",
+        lambda **kwargs: (["/tmp/fake_python"], {"SAGE_STAGE7_HEADLESS_MODE": str(kwargs["args"].stage7_headless_mode)}),
+    )
+    monkeypatch.setattr(
+        s,
+        "_run_stage7_probe_process",
+        lambda **kwargs: (1, False, 1.0),
+    )
+    monkeypatch.setattr(
+        s,
+        "_stage7_output_contract_ok",
+        lambda **kwargs: (False, ["rgb_std_min=0.0", "missing_videos=1"]),
+    )
+    monkeypatch.setattr(s, "_read_json_if_exists", lambda path: None)
+
+    report = s.run_stage7_rgb_mode_probe(
+        args=args,
+        collector=collector,
+        plan_path=plan_path,
+        output_root=output_root,
+        report_path=report_path,
+        run_id="run_probe_fail",
+    )
+    assert report["status"] == "fail"
+    assert report["selected_mode"] is None
+    assert report_path.exists()
 
 
 @pytest.mark.unit
@@ -289,6 +514,7 @@ def test_stage7_command_env_respects_keep_cuda_visible_devices(monkeypatch, tmp_
         output_dir=output_dir,
         run_id="run_test_keep_cuda",
     )
+    assert "--headless-mode" in _cmd
     assert env["CUDA_VISIBLE_DEVICES"] == "0"
 
 
@@ -400,3 +626,169 @@ def test_stage5_grasp_retry_meets_threshold(monkeypatch, tmp_path):
     assert len(attempts) == 2
     assert attempts[0]["num_grasps"] == 2
     assert attempts[1]["num_grasps"] == 12
+
+
+@pytest.mark.unit
+def test_fix_layout_json_synthesizes_stage4_fields():
+    from scripts.runpod_sage import fix_layout_json as f
+
+    layout = {
+        "rooms": [
+            {
+                "id": "room_0",
+                "dimensions": {"width": 6.0, "length": 6.0, "height": 3.0},
+                "objects": [
+                    {"id": "salt_0", "type": "salt_shaker", "position": {"x": 2.0, "y": 2.0, "z": 0.8}},
+                    {"id": "counter_0", "type": "kitchen_counter", "position": {"x": 2.0, "y": 2.0, "z": 0.0}},
+                    {"id": "table_0", "type": "dining_table", "position": {"x": 4.0, "y": 4.0, "z": 0.0}},
+                ],
+            }
+        ]
+    }
+    out = f.patch_layout_dict(
+        layout,
+        task_desc="Pick up the salt from the counter and place it on the dining table",
+        require_stage4_fields=True,
+    )
+    pa = out["policy_analysis"]
+    assert isinstance(pa.get("minimum_required_objects"), list) and pa["minimum_required_objects"]
+    assert isinstance(pa.get("task_decomposition"), list) and pa["task_decomposition"]
+    utd = pa.get("updated_task_decomposition")
+    assert isinstance(utd, list) and utd
+    pick_steps = [s for s in utd if str(s.get("action", "")).lower() == "pick"]
+    place_steps = [s for s in utd if str(s.get("action", "")).lower() == "place"]
+    assert pick_steps and place_steps
+    assert pick_steps[0].get("target_object_id") == "salt_0"
+    assert place_steps[0].get("location_object_id") == "table_0"
+
+
+@pytest.mark.unit
+def test_validate_ridgeback_assets_handles_pathological_binary_refs(tmp_path):
+    from scripts.runpod_sage import validate_ridgeback_usd_assets as v
+
+    assets_root = tmp_path / "Assets" / "Isaac" / "5.1"
+    root = assets_root / "Isaac" / "Robots" / "Clearpath" / "RidgebackFranka" / "ridgeback_franka.usdc"
+    root.parent.mkdir(parents=True, exist_ok=True)
+    # Include an absurdly long token that previously triggered path-length issues.
+    long_ref = "A" * 12000
+    root.write_bytes(b"PXR-USDC\n@" + long_ref.encode("ascii") + b"@\n")
+    report = v.validate_ridgeback_assets(root, assets_root=assets_root)
+    assert isinstance(report, dict)
+    assert report["visited_usd_count"] >= 1
+    assert report["checked_references_count"] >= 0
+
+
+@pytest.mark.unit
+def test_nav_gate_prefers_explicit_task_anchors():
+    from scripts.runpod_sage import robot_nav_gate as g
+
+    layout = {
+        "rooms": [
+            {
+                "id": "room_0",
+                "dimensions": {"width": 6.0, "length": 6.0, "height": 3.0},
+                "objects": [
+                    {
+                        "id": "salt_0",
+                        "type": "salt_shaker",
+                        "dimensions": {"width": 0.08, "length": 0.08, "height": 0.16},
+                        "position": {"x": 1.8, "y": 1.7, "z": 0.9},
+                    },
+                    {
+                        "id": "kitchen_island_0",
+                        "type": "kitchen_island",
+                        "dimensions": {"width": 1.2, "length": 0.8, "height": 0.9},
+                        "position": {"x": 1.8, "y": 1.7, "z": 0.0},
+                    },
+                    {
+                        "id": "dining_table_0",
+                        "type": "dining_table",
+                        "dimensions": {"width": 1.4, "length": 0.9, "height": 0.75},
+                        "position": {"x": 4.2, "y": 4.2, "z": 0.0},
+                    },
+                ],
+            }
+        ]
+    }
+    report = g.run_gate(
+        layout=layout,
+        grid_res_m=0.05,
+        pick_radius_min_m=0.55,
+        pick_radius_max_m=1.40,
+        robot_radius_m=0.32,
+        obstacle_min_size_m=0.25,
+        pick_object_id="salt_0",
+        place_surface_id="dining_table_0",
+        task_desc="Pick up salt and place it on the dining table",
+        require_non_heuristic=True,
+    )
+    assert report["status"] == "pass"
+    assert report["pick_object_id"] == "salt_0"
+    assert report["place_surface_id"] == "dining_table_0"
+    assert report["anchor_source"] == "cli_override"
+
+
+@pytest.mark.unit
+def test_stage7_nonzero_teardown_only_is_downgraded_when_contract_passes(tmp_path):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    output_dir = tmp_path / "demos"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "dataset.hdf5").write_bytes(b"ok")
+    (output_dir / "artifact_manifest.json").write_text("{}", encoding="utf-8")
+    (output_dir / "quality_report.json").write_text(
+        (
+            "{\n"
+            '  "status": "pass",\n'
+            '  "num_demos": 1,\n'
+            '  "summary": {"rgb_std_min": 10.0, "frozen_observations": {"rgb_all_black_demos": 0}},\n'
+            '  "artifact_contract": {"missing_videos": []},\n'
+            '  "video_report": {"exported_demos": 1}\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "stage7.log"
+    s._run_stage7_collector_with_tee(
+        cmd=["bash", "-lc", "echo 'XIO:  fatal IO error 11'; exit 1"],
+        env={"PATH": os.environ.get("PATH", "")},
+        cwd=tmp_path,
+        log_path=log_path,
+        output_dir=output_dir,
+        expected_demos=1,
+        enable_cameras=True,
+        require_valid_rgb=True,
+    )
+
+
+@pytest.mark.unit
+def test_stage7_nonzero_still_fails_when_contract_invalid(tmp_path):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    output_dir = tmp_path / "demos"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "dataset.hdf5").write_bytes(b"ok")
+    (output_dir / "artifact_manifest.json").write_text("{}", encoding="utf-8")
+    (output_dir / "quality_report.json").write_text(
+        (
+            "{\n"
+            '  "status": "fail",\n'
+            '  "num_demos": 1,\n'
+            '  "summary": {"rgb_std_min": 0.0, "frozen_observations": {"rgb_all_black_demos": 1}},\n'
+            '  "artifact_contract": {"missing_videos": ["demo_0.mp4"]},\n'
+            '  "video_report": {"exported_demos": 0}\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(subprocess.CalledProcessError):
+        s._run_stage7_collector_with_tee(
+            cmd=["bash", "-lc", "echo 'XIO:  fatal IO error 11'; exit 1"],
+            env={"PATH": os.environ.get("PATH", "")},
+            cwd=tmp_path,
+            log_path=tmp_path / "stage7_fail.log",
+            output_dir=output_dir,
+            expected_demos=1,
+            enable_cameras=True,
+            require_valid_rgb=True,
+        )

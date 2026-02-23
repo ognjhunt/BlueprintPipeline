@@ -24,6 +24,7 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -92,6 +93,364 @@ def _configure_vulkan_icd_env(env: Dict[str, str]) -> None:
         env["VK_ICD_FILENAMES"] = env["VK_DRIVER_FILES"]
 
 
+def _env_truthy(value: str) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_stage7_headless_mode(*, requested_mode: str, default_headless: bool, env: Dict[str, str]) -> Tuple[bool, str]:
+    mode = str(requested_mode or "auto").strip().lower()
+    if mode not in {"auto", "headless", "windowed", "streaming"}:
+        mode = "auto"
+    if mode == "headless":
+        return True, "headless"
+    if mode == "windowed":
+        return False, "windowed"
+    if mode == "streaming":
+        return True, "streaming"
+    has_display = bool(str(env.get("DISPLAY", "")).strip())
+    if has_display:
+        return False, "windowed"
+    return bool(default_headless), "headless" if bool(default_headless) else "windowed"
+
+
+def _display_server_ready_for_mode_probe(env: Dict[str, str]) -> bool:
+    display = str(env.get("DISPLAY", "")).strip()
+    if not display:
+        return False
+    if display == ":99" or Path("/tmp/.X99-lock").exists():
+        return False
+    for cmd in (["xdpyinfo"], ["xset", "q"]):
+        try:
+            proc = subprocess.run(
+                cmd,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+            if proc.returncode == 0:
+                return True
+        except Exception:
+            continue
+    # Best effort fallback: DISPLAY exists and is not known-Xvfb.
+    return True
+
+
+def _resolve_stage7_probe_mode_order(
+    *,
+    requested_mode: str,
+    mode_order_raw: str,
+    env: Dict[str, str],
+    streaming_enabled: bool,
+) -> List[str]:
+    valid_modes = {"streaming", "windowed", "headless"}
+    requested = str(requested_mode or "auto").strip().lower()
+    if requested not in {"auto", *valid_modes}:
+        requested = "auto"
+
+    has_display = _display_server_ready_for_mode_probe(env)
+    default_order = ["windowed", "streaming", "headless"] if has_display else ["streaming", "headless"]
+
+    if requested != "auto":
+        if requested == "streaming" and not streaming_enabled:
+            raise RuntimeError(
+                "Requested stage7 mode 'streaming' but SAGE_STAGE7_STREAMING_ENABLED=0."
+            )
+        return [requested]
+
+    order_raw = str(mode_order_raw or "auto").strip().lower()
+    if order_raw in {"", "auto"}:
+        modes = list(default_order)
+    else:
+        modes = []
+        for token in re.split(r"[,\s]+", order_raw):
+            if token in valid_modes and token not in modes:
+                modes.append(token)
+        if not modes:
+            modes = list(default_order)
+
+    if not streaming_enabled:
+        modes = [m for m in modes if m != "streaming"]
+    if not modes:
+        modes = ["windowed"] if has_display else ["headless"]
+    return modes
+
+
+def _stage7_probe_env_snapshot(env: Dict[str, str]) -> Dict[str, str]:
+    allowed_exact = {
+        "DISPLAY",
+        "ISAAC_ASSETS_ROOT",
+        "VK_ICD_FILENAMES",
+        "VK_DRIVER_FILES",
+        "__NV_PRIME_RENDER_OFFLOAD",
+        "__GLX_VENDOR_LIBRARY_NAME",
+        "MESA_EGL_NO_X11_FALLBACK",
+        "PYTHONSAFEPATH",
+    }
+    out: Dict[str, str] = {}
+    for key in sorted(env.keys()):
+        if (
+            key in allowed_exact
+            or key.startswith("SAGE_")
+            or key.startswith("VK_")
+        ):
+            out[key] = str(env.get(key, ""))
+    return out
+
+
+def _extract_stage7_probe_quality(quality: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(quality, dict):
+        return {
+            "quality_status": "missing",
+            "num_demos": 0,
+            "rgb_std_min": None,
+            "depth_finite_ratio_min": None,
+            "rgb_all_black_demos": None,
+            "exported_videos": 0,
+            "missing_videos": None,
+        }
+    summary = quality.get("summary", {}) if isinstance(quality.get("summary"), dict) else {}
+    frozen = (
+        summary.get("frozen_observations", {})
+        if isinstance(summary.get("frozen_observations"), dict)
+        else {}
+    )
+    video_report = quality.get("video_report", {}) if isinstance(quality.get("video_report"), dict) else {}
+    artifact_contract = (
+        quality.get("artifact_contract", {})
+        if isinstance(quality.get("artifact_contract"), dict)
+        else {}
+    )
+    missing_videos = artifact_contract.get("missing_videos")
+    if isinstance(missing_videos, list):
+        missing_videos_val: Optional[int] = len(missing_videos)
+    else:
+        missing_videos_val = None
+    return {
+        "quality_status": str(quality.get("status", "missing")).lower(),
+        "num_demos": int(quality.get("num_demos", 0) or 0),
+        "rgb_std_min": float(summary.get("rgb_std_min", 0.0) or 0.0),
+        "depth_finite_ratio_min": float(summary.get("depth_finite_ratio_min", 0.0) or 0.0),
+        "rgb_all_black_demos": int(frozen.get("rgb_all_black_demos", 0) or 0),
+        "exported_videos": int(video_report.get("exported_demos", 0) or 0),
+        "missing_videos": missing_videos_val,
+    }
+
+
+def _build_probe_bundle_for_mode(
+    *,
+    source_bundle: Dict[str, Any],
+    mode: str,
+    probe_demos: int,
+) -> Tuple[Dict[str, Any], int]:
+    demos = source_bundle.get("demos")
+    if not isinstance(demos, list) or not demos:
+        raise RuntimeError("Probe bundle is missing demos[] in plan_bundle.json")
+    use_demos = max(1, min(int(probe_demos), len(demos)))
+    bundle = dict(source_bundle)
+    bundle["demos"] = demos[:use_demos]
+    bundle["num_demos"] = int(use_demos)
+    bundle["headless"] = bool(mode != "windowed")
+    bundle["stage7_headless_mode"] = str(mode)
+    return bundle, use_demos
+
+
+def _run_stage7_probe_process(
+    *,
+    cmd: Sequence[str],
+    env: Dict[str, str],
+    cwd: Path,
+    log_path: Path,
+    timeout_s: int,
+) -> Tuple[int, bool, float]:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    start = time.time()
+    timed_out = False
+    return_code = 0
+    with log_path.open("w", encoding="utf-8") as log_f:
+        log_f.write(f"# cmd: {' '.join(cmd)}\n")
+        log_f.write(f"# cwd: {cwd}\n")
+        log_f.flush()
+        try:
+            proc = subprocess.run(
+                list(cmd),
+                env=env,
+                cwd=str(cwd),
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=max(1, int(timeout_s)),
+                check=False,
+            )
+            return_code = int(proc.returncode)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            return_code = 124
+            log_f.write(
+                f"\n# TIMEOUT: exceeded {max(1, int(timeout_s))}s waiting for Stage 7 probe process.\n"
+            )
+    return return_code, timed_out, float(time.time() - start)
+
+
+def run_stage7_rgb_mode_probe(
+    *,
+    args: argparse.Namespace,
+    collector: Path,
+    plan_path: Path,
+    output_root: Path,
+    report_path: Path,
+    run_id: str,
+) -> Dict[str, Any]:
+    mode_order_raw = str(os.environ.get("SAGE_STAGE7_MODE_ORDER", "auto"))
+    streaming_enabled = _env_truthy(os.environ.get("SAGE_STAGE7_STREAMING_ENABLED", "1"))
+    keep_probe_artifacts = _env_truthy(os.environ.get("SAGE_STAGE7_PROBE_KEEP_ARTIFACTS", "1"))
+    try:
+        probe_demos = max(1, int(os.environ.get("SAGE_STAGE7_PROBE_DEMOS", "1")))
+    except Exception:
+        probe_demos = 1
+    try:
+        timeout_s = max(1, int(os.environ.get("SAGE_STAGE7_PROBE_TIMEOUT_S", "600")))
+    except Exception:
+        timeout_s = 600
+
+    env_base = os.environ.copy()
+    mode_order = _resolve_stage7_probe_mode_order(
+        requested_mode=str(getattr(args, "stage7_headless_mode", "auto")),
+        mode_order_raw=mode_order_raw,
+        env=env_base,
+        streaming_enabled=bool(streaming_enabled),
+    )
+
+    source_bundle = _load_json(plan_path)
+    if not isinstance(source_bundle, dict):
+        raise RuntimeError(f"Invalid plan bundle (expected JSON object): {plan_path}")
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    attempts: List[Dict[str, Any]] = []
+    selected_mode: Optional[str] = None
+    selected_headless: Optional[bool] = None
+
+    for mode in mode_order:
+        mode_output_dir = output_root / f"mode_{mode}"
+        mode_output_dir.mkdir(parents=True, exist_ok=True)
+        probe_bundle, expected_probe_demos = _build_probe_bundle_for_mode(
+            source_bundle=source_bundle,
+            mode=mode,
+            probe_demos=probe_demos,
+        )
+        mode_plan_path = output_root / f"probe_plan_{mode}.json"
+        _write_json(mode_plan_path, probe_bundle)
+
+        probe_args = argparse.Namespace(**vars(args))
+        probe_args.stage7_headless_mode = str(mode)
+        probe_args.headless = bool(mode != "windowed")
+        probe_cmd, probe_env = _build_stage7_command_and_env(
+            args=probe_args,
+            collector=collector,
+            plan_path=mode_plan_path,
+            output_dir=mode_output_dir,
+            run_id=f"{run_id}_probe_{mode}",
+        )
+        # Probes intentionally evaluate multiple mode/headless combinations.
+        probe_env["SAGE_ENFORCE_BUNDLE_STRICT"] = "0"
+
+        mode_log_path = mode_output_dir / "stage7_probe.log"
+        return_code, timed_out, duration_s = _run_stage7_probe_process(
+            cmd=probe_cmd,
+            env=probe_env,
+            cwd=Path(__file__).resolve().parents[2],
+            log_path=mode_log_path,
+            timeout_s=timeout_s,
+        )
+
+        contract_ok, contract_issues = _stage7_output_contract_ok(
+            output_dir=mode_output_dir,
+            expected_demos=int(expected_probe_demos),
+            enable_cameras=bool(args.enable_cameras),
+            require_valid_rgb=True,
+        )
+        log_text = ""
+        try:
+            log_text = mode_log_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            log_text = ""
+        teardown_only = bool(return_code != 0 and _is_known_teardown_signature(log_text))
+
+        quality = _read_json_if_exists(mode_output_dir / "quality_report.json")
+        quality_summary = _extract_stage7_probe_quality(quality)
+
+        reasons: List[str] = []
+        if timed_out:
+            reasons.append(f"timeout>{timeout_s}s")
+        if return_code != 0 and not teardown_only:
+            reasons.append(f"exit_code={return_code}")
+        if contract_issues:
+            reasons.extend(str(x) for x in contract_issues)
+        if not reasons and not contract_ok:
+            reasons.append("contract_failed")
+
+        attempt_pass = bool(contract_ok and (return_code == 0 or teardown_only) and not timed_out)
+        attempt = {
+            "mode": str(mode),
+            "headless": bool(mode != "windowed"),
+            "command": [str(x) for x in probe_cmd],
+            "env": _stage7_probe_env_snapshot(probe_env),
+            "plan_bundle": str(mode_plan_path),
+            "output_dir": str(mode_output_dir),
+            "log_path": str(mode_log_path),
+            "expected_probe_demos": int(expected_probe_demos),
+            "return_code": int(return_code),
+            "timed_out": bool(timed_out),
+            "teardown_only_signature": bool(teardown_only),
+            "duration_s": float(duration_s),
+            "contract_ok": bool(contract_ok),
+            "contract_issues": [str(x) for x in contract_issues],
+            "quality": quality_summary,
+            "pass": bool(attempt_pass),
+            "failure_reasons": reasons,
+        }
+        attempts.append(attempt)
+        if attempt_pass:
+            selected_mode = str(mode)
+            selected_headless = bool(mode != "windowed")
+            break
+
+    report: Dict[str, Any] = {
+        "run_id": str(run_id),
+        "layout_id": str(getattr(args, "layout_id", "")),
+        "requested_mode": str(getattr(args, "stage7_headless_mode", "auto")),
+        "mode_order_raw": str(mode_order_raw),
+        "mode_order_resolved": mode_order,
+        "probe_demos_requested": int(probe_demos),
+        "probe_timeout_s": int(timeout_s),
+        "streaming_enabled": bool(streaming_enabled),
+        "output_root": str(output_root),
+        "status": "pass" if selected_mode else "fail",
+        "selected_mode": selected_mode,
+        "selected_headless": selected_headless,
+        "attempts": attempts,
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    _write_json(report_path, report)
+
+    if not keep_probe_artifacts:
+        try:
+            root_real = output_root.resolve()
+            report_real = report_path.resolve()
+            if report_real == root_real or root_real in report_real.parents:
+                _log(
+                    "Preserving probe output root because report_path is inside it: "
+                    f"{report_path}"
+                )
+            else:
+                shutil.rmtree(output_root, ignore_errors=True)
+        except Exception:
+            pass
+
+    return report
+
+
 def _file_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -132,6 +491,20 @@ def _build_stage7_command_and_env(
     export_scene_usd_default = os.environ.get("SAGE_EXPORT_SCENE_USD", "1").strip().lower() in {"1", "true", "yes", "on"}
     export_demo_videos_default = os.environ.get("SAGE_EXPORT_DEMO_VIDEOS", "1").strip().lower() in {"1", "true", "yes", "on"}
     quality_report_path = str((output_dir / "quality_report.json").resolve())
+    requested_headless_mode = str(
+        getattr(
+            args,
+            "stage7_headless_mode",
+            "headless" if bool(getattr(args, "headless", True)) else "windowed",
+        )
+        or "auto"
+    )
+    env_base = os.environ.copy()
+    resolved_headless, resolved_mode = _resolve_stage7_headless_mode(
+        requested_mode=requested_headless_mode,
+        default_headless=bool(args.headless),
+        env=env_base,
+    )
 
     cmd = [
         args.isaacsim_py,
@@ -142,7 +515,8 @@ def _build_stage7_command_and_env(
         "--output_dir",
         str(output_dir),
     ]
-    cmd.append("--headless" if args.headless else "--no-headless")
+    cmd.extend(["--headless-mode", resolved_mode])
+    cmd.append("--headless" if resolved_headless else "--no-headless")
     cmd.append("--enable_cameras" if args.enable_cameras else "--disable_cameras")
     cmd.append("--strict" if args.strict else "--no-strict")
     cmd.append("--strict-sensors" if strict_sensors_default else "--no-strict-sensors")
@@ -161,13 +535,16 @@ def _build_stage7_command_and_env(
     cmd.append("--export-scene-usd" if export_scene_usd_default else "--no-export-scene-usd")
     cmd.append("--export-demo-videos" if export_demo_videos_default else "--no-export-demo-videos")
 
-    env = os.environ.copy()
+    env = env_base
+    env["SAGE_STAGE7_HEADLESS_MODE"] = resolved_mode
     env["OMNI_KIT_ACCEPT_EULA"] = "yes"
     env.setdefault("ISAAC_ASSETS_ROOT", "/workspace/isaacsim_assets/Assets/Isaac/5.1")
     env.setdefault("SAGE_ALLOW_REMOTE_ISAAC_ASSETS", "0")
     env.setdefault("SAGE_SENSOR_FAILURE_POLICY", "fail" if bool(args.strict) else "warn")
     env.setdefault("SAGE_STRICT_SENSORS", "1" if strict_sensors_default else "0")
     env.setdefault("SAGE_RENDER_WARMUP_FRAMES", "100")
+    env.setdefault("SAGE_REPLICATOR_STEP_EACH_FRAME", "1")  # Required for rasterized depth in headless
+    env.setdefault("SAGE_PHYSICS_SUBSTEPS_PER_FRAME", "4")  # PD controller convergence for vel/effort
     env.setdefault("SAGE_SENSOR_MIN_RGB_STD", "5.0")
     env.setdefault("SAGE_SENSOR_MIN_DEPTH_STD", "0.0001")
     env.setdefault("SAGE_MIN_DEPTH_FINITE_RATIO", "0.98")
@@ -183,6 +560,14 @@ def _build_stage7_command_and_env(
     env.setdefault("SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD", "0.01")
     env.setdefault("SAGE_ENFORCE_BUNDLE_STRICT", "1")
     env.setdefault("SAGE_DOMAIN_RAND", "0")
+    # EGL rendering for headless RGB — bypasses Xvfb/GLX on many cloud GPUs.
+    if resolved_headless and _env_truthy(os.environ.get("SAGE_USE_EGL_RENDERING", "1")):
+        env["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+        env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+        env["MESA_EGL_NO_X11_FALLBACK"] = "1"
+        env.pop("DISPLAY", None)
+    # Configurable renderer: PathTracing often works headless where RaytracedLighting fails.
+    env.setdefault("SAGE_ISAAC_RENDERER", "PathTracing")
     if run_id:
         env.setdefault("SAGE_RUN_ID", run_id)
     keep_cuda_visible = str(os.environ.get("SAGE_KEEP_CUDA_VISIBLE_DEVICES", "0")).strip().lower() in {
@@ -261,7 +646,84 @@ if issues:
     )
 
 
-def _run_stage7_collector_with_tee(*, cmd: Sequence[str], env: Dict[str, str], cwd: Path, log_path: Path) -> None:
+def _read_json_if_exists(path: Path) -> Optional[Dict[str, Any]]:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(data, dict):
+        return data
+    return None
+
+
+def _is_known_teardown_signature(log_text: str) -> bool:
+    text = str(log_text or "")
+    return ("XIO:  fatal IO error" in text) or ("XIO: fatal IO error" in text)
+
+
+def _stage7_output_contract_ok(
+    *,
+    output_dir: Path,
+    expected_demos: int,
+    enable_cameras: bool,
+    require_valid_rgb: bool,
+) -> Tuple[bool, List[str]]:
+    issues: List[str] = []
+    h5_path = output_dir / "dataset.hdf5"
+    manifest_path = output_dir / "artifact_manifest.json"
+    quality_path = output_dir / "quality_report.json"
+    if not h5_path.is_file():
+        issues.append(f"missing_dataset:{h5_path}")
+    if not manifest_path.is_file():
+        issues.append(f"missing_artifact_manifest:{manifest_path}")
+    quality = _read_json_if_exists(quality_path)
+    if quality is None:
+        issues.append(f"missing_or_invalid_quality_report:{quality_path}")
+        return False, issues
+
+    status = str(quality.get("status", "")).lower()
+    if status not in {"pass", "disabled"}:
+        issues.append(f"quality_status={status}")
+    num_demos = int(quality.get("num_demos", 0) or 0)
+    if expected_demos > 0 and num_demos < expected_demos:
+        issues.append(f"quality_num_demos={num_demos} expected>={expected_demos}")
+
+    if enable_cameras:
+        artifact_contract = quality.get("artifact_contract", {}) if isinstance(quality.get("artifact_contract"), dict) else {}
+        missing_videos = artifact_contract.get("missing_videos", [])
+        if isinstance(missing_videos, list) and missing_videos:
+            issues.append(f"missing_videos={len(missing_videos)}")
+        video_report = quality.get("video_report", {}) if isinstance(quality.get("video_report"), dict) else {}
+        exported = int(video_report.get("exported_demos", 0) or 0)
+        if expected_demos > 0 and exported < expected_demos:
+            issues.append(f"exported_videos={exported} expected>={expected_demos}")
+
+        if require_valid_rgb:
+            summary = quality.get("summary", {}) if isinstance(quality.get("summary"), dict) else {}
+            frozen = summary.get("frozen_observations", {}) if isinstance(summary.get("frozen_observations"), dict) else {}
+            all_black = int(frozen.get("rgb_all_black_demos", 0) or 0)
+            if all_black > 0:
+                issues.append(f"rgb_all_black_demos={all_black}")
+            rgb_std = float(summary.get("rgb_std_min", 0.0) or 0.0)
+            if rgb_std <= 0.0:
+                issues.append(f"rgb_std_min={rgb_std}")
+
+    return len(issues) == 0, issues
+
+
+def _run_stage7_collector_with_tee(
+    *,
+    cmd: Sequence[str],
+    env: Dict[str, str],
+    cwd: Path,
+    log_path: Path,
+    output_dir: Path,
+    expected_demos: int,
+    enable_cameras: bool,
+    require_valid_rgb: bool,
+) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log_f:
         log_f.write(f"# cmd: {' '.join(cmd)}\n")
@@ -282,6 +744,27 @@ def _run_stage7_collector_with_tee(*, cmd: Sequence[str], env: Dict[str, str], c
             log_f.write(line)
         ret = proc.wait()
     if ret != 0:
+        log_text = ""
+        try:
+            log_text = log_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            log_text = ""
+        contract_ok, contract_issues = _stage7_output_contract_ok(
+            output_dir=output_dir,
+            expected_demos=int(expected_demos),
+            enable_cameras=bool(enable_cameras),
+            require_valid_rgb=bool(require_valid_rgb),
+        )
+        if _is_known_teardown_signature(log_text) and contract_ok:
+            _log(
+                f"WARNING: Stage 7 exited with code {ret} due to teardown-only signature; "
+                "artifacts and quality contract are valid, continuing."
+            )
+            return
+        if contract_issues:
+            _log(
+                f"Stage 7 non-zero exit {ret}; contract issues: {', '.join(contract_issues)}"
+            )
         raise subprocess.CalledProcessError(ret, list(cmd))
 
 
@@ -598,6 +1081,34 @@ def _sample_base_pose_near(
         yaw = 0.0
         return bx, by, yaw
     return best
+
+
+def _jitter_base_pose(
+    *,
+    base_pose: Tuple[float, float, float],
+    room_dims: Dict[str, Any],
+    grid: np.ndarray,
+    grid_meta: Dict[str, Any],
+    rng: np.random.RandomState,
+    jitter_radius_m: float,
+    tries: int = 24,
+) -> Tuple[float, float, float]:
+    width = float(room_dims.get("width", 6.0))
+    length = float(room_dims.get("length", 6.0))
+    margin = 0.45
+    x0, y0, yaw0 = base_pose
+    for _ in range(max(1, int(tries))):
+        angle = float(rng.uniform(0.0, 2.0 * math.pi))
+        radius = float(rng.uniform(0.0, max(0.02, jitter_radius_m)))
+        bx = float(x0 + radius * math.cos(angle))
+        by = float(y0 + radius * math.sin(angle))
+        if not (margin < bx < width - margin and margin < by < length - margin):
+            continue
+        if not _grid_free(grid, grid_meta, bx, by):
+            continue
+        yaw = float(yaw0 + rng.uniform(-0.35, 0.35))
+        return bx, by, yaw
+    return base_pose
 
 
 def _astar_path(
@@ -1105,6 +1616,11 @@ def main() -> None:
 
     parser.add_argument("--headless", dest="headless", action="store_true", default=True)
     parser.add_argument("--no-headless", dest="headless", action="store_false")
+    parser.add_argument(
+        "--stage7-headless-mode",
+        choices=["auto", "headless", "windowed", "streaming"],
+        default=os.getenv("SAGE_STAGE7_HEADLESS_MODE", "auto"),
+    )
     parser.add_argument("--enable_cameras", dest="enable_cameras", action="store_true", default=True)
     parser.add_argument("--disable_cameras", dest="enable_cameras", action="store_false")
     parser.add_argument("--strict", dest="strict", action="store_true", default=False)
@@ -1158,7 +1674,17 @@ def main() -> None:
     _log(f"layout_id={args.layout_id}")
     _log(f"run_id={run_id}")
     _log(f"pose_aug_variants={len(variants)}")
-    _log(f"num_demos={args.num_demos} strict={args.strict} cameras={args.enable_cameras} headless={args.headless}")
+    _log(
+        f"num_demos={args.num_demos} strict={args.strict} cameras={args.enable_cameras} "
+        f"headless={args.headless} stage7_headless_mode={args.stage7_headless_mode}"
+    )
+    _log(
+        "stage7_rgb_policy="
+        f"{os.environ.get('SAGE_STAGE7_RGB_POLICY', 'legacy_direct')} "
+        f"mode_order={os.environ.get('SAGE_STAGE7_MODE_ORDER', 'auto')} "
+        f"probe_demos={os.environ.get('SAGE_STAGE7_PROBE_DEMOS', '1')} "
+        f"probe_timeout_s={os.environ.get('SAGE_STAGE7_PROBE_TIMEOUT_S', '600')}"
+    )
 
     # Load M2T2 once.
     try:
@@ -1186,265 +1712,310 @@ def main() -> None:
     )
     stage5_demo_stats: List[Dict[str, Any]] = []
 
-    for demo_idx in range(args.num_demos):
-      try:
-        # Deterministic variant selection (rotate) for reproducibility.
-        variant_json = variants[demo_idx % len(variants)]
-        _variant_data = _load_json(variant_json)
-        # Handle both room-level and layout-level JSONs.
-        if "rooms" in _variant_data and isinstance(_variant_data["rooms"], list) and _variant_data["rooms"]:
-            room = _variant_data["rooms"][0]
-        else:
-            room = _variant_data
-        room_dims = room.get("dimensions", {}) or {}
+    stage5_attempt_failures: List[Dict[str, Any]] = []
+    max_backfill_attempts = max(int(args.num_demos) * 3, int(args.num_demos) + 4)
+    planned_idx = 0
+    planning_attempt_idx = 0
+    planner_retry_cap = max(1, int(os.environ.get("STAGE6_PLANNER_RETRIES", "3")))
+    grasp_window_step = max(1, int(os.environ.get("STAGE6_GRASP_WINDOW_STEP", "4")))
+    base_jitter_m = max(0.05, float(os.environ.get("STAGE6_BASE_JITTER_M", "0.22")))
 
-        pick_obj, place_surface = _select_pick_and_place(room, task_desc=args.task_desc)
-        grid, grid_meta = _build_occupancy_grid(room)
-
-        pick_xy = (float(pick_obj["position"]["x"]), float(pick_obj["position"]["y"]))
-        place_xy = (float(place_surface["position"]["x"]), float(place_surface["position"]["y"]))
-
-        base_pick = _sample_base_pose_near(
-            target_xy=pick_xy, room_dims=room_dims, grid=grid, grid_meta=grid_meta
-        )
-        base_place = _sample_base_pose_near(
-            target_xy=place_xy, room_dims=room_dims, grid=grid, grid_meta=grid_meta
-        )
-
-        # If placing back on the same support (e.g. "pick salt and place on table"),
-        # keep a single base pose and skip mobile-base navigation entirely.
-        same_support = _is_object_on_surface(pick_obj, place_surface)
-        base_dist = math.sqrt((base_pick[0] - base_place[0]) ** 2 + (base_pick[1] - base_place[1]) ** 2)
-        skip_nav = same_support or (base_dist < 0.5)
-        if skip_nav:
-            reason = "same_support" if same_support else f"bases_within_{base_dist:.2f}m"
-            _log(f"demo={demo_idx}: skipping base navigation ({reason})")
-            base_place = base_pick
-
-        _log(f"demo={demo_idx}: variant={variant_json.name} pick={pick_obj.get('type')} place={place_surface.get('type')}")
-
-        grasps_world, contacts, grasp_attempts = _infer_grasps_with_retries(
-            layout_id=args.layout_id,
-            layout_dir=layout_dir,
-            variant_layout_json=variant_json,
-            pick_obj_id=pick_obj["id"],
-            base_pos=(base_pick[0], base_pick[1], 0.0),
-            room_id=room.get("id", "room_0"),
-            num_views=args.num_views_m2t2,
-            strict=args.strict,
-            model=model,
-            cfg=cfg,
-            min_grasps_per_object=int(args.min_grasps_per_object),
-            max_retries=int(args.stage5_max_retries),
-        )
-        num_grasps = grasps_world.shape[0]
+    while planned_idx < int(args.num_demos) and planning_attempt_idx < max_backfill_attempts:
         stage5_entry: Dict[str, Any] = {
-            "demo_idx": int(demo_idx),
-            "variant_layout_json": str(variant_json),
-            "pick_object_id": str(pick_obj.get("id", "")),
-            "pick_object_type": str(pick_obj.get("type", "")),
-            "required_min_grasps": int(args.min_grasps_per_object),
-            "num_grasps": int(num_grasps),
-            "attempts": grasp_attempts,
-            "passed": bool(int(num_grasps) >= int(args.min_grasps_per_object)),
+            "demo_idx": int(planned_idx),
+            "planning_attempt": int(planning_attempt_idx),
+            "passed": False,
         }
-        stage5_demo_stats.append(stage5_entry)
-        if int(num_grasps) < int(args.min_grasps_per_object):
-            msg = (
-                f"demo={demo_idx}: insufficient grasps "
-                f"({num_grasps} < {int(args.min_grasps_per_object)}) after "
-                f"{int(args.stage5_max_retries)} attempt(s)"
-            )
-            if args.strict:
-                raise RuntimeError(msg)
-            _log(f"WARNING: {msg} — skipping")
-            continue
-        if num_grasps == 0:
-            _log(f"demo={demo_idx}: Stage 5 produced 0 grasps — skipping")
-            if args.strict:
-                raise RuntimeError(f"Stage 5 produced 0 grasps for demo={demo_idx} (variant={variant_json})")
-            continue
+        try:
+            variant_json = variants[planning_attempt_idx % len(variants)]
+            stage5_entry["variant_layout_json"] = str(variant_json)
+            _variant_data = _load_json(variant_json)
+            if "rooms" in _variant_data and isinstance(_variant_data["rooms"], list) and _variant_data["rooms"]:
+                room = _variant_data["rooms"][0]
+            else:
+                room = _variant_data
+            room_dims = room.get("dimensions", {}) or {}
 
-        # Warn about low grasp counts — a single grasp means no fallback if
-        # cuRobo planning fails for that candidate.
-        MIN_GRASP_WARNING = 3
-        if num_grasps < MIN_GRASP_WARNING:
+            pick_obj, place_surface = _select_pick_and_place(room, task_desc=args.task_desc)
+            stage5_entry["pick_object_id"] = str(pick_obj.get("id", ""))
+            stage5_entry["pick_object_type"] = str(pick_obj.get("type", ""))
+            stage5_entry["required_min_grasps"] = int(args.min_grasps_per_object)
+            grid, grid_meta = _build_occupancy_grid(room)
+
+            pick_xy = (float(pick_obj["position"]["x"]), float(pick_obj["position"]["y"]))
+            place_xy = (float(place_surface["position"]["x"]), float(place_surface["position"]["y"]))
+            base_pick_nominal = _sample_base_pose_near(
+                target_xy=pick_xy, room_dims=room_dims, grid=grid, grid_meta=grid_meta
+            )
+            base_place_nominal = _sample_base_pose_near(
+                target_xy=place_xy, room_dims=room_dims, grid=grid, grid_meta=grid_meta
+            )
+
+            same_support = _is_object_on_surface(pick_obj, place_surface)
+            base_dist = math.sqrt(
+                (base_pick_nominal[0] - base_place_nominal[0]) ** 2
+                + (base_pick_nominal[1] - base_place_nominal[1]) ** 2
+            )
+            skip_nav = same_support or (base_dist < 0.5)
+            if skip_nav:
+                base_place_nominal = base_pick_nominal
             _log(
-                f"WARNING: demo={demo_idx}: only {num_grasps} grasp(s) produced "
-                f"(min recommended: {MIN_GRASP_WARNING}). "
-                f"Motion planning may fail with no fallback candidates."
+                f"demo_slot={planned_idx}: variant={variant_json.name} "
+                f"pick={pick_obj.get('type')} place={place_surface.get('type')} "
+                f"attempt={planning_attempt_idx + 1}/{max_backfill_attempts}"
             )
 
-        # Choose grasp using top-K candidates and require first successful cuRobo plan.
-        top_k = max(1, int(args.grasp_top_k))
-        grasp_candidates = min(num_grasps, top_k)
-        if args.strict and grasp_candidates <= 0:
-            raise RuntimeError(f"Stage 5 produced 0 grasps after filtering for demo={demo_idx} (variant={variant_json})")
-
-        # Convert base pose for frame conversion once.
-        base_T_world = _invert_T(_world_from_base(base_pick))
-        place_pose_base = _default_place_pose_base(place_surface, base_place)
-
-        # Debug: show grasp in base frame
-        if grasps_world.shape[0] > 0:
-            g0 = base_T_world @ grasps_world[0]
-            _log(f"demo={demo_idx}: base_pick=({base_pick[0]:.2f},{base_pick[1]:.2f},{base_pick[2]:.2f}) "
-                 f"grasp[0]_base=({g0[0,3]:.3f},{g0[1,3]:.3f},{g0[2,3]:.3f}) "
-                 f"dist={np.linalg.norm(g0[:3,3]):.3f}m")
-
-        chosen_grasp_world: Optional[np.ndarray] = None
-        chosen_segments: Optional[Dict[str, np.ndarray]] = None
-        chosen_idx = -1
-        plan_error = None
-        for cand_idx in range(grasp_candidates):
-            grasp_world = grasps_world[cand_idx]
-            try:
-                grasp_pose_base = base_T_world @ grasp_world
-                segments = _plan_arm_segments_with_curobo(
-                    grasp_pose_base=grasp_pose_base,
-                    place_pose_base=place_pose_base,
-                    motion_gen=motion_gen,
-                    strict=args.strict,
+            grasps_world, contacts, grasp_attempts = _infer_grasps_with_retries(
+                layout_id=args.layout_id,
+                layout_dir=layout_dir,
+                variant_layout_json=variant_json,
+                pick_obj_id=pick_obj["id"],
+                base_pos=(base_pick_nominal[0], base_pick_nominal[1], 0.0),
+                room_id=room.get("id", "room_0"),
+                num_views=args.num_views_m2t2,
+                strict=args.strict,
+                model=model,
+                cfg=cfg,
+                min_grasps_per_object=int(args.min_grasps_per_object),
+                max_retries=int(args.stage5_max_retries),
+            )
+            num_grasps = int(grasps_world.shape[0])
+            stage5_entry["num_grasps"] = num_grasps
+            stage5_entry["attempts"] = grasp_attempts
+            if num_grasps < int(args.min_grasps_per_object):
+                msg = (
+                    f"insufficient_grasps:{num_grasps}<{int(args.min_grasps_per_object)} "
+                    f"after {int(args.stage5_max_retries)} retries"
                 )
-                chosen_grasp_world = grasp_world
-                chosen_segments = segments
-                chosen_idx = cand_idx
-                break
-            except Exception as e:  # pragma: no cover
-                import traceback
-                plan_error = str(e)
-                tb = traceback.format_exc()
-                _log(f"demo={demo_idx}: grasp candidate {cand_idx + 1}/{grasp_candidates} failed: {e}\n{tb}")
+                stage5_entry["stage5_error"] = msg
+                stage5_demo_stats.append(stage5_entry)
+                stage5_attempt_failures.append(stage5_entry)
+                _log(f"WARNING: demo_slot={planned_idx} {msg}; retrying with backfill")
+                planning_attempt_idx += 1
                 continue
 
-        if chosen_segments is None or chosen_grasp_world is None:
-            msg = (
-                f"Stage 6 failed to plan arm trajectory for demo={demo_idx}. "
-                f"No feasible grasps in top-K ({grasp_candidates}). last_error={plan_error}"
+            if num_grasps < 3:
+                _log(
+                    f"WARNING: demo_slot={planned_idx}: only {num_grasps} grasp(s) available; "
+                    "using adaptive planner retries."
+                )
+
+            chosen_grasp_world: Optional[np.ndarray] = None
+            chosen_segments: Optional[Dict[str, np.ndarray]] = None
+            chosen_idx = -1
+            plan_error = ""
+            base_pick = base_pick_nominal
+            base_place = base_place_nominal
+            planner_retry_log: List[Dict[str, Any]] = []
+            plan_rng = np.random.RandomState(args.seed + planning_attempt_idx * 97 + planned_idx)
+
+            for retry_idx in range(planner_retry_cap):
+                if retry_idx == 0:
+                    retry_base_pick = base_pick_nominal
+                    retry_base_place = base_place_nominal
+                else:
+                    retry_base_pick = _jitter_base_pose(
+                        base_pose=base_pick_nominal,
+                        room_dims=room_dims,
+                        grid=grid,
+                        grid_meta=grid_meta,
+                        rng=plan_rng,
+                        jitter_radius_m=float(base_jitter_m * retry_idx),
+                    )
+                    retry_base_place = retry_base_pick if skip_nav else _jitter_base_pose(
+                        base_pose=base_place_nominal,
+                        room_dims=room_dims,
+                        grid=grid,
+                        grid_meta=grid_meta,
+                        rng=plan_rng,
+                        jitter_radius_m=float(base_jitter_m * retry_idx),
+                    )
+                retry_top_k = min(num_grasps, max(1, int(args.grasp_top_k) + retry_idx * grasp_window_step))
+                retry_success = False
+                retry_error = ""
+                base_T_world = _invert_T(_world_from_base(retry_base_pick))
+                place_pose_base = _default_place_pose_base(place_surface, retry_base_place)
+                for cand_idx in range(retry_top_k):
+                    grasp_world = grasps_world[cand_idx]
+                    try:
+                        grasp_pose_base = base_T_world @ grasp_world
+                        segments = _plan_arm_segments_with_curobo(
+                            grasp_pose_base=grasp_pose_base,
+                            place_pose_base=place_pose_base,
+                            motion_gen=motion_gen,
+                            strict=args.strict,
+                        )
+                        chosen_grasp_world = grasp_world
+                        chosen_segments = segments
+                        chosen_idx = cand_idx
+                        base_pick = retry_base_pick
+                        base_place = retry_base_place
+                        retry_success = True
+                        break
+                    except Exception as exc:  # pragma: no cover
+                        retry_error = str(exc)
+                        plan_error = retry_error
+                planner_retry_log.append(
+                    {
+                        "retry_idx": int(retry_idx),
+                        "top_k": int(retry_top_k),
+                        "base_pick": [float(v) for v in retry_base_pick],
+                        "base_place": [float(v) for v in retry_base_place],
+                        "success": bool(retry_success),
+                        "last_error": retry_error,
+                    }
+                )
+                if retry_success:
+                    break
+
+            stage5_entry["planner_retries"] = planner_retry_log
+            if chosen_segments is None or chosen_grasp_world is None:
+                msg = (
+                    f"Stage6_no_feasible_grasp top_k<= {min(num_grasps, int(args.grasp_top_k) + (planner_retry_cap - 1) * grasp_window_step)} "
+                    f"last_error={plan_error}"
+                )
+                stage5_entry["stage6_error"] = msg
+                stage5_demo_stats.append(stage5_entry)
+                stage5_attempt_failures.append(stage5_entry)
+                _log(f"WARNING: demo_slot={planned_idx} {msg}; retrying with backfill")
+                planning_attempt_idx += 1
+                continue
+
+            stage5_entry["selected_grasp_idx"] = int(chosen_idx)
+            stage5_entry["evaluated_candidates"] = int(
+                min(num_grasps, int(args.grasp_top_k) + (planner_retry_cap - 1) * grasp_window_step)
             )
-            stage5_entry["passed"] = False
-            stage5_entry["stage6_error"] = msg
-            if args.strict:
-                raise RuntimeError(msg)
-            _log(f"WARNING: {msg} — skipping demo")
+            all_grasps_for_report.append(chosen_grasp_world[None, ...])
+            all_contacts_for_report.append(
+                contacts[chosen_idx : chosen_idx + 1] if contacts.shape[0] else np.zeros((1, 3), dtype=np.float32)
+            )
+
+            if skip_nav:
+                base_path = np.array([[base_pick[0], base_pick[1], base_pick[2]]], dtype=np.float32)
+            else:
+                try:
+                    base_path = _plan_base_traj(
+                        grid=grid,
+                        grid_meta=grid_meta,
+                        start_xy=(base_pick[0], base_pick[1]),
+                        goal_xy=(base_place[0], base_place[1]),
+                        fixed_yaw=float(base_pick[2]),
+                    )
+                except RuntimeError:
+                    grid_relaxed, meta_relaxed = _build_occupancy_grid(
+                        room,
+                        resolution_m=0.05,
+                        margin_m=0.08,
+                        min_footprint_for_obstacle=0.35,
+                    )
+                    base_path = _plan_base_traj(
+                        grid=grid_relaxed,
+                        grid_meta=meta_relaxed,
+                        start_xy=(base_pick[0], base_pick[1]),
+                        goal_xy=(base_place[0], base_place[1]),
+                        fixed_yaw=float(base_pick[2]),
+                    )
+
+            step_labels: List[str] = []
+            base_traj: List[List[float]] = []
+            arm_traj: List[List[float]] = []
+            grip_traj: List[List[float]] = []
+
+            def append_arm_segment(
+                label: str,
+                q_traj: np.ndarray,
+                base_pose: Tuple[float, float, float],
+                grip: float,
+            ) -> None:
+                for q in q_traj:
+                    step_labels.append(label)
+                    base_traj.append([float(base_pose[0]), float(base_pose[1]), float(base_pose[2])])
+                    arm_traj.append([float(v) for v in q.tolist()])
+                    grip_traj.append([float(grip)])
+
+            assert chosen_segments is not None
+            append_arm_segment("approach_pick", chosen_segments["approach_pick"], base_pick, grip=0.04)
+            append_arm_segment("grasp", chosen_segments["grasp"], base_pick, grip=0.0)
+            append_arm_segment("lift", chosen_segments["lift"], base_pick, grip=0.0)
+            q_hold = chosen_segments["lift"][-1]
+            for pose in base_path:
+                step_labels.append("navigate")
+                base_traj.append([float(pose[0]), float(pose[1]), float(pose[2])])
+                arm_traj.append([float(v) for v in q_hold.tolist()])
+                grip_traj.append([0.0])
+            append_arm_segment("approach_place", chosen_segments["approach_place"], base_place, grip=0.0)
+            append_arm_segment("place", chosen_segments["place"], base_place, grip=0.04)
+            append_arm_segment("retreat_place", chosen_segments["retreat_place"], base_place, grip=0.04)
+
+            plans.append(
+                DemoPlan(
+                    demo_idx=int(planned_idx),
+                    variant_layout_json=str(variant_json),
+                    pick_object={
+                        "id": pick_obj.get("id", ""),
+                        "type": pick_obj.get("type", ""),
+                        "source_id": pick_obj.get("source_id", ""),
+                    },
+                    place_surface={
+                        "id": place_surface.get("id", ""),
+                        "type": place_surface.get("type", ""),
+                        "source_id": place_surface.get("source_id", ""),
+                    },
+                    base_pick=[float(base_pick[0]), float(base_pick[1]), float(base_pick[2])],
+                    base_place=[float(base_place[0]), float(base_place[1]), float(base_place[2])],
+                    trajectory_base=base_traj,
+                    trajectory_arm=arm_traj,
+                    trajectory_gripper=grip_traj,
+                    step_labels=step_labels,
+                    chosen_grasp_T_world=chosen_grasp_world.tolist(),
+                )
+            )
+            stage5_entry["passed"] = True
+            stage5_demo_stats.append(stage5_entry)
+            planned_idx += 1
+            planning_attempt_idx += 1
+        except Exception as exc:
+            stage5_entry["stage56_error"] = str(exc)
+            stage5_demo_stats.append(stage5_entry)
+            stage5_attempt_failures.append(stage5_entry)
+            _log(f"WARNING: demo_slot={planned_idx} failed on attempt {planning_attempt_idx}: {exc}")
+            planning_attempt_idx += 1
             continue
 
-        stage5_entry["selected_grasp_idx"] = int(chosen_idx)
-        stage5_entry["evaluated_candidates"] = int(grasp_candidates)
-        all_grasps_for_report.append(chosen_grasp_world[None, ...])
-        all_contacts_for_report.append((contacts[chosen_idx : chosen_idx + 1] if contacts.shape[0] else np.zeros((1, 3), dtype=np.float32)))
-
-        # Base path (A*), yaw fixed to face forward.
-        if skip_nav:
-            _log(f"demo={demo_idx}: skipping base navigation (same base pose)")
-            base_path = np.array([[base_pick[0], base_pick[1], base_pick[2]]], dtype=np.float32)
-        else:
-            try:
-                base_path = _plan_base_traj(
-                    grid=grid,
-                    grid_meta=grid_meta,
-                    start_xy=(base_pick[0], base_pick[1]),
-                    goal_xy=(base_place[0], base_place[1]),
-                    fixed_yaw=float(base_pick[2]),
-                )
-            except RuntimeError as exc:
-                # Retry once with a relaxed occupancy model to reduce false negatives
-                # in narrow kitchens where chairs/props make the conservative grid disconnected.
-                _log(f"demo={demo_idx}: base A* failed on primary grid ({exc}); retrying with relaxed grid")
-                grid_relaxed, meta_relaxed = _build_occupancy_grid(
-                    room,
-                    resolution_m=0.05,
-                    margin_m=0.08,
-                    min_footprint_for_obstacle=0.35,
-                )
-                base_path = _plan_base_traj(
-                    grid=grid_relaxed,
-                    grid_meta=meta_relaxed,
-                    start_xy=(base_pick[0], base_pick[1]),
-                    goal_xy=(base_place[0], base_place[1]),
-                    fixed_yaw=float(base_pick[2]),
-                )
-
-        # Build a single timeline.
-        step_labels: List[str] = []
-        base_traj: List[List[float]] = []
-        arm_traj: List[List[float]] = []
-        grip_traj: List[List[float]] = []
-
-        def append_arm_segment(label: str, q_traj: np.ndarray, base_pose: Tuple[float, float, float], grip: float) -> None:
-            for q in q_traj:
-                step_labels.append(label)
-                base_traj.append([float(base_pose[0]), float(base_pose[1]), float(base_pose[2])])
-                arm_traj.append([float(v) for v in q.tolist()])
-                grip_traj.append([float(grip)])
-
-        assert chosen_segments is not None
-        home = chosen_segments["home"]
-        append_arm_segment("approach_pick", chosen_segments["approach_pick"], base_pick, grip=0.04)
-        append_arm_segment("grasp", chosen_segments["grasp"], base_pick, grip=0.0)
-        append_arm_segment("lift", chosen_segments["lift"], base_pick, grip=0.0)
-
-        # Navigate: keep arm at last lift joint config.
-        q_hold = chosen_segments["lift"][-1]
-        for pose in base_path:
-            step_labels.append("navigate")
-            base_traj.append([float(pose[0]), float(pose[1]), float(pose[2])])
-            arm_traj.append([float(v) for v in q_hold.tolist()])
-            grip_traj.append([0.0])
-
-        # After navigate, snap base pose to base_place.
-        append_arm_segment("approach_place", chosen_segments["approach_place"], base_place, grip=0.0)
-        append_arm_segment("place", chosen_segments["place"], base_place, grip=0.04)
-        append_arm_segment("retreat_place", chosen_segments["retreat_place"], base_place, grip=0.04)
-
-        plans.append(
-            DemoPlan(
-                demo_idx=demo_idx,
-                variant_layout_json=str(variant_json),
-                pick_object={
-                    "id": pick_obj.get("id", ""),
-                    "type": pick_obj.get("type", ""),
-                    "source_id": pick_obj.get("source_id", ""),
-                },
-                place_surface={
-                    "id": place_surface.get("id", ""),
-                    "type": place_surface.get("type", ""),
-                    "source_id": place_surface.get("source_id", ""),
-                },
-                base_pick=[float(base_pick[0]), float(base_pick[1]), float(base_pick[2])],
-                base_place=[float(base_place[0]), float(base_place[1]), float(base_place[2])],
-                trajectory_base=base_traj,
-                trajectory_arm=arm_traj,
-                trajectory_gripper=grip_traj,
-                step_labels=step_labels,
-                chosen_grasp_T_world=chosen_grasp_world.tolist(),
+    stage5_failed: List[Dict[str, Any]] = []
+    if len(plans) < int(args.num_demos):
+        for missing_idx in range(len(plans), int(args.num_demos)):
+            stage5_failed.append(
+                {
+                    "demo_idx": int(missing_idx),
+                    "reason": "planning_backfill_exhausted",
+                    "attempts_used": int(planning_attempt_idx),
+                    "max_backfill_attempts": int(max_backfill_attempts),
+                }
             )
-        )
-      except Exception as exc:
-        if args.strict:
-            raise
-        _log(f"ERROR: demo={demo_idx} failed: {exc} — skipping")
-        continue
 
-    stage5_failed = [entry for entry in stage5_demo_stats if not bool(entry.get("passed"))]
+    stage5_status = "pass" if len(plans) >= int(args.num_demos) else "fail"
     stage5_quality_report: Dict[str, Any] = {
         "run_id": run_id,
         "layout_id": args.layout_id,
-        "status": "pass" if not stage5_failed else "fail",
+        "status": stage5_status,
         "required_min_grasps": int(args.min_grasps_per_object),
         "max_retries": int(args.stage5_max_retries),
+        "planning_backfill_attempts": int(planning_attempt_idx),
+        "planning_backfill_max_attempts": int(max_backfill_attempts),
         "num_demos_requested": int(args.num_demos),
         "num_demos_planned": int(len(plans)),
         "num_failed_demos": int(len(stage5_failed)),
         "failed_demos": stage5_failed,
+        "attempt_failures": stage5_attempt_failures,
         "demos": stage5_demo_stats,
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     _write_json(stage5_quality_path, stage5_quality_report)
     _log(f"Wrote Stage 5 quality report: {stage5_quality_path}")
-    if args.strict and stage5_failed:
+    if args.strict and len(plans) < int(args.num_demos):
         raise RuntimeError(
-            f"Stage 5 quality gate failed for {len(stage5_failed)} demo(s); see {stage5_quality_path}"
+            f"Stage 5/6 planned {len(plans)}/{int(args.num_demos)} demos after backfill; see {stage5_quality_path}"
         )
 
     # Save grasps (only the selected ones per demo to keep artifact small).
@@ -1471,6 +2042,12 @@ def main() -> None:
     }
     _write_json(grasps_out_dir / "grasp_transforms.json", grasp_payload)
 
+    bundle_headless, bundle_headless_mode = _resolve_stage7_headless_mode(
+        requested_mode=str(args.stage7_headless_mode),
+        default_headless=bool(args.headless),
+        env=os.environ.copy(),
+    )
+
     plan_bundle = {
         "run_id": run_id,
         "layout_id": args.layout_id,
@@ -1478,7 +2055,8 @@ def main() -> None:
         "arm_robot_type": "franka",
         "results_dir": str(Path(args.results_dir)),
         "pose_aug_name": args.pose_aug_name,
-        "headless": bool(args.headless),
+        "headless": bool(bundle_headless),
+        "stage7_headless_mode": str(bundle_headless_mode),
         "enable_cameras": bool(args.enable_cameras),
         "strict": bool(args.strict),
         "task_desc": args.task_desc,
@@ -1503,6 +2081,7 @@ def main() -> None:
                 "SAGE_MIN_VALID_DEPTH_PX": os.environ.get("SAGE_MIN_VALID_DEPTH_PX", ""),
                 "SAGE_SENSOR_CHECK_FRAME": os.environ.get("SAGE_SENSOR_CHECK_FRAME", ""),
                 "SAGE_ENFORCE_BUNDLE_STRICT": os.environ.get("SAGE_ENFORCE_BUNDLE_STRICT", ""),
+                "SAGE_STAGE7_HEADLESS_MODE": os.environ.get("SAGE_STAGE7_HEADLESS_MODE", ""),
             },
         },
     }
@@ -1542,11 +2121,64 @@ def main() -> None:
     _log(f"Stage 7 Python binary: {args.isaacsim_py}")
 
     stage7_log_path = layout_dir / "stage7_output" / "stage7.log"
+    require_valid_rgb = _env_truthy(os.environ.get("SAGE_REQUIRE_VALID_RGB", "1"))
+    rgb_policy = str(os.environ.get("SAGE_STAGE7_RGB_POLICY", "legacy_direct")).strip().lower()
+    if rgb_policy not in {"auto_probe_fail", "legacy_direct"}:
+        rgb_policy = "legacy_direct"
+
+    stage7_args = argparse.Namespace(**vars(args))
+    probe_report_path = layout_dir / "quality" / "stage7_mode_probe.json"
+    if bool(args.enable_cameras) and bool(require_valid_rgb) and rgb_policy == "auto_probe_fail":
+        probe_output_root = layout_dir / "stage7_probe"
+        _log(
+            "Running Stage 7 RGB mode probe "
+            f"(requested_mode={args.stage7_headless_mode}, output={probe_output_root})"
+        )
+        probe_report = run_stage7_rgb_mode_probe(
+            args=stage7_args,
+            collector=collector,
+            plan_path=plan_path,
+            output_root=probe_output_root,
+            report_path=probe_report_path,
+            run_id=run_id,
+        )
+        selected_mode = str(probe_report.get("selected_mode") or "").strip().lower()
+        if not selected_mode:
+            summaries: List[str] = []
+            for attempt in probe_report.get("attempts", []) if isinstance(probe_report.get("attempts"), list) else []:
+                mode = str(attempt.get("mode", "unknown"))
+                reasons = attempt.get("failure_reasons", [])
+                if isinstance(reasons, list) and reasons:
+                    reason_text = ",".join(str(x) for x in reasons)
+                else:
+                    reason_text = "unknown_failure"
+                summaries.append(f"{mode}[{reason_text}]")
+            summary_text = "; ".join(summaries) if summaries else "no probe attempts recorded"
+            raise RuntimeError(
+                "Stage 7 RGB mode probe failed across all candidate modes: "
+                f"{summary_text}. See {probe_report_path}"
+            )
+        stage7_args.stage7_headless_mode = selected_mode
+        stage7_args.headless = bool(selected_mode != "windowed")
+        plan_bundle["stage7_headless_mode"] = str(selected_mode)
+        plan_bundle["headless"] = bool(stage7_args.headless)
+        _write_json(plan_path, plan_bundle)
+        _log(
+            f"Stage 7 RGB mode probe selected mode={selected_mode} "
+            f"(headless={stage7_args.headless}); updated {plan_path}"
+        )
+    else:
+        _log(
+            "Stage 7 RGB mode probe skipped: "
+            f"policy={rgb_policy} enable_cameras={bool(args.enable_cameras)} "
+            f"require_valid_rgb={bool(require_valid_rgb)}"
+        )
+
     cmd, env = _build_stage7_command_and_env(
-        args=args,
+        args=stage7_args,
         collector=collector,
         plan_path=plan_path,
-        output_dir=Path(args.output_dir),
+        output_dir=Path(stage7_args.output_dir),
         run_id=run_id,
     )
     _run_isaacsim_import_preflight(
@@ -1562,6 +2194,10 @@ def main() -> None:
         env=env,
         cwd=Path(__file__).resolve().parents[2],
         log_path=stage7_log_path,
+        output_dir=Path(stage7_args.output_dir),
+        expected_demos=int(len(plans)),
+        enable_cameras=bool(stage7_args.enable_cameras),
+        require_valid_rgb=bool(require_valid_rgb),
     )
 
     # Final checks (strict).

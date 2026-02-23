@@ -79,6 +79,16 @@ REQUIRE_LOCAL_ROBOT_ASSET="${REQUIRE_LOCAL_ROBOT_ASSET:-1}"
 SAGE_ALLOW_REMOTE_ISAAC_ASSETS="${SAGE_ALLOW_REMOTE_ISAAC_ASSETS:-0}"
 ENABLE_CAMERAS="${ENABLE_CAMERAS:-1}"
 STRICT_PIPELINE="${STRICT_PIPELINE:-1}"
+SAGE_REQUIRE_VALID_RGB="${SAGE_REQUIRE_VALID_RGB:-1}"
+SAGE_REQUIRE_STAGE4_SUCCESS="${SAGE_REQUIRE_STAGE4_SUCCESS:-1}"
+SAGE_STAGE7_HEADLESS_MODE="${SAGE_STAGE7_HEADLESS_MODE:-auto}"  # auto|headless|windowed|streaming
+SAGE_STAGE7_RGB_POLICY="${SAGE_STAGE7_RGB_POLICY:-auto_probe_fail}"  # auto_probe_fail|legacy_direct
+SAGE_STAGE7_MODE_ORDER="${SAGE_STAGE7_MODE_ORDER:-auto}"  # auto or csv (streaming,headless,windowed)
+SAGE_STAGE7_PROBE_DEMOS="${SAGE_STAGE7_PROBE_DEMOS:-1}"
+SAGE_STAGE7_PROBE_TIMEOUT_S="${SAGE_STAGE7_PROBE_TIMEOUT_S:-600}"
+SAGE_STAGE7_STREAMING_ENABLED="${SAGE_STAGE7_STREAMING_ENABLED:-1}"  # 1|0
+SAGE_STAGE7_STREAMING_PORT="${SAGE_STAGE7_STREAMING_PORT:-49100}"
+SAGE_STAGE7_PROBE_KEEP_ARTIFACTS="${SAGE_STAGE7_PROBE_KEEP_ARTIFACTS:-1}"  # 1|0
 SAGE_SENSOR_FAILURE_POLICY="${SAGE_SENSOR_FAILURE_POLICY:-auto}"
 if [[ -z "${SAGE_STRICT_SENSORS+x}" ]]; then
     if [[ "${STRICT_PIPELINE}" == "1" ]]; then
@@ -124,6 +134,7 @@ NAV_REPAIR_MAX_MOVES="${NAV_REPAIR_MAX_MOVES:-8}"               # objects
 # Hard robot-nav gate (pre-acceptance).
 NAV_GATE_ENABLED="${NAV_GATE_ENABLED:-1}"                       # 1|0
 NAV_GATE_HARD_FAIL="${NAV_GATE_HARD_FAIL:-1}"                   # 1|0
+NAV_GATE_REQUIRE_TASK_ANCHORS="${NAV_GATE_REQUIRE_TASK_ANCHORS:-${STRICT_PIPELINE}}"  # 1|0
 NAV_GATE_GRID_RES_M="${NAV_GATE_GRID_RES_M:-0.05}"              # meters
 NAV_GATE_PICK_RADIUS_MIN_M="${NAV_GATE_PICK_RADIUS_MIN_M:-0.55}" # meters
 NAV_GATE_PICK_RADIUS_MAX_M="${NAV_GATE_PICK_RADIUS_MAX_M:-1.40}" # meters
@@ -224,6 +235,17 @@ export SAGE_MIN_GRIPPER_CONTACT_FORCE
 export SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD
 export SAGE_ENFORCE_BUNDLE_STRICT
 export SAGE_DOMAIN_RAND
+export SAGE_REQUIRE_VALID_RGB
+export SAGE_REQUIRE_STAGE4_SUCCESS
+export SAGE_STAGE7_HEADLESS_MODE
+export SAGE_STAGE7_RGB_POLICY
+export SAGE_STAGE7_MODE_ORDER
+export SAGE_STAGE7_PROBE_DEMOS
+export SAGE_STAGE7_PROBE_TIMEOUT_S
+export SAGE_STAGE7_STREAMING_ENABLED
+export SAGE_STAGE7_STREAMING_PORT
+export SAGE_STAGE7_PROBE_KEEP_ARTIFACTS
+export NAV_GATE_REQUIRE_TASK_ANCHORS
 export SCENESMITH_PAPER_KEEP_RUN_DIR
 export SCENESMITH_PAPER_EXISTING_RUN_DIR="${SCENESMITH_PAPER_EXISTING_RUN_DIR:-}"
 
@@ -298,6 +320,11 @@ log "Stage7 exports: scene_usd=${SAGE_EXPORT_SCENE_USD} demo_videos=${SAGE_EXPOR
 log "Stage7 carry defaults: mode=${SAGE_CARRY_MODE} min_gripper_force=${SAGE_MIN_GRIPPER_CONTACT_FORCE} closed_width=${SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD}"
 log "Stage7 bundle strict enforcement: ${SAGE_ENFORCE_BUNDLE_STRICT}"
 log "Stage7 domain randomization: ${SAGE_DOMAIN_RAND}"
+log "Stage7 RGB required: ${SAGE_REQUIRE_VALID_RGB}"
+log "Stage4 success required: ${SAGE_REQUIRE_STAGE4_SUCCESS}"
+log "Stage7 headless mode policy: ${SAGE_STAGE7_HEADLESS_MODE}"
+log "Stage7 RGB mode policy: ${SAGE_STAGE7_RGB_POLICY} (order=${SAGE_STAGE7_MODE_ORDER}, probe_demos=${SAGE_STAGE7_PROBE_DEMOS}, probe_timeout_s=${SAGE_STAGE7_PROBE_TIMEOUT_S}, keep_probe_artifacts=${SAGE_STAGE7_PROBE_KEEP_ARTIFACTS})"
+log "Stage7 streaming: enabled=${SAGE_STAGE7_STREAMING_ENABLED} webrtc_port=${SAGE_STAGE7_STREAMING_PORT}"
 log "Contracts: strict_artifact=${STRICT_ARTIFACT_CONTRACT} strict_provenance=${STRICT_PROVENANCE} auto_fix_layout=${AUTO_FIX_LAYOUT}"
 log ""
 
@@ -464,7 +491,11 @@ _prepare_layout_for_stage4() {
     FIX_LAYOUT_JSON_SCRIPT="${SAGE_SCRIPTS}/fix_layout_json.py"
     if [[ -f "${FIX_LAYOUT_JSON_SCRIPT}" ]]; then
         log "Repairing layout JSON for Stage 4 (policy_analysis matches + updated_task_decomposition)..."
-        if ! "${PY_SYS}" "${FIX_LAYOUT_JSON_SCRIPT}" "${LAYOUT_JSON}" 2>&1 | tee "/tmp/sage_fix_layout_json.log"; then
+        FIX_LAYOUT_ARGS=("${LAYOUT_JSON}" "--task-desc" "${TASK_DESC}")
+        if [[ "${SAGE_REQUIRE_STAGE4_SUCCESS}" == "1" ]]; then
+            FIX_LAYOUT_ARGS+=("--require-stage4-fields")
+        fi
+        if ! "${PY_SYS}" "${FIX_LAYOUT_JSON_SCRIPT}" "${FIX_LAYOUT_ARGS[@]}" 2>&1 | tee "/tmp/sage_fix_layout_json.log"; then
             log "ERROR: Layout JSON repair failed (see /tmp/sage_fix_layout_json.log)"
             return 1
         fi
@@ -473,15 +504,26 @@ _prepare_layout_for_stage4() {
         return 1
     fi
 
+    _resolve_layout_task_anchors "${LAYOUT_JSON}"
+    log "Resolved task anchors: pick=${NAV_PICK_OBJECT_ID:-} place=${NAV_PLACE_SURFACE_ID:-} source=${NAV_ANCHOR_SOURCE:-unknown}"
+
     NAV_REPAIR_SCRIPT="${SAGE_SCRIPTS}/repair_navigation_corridor.py"
     if [[ "${NAV_CORRIDOR_REPAIR}" == "1" ]]; then
         if [[ -f "${NAV_REPAIR_SCRIPT}" ]]; then
             log "Pre-conditioning layout for mobile-base corridor clearance..."
-            if ! "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" \
-                --layout_json "${LAYOUT_JSON}" \
-                --min_corridor_m "${NAV_MIN_CORRIDOR_M}" \
-                --max_moves "${NAV_REPAIR_MAX_MOVES}" \
-                2>&1 | tee "/tmp/sage_nav_repair_pre4.log"; then
+            NAV_REPAIR_ARGS=(
+                --layout_json "${LAYOUT_JSON}"
+                --min_corridor_m "${NAV_MIN_CORRIDOR_M}"
+                --max_moves "${NAV_REPAIR_MAX_MOVES}"
+                --task-desc "${TASK_DESC}"
+            )
+            if [[ -n "${NAV_PICK_OBJECT_ID:-}" ]]; then
+                NAV_REPAIR_ARGS+=(--pick-object-id "${NAV_PICK_OBJECT_ID}")
+            fi
+            if [[ -n "${NAV_PLACE_SURFACE_ID:-}" ]]; then
+                NAV_REPAIR_ARGS+=(--place-surface-id "${NAV_PLACE_SURFACE_ID}")
+            fi
+            if ! "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" "${NAV_REPAIR_ARGS[@]}" 2>&1 | tee "/tmp/sage_nav_repair_pre4.log"; then
                 log "WARNING: navigation corridor pre-repair failed (continuing)."
             fi
         else
@@ -495,32 +537,45 @@ _prepare_layout_for_stage4() {
             NAV_GATE_REPORT="${LAYOUT_DIR}/quality/nav_gate_report.json"
             log "Running hard robot-nav gate before scene acceptance..."
             NAV_GATE_OK=0
-            if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" \
-                --layout_json "${LAYOUT_JSON}" \
-                --report_path "${NAV_GATE_REPORT}" \
-                --grid_res_m "${NAV_GATE_GRID_RES_M}" \
-                --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}" \
-                --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}" \
-                2>&1 | tee "/tmp/sage_nav_gate_pre4.log"; then
+            NAV_GATE_ARGS=(
+                --layout_json "${LAYOUT_JSON}"
+                --report_path "${NAV_GATE_REPORT}"
+                --grid_res_m "${NAV_GATE_GRID_RES_M}"
+                --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}"
+                --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}"
+                --task-desc "${TASK_DESC}"
+            )
+            if [[ -n "${NAV_PICK_OBJECT_ID:-}" ]]; then
+                NAV_GATE_ARGS+=(--pick-object-id "${NAV_PICK_OBJECT_ID}")
+            fi
+            if [[ -n "${NAV_PLACE_SURFACE_ID:-}" ]]; then
+                NAV_GATE_ARGS+=(--place-surface-id "${NAV_PLACE_SURFACE_ID}")
+            fi
+            if [[ "${NAV_GATE_REQUIRE_TASK_ANCHORS}" == "1" ]]; then
+                NAV_GATE_ARGS+=(--require-non-heuristic)
+            fi
+            if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" "${NAV_GATE_ARGS[@]}" 2>&1 | tee "/tmp/sage_nav_gate_pre4.log"; then
                 NAV_GATE_OK=1
             fi
 
             if [[ "${NAV_GATE_OK}" != "0" && "${NAV_CORRIDOR_REPAIR}" == "1" && -f "${NAV_REPAIR_SCRIPT}" ]]; then
                 log "Robot-nav gate failed. Applying aggressive corridor repair and retrying nav gate once..."
-                if "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" \
-                    --layout_json "${LAYOUT_JSON}" \
-                    --min_corridor_m "${NAV_MIN_CORRIDOR_RETRY_M}" \
-                    --max_moves "$(( NAV_REPAIR_MAX_MOVES * 2 ))" \
-                    --aggressive \
-                    2>&1 | tee "/tmp/sage_nav_repair_gate_retry.log"; then
+                NAV_REPAIR_RETRY_ARGS=(
+                    --layout_json "${LAYOUT_JSON}"
+                    --min_corridor_m "${NAV_MIN_CORRIDOR_RETRY_M}"
+                    --max_moves "$(( NAV_REPAIR_MAX_MOVES * 2 ))"
+                    --aggressive
+                    --task-desc "${TASK_DESC}"
+                )
+                if [[ -n "${NAV_PICK_OBJECT_ID:-}" ]]; then
+                    NAV_REPAIR_RETRY_ARGS+=(--pick-object-id "${NAV_PICK_OBJECT_ID}")
+                fi
+                if [[ -n "${NAV_PLACE_SURFACE_ID:-}" ]]; then
+                    NAV_REPAIR_RETRY_ARGS+=(--place-surface-id "${NAV_PLACE_SURFACE_ID}")
+                fi
+                if "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" "${NAV_REPAIR_RETRY_ARGS[@]}" 2>&1 | tee "/tmp/sage_nav_repair_gate_retry.log"; then
                     NAV_GATE_OK=0
-                    if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" \
-                        --layout_json "${LAYOUT_JSON}" \
-                        --report_path "${NAV_GATE_REPORT}" \
-                        --grid_res_m "${NAV_GATE_GRID_RES_M}" \
-                        --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}" \
-                        --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}" \
-                        2>&1 | tee "/tmp/sage_nav_gate_retry.log"; then
+                    if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" "${NAV_GATE_ARGS[@]}" 2>&1 | tee "/tmp/sage_nav_gate_retry.log"; then
                         NAV_GATE_OK=1
                     fi
                 fi
@@ -649,6 +704,259 @@ _audit_stage7_log() {
     return 0
 }
 
+_display_server_ready() {
+    if [[ -z "${DISPLAY:-}" ]]; then
+        return 1
+    fi
+    if command -v xdpyinfo >/dev/null 2>&1; then
+        xdpyinfo >/dev/null 2>&1 && return 0
+    fi
+    if command -v xset >/dev/null 2>&1; then
+        xset q >/dev/null 2>&1 && return 0
+    fi
+    # Fallback: DISPLAY is present but diagnostic tools are unavailable.
+    return 0
+}
+
+_resolve_stage7_headless_mode() {
+    local mode="${SAGE_STAGE7_HEADLESS_MODE:-auto}"
+    local rgb_policy="${SAGE_STAGE7_RGB_POLICY:-legacy_direct}"
+    mode="${mode,,}"
+    rgb_policy="${rgb_policy,,}"
+    case "${mode}" in
+        headless)
+            STAGE7_HEADLESS_RESOLVED="headless"
+            ;;
+        windowed)
+            STAGE7_HEADLESS_RESOLVED="windowed"
+            ;;
+        streaming)
+            STAGE7_HEADLESS_RESOLVED="streaming"
+            ;;
+        auto|*)
+            if [[ "${rgb_policy}" == "auto_probe_fail" ]]; then
+                # Let stage567 probe multiple render modes before full collection.
+                STAGE7_HEADLESS_RESOLVED="auto"
+            elif _display_server_ready; then
+                STAGE7_HEADLESS_RESOLVED="windowed"
+            else
+                STAGE7_HEADLESS_RESOLVED="headless"
+            fi
+            ;;
+    esac
+}
+
+_preflight_stage7_display_requirements() {
+    local rgb_policy="${SAGE_STAGE7_RGB_POLICY:-legacy_direct}"
+    rgb_policy="${rgb_policy,,}"
+    _resolve_stage7_headless_mode
+    log "Stage7 display preflight: requested=${SAGE_STAGE7_HEADLESS_MODE} resolved=${STAGE7_HEADLESS_RESOLVED} DISPLAY='${DISPLAY:-}'"
+
+    if [[ "${ENABLE_CAMERAS}" != "1" ]]; then
+        return 0
+    fi
+
+    if [[ "${SAGE_REQUIRE_VALID_RGB}" == "1" ]]; then
+        if [[ "${STAGE7_HEADLESS_RESOLVED}" == "windowed" ]]; then
+            if [[ "${DISPLAY:-}" == ":99" || -f /tmp/.X99-lock ]]; then
+                log "ERROR: SAGE_REQUIRE_VALID_RGB=1 but DISPLAY appears to be Xvfb (:99)."
+                log "  This is treated as degraded display mode for RGB capture."
+                return 1
+            fi
+            if ! _display_server_ready; then
+                log "ERROR: SAGE_REQUIRE_VALID_RGB=1 but no usable display server is available for windowed capture."
+                return 1
+            fi
+            return 0
+        fi
+
+        if [[ "${STAGE7_HEADLESS_RESOLVED}" == "streaming" ]]; then
+            if [[ "${SAGE_STAGE7_STREAMING_ENABLED}" != "1" ]]; then
+                log "ERROR: Stage 7 mode resolved to streaming but SAGE_STAGE7_STREAMING_ENABLED=0."
+                return 1
+            fi
+            log "Stage7 preflight: streaming mode selected; RGB validity will be enforced by Stage 7 contract."
+            return 0
+        fi
+
+        if [[ "${STAGE7_HEADLESS_RESOLVED}" == "auto" || "${STAGE7_HEADLESS_RESOLVED}" == "headless" ]]; then
+            if [[ "${rgb_policy}" == "auto_probe_fail" ]]; then
+                log "Stage7 preflight: deferring RGB mode selection to Stage 7 probe policy (${rgb_policy})."
+                return 0
+            fi
+            log "ERROR: SAGE_REQUIRE_VALID_RGB=1 but Stage 7 would run ${STAGE7_HEADLESS_RESOLVED} (${SAGE_STAGE7_HEADLESS_MODE})."
+            log "  Set SAGE_STAGE7_RGB_POLICY=auto_probe_fail or provide a real display and use SAGE_STAGE7_HEADLESS_MODE=windowed."
+            return 1
+        fi
+
+    fi
+    return 0
+}
+
+_resolve_layout_task_anchors() {
+    local _layout_json="$1"
+    if [[ ! -f "${_layout_json}" ]]; then
+        NAV_PICK_OBJECT_ID=""
+        NAV_PLACE_SURFACE_ID=""
+        NAV_ANCHOR_SOURCE="missing_layout_json"
+        return 0
+    fi
+    local _line
+    _line="$("${PY_SYS}" - "${_layout_json}" "${TASK_DESC}" <<'PY'
+import json
+import re
+import sys
+
+layout_path = sys.argv[1]
+task_desc = str(sys.argv[2] if len(sys.argv) > 2 else "")
+layout = json.load(open(layout_path, "r"))
+
+def norm(s):
+    return str(s or "").strip().lower().replace(" ", "_")
+
+def objects_from_layout(payload):
+    rooms = payload.get("rooms")
+    if isinstance(rooms, list) and rooms and isinstance(rooms[0], dict):
+        objs = rooms[0].get("objects")
+        if isinstance(objs, list):
+            return objs
+    objs = payload.get("objects")
+    if isinstance(objs, list):
+        return objs
+    room = payload.get("room")
+    if isinstance(room, dict):
+        objs = room.get("objects")
+        if isinstance(objs, list):
+            return objs
+    return []
+
+objs = objects_from_layout(layout)
+by_id = {str(o.get("id", "")): o for o in objs if str(o.get("id", ""))}
+
+def first_by_tokens(tokens):
+    for o in objs:
+        t = norm(o.get("type"))
+        if any(tok in t for tok in tokens):
+            oid = str(o.get("id", ""))
+            if oid:
+                return oid
+    return ""
+
+pick = ""
+place = ""
+source = "heuristic"
+pa = layout.get("policy_analysis", {})
+utd = pa.get("updated_task_decomposition")
+if not isinstance(utd, list):
+    utd = layout.get("updated_task_decomposition")
+if isinstance(utd, list):
+    for step in utd:
+        if not isinstance(step, dict):
+            continue
+        action = norm(step.get("action"))
+        if not pick and "pick" in action and step.get("target_object_id"):
+            maybe = str(step.get("target_object_id"))
+            if maybe in by_id:
+                pick = maybe
+                source = "task_decomposition"
+        if not place and "place" in action and step.get("location_object_id"):
+            maybe = str(step.get("location_object_id"))
+            if maybe in by_id:
+                place = maybe
+                source = "task_decomposition"
+
+if (not pick or not place) and isinstance(pa.get("minimum_required_objects"), list):
+    for mro in pa["minimum_required_objects"]:
+        if not isinstance(mro, dict):
+            continue
+        t = norm(mro.get("object_type"))
+        ids = mro.get("matched_object_ids")
+        if not isinstance(ids, list) or not ids:
+            continue
+        if not pick and any(tok in t for tok in ("salt", "mug", "cup", "glass", "bottle", "can", "jar", "book", "plate", "bowl")):
+            pick = str(ids[0])
+            source = "minimum_required_objects"
+        if not place and any(tok in t for tok in ("table", "counter", "desk", "island", "bench")):
+            place = str(ids[0])
+            source = "minimum_required_objects"
+
+task = " ".join(re.sub(r"[^a-z0-9_ ]+", " ", task_desc.lower()).split())
+if not pick and task:
+    pick = first_by_tokens(("salt", "mug", "cup", "glass", "bottle", "can", "jar", "book", "plate", "bowl"))
+    if pick:
+        source = "task_desc"
+if not place and task:
+    place = first_by_tokens(("dining_table", "table", "counter", "desk", "island", "bench"))
+    if place:
+        source = "task_desc"
+
+if not pick:
+    pick = first_by_tokens(("salt", "mug", "cup", "glass", "bottle", "can", "jar", "book", "plate", "bowl"))
+if not place:
+    place = first_by_tokens(("dining_table", "table", "counter", "desk", "island", "bench"))
+if source == "heuristic" and (pick or place):
+    source = "heuristic"
+
+print(f"{pick}|{place}|{source}")
+PY
+)" || true
+    IFS='|' read -r NAV_PICK_OBJECT_ID NAV_PLACE_SURFACE_ID NAV_ANCHOR_SOURCE <<<"${_line}"
+    NAV_PICK_OBJECT_ID="${NAV_PICK_OBJECT_ID:-}"
+    NAV_PLACE_SURFACE_ID="${NAV_PLACE_SURFACE_ID:-}"
+    NAV_ANCHOR_SOURCE="${NAV_ANCHOR_SOURCE:-unknown}"
+}
+
+_enforce_stage7_rgb_contract() {
+    local _quality_report="$1"
+    local _expected_demos="$2"
+    if [[ "${ENABLE_CAMERAS}" != "1" || "${SAGE_REQUIRE_VALID_RGB}" != "1" ]]; then
+        return 0
+    fi
+    if [[ ! -f "${_quality_report}" ]]; then
+        log "ERROR: Missing Stage 7 quality report for RGB contract: ${_quality_report}"
+        return 1
+    fi
+    if ! "${PY_SYS}" - "${_quality_report}" "${_expected_demos}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+expected = int(sys.argv[2])
+report = json.loads(path.read_text(encoding="utf-8"))
+
+issues = []
+status = str(report.get("status", "")).lower()
+if status != "pass":
+    issues.append(f"status={status}")
+summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+frozen = summary.get("frozen_observations", {}) if isinstance(summary.get("frozen_observations"), dict) else {}
+if int(frozen.get("rgb_all_black_demos", 0) or 0) > 0:
+    issues.append(f"rgb_all_black_demos={frozen.get('rgb_all_black_demos')}")
+if float(summary.get("rgb_std_min", 0.0) or 0.0) <= 0.0:
+    issues.append(f"rgb_std_min={summary.get('rgb_std_min')}")
+
+artifact = report.get("artifact_contract", {}) if isinstance(report.get("artifact_contract"), dict) else {}
+missing_videos = artifact.get("missing_videos", [])
+if isinstance(missing_videos, list) and missing_videos:
+    issues.append(f"missing_videos={len(missing_videos)}")
+video_report = report.get("video_report", {}) if isinstance(report.get("video_report"), dict) else {}
+if int(video_report.get("exported_demos", 0) or 0) < expected:
+    issues.append(
+        f"exported_demos={video_report.get('exported_demos', 0)} expected={expected}"
+    )
+
+if issues:
+    raise SystemExit("RGB_CONTRACT_FAIL: " + "; ".join(issues))
+print("rgb_contract_ok")
+PY
+    then
+        log "ERROR: Stage 7 RGB contract failed (report: ${_quality_report})"
+        return 1
+    fi
+    return 0
+}
+
 # ── SCENE GENERATION ───────────────────────────────────────────────────────
 LAYOUT_PREPARED=0
 if [[ -n "${RESUME_LAYOUT_ID}" ]]; then
@@ -766,44 +1074,52 @@ fi
 STAGE13_END=$(date +%s)
 log "Scene generation completed in $(( STAGE13_END - PIPELINE_START ))s"
 
-	# ── STAGE 4: Scene Augmentation ─────────────────────────────────────────────
-		if [[ "${SKIP_AUGMENTATION}" != "1" ]]; then
-		    log ""
-		    log "════ STAGE 4: Scene Augmentation ════"
+PYTORCH3D_SHIM_ROOT="${SAGE_SCRIPTS}/shims"
 
-		    # 4a: MCP-based augmentation (agent adds complementary objects)
-		    log "4a: MCP-based augmentation..."
-		    AUG_CLIENT="${SAGE_DIR}/client/client_generation_scene_aug.py"
-		    if [[ -f "${AUG_CLIENT}" ]]; then
-		        if ! python "${AUG_CLIENT}" \
-		            --base_layout_dict_path "${LAYOUT_DIR}/${LAYOUT_ID}.json" \
-		            --server_paths "${SAGE_DIR}/server/layout.py" \
-		            --from_task_required_objects \
-		            2>&1 | tee "/tmp/sage_stage4a.log"; then
-		            # Stage 4a is best-effort: it improves scene richness but is not required
-		            # for pose augmentation or downstream grasp/planning stages.
-		            log "WARNING: MCP augmentation failed (continuing; Stage 4a is best-effort)."
-		        fi
-		    else
-		        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-		            log "ERROR: Strict mode requires MCP augmentation script; missing ${AUG_CLIENT}"
-		            exit 1
-		        fi
-		        log "SKIP: client_generation_scene_aug.py not found"
-		    fi
+# ── STAGE 4: Scene Augmentation ─────────────────────────────────────────────
+if [[ "${SKIP_AUGMENTATION}" != "1" ]]; then
+    log ""
+    log "════ STAGE 4: Scene Augmentation ════"
 
-		    # 4a sometimes rewrites the layout JSON; re-apply the compatibility patch so
-		    # Stage 4b never fails on missing keys.
-		    log "Re-checking layout JSON for Stage 4b..."
-		    if ! "${PY_SYS}" "${FIX_LAYOUT_JSON_SCRIPT}" "${LAYOUT_JSON}" 2>&1 | tee "/tmp/sage_fix_layout_json_post4a.log"; then
-		        log "ERROR: Layout JSON repair failed after Stage 4a (see /tmp/sage_fix_layout_json_post4a.log)"
-		        exit 1
-		    fi
+    # 4a: MCP-based augmentation (agent adds complementary objects)
+    log "4a: MCP-based augmentation..."
+    AUG_CLIENT="${SAGE_DIR}/client/client_generation_scene_aug.py"
+    if [[ -f "${AUG_CLIENT}" ]]; then
+        if ! python "${AUG_CLIENT}" \
+            --base_layout_dict_path "${LAYOUT_DIR}/${LAYOUT_ID}.json" \
+            --server_paths "${SAGE_DIR}/server/layout.py" \
+            --from_task_required_objects \
+            2>&1 | tee "/tmp/sage_stage4a.log"; then
+            if [[ "${SAGE_REQUIRE_STAGE4_SUCCESS}" == "1" || "${STRICT_PIPELINE}" == "1" ]]; then
+                log "ERROR: Stage 4a augmentation failed and SAGE_REQUIRE_STAGE4_SUCCESS=1."
+                exit 1
+            fi
+            log "WARNING: MCP augmentation failed (continuing; Stage 4a best-effort mode)."
+        fi
+    else
+        if [[ "${SAGE_REQUIRE_STAGE4_SUCCESS}" == "1" || "${STRICT_PIPELINE}" == "1" ]]; then
+            log "ERROR: Stage 4a augmentation script missing: ${AUG_CLIENT}"
+            exit 1
+        fi
+        log "SKIP: client_generation_scene_aug.py not found"
+    fi
 
-		    # 4b: Pose augmentation
-		    log "4b: Pose augmentation (${NUM_POSE_SAMPLES} samples)..."
-		    POSE_AUG_SCRIPT="${SAGE_DIR}/server/augment/pose_aug_mm_from_layout_with_task.py"
-		    if [[ -f "${POSE_AUG_SCRIPT}" ]]; then
+    # 4a sometimes rewrites the layout JSON; re-apply compatibility fixes.
+    log "Re-checking layout JSON for Stage 4b..."
+    FIX_LAYOUT_POST4A_ARGS=("${LAYOUT_JSON}" "--task-desc" "${TASK_DESC}")
+    if [[ "${SAGE_REQUIRE_STAGE4_SUCCESS}" == "1" ]]; then
+        FIX_LAYOUT_POST4A_ARGS+=("--require-stage4-fields")
+    fi
+    if ! "${PY_SYS}" "${FIX_LAYOUT_JSON_SCRIPT}" "${FIX_LAYOUT_POST4A_ARGS[@]}" 2>&1 | tee "/tmp/sage_fix_layout_json_post4a.log"; then
+        log "ERROR: Layout JSON repair failed after Stage 4a (see /tmp/sage_fix_layout_json_post4a.log)"
+        exit 1
+    fi
+    _resolve_layout_task_anchors "${LAYOUT_JSON}"
+
+    # 4b: Pose augmentation
+    log "4b: Pose augmentation (${NUM_POSE_SAMPLES} samples)..."
+    POSE_AUG_SCRIPT="${SAGE_DIR}/server/augment/pose_aug_mm_from_layout_with_task.py"
+    if [[ -f "${POSE_AUG_SCRIPT}" ]]; then
 		        _count_pose_meta_layouts() {
 		            local _meta_path="$1"
 		            if [[ ! -f "${_meta_path}" ]]; then
@@ -826,52 +1142,61 @@ print(count)
 PY
 		        }
 
-		        _run_pose_aug_for_dir() {
-		            local _save_dir_name="$1"
-		            local _log_file="$2"
-		            (cd "${SAGE_DIR}/server" && export PYTHONPATH="${SAGE_DIR}/server:${PYTHONPATH:-}" && python "${POSE_AUG_SCRIPT}" \
-		                --layout_id "${LAYOUT_ID}" \
-		                --save_dir_name "${_save_dir_name}" \
-		                --num_samples "${NUM_POSE_SAMPLES}" \
-		                2>&1 | tee "${_log_file}")
-		        }
+        _run_pose_aug_for_dir() {
+            local _save_dir_name="$1"
+            local _log_file="$2"
+            local _stage4_pythonpath="${SAGE_DIR}/server:${PYTORCH3D_SHIM_ROOT}:${PYTHONPATH:-}"
+            (cd "${SAGE_DIR}/server" && export PYTHONPATH="${_stage4_pythonpath}" && python "${POSE_AUG_SCRIPT}" \
+                --layout_id "${LAYOUT_ID}" \
+                --save_dir_name "${_save_dir_name}" \
+                --num_samples "${NUM_POSE_SAMPLES}" \
+                2>&1 | tee "${_log_file}")
+        }
 
-		        if ! _run_pose_aug_for_dir "${POSE_AUG_NAME}" "/tmp/sage_stage4b.log"; then
-		            if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-		                log "ERROR: Pose augmentation failed in strict mode."
-		                exit 1
-		            fi
-		            log "WARNING: Pose augmentation failed (non-fatal)"
-		        fi
+        if ! _run_pose_aug_for_dir "${POSE_AUG_NAME}" "/tmp/sage_stage4b.log"; then
+            if [[ "${SAGE_REQUIRE_STAGE4_SUCCESS}" == "1" || "${STRICT_PIPELINE}" == "1" ]]; then
+                log "ERROR: Pose augmentation failed and SAGE_REQUIRE_STAGE4_SUCCESS=1."
+                exit 1
+            fi
+            log "WARNING: Pose augmentation failed (non-fatal)"
+        fi
 
 		        # If planner filtering yields 0 feasible layouts, attempt one aggressive
 		        # corridor repair + Stage 4b retry before synthetic fallback meta.
 		        POSE_META_FALLBACK="${LAYOUT_DIR}/${POSE_AUG_NAME}/meta.json"
 		        POSE_META_COUNT="$(_count_pose_meta_layouts "${POSE_META_FALLBACK}")"
-		        if [[ "${POSE_META_COUNT}" -lt 1 && "${NAV_CORRIDOR_REPAIR}" == "1" && -f "${NAV_REPAIR_SCRIPT}" ]]; then
-		            log "WARNING: Stage 4b produced 0 feasible layouts. Applying aggressive corridor repair and retrying once..."
-		            if "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" \
-		                --layout_json "${LAYOUT_JSON}" \
-		                --min_corridor_m "${NAV_MIN_CORRIDOR_RETRY_M}" \
-		                --max_moves "$(( NAV_REPAIR_MAX_MOVES * 2 ))" \
-		                --aggressive \
-		                2>&1 | tee "/tmp/sage_nav_repair_retry4b.log"; then
-		                POSE_AUG_RETRY_NAME="${POSE_AUG_NAME}_retry1"
-		                if ! _run_pose_aug_for_dir "${POSE_AUG_RETRY_NAME}" "/tmp/sage_stage4b_retry.log"; then
-		                    if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-		                        log "ERROR: Pose augmentation retry failed in strict mode."
-		                        exit 1
-		                    fi
-		                    log "WARNING: Pose augmentation retry failed (non-fatal)"
-		                fi
-		                POSE_AUG_NAME="${POSE_AUG_RETRY_NAME}"
-		                POSE_META_FALLBACK="${LAYOUT_DIR}/${POSE_AUG_NAME}/meta.json"
-		                POSE_META_COUNT="$(_count_pose_meta_layouts "${POSE_META_FALLBACK}")"
-		                log "Stage 4b retry complete (pose_aug_name=${POSE_AUG_NAME}, feasible_layouts=${POSE_META_COUNT})"
-		            else
-		                log "WARNING: aggressive corridor repair failed; continuing with fallback meta logic."
-		            fi
-		        fi
+        if [[ "${POSE_META_COUNT}" -lt 1 && "${NAV_CORRIDOR_REPAIR}" == "1" && -f "${NAV_REPAIR_SCRIPT}" ]]; then
+            log "WARNING: Stage 4b produced 0 feasible layouts. Applying aggressive corridor repair and retrying once..."
+            NAV_REPAIR_STAGE4_RETRY_ARGS=(
+                --layout_json "${LAYOUT_JSON}"
+                --min_corridor_m "${NAV_MIN_CORRIDOR_RETRY_M}"
+                --max_moves "$(( NAV_REPAIR_MAX_MOVES * 2 ))"
+                --aggressive
+                --task-desc "${TASK_DESC}"
+            )
+            if [[ -n "${NAV_PICK_OBJECT_ID:-}" ]]; then
+                NAV_REPAIR_STAGE4_RETRY_ARGS+=(--pick-object-id "${NAV_PICK_OBJECT_ID}")
+            fi
+            if [[ -n "${NAV_PLACE_SURFACE_ID:-}" ]]; then
+                NAV_REPAIR_STAGE4_RETRY_ARGS+=(--place-surface-id "${NAV_PLACE_SURFACE_ID}")
+            fi
+            if "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" "${NAV_REPAIR_STAGE4_RETRY_ARGS[@]}" 2>&1 | tee "/tmp/sage_nav_repair_retry4b.log"; then
+                POSE_AUG_RETRY_NAME="${POSE_AUG_NAME}_retry1"
+                if ! _run_pose_aug_for_dir "${POSE_AUG_RETRY_NAME}" "/tmp/sage_stage4b_retry.log"; then
+                    if [[ "${SAGE_REQUIRE_STAGE4_SUCCESS}" == "1" || "${STRICT_PIPELINE}" == "1" ]]; then
+                        log "ERROR: Pose augmentation retry failed and SAGE_REQUIRE_STAGE4_SUCCESS=1."
+                        exit 1
+                    fi
+                    log "WARNING: Pose augmentation retry failed (non-fatal)"
+                fi
+                POSE_AUG_NAME="${POSE_AUG_RETRY_NAME}"
+                POSE_META_FALLBACK="${LAYOUT_DIR}/${POSE_AUG_NAME}/meta.json"
+                POSE_META_COUNT="$(_count_pose_meta_layouts "${POSE_META_FALLBACK}")"
+                log "Stage 4b retry complete (pose_aug_name=${POSE_AUG_NAME}, feasible_layouts=${POSE_META_COUNT})"
+            else
+                log "WARNING: aggressive corridor repair failed; continuing with fallback meta logic."
+            fi
+        fi
 
 		        # Final fallback: if meta is missing or empty, synthesize from generated variants.
 		        if [[ "${POSE_META_COUNT}" -lt 1 ]]; then
@@ -898,11 +1223,11 @@ print(f"[bp] wrote {out_path} ({len(variants)} variants)")
 PY
 		            fi
 		        fi
-		    else
-		        if [[ "${STRICT_PIPELINE}" == "1" ]]; then
-		            log "ERROR: Strict mode requires pose augmentation script; missing ${POSE_AUG_SCRIPT}"
-		            exit 1
-		        fi
+    else
+        if [[ "${SAGE_REQUIRE_STAGE4_SUCCESS}" == "1" || "${STRICT_PIPELINE}" == "1" ]]; then
+            log "ERROR: Stage 4b pose augmentation script missing: ${POSE_AUG_SCRIPT}"
+            exit 1
+        fi
         log "SKIP: pose augmentation script not found"
     fi
 
@@ -1005,35 +1330,49 @@ if [[ "${SKIP_GRASPS}" != "1" && "${SKIP_DATA_GEN}" != "1" ]]; then
 
             # Re-run hard robot-nav gate on the fallback scene before accepting it.
             LAYOUT_JSON="${LAYOUT_DIR}/${LAYOUT_ID}.json"
+            _resolve_layout_task_anchors "${LAYOUT_JSON}"
             if [[ "${NAV_GATE_ENABLED}" == "1" && -f "${NAV_GATE_SCRIPT}" ]]; then
                 NAV_GATE_REPORT="${LAYOUT_DIR}/quality/nav_gate_report.json"
                 NAV_GATE_OK=0
                 log "Running hard robot-nav gate on fallback scene..."
-                if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" \
-                    --layout_json "${LAYOUT_JSON}" \
-                    --report_path "${NAV_GATE_REPORT}" \
-                    --grid_res_m "${NAV_GATE_GRID_RES_M}" \
-                    --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}" \
-                    --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}" \
-                    2>&1 | tee "/tmp/sage_nav_gate_fallback.log"; then
+                NAV_GATE_FALLBACK_ARGS=(
+                    --layout_json "${LAYOUT_JSON}"
+                    --report_path "${NAV_GATE_REPORT}"
+                    --grid_res_m "${NAV_GATE_GRID_RES_M}"
+                    --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}"
+                    --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}"
+                    --task-desc "${TASK_DESC}"
+                )
+                if [[ -n "${NAV_PICK_OBJECT_ID:-}" ]]; then
+                    NAV_GATE_FALLBACK_ARGS+=(--pick-object-id "${NAV_PICK_OBJECT_ID}")
+                fi
+                if [[ -n "${NAV_PLACE_SURFACE_ID:-}" ]]; then
+                    NAV_GATE_FALLBACK_ARGS+=(--place-surface-id "${NAV_PLACE_SURFACE_ID}")
+                fi
+                if [[ "${NAV_GATE_REQUIRE_TASK_ANCHORS}" == "1" ]]; then
+                    NAV_GATE_FALLBACK_ARGS+=(--require-non-heuristic)
+                fi
+                if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" "${NAV_GATE_FALLBACK_ARGS[@]}" 2>&1 | tee "/tmp/sage_nav_gate_fallback.log"; then
                     NAV_GATE_OK=1
                 fi
                 if [[ "${NAV_GATE_OK}" != "0" && "${NAV_CORRIDOR_REPAIR}" == "1" && -f "${NAV_REPAIR_SCRIPT}" ]]; then
                     log "Fallback robot-nav gate failed. Applying aggressive corridor repair and retrying once..."
-                    if "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" \
-                        --layout_json "${LAYOUT_JSON}" \
-                        --min_corridor_m "${NAV_MIN_CORRIDOR_RETRY_M}" \
-                        --max_moves "$(( NAV_REPAIR_MAX_MOVES * 2 ))" \
-                        --aggressive \
-                        2>&1 | tee "/tmp/sage_nav_repair_fallback_retry.log"; then
+                    NAV_REPAIR_FALLBACK_ARGS=(
+                        --layout_json "${LAYOUT_JSON}"
+                        --min_corridor_m "${NAV_MIN_CORRIDOR_RETRY_M}"
+                        --max_moves "$(( NAV_REPAIR_MAX_MOVES * 2 ))"
+                        --aggressive
+                        --task-desc "${TASK_DESC}"
+                    )
+                    if [[ -n "${NAV_PICK_OBJECT_ID:-}" ]]; then
+                        NAV_REPAIR_FALLBACK_ARGS+=(--pick-object-id "${NAV_PICK_OBJECT_ID}")
+                    fi
+                    if [[ -n "${NAV_PLACE_SURFACE_ID:-}" ]]; then
+                        NAV_REPAIR_FALLBACK_ARGS+=(--place-surface-id "${NAV_PLACE_SURFACE_ID}")
+                    fi
+                    if "${PY_SYS}" "${NAV_REPAIR_SCRIPT}" "${NAV_REPAIR_FALLBACK_ARGS[@]}" 2>&1 | tee "/tmp/sage_nav_repair_fallback_retry.log"; then
                         NAV_GATE_OK=0
-                        if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" \
-                            --layout_json "${LAYOUT_JSON}" \
-                            --report_path "${NAV_GATE_REPORT}" \
-                            --grid_res_m "${NAV_GATE_GRID_RES_M}" \
-                            --pick_radius_min_m "${NAV_GATE_PICK_RADIUS_MIN_M}" \
-                            --pick_radius_max_m "${NAV_GATE_PICK_RADIUS_MAX_M}" \
-                            2>&1 | tee "/tmp/sage_nav_gate_fallback_retry.log"; then
+                        if ! "${PY_SYS}" "${NAV_GATE_SCRIPT}" "${NAV_GATE_FALLBACK_ARGS[@]}" 2>&1 | tee "/tmp/sage_nav_gate_fallback_retry.log"; then
                             NAV_GATE_OK=1
                         fi
                     fi
@@ -1131,6 +1470,9 @@ else
             log "WARNING: Isaac Sim runtime preflight failed (continuing; STRICT_PIPELINE=0)."
         fi
     fi
+    if ! _preflight_stage7_display_requirements; then
+        exit 1
+    fi
 
     STAGE5_QUALITY_REPORT="${LAYOUT_DIR}/quality/stage5_quality_report.json"
     STAGE567_ARGS=(--layout_id "${LAYOUT_ID}" --results_dir "${SAGE_DIR}/server/results" --pose_aug_name "${POSE_AUG_NAME}" --num_demos "${NUM_DEMOS}" --task_desc "${TASK_DESC}" --grasp_top_k "${STAGE567_GRASP_TOP_K}" --min_grasps_per_object "${STAGE5_MIN_GRASPS_PER_OBJECT}" --stage5_max_retries "${STAGE5_MAX_RETRIES}" --stage5_quality_report "${STAGE5_QUALITY_REPORT}" --isaacsim_py "${ISAACSIM_PY_STAGE7}")
@@ -1139,7 +1481,12 @@ else
     else
         STAGE567_ARGS+=(--disable_cameras)
     fi
-    STAGE567_ARGS+=(--headless)
+    STAGE567_ARGS+=(--stage7-headless-mode "${STAGE7_HEADLESS_RESOLVED}")
+    if [[ "${STAGE7_HEADLESS_RESOLVED}" == "headless" || "${STAGE7_HEADLESS_RESOLVED}" == "streaming" || "${STAGE7_HEADLESS_RESOLVED}" == "auto" ]]; then
+        STAGE567_ARGS+=(--headless)
+    else
+        STAGE567_ARGS+=(--no-headless)
+    fi
     if [[ "${STRICT_PIPELINE}" == "1" ]]; then
         STAGE567_ARGS+=(--strict)
     else
@@ -1223,6 +1570,13 @@ PY
         --report-path "${CONTRACT_REPORT}" \
         2>&1 | tee "/tmp/sage_stage7_contract.log"; then
         log "ERROR: Stage 7 artifact/provenance contract validation failed."
+        exit 1
+    fi
+    RGB_EXPECTED_DEMOS="${NUM_DEMOS}"
+    if [[ "${STRICT_PIPELINE}" != "1" ]]; then
+        RGB_EXPECTED_DEMOS="0"
+    fi
+    if ! _enforce_stage7_rgb_contract "${LAYOUT_DIR}/demos/quality_report.json" "${RGB_EXPECTED_DEMOS}"; then
         exit 1
     fi
 

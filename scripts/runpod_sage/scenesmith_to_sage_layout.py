@@ -966,6 +966,12 @@ def _convert_objects_to_sage(
     room_l = float((max_y - min_y) + 2.0 * margin_m)
     room_h = float(max(3.0, max_z + 0.5))
 
+    if not objs:
+        raise RuntimeError(
+            f"SceneSmith produced zero objects for room_type={room_type!r} seed={seed}. "
+            "This layout cannot be used for Stages 5-7 (no graspable objects)."
+        )
+
     return {
         "room_type": room_type,
         "dimensions": {"width": room_w, "length": room_l, "height": room_h},

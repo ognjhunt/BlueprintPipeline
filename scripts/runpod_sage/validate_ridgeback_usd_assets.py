@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""
-Validate transitive local USD dependencies for RidgebackFranka assets.
+"""Validate transitive local USD dependencies for RidgebackFranka assets.
 
-This avoids "single file exists" false positives by recursively scanning USD
-asset references and verifying all referenced local files are present.
+Uses structured USD layer/reference traversal when available, with a guarded
+text fallback. The fallback is defensive against malformed binary scrape tokens
+to avoid path-length and decode crashes.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 
 USD_EXTS = {".usd", ".usda", ".usdc", ".usdz"}
+MAX_REF_LEN = 4096
 REF_PATTERN = re.compile(r"@([^@]+)@")
 SKIP_PREFIXES = ("http://", "https://", "data:", "anon:", "materialx:")
 
@@ -28,7 +29,10 @@ def _read_text_for_reference_scan(path: Path) -> str:
     except Exception:
         pass
 
-    raw = path.read_bytes()
+    try:
+        raw = path.read_bytes()
+    except Exception:
+        return ""
     if raw.startswith(b"PXR-USDC"):
         if shutil.which("usdcat"):
             try:
@@ -42,26 +46,83 @@ def _read_text_for_reference_scan(path: Path) -> str:
                 return proc.stdout
             except Exception:
                 pass
-        if shutil.which("strings"):
-            try:
-                proc = subprocess.run(
-                    ["strings", str(path)],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                )
-                return proc.stdout
-            except Exception:
-                pass
     return raw.decode("utf-8", errors="ignore")
+
+
+def _is_plausible_ref(ref: str) -> bool:
+    token = str(ref or "").strip()
+    if not token:
+        return False
+    if len(token) > MAX_REF_LEN:
+        return False
+    if "\x00" in token:
+        return False
+    return True
+
+
+def _structured_refs_from_usd(path: Path) -> Optional[List[str]]:
+    try:
+        from pxr import Sdf  # type: ignore
+    except Exception:
+        return None
+
+    try:
+        layer = Sdf.Layer.FindOrOpen(str(path))
+    except Exception:
+        return None
+    if layer is None:
+        return None
+
+    refs: Set[str] = set()
+    try:
+        for sub in list(getattr(layer, "subLayerPaths", []) or []):
+            if isinstance(sub, str) and sub.strip():
+                refs.add(sub.strip())
+    except Exception:
+        pass
+
+    def _walk_prim_spec(prim_spec: object) -> None:
+        for list_attr in ("referenceList", "payloadList"):
+            try:
+                list_op = getattr(prim_spec, list_attr, None)
+            except Exception:
+                list_op = None
+            if list_op is None:
+                continue
+            for item_attr in ("prependedItems", "addedItems", "appendedItems", "explicitItems"):
+                try:
+                    items = list(getattr(list_op, item_attr, []) or [])
+                except Exception:
+                    items = []
+                for item in items:
+                    try:
+                        asset = str(getattr(item, "assetPath", "") or "").strip()
+                    except Exception:
+                        asset = ""
+                    if asset:
+                        refs.add(asset)
+        children = {}
+        try:
+            children = dict(getattr(prim_spec, "nameChildren", {}) or {})
+        except Exception:
+            children = {}
+        for child in children.values():
+            _walk_prim_spec(child)
+
+    try:
+        for prim_spec in list(getattr(layer, "rootPrims", []) or []):
+            _walk_prim_spec(prim_spec)
+    except Exception:
+        return None
+
+    return sorted(refs)
 
 
 def _extract_refs(text: str) -> List[str]:
     refs: List[str] = []
     for match in REF_PATTERN.finditer(text):
         ref = match.group(1).strip()
-        if ref:
+        if _is_plausible_ref(ref):
             refs.append(ref)
     return refs
 
@@ -70,7 +131,7 @@ def _resolve_ref_path(ref: str, *, owner_file: Path, assets_root: Path) -> Optio
     if not ref or ref.startswith(SKIP_PREFIXES):
         return None
     ref = ref.split("#", 1)[0].strip()
-    if not ref:
+    if not _is_plausible_ref(ref):
         return None
 
     # Omniverse-style absolute references mapped into local assets root.
@@ -89,17 +150,32 @@ def _resolve_ref_path(ref: str, *, owner_file: Path, assets_root: Path) -> Optio
         # Keep "/NVIDIA" marker support for environments mirroring Nucleus roots.
         return assets_root.parent.parent.parent / ref.lstrip("/")
 
-    p = Path(ref)
-    if p.is_absolute():
-        return p
-    return (owner_file.parent / p).resolve()
+    try:
+        p = Path(ref)
+        if p.is_absolute():
+            return p
+        return (owner_file.parent / p).resolve()
+    except Exception:
+        return None
 
 
-def _scan_transitive_dependencies(root_usd: Path, *, assets_root: Path) -> Tuple[Set[Path], List[Dict[str, str]], int]:
+def _refs_for_usd(path: Path) -> List[str]:
+    structured = _structured_refs_from_usd(path)
+    if structured is not None:
+        return [r for r in structured if _is_plausible_ref(r)]
+    return _extract_refs(_read_text_for_reference_scan(path))
+
+
+def _scan_transitive_dependencies(
+    root_usd: Path,
+    *,
+    assets_root: Path,
+) -> Tuple[Set[Path], List[Dict[str, str]], int, int]:
     queue: List[Path] = [root_usd.resolve()]
     visited_usd: Set[Path] = set()
     missing: List[Dict[str, str]] = []
     checked_refs = 0
+    skipped_refs = 0
 
     while queue:
         usd_path = queue.pop()
@@ -111,30 +187,43 @@ def _scan_transitive_dependencies(root_usd: Path, *, assets_root: Path) -> Tuple
             missing.append({"owner": str(usd_path), "ref": "(root)", "resolved": str(usd_path)})
             continue
 
-        text = _read_text_for_reference_scan(usd_path)
-        refs = _extract_refs(text)
+        refs = _refs_for_usd(usd_path)
         for ref in refs:
             resolved = _resolve_ref_path(ref, owner_file=usd_path, assets_root=assets_root)
             if resolved is None:
+                skipped_refs += 1
                 continue
             checked_refs += 1
-            if not resolved.exists():
+            try:
+                exists = resolved.exists()
+            except OSError as exc:
+                missing.append(
+                    {
+                        "owner": str(usd_path),
+                        "ref": ref,
+                        "resolved": str(resolved),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            if not exists:
                 missing.append({"owner": str(usd_path), "ref": ref, "resolved": str(resolved)})
                 continue
             if resolved.suffix.lower() in USD_EXTS:
                 queue.append(resolved)
 
-    return visited_usd, missing, checked_refs
+    return visited_usd, missing, checked_refs, skipped_refs
 
 
 def validate_ridgeback_assets(root_usd: Path, *, assets_root: Path) -> Dict[str, object]:
-    visited_usd, missing, checked_refs = _scan_transitive_dependencies(root_usd, assets_root=assets_root)
+    visited_usd, missing, checked_refs, skipped_refs = _scan_transitive_dependencies(root_usd, assets_root=assets_root)
     return {
         "root_usd": str(root_usd),
         "assets_root": str(assets_root),
         "visited_usd_files": sorted(str(p) for p in visited_usd),
         "visited_usd_count": len(visited_usd),
         "checked_references_count": checked_refs,
+        "skipped_references_count": skipped_refs,
         "missing_references": missing,
         "missing_count": len(missing),
         "ok": len(missing) == 0,

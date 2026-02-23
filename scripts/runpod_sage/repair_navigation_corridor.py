@@ -107,32 +107,88 @@ def _find_first_type(objects: Sequence[Dict[str, Any]], tokens: Iterable[str]) -
     return None
 
 
-def _infer_pick_place_ids(layout: Dict[str, Any], objects: Sequence[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+def _extract_task_targets(task_desc: str) -> Tuple[Optional[str], Optional[str]]:
+    raw = str(task_desc or "").lower()
+    if not raw:
+        return None, None
+    task = " ".join(raw.replace("_", " ").split())
+    pick_hint = None
+    place_hint = None
+    for tok in _PICK_PREF:
+        if tok in task:
+            pick_hint = tok
+            break
+    for tok in _SURFACE_PREF:
+        if tok in task:
+            place_hint = tok
+            break
+    return pick_hint, place_hint
+
+
+def _infer_pick_place_ids(
+    layout: Dict[str, Any],
+    objects: Sequence[Dict[str, Any]],
+    *,
+    pick_object_id: str,
+    place_surface_id: str,
+    task_desc: str,
+) -> Tuple[Optional[str], Optional[str], str]:
     pa = layout.get("policy_analysis", {})
     if not isinstance(pa, dict):
         pa = {}
     utd = pa.get("updated_task_decomposition")
     pick_id = None
-    place_surface_id = None
+    place_id = None
+    pick_source = "heuristic"
+    place_source = "heuristic"
+
+    if pick_object_id and _find_by_id(objects, pick_object_id) is not None:
+        pick_id = str(pick_object_id)
+        pick_source = "cli_override"
+    if place_surface_id and _find_by_id(objects, place_surface_id) is not None:
+        place_id = str(place_surface_id)
+        place_source = "cli_override"
+
     if isinstance(utd, list):
         for step in utd:
             if not isinstance(step, dict):
                 continue
             action = _norm(step.get("action"))
-            if "pick" in action and step.get("target_object_id"):
-                pick_id = str(step["target_object_id"])
-            if "place" in action and step.get("location_object_id"):
-                place_surface_id = str(step["location_object_id"])
+            if not pick_id and "pick" in action and step.get("target_object_id"):
+                maybe = str(step["target_object_id"])
+                if _find_by_id(objects, maybe) is not None:
+                    pick_id = maybe
+                    pick_source = "task_decomposition"
+            if not place_id and "place" in action and step.get("location_object_id"):
+                maybe = str(step["location_object_id"])
+                if _find_by_id(objects, maybe) is not None:
+                    place_id = maybe
+                    place_source = "task_decomposition"
+
+    pick_hint, place_hint = _extract_task_targets(task_desc)
+    if not pick_id and pick_hint:
+        p = _find_first_type(objects, (pick_hint,))
+        if p is not None and p.get("id") is not None:
+            pick_id = str(p["id"])
+            pick_source = "task_desc"
+    if not place_id and place_hint:
+        s = _find_first_type(objects, (place_hint,))
+        if s is not None and s.get("id") is not None:
+            place_id = str(s["id"])
+            place_source = "task_desc"
 
     if pick_id is None:
         p = _find_first_type(objects, _PICK_PREF)
         if p is not None and p.get("id") is not None:
             pick_id = str(p["id"])
-    if place_surface_id is None:
+            pick_source = "heuristic"
+    if place_id is None:
         s = _find_first_type(objects, _SURFACE_PREF)
         if s is not None and s.get("id") is not None:
-            place_surface_id = str(s["id"])
-    return pick_id, place_surface_id
+            place_id = str(s["id"])
+            place_source = "heuristic"
+    source = pick_source if pick_source == place_source else f"mixed:{pick_source}+{place_source}"
+    return pick_id, place_id, source
 
 
 def _pt_seg_dist(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
@@ -239,6 +295,9 @@ def main() -> int:
     ap.add_argument("--max_moves", type=int, default=8, help="Max blocker objects to move")
     ap.add_argument("--aggressive", action="store_true", help="Move more blockers and with larger shift")
     ap.add_argument("--dry_run", action="store_true", help="Analyze but do not write file")
+    ap.add_argument("--pick-object-id", default="", help="Explicit pick object id override")
+    ap.add_argument("--place-surface-id", default="", help="Explicit place surface id override")
+    ap.add_argument("--task-desc", default="", help="Task text used for anchor resolution")
     args = ap.parse_args()
 
     path = Path(args.layout_json)
@@ -251,7 +310,13 @@ def main() -> int:
         print("[nav-repair] no objects found; skipping")
         return 0
 
-    pick_id, place_id = _infer_pick_place_ids(layout, objects)
+    pick_id, place_id, anchor_source = _infer_pick_place_ids(
+        layout,
+        objects,
+        pick_object_id=str(args.pick_object_id or ""),
+        place_surface_id=str(args.place_surface_id or ""),
+        task_desc=str(args.task_desc or ""),
+    )
     if not pick_id or not place_id:
         print("[nav-repair] could not infer pick/place anchors; skipping")
         return 0
@@ -303,6 +368,7 @@ def main() -> int:
         "[nav-repair] anchors:",
         f"pick={pick_id}",
         f"place={place_id}",
+        f"source={anchor_source}",
         f"corridor_m={float(args.min_corridor_m):.2f}",
         f"moved={len(moved)}",
     )
