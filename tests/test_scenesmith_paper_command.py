@@ -473,18 +473,22 @@ def test_official_scenesmith_reuses_existing_run_dir_without_subprocess(
     output_dir = existing_run_dir / "scene_demo_resume" / "scene_000" / "combined_house"
     output_dir.mkdir(parents=True, exist_ok=True)
     house_state = {
-        "objects": [
-            {
-                "id": "table_001",
-                "semantic_class": "table",
-                "extent": {"x": 1.2, "y": 0.8, "z": 0.7},
-                "pose": {
-                    "position": {"x": 0.3, "y": 0.0, "z": -0.2},
-                    "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
-                },
-                "floor_object": True,
+        "rooms": {
+            "kitchen": {
+                "objects": [
+                    {
+                        "id": "table_001",
+                        "semantic_class": "table",
+                        "extent": {"x": 1.2, "y": 0.8, "z": 0.7},
+                        "pose": {
+                            "position": {"x": 0.3, "y": 0.0, "z": -0.2},
+                            "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                        },
+                        "floor_object": True,
+                    }
+                ]
             }
-        ]
+        }
     }
     (output_dir / "house_state.json").write_text(json.dumps(house_state), encoding="utf-8")
 
@@ -512,3 +516,29 @@ def test_official_scenesmith_reuses_existing_run_dir_without_subprocess(
     assert len(attempts) == 1
     assert attempts[0]["status"] == "reused_existing_run"
     assert existing_run_dir.exists()
+
+
+@pytest.mark.unit
+def test_collect_raw_objects_handles_rooms_dict_schema() -> None:
+    module = _load_module("scenesmith_paper_command_rooms_schema_module", "scenesmith-service/scenesmith_paper_command.py")
+    house_state = {
+        "rooms": {
+            "kitchen": {
+                "objects": [
+                    {
+                        "id": "salt_shaker_1",
+                        "semantic_class": "salt_shaker",
+                        "pose": {
+                            "position": {"x": 1.2, "y": 0.87, "z": -0.4},
+                            "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                        },
+                        "extent": {"x": 0.08, "y": 0.12, "z": 0.08},
+                    }
+                ]
+            }
+        }
+    }
+    objects = module._collect_raw_objects(house_state)
+    assert len(objects) == 1
+    assert objects[0]["id"] == "salt_shaker_1"
+    assert objects[0]["semantic_class"] == "salt_shaker"

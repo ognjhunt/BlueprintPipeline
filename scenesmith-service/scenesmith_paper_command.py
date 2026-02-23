@@ -448,15 +448,141 @@ def _object_from_house_state(
 
 
 def _collect_raw_objects(house_state: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    objects = house_state.get("objects")
-    if isinstance(objects, list):
-        return [dict(item) for item in objects if isinstance(item, Mapping)]
+    def _looks_like_object(candidate: Mapping[str, Any]) -> bool:
+        identity_present = any(
+            candidate.get(key) is not None
+            for key in ("id", "object_id", "source_id", "semantic_class", "class_name", "category", "type", "name")
+        )
+        if not identity_present:
+            return False
+
+        if isinstance(candidate.get("extent"), Mapping):
+            return True
+        if isinstance(candidate.get("dimensions"), Mapping):
+            return True
+        if isinstance(candidate.get("pose"), Mapping):
+            return True
+        if isinstance(candidate.get("transform"), Mapping):
+            return True
+        if isinstance(candidate.get("position"), Mapping):
+            return True
+        return False
+
+    def _normalize_candidate(candidate: Mapping[str, Any], *, fallback_index: int) -> Dict[str, Any]:
+        out = dict(candidate)
+
+        semantic = (
+            out.get("semantic_class")
+            or out.get("class_name")
+            or out.get("category")
+            or out.get("type")
+            or out.get("name")
+            or "object"
+        )
+        out["semantic_class"] = str(semantic).strip() or "object"
+
+        obj_id = out.get("id")
+        if obj_id is None or str(obj_id).strip() == "":
+            alt_id = out.get("object_id") or out.get("source_id") or out.get("name")
+            out["id"] = str(alt_id).strip() if alt_id else f"obj_{fallback_index:03d}"
+
+        extent = out.get("extent")
+        if not isinstance(extent, Mapping):
+            dims = out.get("dimensions") if isinstance(out.get("dimensions"), Mapping) else {}
+            out["extent"] = {
+                "x": dims.get("x", dims.get("width", dims.get("w", 0.3))),
+                "y": dims.get("y", dims.get("height", dims.get("h", 0.3))),
+                "z": dims.get("z", dims.get("depth", dims.get("length", dims.get("l", 0.3)))),
+            }
+
+        pose = out.get("pose")
+        if not isinstance(pose, Mapping):
+            transform = out.get("transform") if isinstance(out.get("transform"), Mapping) else {}
+            position = (
+                transform.get("position")
+                if isinstance(transform.get("position"), Mapping)
+                else out.get("position")
+                if isinstance(out.get("position"), Mapping)
+                else {}
+            )
+            orientation = {}
+            if isinstance(transform.get("rotation_quaternion"), Mapping):
+                orientation = dict(transform.get("rotation_quaternion") or {})
+            elif isinstance(transform.get("orientation"), Mapping):
+                orientation = dict(transform.get("orientation") or {})
+            elif isinstance(out.get("orientation"), Mapping):
+                orientation = dict(out.get("orientation") or {})
+            elif isinstance(out.get("rotation_quaternion"), Mapping):
+                orientation = dict(out.get("rotation_quaternion") or {})
+            out["pose"] = {"position": dict(position or {}), "orientation": dict(orientation or {})}
+
+        if "floor_object" not in out and isinstance(out.get("sim_role"), str):
+            out["floor_object"] = str(out.get("sim_role")).strip().lower() in {"static", "articulated_furniture"}
+
+        articulation = out.get("articulation")
+        if isinstance(articulation, Mapping):
+            if "joint_type" not in out and articulation.get("joint_type") is not None:
+                out["joint_type"] = articulation.get("joint_type")
+            if "requires_articulation" not in out and articulation.get("required") is not None:
+                out["requires_articulation"] = bool(articulation.get("required"))
+
+        return out
+
+    def _walk(node: Any) -> List[Mapping[str, Any]]:
+        out: List[Mapping[str, Any]] = []
+        if isinstance(node, Mapping):
+            out.append(node)
+            for value in node.values():
+                out.extend(_walk(value))
+        elif isinstance(node, list):
+            for value in node:
+                out.extend(_walk(value))
+        return out
+
+    def _dedupe_key(item: Mapping[str, Any]) -> str:
+        item_id = str(item.get("id") or "").strip()
+        if item_id:
+            return f"id:{item_id.lower()}"
+        pose = item.get("pose") if isinstance(item.get("pose"), Mapping) else {}
+        position = pose.get("position") if isinstance(pose.get("position"), Mapping) else {}
+        extent = item.get("extent") if isinstance(item.get("extent"), Mapping) else {}
+        semantic = str(item.get("semantic_class") or "").strip().lower()
+        return (
+            "sig:"
+            f"{semantic}:"
+            f"{_safe_float(position.get('x'), default=0.0):.4f}:"
+            f"{_safe_float(position.get('y'), default=0.0):.4f}:"
+            f"{_safe_float(position.get('z'), default=0.0):.4f}:"
+            f"{_safe_float(extent.get('x'), default=0.0):.4f}:"
+            f"{_safe_float(extent.get('y'), default=0.0):.4f}:"
+            f"{_safe_float(extent.get('z'), default=0.0):.4f}"
+        )
 
     combined: List[Dict[str, Any]] = []
-    for key in ("furniture", "surface_objects", "ceiling_lights"):
+    seen: set[str] = set()
+
+    def _append_if_object(candidate: Any) -> None:
+        if not isinstance(candidate, Mapping):
+            return
+        if not _looks_like_object(candidate):
+            return
+        normalized = _normalize_candidate(candidate, fallback_index=len(combined) + 1)
+        key = _dedupe_key(normalized)
+        if key in seen:
+            return
+        seen.add(key)
+        combined.append(normalized)
+
+    for key in ("objects", "furniture", "surface_objects", "ceiling_lights"):
         payload = house_state.get(key)
         if isinstance(payload, list):
-            combined.extend(dict(item) for item in payload if isinstance(item, Mapping))
+            for item in payload:
+                _append_if_object(item)
+    if combined:
+        return combined
+
+    for candidate in _walk(house_state):
+        _append_if_object(candidate)
     return combined
 
 
