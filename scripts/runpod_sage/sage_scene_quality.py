@@ -4,7 +4,7 @@ Fast, deterministic scene quality gates + bounded repairs for SAGE layout dirs.
 
 This is intentionally CPU-only and does not require Isaac Sim.
 
-It operates on SAGE "room dict" JSON files:
+It operates on SAGE layout JSON files:
   - room_*.json
   - pose augmentation variants referenced by pose_aug_*/meta.json
 
@@ -50,6 +50,21 @@ def _load_json(path: Path) -> Any:
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _extract_room_payload(payload: Any, *, path: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Return (full_payload, room_dict) for room-level quality checks/repairs."""
+    if not isinstance(payload, dict):
+        raise ValueError("room json is not an object")
+    if isinstance(payload.get("objects"), list):
+        return payload, payload
+    rooms = payload.get("rooms")
+    if isinstance(rooms, list) and rooms and isinstance(rooms[0], dict):
+        return payload, rooms[0]
+    room = payload.get("room")
+    if isinstance(room, dict):
+        return payload, room
+    raise ValueError(f"unsupported layout shape in {path}")
 
 
 def _normalize_type(s: str) -> str:
@@ -921,9 +936,8 @@ def main() -> int:
     any_changed = False
     for path in targets:
         try:
-            room = _load_json(path)
-            if not isinstance(room, dict):
-                raise ValueError("room json is not an object")
+            payload = _load_json(path)
+            payload_to_write, room = _extract_room_payload(payload, path=path)
         except Exception as exc:
             per_file.append({"path": str(path), "error": f"failed_to_load: {exc}"})
             all_pass = False
@@ -942,7 +956,7 @@ def main() -> int:
         all_pass = all_pass and bool(rep.get("pass_after"))
 
         if args.write and bool(rep.get("changed")):
-            _write_json(path, room)
+            _write_json(path, payload_to_write)
 
     report = {
         "layout_dir": str(layout_dir),

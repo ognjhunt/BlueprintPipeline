@@ -418,6 +418,13 @@ def _runtime_provenance(
         "SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD": os.environ.get("SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD", ""),
         "SAGE_DOMAIN_RAND": os.environ.get("SAGE_DOMAIN_RAND", "0"),
         "SAGE_RUN_ID": os.environ.get("SAGE_RUN_ID", ""),
+        "SAGE_REPLICATOR_FSD_MODE": os.environ.get("SAGE_REPLICATOR_FSD_MODE", ""),
+        "SAGE_REPLICATOR_RT_SUBFRAMES": os.environ.get("SAGE_REPLICATOR_RT_SUBFRAMES", ""),
+        "SAGE_REPLICATOR_PREWARM_STEPS": os.environ.get("SAGE_REPLICATOR_PREWARM_STEPS", ""),
+        "SAGE_REPLICATOR_STEP_EACH_FRAME": os.environ.get("SAGE_REPLICATOR_STEP_EACH_FRAME", ""),
+        "SAGE_ISAAC_RENDERER": os.environ.get("SAGE_ISAAC_RENDERER", ""),
+        "SAGE_ISAAC_MULTI_GPU": os.environ.get("SAGE_ISAAC_MULTI_GPU", ""),
+        "SAGE_ISAAC_MAX_GPU_COUNT": os.environ.get("SAGE_ISAAC_MAX_GPU_COUNT", ""),
     }
     return {
         "run_id": run_id,
@@ -657,12 +664,29 @@ def _capture_camera_frames(
     width: int,
     height: int,
     min_valid_depth_px: int,
+    prefer_replicator_step: bool = False,
+    replicator_rt_subframes: int = 4,
+    prime_before_read: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Capture one frame from both cameras, retrying a few simulation steps until
     shapes are valid, RGB is not fully black, and depth has enough valid pixels.
     """
+    def _step_for_capture() -> str:
+        if bool(prefer_replicator_step):
+            try:
+                import omni.replicator.core as rep
+
+                rep.orchestrator.step(rt_subframes=max(1, int(replicator_rt_subframes)))
+                return "replicator"
+            except Exception:
+                pass
+        world.step(render=True)
+        return "world"
+
     last_reason = "unknown"
+    if bool(prime_before_read):
+        _step_for_capture()
     for _ in range(max(1, int(max_extra_steps) + 1)):
         a_rgb = _annotator_data(annotators["agentview"]["rgb"], name="agentview_rgb")
         a_d = _annotator_data(annotators["agentview"]["depth"], name="agentview_depth")
@@ -704,7 +728,8 @@ def _capture_camera_frames(
             f"depth_minmax={float(np.nanmin(a_d_raw)) if a_d_raw.size else float('nan'):.4f}/"
             f"{float(np.nanmax(a_d_raw)) if a_d_raw.size else float('nan'):.4f}"
         )
-        world.step(render=True)
+        step_mode = _step_for_capture()
+        last_reason = f"{last_reason} step={step_mode}"
 
     raise RuntimeError(f"Camera capture did not become valid after retries: {last_reason}")
 
@@ -1015,6 +1040,24 @@ def _apply_xform(stage, prim_path: str, matrix: np.ndarray) -> None:
     xformable.ClearXformOpOrder()
     m = Gf.Matrix4d(*matrix.reshape(-1).tolist())
     xformable.AddTransformOp().Set(m)
+
+
+def _add_reference_prim(stage, prim_path: str, asset_path: str) -> None:
+    """
+    Add a USD reference using low-level USD APIs.
+
+    This avoids Kit command routing (`AddReference`) that has intermittently
+    asserted in headless runs under `carb.assets`.
+    """
+    from pxr import UsdGeom
+
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        prim = UsdGeom.Xform.Define(stage, prim_path).GetPrim()
+    refs = prim.GetReferences()
+    ok = refs.AddReference(str(asset_path))
+    if not ok:
+        raise RuntimeError(f"Failed to add USD reference: prim={prim_path} asset={asset_path}")
 
 
 def _define_camera(stage, prim_path: str, *, pos: np.ndarray, look_at: np.ndarray) -> None:
@@ -1534,6 +1577,14 @@ def main() -> None:
     if final_h5_path.exists():
         final_h5_path.unlink()
 
+    # Camera config (parsed before SimulationApp init so render resolution can be set in launch config).
+    res_env = os.getenv("SAGE_CAPTURE_RES", "640,480")
+    try:
+        width, height = [int(x) for x in res_env.split(",")]
+    except Exception:
+        width, height = (640, 480)
+        _log(f"WARNING: invalid SAGE_CAPTURE_RES='{res_env}', using {width}x{height}")
+
     # Isaac Sim initialization MUST come before omni imports.
     # Prevent Kit from interpreting application-specific CLI args.
     if unknown_args:
@@ -1541,7 +1592,28 @@ def main() -> None:
     sys.argv = [sys.argv[0]]
     from isaacsim.simulation_app import SimulationApp
 
-    sim_app = SimulationApp({"headless": bool(args.headless)})
+    sim_renderer = str(os.getenv("SAGE_ISAAC_RENDERER", "RaytracedLighting")).strip() or "RaytracedLighting"
+    sim_multi_gpu = _env_bool("SAGE_ISAAC_MULTI_GPU", default=False)
+    try:
+        sim_max_gpu_count = max(1, int(os.getenv("SAGE_ISAAC_MAX_GPU_COUNT", "1")))
+    except Exception:
+        sim_max_gpu_count = 1
+    sim_cfg = {
+        "headless": bool(args.headless),
+        "renderer": sim_renderer,
+        "width": int(width),
+        "height": int(height),
+        "sync_loads": True,
+        "multi_gpu": bool(sim_multi_gpu),
+        "max_gpu_count": int(sim_max_gpu_count if sim_multi_gpu else 1),
+    }
+    _log(
+        "SimulationApp launch config: "
+        f"headless={sim_cfg['headless']} renderer={sim_cfg['renderer']} "
+        f"res={sim_cfg['width']}x{sim_cfg['height']} multi_gpu={sim_cfg['multi_gpu']} "
+        f"max_gpu_count={sim_cfg['max_gpu_count']}"
+    )
+    sim_app = SimulationApp(sim_cfg)
     try:
         import omni
         import omni.usd
@@ -1551,13 +1623,13 @@ def main() -> None:
 
         import omni.replicator.core as rep
         from omni.isaac.core import World
-        from omni.isaac.core.utils.stage import add_reference_to_stage
+
+        try:
+            rep.orchestrator.set_capture_on_play(False)
+        except Exception as rep_cfg_err:
+            _log(f"WARNING: failed to configure Replicator capture_on_play: {rep_cfg_err}")
 
         _configure_local_assets_root()
-
-        # Camera config
-        res_env = os.getenv("SAGE_CAPTURE_RES", "640,480")
-        width, height = [int(x) for x in res_env.split(",")]
 
         # Headless RTX render quality: disable DLSS (causes upscale artifacts at
         # low resolution), use direct lighting to avoid noisy path-tracing, and
@@ -1567,9 +1639,24 @@ def main() -> None:
             try:
                 import carb
                 settings = carb.settings.get_settings()
+                # Replicator RGB pipelines can emit empty LdrColor host buffers in
+                # headless mode when Fabric Scene Delegate is enabled.
+                fsd_mode = str(os.getenv("SAGE_REPLICATOR_FSD_MODE", "off")).strip().lower()
+                if fsd_mode in {"off", "0", "false", "disable", "disabled"}:
+                    settings.set("/app/useFabricSceneDelegate", False)
+                    _log("Replicator compatibility: /app/useFabricSceneDelegate=0")
+                elif fsd_mode in {"on", "1", "true", "enable", "enabled"}:
+                    settings.set("/app/useFabricSceneDelegate", True)
+                    _log("Replicator compatibility: /app/useFabricSceneDelegate=1")
                 # Disable DLSS — it requires minimum 300px and causes uniform-brightness
                 # artifacts in headless mode.
                 settings.set("/rtx/post/dlss/enabled", False)
+                # Keep DLSS mode explicit for SDG pipelines where driver/runtime can
+                # silently override post settings.
+                try:
+                    settings.set("/rtx/post/dlss/execMode", int(os.getenv("SAGE_DLSS_EXEC_MODE", "2")))
+                except Exception:
+                    settings.set("/rtx/post/dlss/execMode", 2)
                 # Use higher sample count for less noisy output.
                 settings.set("/rtx/pathtracing/spp", 64)
                 settings.set("/rtx/pathtracing/totalSpp", 64)
@@ -1578,7 +1665,11 @@ def main() -> None:
                 settings.set("/rtx/renderResolution/height", height)
                 # Enable tone mapping for proper LDR output.
                 settings.set("/rtx/post/tonemap/enabled", True)
-                _log(f"Headless RTX settings applied: DLSS=off, spp=64, res={width}x{height}")
+                _log(
+                    "Headless RTX settings applied: "
+                    f"DLSS=off, spp=64, res={width}x{height}, "
+                    f"dlss_exec_mode={os.getenv('SAGE_DLSS_EXEC_MODE', '2')}"
+                )
             except Exception as rtx_err:
                 _log(f"WARNING: Could not apply headless RTX settings: {rtx_err}")
 
@@ -1699,7 +1790,7 @@ def main() -> None:
 
                 prim_path = f"/World/Objects/obj_{idx:03d}"
                 UsdGeom.Xform.Define(stage, prim_path)
-                add_reference_to_stage(str(usd_out), prim_path + "/Mesh")
+                _add_reference_prim(stage, prim_path + "/Mesh", str(usd_out))
                 source_to_prim[str(source_id)] = prim_path
 
                 # Compute scale to match target dimensions.
@@ -1766,7 +1857,7 @@ def main() -> None:
             robot_xform = "/World/Robot"
             robot_articulation = "/World/Robot/RidgebackFranka"
             UsdGeom.Xform.Define(stage, robot_xform)
-            add_reference_to_stage(_resolve_ridgeback_franka_usd(), robot_articulation)
+            _add_reference_prim(stage, robot_articulation, _resolve_ridgeback_franka_usd())
 
             return robot_xform, robot_articulation, physics_report, source_to_prim
 
@@ -1986,6 +2077,19 @@ def main() -> None:
             world.reset()
             for _ in range(max(0, int(args.render_warmup_frames))):
                 world.step(render=True)
+            replicator_rt_subframes = max(1, int(os.getenv("SAGE_REPLICATOR_RT_SUBFRAMES", "8")))
+            replicator_step_each_frame = _env_bool("SAGE_REPLICATOR_STEP_EACH_FRAME", default=False)
+            replicator_prewarm_steps = max(0, int(os.getenv("SAGE_REPLICATOR_PREWARM_STEPS", "4")))
+            if args.enable_cameras and args.headless and replicator_prewarm_steps > 0:
+                for _ in range(replicator_prewarm_steps):
+                    try:
+                        rep.orchestrator.step(rt_subframes=replicator_rt_subframes)
+                    except Exception:
+                        world.step(render=True)
+                _log(
+                    f"Replicator prewarm complete: steps={replicator_prewarm_steps} "
+                    f"rt_subframes={replicator_rt_subframes}"
+                )
 
             # Probe depth annotator after warmup — if the selected annotator produces
             # all-inf/NaN (common with RTX annotators in headless mode), fall back to
@@ -2035,6 +2139,9 @@ def main() -> None:
                         width=width,
                         height=height,
                         min_valid_depth_px=int(args.min_valid_depth_px),
+                        prefer_replicator_step=bool(args.headless),
+                        replicator_rt_subframes=int(replicator_rt_subframes),
+                        prime_before_read=True,
                     )
                 except Exception as warmup_exc:
                     detail = str(warmup_exc)
@@ -2394,6 +2501,8 @@ def main() -> None:
                                 width=width,
                                 height=height,
                                 min_valid_depth_px=int(args.min_valid_depth_px),
+                                prefer_replicator_step=bool(args.headless and replicator_step_each_frame),
+                                replicator_rt_subframes=int(replicator_rt_subframes),
                             )
                         except RuntimeError as sensor_exc:
                             sensor_frame_failures += 1

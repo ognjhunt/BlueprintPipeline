@@ -185,6 +185,18 @@ def _build_stage7_command_and_env(
     env.setdefault("SAGE_DOMAIN_RAND", "0")
     if run_id:
         env.setdefault("SAGE_RUN_ID", run_id)
+    keep_cuda_visible = str(os.environ.get("SAGE_KEEP_CUDA_VISIBLE_DEVICES", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not keep_cuda_visible and "CUDA_VISIBLE_DEVICES" in env:
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        _log(
+            "Unset CUDA_VISIBLE_DEVICES for Stage 7 Isaac Sim subprocess "
+            "(avoids CUDA/Omniverse device-enumeration mismatch warnings)."
+        )
     env["PYTHONSAFEPATH"] = "1"
     _sanitize_pythonpath_for_isaacsim(env)
     _configure_vulkan_icd_env(env)
@@ -786,17 +798,112 @@ def _init_curobo_motion_gen():
     return mg
 
 
+def _fallback_uv_from_mesh(mesh: Any) -> Dict[str, np.ndarray]:
+    vertices = np.asarray(getattr(mesh, "vertices", []), dtype=np.float32)
+    faces = np.asarray(getattr(mesh, "faces", []), dtype=np.int32)
+    if vertices.ndim != 2 or vertices.shape[0] == 0:
+        vertices = np.asarray(
+            [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]],
+            dtype=np.float32,
+        )
+    if faces.ndim != 2 or faces.shape[0] == 0:
+        faces = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+
+    xy = vertices[:, :2]
+    mn = xy.min(axis=0)
+    mx = xy.max(axis=0)
+    span = np.maximum(mx - mn, 1e-6)
+    vts = ((xy - mn) / span).astype(np.float32)
+    fts = faces.astype(np.int32, copy=False)
+    return {"vts": vts, "fts": fts}
+
+
+def _ensure_mesh_textures(mesh_info_dict: Dict[str, Any], variant_layout_json: Path) -> Dict[str, Any]:
+    """Fill missing mesh texture payloads with deterministic placeholders."""
+    def _write_solid_texture(path_stem: Path) -> Path:
+        # Prefer PNG via Pillow when available; fall back to portable pixmap
+        # with only stdlib dependencies.
+        try:
+            from PIL import Image  # type: ignore
+
+            png_path = path_stem.with_suffix(".png")
+            if not png_path.exists():
+                Image.new("RGB", (4, 4), (200, 200, 200)).save(png_path)
+            return png_path
+        except Exception:
+            ppm_path = path_stem.with_suffix(".ppm")
+            if not ppm_path.exists():
+                header = "P3\n4 4\n255\n"
+                pixel = "200 200 200"
+                body = "\n".join([pixel for _ in range(16)]) + "\n"
+                ppm_path.write_text(header + body, encoding="ascii")
+            return ppm_path
+
+    layout_dir = variant_layout_json.parent.parent
+    fallback_dir = layout_dir / "materials_fallback"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_solid_texture(fallback_dir / "default_texture")
+
+    for mesh_id, mesh_info in list(mesh_info_dict.items()):
+        if not isinstance(mesh_info, dict):
+            continue
+        mesh = mesh_info.get("mesh")
+        if mesh is None:
+            continue
+
+        tex = mesh_info.get("texture")
+        tex_ok = (
+            isinstance(tex, dict)
+            and isinstance(tex.get("vts"), np.ndarray)
+            and isinstance(tex.get("fts"), np.ndarray)
+            and bool(str(tex.get("texture_map_path") or "").strip())
+            and Path(str(tex.get("texture_map_path"))).exists()
+        )
+        if tex_ok:
+            continue
+
+        uv = _fallback_uv_from_mesh(mesh)
+        if isinstance(tex, dict):
+            vts = tex.get("vts")
+            fts = tex.get("fts")
+            if isinstance(vts, np.ndarray) and vts.size > 0:
+                uv["vts"] = vts
+            if isinstance(fts, np.ndarray) and fts.size > 0:
+                uv["fts"] = fts
+
+        safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(mesh_id))[:96] or "mesh"
+        tex_path = _write_solid_texture(fallback_dir / f"{safe_id}_texture")
+
+        mesh_info["texture"] = {
+            "vts": uv["vts"],
+            "fts": uv["fts"],
+            "texture_map_path": str(tex_path),
+        }
+
+    return mesh_info_dict
+
+
 def _build_mesh_dict_list(variant_layout_json: Path, room_id: str):
     """Convert a layout JSON into the mesh_dict_list that M2T2 expects."""
     from tex_utils import dict_to_floor_plan, export_single_room_layout_to_mesh_dict_list
 
     layout_data = _load_json(variant_layout_json)
+    if (
+        isinstance(layout_data, dict)
+        and "rooms" not in layout_data
+        and isinstance(layout_data.get("objects"), list)
+    ):
+        # Backward compatibility for older SceneSmith bridge outputs that wrote
+        # variant JSONs as flat room dicts instead of layout dicts.
+        layout_data = {"rooms": [layout_data]}
     layout = dict_to_floor_plan(layout_data)
     # Use the first room if room_id not found (single-room layouts).
     rid = room_id
     if not any(r.id == rid for r in layout.rooms):
         rid = layout.rooms[0].id
     mesh_info_dict = export_single_room_layout_to_mesh_dict_list(layout, rid)
+    mesh_info_dict = _ensure_mesh_textures(mesh_info_dict, variant_layout_json)
     return mesh_info_dict
 
 

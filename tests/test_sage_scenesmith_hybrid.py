@@ -1,6 +1,11 @@
+import json
 import math
+import sys
+import types
+from pathlib import Path
 
 import pytest
+import numpy as np
 
 
 @pytest.mark.unit
@@ -227,3 +232,202 @@ def test_scenesmith_to_sage_room_bounds_and_shift_positive():
     assert min_y >= margin - 1e-6
     assert max_x <= float(dims["width"]) - margin + 1e-6
     assert max_y <= float(dims["length"]) - margin + 1e-6
+
+
+@pytest.mark.unit
+def test_scenesmith_to_sage_reuses_existing_glb_matches_by_object_tokens(tmp_path):
+    from scripts.runpod_sage import scenesmith_to_sage_layout as conv
+
+    run_dir = tmp_path / "run"
+    house_state_dir = run_dir / "scene_demo_resume" / "scene_000" / "combined_house"
+    house_state_dir.mkdir(parents=True, exist_ok=True)
+    house_state_path = house_state_dir / "house_state.json"
+    house_state_path.write_text(
+        json.dumps(
+            {
+                "rooms": {
+                    "kitchen": {
+                        "objects": [
+                            {
+                                "id": "salt_shaker_1",
+                                "semantic_class": "salt_shaker",
+                                "pose": {"position": {"x": 0, "y": 0, "z": 0}},
+                                "extent": {"x": 0.1, "y": 0.1, "z": 0.2},
+                            },
+                            {
+                                "id": "mug_0",
+                                "semantic_class": "mug",
+                                "pose": {"position": {"x": 1, "y": 0, "z": 0}},
+                                "extent": {"x": 0.1, "y": 0.1, "z": 0.1},
+                            },
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    glb_salt = run_dir / "generated_assets" / "salt_shaker_1771814906.glb"
+    glb_mug = run_dir / "generated_assets" / "mug_1771814907.glb"
+    glb_salt.parent.mkdir(parents=True, exist_ok=True)
+    glb_salt.write_bytes(b"dummy")
+    glb_mug.write_bytes(b"dummy")
+
+    raw_objects = [
+        {"id": "salt_shaker_1", "name": "salt shaker", "category": "salt_shaker"},
+        {"id": "mug_0", "name": "mug", "category": "mug"},
+    ]
+    response = {
+        "paper_stack": {
+            "run_dir": str(run_dir),
+            "house_state_path": str(house_state_path),
+        }
+    }
+
+    pool = conv._collect_existing_glb_pool(response=response, raw_objects=raw_objects)
+    first = conv._pick_existing_glb_for_object(pool, raw_objects[0])
+    second = conv._pick_existing_glb_for_object(pool, raw_objects[1])
+
+    assert first is not None
+    assert second is not None
+    assert first.name.startswith("salt_shaker")
+    assert second.name.startswith("mug")
+    assert first != second
+
+
+@pytest.mark.unit
+def test_scenesmith_to_sage_glb_match_avoids_partial_token_false_positive(tmp_path):
+    from scripts.runpod_sage import scenesmith_to_sage_layout as conv
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    wall_glb = run_dir / "generated_assets" / "north_wall_1771814907.glb"
+    wall_glb.parent.mkdir(parents=True, exist_ok=True)
+    wall_glb.write_bytes(b"dummy")
+
+    response = {"paper_stack": {"run_dir": str(run_dir), "house_state_path": ""}}
+    raw_objects = [{"id": "wall_clock_1", "name": "wall clock", "category": "wall_clock"}]
+    pool = conv._collect_existing_glb_pool(response=response, raw_objects=raw_objects)
+    picked = conv._pick_existing_glb_for_object(pool, raw_objects[0])
+    assert picked is None
+
+
+@pytest.mark.unit
+def test_scenesmith_to_sage_glb_warm_match_avoids_substring_false_positive(tmp_path):
+    from scripts.runpod_sage import scenesmith_to_sage_layout as conv
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    template_glb = run_dir / "generated_assets" / "template_plate_holder.glb"
+    template_glb.parent.mkdir(parents=True, exist_ok=True)
+    template_glb.write_bytes(b"dummy")
+
+    response = {"paper_stack": {"run_dir": str(run_dir), "house_state_path": ""}}
+    raw_objects = [{"id": "plate_1", "name": "plate", "category": "plate"}]
+    pool = conv._collect_existing_glb_pool(response=response, raw_objects=raw_objects)
+    picked = conv._pick_existing_glb_for_object(pool, raw_objects[0])
+    assert picked is None
+
+
+@pytest.mark.unit
+def test_scenesmith_to_sage_layout_payload_wraps_room_with_rooms_key():
+    from scripts.runpod_sage import scenesmith_to_sage_layout as conv
+
+    room = {
+        "room_type": "kitchen",
+        "dimensions": {"width": 6.0, "length": 5.0, "height": 3.0},
+        "seed": 123,
+        "scene_source": "scenesmith",
+        "objects": [{"id": "salt_0", "type": "salt_shaker"}],
+        "policy_analysis": {"task": "pick and place"},
+    }
+    payload = conv._single_room_layout_payload(room, layout_id="layout_test")
+    assert payload["layout_id"] == "layout_test"
+    assert isinstance(payload.get("rooms"), list) and len(payload["rooms"]) == 1
+    assert payload["rooms"][0]["objects"][0]["id"] == "salt_0"
+    assert payload["policy_analysis"]["task"] == "pick and place"
+
+
+@pytest.mark.unit
+def test_sage_scene_quality_extract_room_payload_accepts_layout_wrapper(tmp_path):
+    from scripts.runpod_sage import sage_scene_quality as q
+
+    payload = {
+        "layout_id": "layout_test",
+        "rooms": [
+            {
+                "room_type": "kitchen",
+                "dimensions": {"width": 4.0, "length": 4.0, "height": 3.0},
+                "objects": [],
+            }
+        ],
+    }
+    full, room = q._extract_room_payload(payload, path=tmp_path / "variant.json")
+    assert full is payload
+    assert room is payload["rooms"][0]
+
+
+@pytest.mark.unit
+def test_stage567_build_mesh_dict_list_accepts_flat_room_variant(tmp_path, monkeypatch):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as stage567
+
+    variant_json = tmp_path / "variant_000.json"
+    variant_json.write_text(
+        json.dumps(
+            {
+                "room_type": "kitchen",
+                "dimensions": {"width": 4.0, "length": 4.0, "height": 3.0},
+                "objects": [{"id": "salt_0", "type": "salt_shaker"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    seen = {}
+
+    def _fake_dict_to_floor_plan(layout_data):
+        seen["layout_data"] = layout_data
+        room = types.SimpleNamespace(id="room_0")
+        return types.SimpleNamespace(rooms=[room])
+
+    def _fake_export_single_room_layout_to_mesh_dict_list(layout, rid):
+        return {"rid": rid, "room_count": len(layout.rooms)}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "tex_utils",
+        types.SimpleNamespace(
+            dict_to_floor_plan=_fake_dict_to_floor_plan,
+            export_single_room_layout_to_mesh_dict_list=_fake_export_single_room_layout_to_mesh_dict_list,
+        ),
+    )
+
+    out = stage567._build_mesh_dict_list(variant_json, "room_0")
+    assert out["rid"] == "room_0"
+    assert out["room_count"] == 1
+    assert isinstance(seen["layout_data"].get("rooms"), list)
+
+
+@pytest.mark.unit
+def test_stage567_ensure_mesh_textures_fills_missing_texture(tmp_path):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as stage567
+
+    class _Mesh:
+        def __init__(self):
+            self.vertices = np.asarray(
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+                dtype=np.float32,
+            )
+            self.faces = np.asarray([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+
+    variant_json = tmp_path / "layout_foo" / "pose_aug_0" / "variant_000.json"
+    variant_json.parent.mkdir(parents=True, exist_ok=True)
+    variant_json.write_text("{}", encoding="utf-8")
+
+    mesh_info = {"salt_shaker_0": {"mesh": _Mesh(), "texture": None}}
+    out = stage567._ensure_mesh_textures(mesh_info, variant_json)
+    tex = out["salt_shaker_0"]["texture"]
+    assert isinstance(tex["vts"], np.ndarray)
+    assert isinstance(tex["fts"], np.ndarray)
+    assert Path(tex["texture_map_path"]).exists()

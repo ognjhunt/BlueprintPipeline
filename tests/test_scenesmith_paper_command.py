@@ -542,3 +542,97 @@ def test_collect_raw_objects_handles_rooms_dict_schema() -> None:
     assert len(objects) == 1
     assert objects[0]["id"] == "salt_shaker_1"
     assert objects[0]["semantic_class"] == "salt_shaker"
+
+
+@pytest.mark.unit
+def test_collect_scenesmith_yaml_scores_synthesises_critic_payload(tmp_path: Path) -> None:
+    """Verify that SceneSmith YAML score files produce valid critic payload."""
+    module = _load_module("scenesmith_paper_command_yaml_scores", "scenesmith-service/scenesmith_paper_command.py")
+
+    # Create a SceneSmith-style directory with scores.yaml files
+    furniture_dir = tmp_path / "scene_000" / "room_kitchen" / "scene_states" / "furniture"
+    furniture_dir.mkdir(parents=True)
+    (furniture_dir / "scores.yaml").write_text(
+        "Realism:\n  grade: 8\n  comment: good\n"
+        "Functionality:\n  grade: 9\n  comment: works\n"
+        "Layout:\n  grade: 9\n  comment: nice\n"
+        "Holistic Completeness:\n  grade: 9\n  comment: complete\n"
+        "Prompt Following:\n  grade: 10\n  comment: perfect\n"
+        "Reachability:\n  grade: 10\n  comment: reachable\n"
+        "summary: overall good\n",
+        encoding="utf-8",
+    )
+
+    wall_dir = tmp_path / "scene_000" / "room_kitchen" / "scene_states" / "wall"
+    wall_dir.mkdir(parents=True)
+    (wall_dir / "scores.yaml").write_text(
+        "Realism:\n  grade: 9\n  comment: realistic\n"
+        "Functionality:\n  grade: 9\n  comment: functional\n"
+        "Layout:\n  grade: 8\n  comment: ok\n"
+        "Holistic Completeness:\n  grade: 9\n  comment: complete\n"
+        "Prompt Following:\n  grade: 10\n  comment: follows\n"
+        "summary: good wall\n",
+        encoding="utf-8",
+    )
+
+    result = module._collect_scenesmith_yaml_scores(tmp_path)
+
+    # All three required keys must be present
+    assert "quality_gate_report" in result
+    assert "critic_scores" in result
+    assert "faithfulness_report" in result
+
+    # quality_gate_report
+    qgr = result["quality_gate_report"]
+    assert qgr["all_pass"] is True
+    assert qgr["status"] == "pass"
+    assert isinstance(qgr["checks"], list)
+    assert len(qgr["checks"]) == 2
+
+    # critic_scores: list with 'total' per stage
+    cs = result["critic_scores"]
+    assert len(cs) == 2
+    for entry in cs:
+        assert "total" in entry
+        assert entry["total"] >= 6.0
+
+    # faithfulness_report: derived from Prompt Following grades
+    fr = result["faithfulness_report"]
+    assert fr["score"] == 10.0  # both stages have PF=10
+
+
+@pytest.mark.unit
+def test_collect_critic_outputs_falls_back_to_yaml(tmp_path: Path) -> None:
+    """_collect_critic_outputs uses YAML fallback when JSON has no critic keys."""
+    module = _load_module("scenesmith_paper_command_yaml_fallback", "scenesmith-service/scenesmith_paper_command.py")
+
+    # Minimal house_state with no critic keys
+    hs_dir = tmp_path / "scene_000" / "combined_house"
+    hs_dir.mkdir(parents=True)
+    house_state = {"rooms": {"kitchen": {"objects": []}}}
+    hs_path = hs_dir / "house_state.json"
+    hs_path.write_text(json.dumps(house_state), encoding="utf-8")
+
+    # Add a scores.yaml
+    scores_dir = tmp_path / "scene_000" / "room_kitchen" / "scene_states" / "furniture"
+    scores_dir.mkdir(parents=True)
+    (scores_dir / "scores.yaml").write_text(
+        "Realism:\n  grade: 7\n  comment: ok\n"
+        "Functionality:\n  grade: 8\n  comment: ok\n"
+        "Prompt Following:\n  grade: 9\n  comment: ok\n"
+        "summary: decent\n",
+        encoding="utf-8",
+    )
+
+    merged, summary = module._collect_critic_outputs(
+        run_dir=tmp_path,
+        house_state=house_state,
+        house_state_path=hs_path,
+    )
+
+    assert "quality_gate_report" in merged
+    assert "critic_scores" in merged
+    assert "faithfulness_report" in merged
+    assert merged["quality_gate_report"]["all_pass"] is True
+    assert merged["faithfulness_report"]["score"] == 9.0
+    assert "scores.yaml" in summary["source_files"][-1]

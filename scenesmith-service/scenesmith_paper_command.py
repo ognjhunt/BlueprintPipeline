@@ -822,6 +822,112 @@ def _iter_candidate_json_files(run_dir: Path) -> List[Path]:
     return out
 
 
+_YAML_GRADE_RE = re.compile(
+    r"^([\w][\w\s]*[\w])\s*:\s*\n\s+grade\s*:\s*(\d+)",
+    re.MULTILINE,
+)
+
+
+def _collect_scenesmith_yaml_scores(run_dir: Path) -> Dict[str, Any]:
+    """Scan SceneSmith ``scores.yaml`` files and synthesise critic payload.
+
+    SceneSmith stores per-stage critic scores in YAML files at paths like::
+
+        scene_000/room_kitchen/scene_states/<stage>/scores.yaml
+
+    Each file contains rubric categories (Realism, Functionality, Layout,
+    Holistic Completeness, Prompt Following, optionally Reachability) with
+    integer grades on a 1-10 scale.
+
+    Returns a dict that may contain ``quality_gate_report``,
+    ``critic_scores``, and ``faithfulness_report`` in the format the
+    downstream bridge expects.
+    """
+    yaml_files: List[Path] = []
+    seen_paths: set[str] = set()
+    for root in (run_dir, run_dir / "outputs"):
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("scores.yaml")):
+            resolved = str(path.resolve())
+            if resolved not in seen_paths:
+                seen_paths.add(resolved)
+                yaml_files.append(path)
+
+    if not yaml_files:
+        return {}
+
+    all_stage_scores: List[Dict[str, Any]] = []
+    all_grades: List[float] = []
+    prompt_following_grades: List[float] = []
+
+    for yaml_path in yaml_files:
+        try:
+            content = yaml_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        matches = _YAML_GRADE_RE.findall(content)
+        if not matches:
+            continue
+
+        stage_name = yaml_path.parent.name
+        stage_entry: Dict[str, Any] = {"stage": stage_name, "source": str(yaml_path)}
+        grades_in_stage: List[float] = []
+
+        for category, grade_str in matches:
+            category = category.strip()
+            grade = float(grade_str)
+            stage_entry[category.lower().replace(" ", "_")] = grade
+            grades_in_stage.append(grade)
+            all_grades.append(grade)
+            if category.lower() == "prompt following":
+                prompt_following_grades.append(grade)
+
+        if grades_in_stage:
+            stage_entry["total"] = round(sum(grades_in_stage) / len(grades_in_stage), 3)
+            all_stage_scores.append(stage_entry)
+
+    if not all_stage_scores:
+        return {}
+
+    overall_avg = sum(all_grades) / len(all_grades) if all_grades else 0.0
+
+    # quality_gate_report: pass if every stage average >= 6/10
+    min_acceptable = 6.0
+    checks = [
+        {
+            "stage": s["stage"],
+            "score": s["total"],
+            "passed": s["total"] >= min_acceptable,
+        }
+        for s in all_stage_scores
+    ]
+    all_pass = all(c["passed"] for c in checks)
+    quality_gate_report: Dict[str, Any] = {
+        "all_pass": all_pass,
+        "status": "pass" if all_pass else "fail",
+        "overall_score": round(overall_avg, 3),
+        "checks": checks,
+    }
+
+    # faithfulness_report: use Prompt Following grades (0-10 scale)
+    if prompt_following_grades:
+        faithfulness_avg = sum(prompt_following_grades) / len(prompt_following_grades)
+    else:
+        faithfulness_avg = overall_avg
+    faithfulness_report: Dict[str, Any] = {
+        "score": round(faithfulness_avg, 3),
+        "source": "scenesmith_yaml_scores",
+    }
+
+    return {
+        "quality_gate_report": quality_gate_report,
+        "critic_scores": all_stage_scores,
+        "faithfulness_report": faithfulness_report,
+    }
+
+
 def _collect_critic_outputs(
     *,
     run_dir: Path,
@@ -863,6 +969,17 @@ def _collect_critic_outputs(
         # Enough data collected; avoid scanning the whole run tree.
         if "critic_scores" in merged and "quality_gate_report" in merged and "faithfulness_report" in merged:
             break
+
+    # Fallback: synthesise from SceneSmith YAML score files when JSON
+    # scanning did not produce the three required critic keys.
+    needed = {"critic_scores", "quality_gate_report", "faithfulness_report"}
+    if not needed.issubset(merged.keys()):
+        yaml_payload = _collect_scenesmith_yaml_scores(run_dir)
+        for key, value in yaml_payload.items():
+            if key not in merged:
+                merged[key] = value
+        if yaml_payload:
+            source_files.append("scores.yaml (SceneSmith YAML synthesis)")
 
     summary = {
         "found_keys": sorted(list(merged.keys())),

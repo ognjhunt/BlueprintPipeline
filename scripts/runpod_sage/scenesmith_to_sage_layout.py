@@ -13,7 +13,7 @@ This script:
   2) Converts objects + transforms into a SAGE-style room dict JSON (z-up).
   3) Writes a minimal pose augmentation folder:
        pose_aug_0/meta.json (list with 1 variant)
-       pose_aug_0/variant_000.json (room dict)
+       pose_aug_0/variant_000.json (layout dict with rooms[0])
   4) Writes meshes into generation/*.obj:
        - Default: key_only (manipulables + key surfaces) use SAM3D server
        - Others: primitive unit-box OBJ (scaled in Isaac Sim by dimensions)
@@ -30,6 +30,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,18 @@ def _load_json(path: Path) -> Any:
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _single_room_layout_payload(room: Mapping[str, Any], *, layout_id: str) -> Dict[str, Any]:
+    """Return a single-room layout wrapper expected by SAGE Stage 4/5 clients."""
+    payload: Dict[str, Any] = {"layout_id": str(layout_id), "rooms": [dict(room)]}
+
+    # Keep common top-level keys for scripts that still read them directly.
+    for key in ("room_type", "dimensions", "seed", "scene_source", "policy_analysis"):
+        value = room.get(key)
+        if value is not None:
+            payload[key] = value
+    return payload
 
 
 def _extract_critic_payload(response: Mapping[str, Any]) -> Dict[str, Any]:
@@ -409,6 +422,271 @@ def _pick_mesh_candidates(
     return ordered[:max_meshes]
 
 
+def _iter_nested_mappings(node: Any) -> List[Mapping[str, Any]]:
+    out: List[Mapping[str, Any]] = []
+    if isinstance(node, Mapping):
+        out.append(node)
+        for value in node.values():
+            out.extend(_iter_nested_mappings(value))
+    elif isinstance(node, list):
+        for value in node:
+            out.extend(_iter_nested_mappings(value))
+    return out
+
+
+def _looks_like_house_object(candidate: Mapping[str, Any]) -> bool:
+    if isinstance(candidate.get("objects"), list):
+        return False
+    identity = (
+        candidate.get("id")
+        or candidate.get("object_id")
+        or candidate.get("source_id")
+        or candidate.get("semantic_class")
+        or candidate.get("class_name")
+        or candidate.get("category")
+        or candidate.get("name")
+    )
+    if identity is None:
+        return False
+    if isinstance(candidate.get("pose"), Mapping):
+        return True
+    if isinstance(candidate.get("transform"), Mapping):
+        return True
+    if isinstance(candidate.get("position"), Mapping):
+        return True
+    if isinstance(candidate.get("extent"), Mapping):
+        return True
+    if isinstance(candidate.get("dimensions"), Mapping):
+        return True
+    return False
+
+
+def _collect_glb_refs(node: Any) -> List[str]:
+    refs: List[str] = []
+    if isinstance(node, Mapping):
+        for value in node.values():
+            refs.extend(_collect_glb_refs(value))
+    elif isinstance(node, list):
+        for value in node:
+            refs.extend(_collect_glb_refs(value))
+    elif isinstance(node, str):
+        text = node.strip()
+        if text.lower().endswith(".glb"):
+            refs.append(text)
+    return refs
+
+
+def _normalize_token(text: Any) -> str:
+    token = str(text or "").strip().lower()
+    token = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
+    token = re.sub(r"_{2,}", "_", token)
+    return token
+
+
+def _matches_confidently(stem: str, token: str) -> bool:
+    if not token:
+        return False
+    if stem == token:
+        return True
+    if stem.startswith(token + "_"):
+        return True
+    return False
+
+
+def _object_match_tokens(raw_obj: Mapping[str, Any]) -> List[str]:
+    tokens: set[str] = set()
+    for key in ("id", "name", "category"):
+        raw = raw_obj.get(key)
+        if raw is None:
+            continue
+        base = _normalize_token(raw)
+        if not base:
+            continue
+        tokens.add(base)
+        trimmed = re.sub(r"(?:_|-)?\d+$", "", base).strip("_")
+        if trimmed:
+            tokens.add(trimmed)
+
+    blacklist = {"object", "generated", "asset", "model", "scene", "mesh"}
+    filtered = [tok for tok in tokens if tok and tok not in blacklist and len(tok) >= 3]
+    return sorted(filtered, key=len, reverse=True)
+
+
+def _resolve_glb_path(path_str: str, *, base_dirs: Sequence[Path]) -> Optional[Path]:
+    path = Path(path_str).expanduser()
+    if path.is_absolute() and path.is_file():
+        return path.resolve()
+    for base_dir in base_dirs:
+        candidate = (base_dir / path).resolve()
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _collect_existing_glb_pool(
+    *,
+    response: Mapping[str, Any],
+    raw_objects: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    paper_stack = response.get("paper_stack") if isinstance(response.get("paper_stack"), Mapping) else {}
+    run_dir = Path(str(paper_stack.get("run_dir") or "")).expanduser()
+    house_state_path = Path(str(paper_stack.get("house_state_path") or "")).expanduser()
+
+    search_roots: List[Path] = []
+    if house_state_path.is_file():
+        search_roots.append(house_state_path.parent)
+    if run_dir.is_dir():
+        search_roots.append(run_dir)
+        outputs_dir = run_dir / "outputs"
+        if outputs_dir.is_dir():
+            search_roots.append(outputs_dir)
+
+    # Use a deduped list of base dirs for resolving relative refs.
+    base_dirs: List[Path] = []
+    seen_bases: set[str] = set()
+    for root in search_roots:
+        rp = str(root.resolve())
+        if rp in seen_bases:
+            continue
+        seen_bases.add(rp)
+        base_dirs.append(root.resolve())
+
+    by_id: Dict[str, List[Path]] = {}
+    all_paths: Dict[str, Path] = {}
+
+    # 1) Prefer explicit GLB refs discoverable inside house_state.json.
+    if house_state_path.is_file():
+        try:
+            house_state = _load_json(house_state_path)
+        except Exception:
+            house_state = {}
+        for candidate in _iter_nested_mappings(house_state):
+            if not _looks_like_house_object(candidate):
+                continue
+            oid_raw = candidate.get("id") or candidate.get("object_id") or candidate.get("source_id")
+            oid = _normalize_token(oid_raw)
+            refs = _collect_glb_refs(candidate)
+            if not refs:
+                continue
+            resolved_refs: List[Path] = []
+            for ref in refs:
+                resolved = _resolve_glb_path(ref, base_dirs=base_dirs)
+                if resolved is None:
+                    continue
+                resolved_refs.append(resolved)
+                all_paths[str(resolved)] = resolved
+            if oid and resolved_refs:
+                by_id.setdefault(oid, [])
+                for resolved in resolved_refs:
+                    if resolved not in by_id[oid]:
+                        by_id[oid].append(resolved)
+
+    # 2) Fallback: index all GLBs under run dirs.
+    for root in base_dirs:
+        for path in root.rglob("*.glb"):
+            try:
+                resolved = path.resolve()
+            except Exception:
+                continue
+            all_paths[str(resolved)] = resolved
+
+    # Precompute normalized stems for token matching.
+    stem_index: Dict[str, str] = {}
+    for resolved in all_paths.values():
+        stem_index[str(resolved)] = _normalize_token(resolved.stem)
+
+    # Warm-match ids to paths by token if explicit refs were missing.
+    for raw_obj in raw_objects:
+        oid = _normalize_token(raw_obj.get("id"))
+        if not oid or oid in by_id:
+            continue
+        tokens = _object_match_tokens(raw_obj)
+        if not tokens:
+            continue
+        ranked_matches: List[Tuple[int, Path]] = []
+        for resolved in all_paths.values():
+            stem = stem_index.get(str(resolved), "")
+            score = 0
+            for token in tokens:
+                if _matches_confidently(stem, token):
+                    score = max(score, len(token))
+            if score > 0:
+                ranked_matches.append((score, resolved))
+        ranked_matches.sort(key=lambda item: (-item[0], str(item[1])))
+        matches = [item[1] for item in ranked_matches]
+        if matches:
+            by_id[oid] = matches
+
+    return {
+        "by_id": by_id,
+        "all_paths": list(all_paths.values()),
+        "stems": stem_index,
+        "used": set(),
+    }
+
+
+def _pick_existing_glb_for_object(pool: Mapping[str, Any], raw_obj: Mapping[str, Any]) -> Optional[Path]:
+    used = pool.get("used")
+    if not isinstance(used, set):
+        return None
+
+    by_id = pool.get("by_id")
+    oid = _normalize_token(raw_obj.get("id"))
+    if isinstance(by_id, Mapping) and oid:
+        refs = by_id.get(oid)
+        if isinstance(refs, list):
+            for ref in refs:
+                if isinstance(ref, Path) and ref.is_file() and str(ref) not in used:
+                    used.add(str(ref))
+                    return ref
+
+    all_paths = pool.get("all_paths")
+    stems = pool.get("stems")
+    if not isinstance(all_paths, list) or not isinstance(stems, Mapping):
+        return None
+    tokens = _object_match_tokens(raw_obj)
+    if not tokens:
+        return None
+
+    best_path: Optional[Path] = None
+    best_score = 0
+    for candidate in all_paths:
+        if not isinstance(candidate, Path):
+            continue
+        if not candidate.is_file():
+            continue
+        if str(candidate) in used:
+            continue
+        stem = str(stems.get(str(candidate), ""))
+        score = 0
+        for token in tokens:
+            if _matches_confidently(stem, token):
+                score = max(score, len(token))
+        if score > best_score:
+            best_score = score
+            best_path = candidate
+
+    if best_path is None:
+        return None
+    used.add(str(best_path))
+    return best_path
+
+
+def _convert_glb_to_obj(glb_path: Path, out_obj_path: Path) -> None:
+    try:
+        import trimesh  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"trimesh required to convert GLB->OBJ: {exc}") from exc
+
+    loaded = trimesh.load(str(glb_path), file_type="glb")
+    if hasattr(loaded, "geometry") and hasattr(loaded, "dump"):
+        mesh = loaded.dump(concatenate=True)
+    else:
+        mesh = loaded
+    out_obj_path.parent.mkdir(parents=True, exist_ok=True)
+    mesh.export(str(out_obj_path))
+
+
 def _http_post_json(url: str, payload: Dict[str, Any], *, timeout_s: int) -> Tuple[int, Dict[str, Any]]:
     try:
         import requests  # type: ignore
@@ -482,12 +760,29 @@ def _sam3d_start_if_needed(server_base: str) -> None:
     if not server_script.exists():
         raise FileNotFoundError(f"Cannot start SAM3D server; missing: {server_script}")
 
-    python_bin = "python3.11" if shutil.which("python3.11") else sys.executable
+    python_bin = str(os.getenv("SAM3D_PYTHON_BIN", "")).strip()
+    if python_bin:
+        python_path = Path(python_bin).expanduser()
+        if python_path.exists():
+            python_bin = str(python_path.resolve())
+        else:
+            resolved = shutil.which(python_bin)
+            if resolved:
+                python_bin = resolved
+            else:
+                raise FileNotFoundError(f"SAM3D_PYTHON_BIN not found: {python_bin}")
+    else:
+        python_bin = sys.executable
+    if not python_bin:
+        python_bin = "python3.11" if shutil.which("python3.11") else "python3"
     image_backend = os.getenv("SAM3D_IMAGE_BACKEND", "gemini")
     checkpoint_dir = os.getenv("SAM3D_CHECKPOINT_DIR", "/workspace/sam3d/checkpoints/hf")
 
     log_path = Path("/tmp/sam3d_server_from_scenesmith.log")
-    _log(f"Starting SAM3D server for mesh generation on :{port} (backend={image_backend})")
+    _log(
+        "Starting SAM3D server for mesh generation "
+        f"on :{port} (backend={image_backend}, python={python_bin})"
+    )
     with log_path.open("ab") as f:
         proc = subprocess.Popen(
             [python_bin, str(server_script), "--port", str(port), "--image-backend", image_backend, "--checkpoint-dir", checkpoint_dir],
@@ -928,6 +1223,10 @@ def main() -> int:
         raw = raw_objects[idx]
         name = str(raw.get("name") or raw.get("category") or "object").strip() or "object"
         mesh_prompts[idx] = name
+    existing_glb_pool = _collect_existing_glb_pool(response=response, raw_objects=raw_objects)
+    existing_glb_count = len(existing_glb_pool.get("all_paths", [])) if isinstance(existing_glb_pool, Mapping) else 0
+    if existing_glb_count > 0:
+        _log(f"Found {existing_glb_count} existing GLB assets from SceneSmith run; reusing when matched.")
 
     _log(f"Meshes: policy={args.mesh_policy} max_meshes={args.max_meshes} candidates={len(candidates)}/{len(objs)}")
 
@@ -936,6 +1235,18 @@ def main() -> int:
         if not source_id:
             continue
         out_obj = layout_dir / "generation" / f"{source_id}.obj"
+        raw_obj = raw_objects[i] if i < len(raw_objects) else {}
+
+        # First preference: reuse SceneSmith-generated GLBs from the existing run.
+        existing_glb = _pick_existing_glb_for_object(existing_glb_pool, raw_obj)
+        if existing_glb is not None:
+            try:
+                _convert_glb_to_obj(existing_glb, out_obj)
+                _log(f"Reused SceneSmith GLB [{i+1}/{len(objs)}]: {existing_glb.name} -> {out_obj.name}")
+                continue
+            except Exception as exc:
+                _log(f"WARNING: Failed GLB->OBJ conversion for {existing_glb}: {exc}")
+
         if i in candidate_set:
             prompt_i = mesh_prompts.get(i, str(obj.get("type") or "object"))
             try:
@@ -951,12 +1262,13 @@ def main() -> int:
     room_json = layout_dir / "room_0.json"
     _write_json(room_json, room)
 
+    layout_payload = _single_room_layout_payload(room, layout_id=layout_id)
     base_layout_json = layout_dir / f"{layout_id}.json"
-    _write_json(base_layout_json, room)
+    _write_json(base_layout_json, layout_payload)
 
     variant_json_rel = "variant_000.json"
     variant_json = layout_dir / args.pose_aug_name / variant_json_rel
-    _write_json(variant_json, room)
+    _write_json(variant_json, layout_payload)
 
     meta_json = layout_dir / args.pose_aug_name / "meta.json"
     _write_json(meta_json, [variant_json_rel])

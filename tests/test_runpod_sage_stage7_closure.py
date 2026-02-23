@@ -197,6 +197,8 @@ def test_validate_ridgeback_assets_transitive_missing(tmp_path):
 def test_stage7_command_env_assembly_defaults(monkeypatch, tmp_path):
     from scripts.runpod_sage import sage_stage567_mobile_franka as s
 
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.delenv("SAGE_KEEP_CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("SAGE_ALLOW_REMOTE_ISAAC_ASSETS", raising=False)
     monkeypatch.delenv("SAGE_SENSOR_FAILURE_POLICY", raising=False)
     monkeypatch.delenv("SAGE_STRICT_SENSORS", raising=False)
@@ -258,6 +260,36 @@ def test_stage7_command_env_assembly_defaults(monkeypatch, tmp_path):
     assert env["SAGE_QUALITY_REPORT_PATH"].endswith("/quality_report.json")
     assert env["SAGE_ENFORCE_BUNDLE_STRICT"] == "1"
     assert env["SAGE_RUN_ID"] == "run_test_123"
+    assert "CUDA_VISIBLE_DEVICES" not in env
+
+
+@pytest.mark.unit
+def test_stage7_command_env_respects_keep_cuda_visible_devices(monkeypatch, tmp_path):
+    from scripts.runpod_sage import sage_stage567_mobile_franka as s
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("SAGE_KEEP_CUDA_VISIBLE_DEVICES", "1")
+
+    args = argparse.Namespace(
+        isaacsim_py="/tmp/isaacsim_env/bin/python3",
+        headless=True,
+        enable_cameras=True,
+        strict=False,
+    )
+    collector = tmp_path / "collector.py"
+    collector.write_text("print('collector')\n", encoding="utf-8")
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("{}\n", encoding="utf-8")
+    output_dir = tmp_path / "demos"
+
+    _cmd, env = s._build_stage7_command_and_env(
+        args=args,
+        collector=collector,
+        plan_path=plan_path,
+        output_dir=output_dir,
+        run_id="run_test_keep_cuda",
+    )
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
 
 
 @pytest.mark.unit

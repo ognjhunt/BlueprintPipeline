@@ -126,8 +126,25 @@ if not OPENAI_API_KEY:
 if not OPENAI_API_KEY:
     print("WARNING: No OpenAI API key found.")
 
-import openai
-oai_client = openai.OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+_oai_client = None
+
+
+def _get_openai_client():
+    """Lazy-load OpenAI client so Gemini-only setups don't require openai package."""
+    global _oai_client
+    if _oai_client is not None:
+        return _oai_client
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        import openai  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "OpenAI fallback requested but openai package is unavailable. "
+            "Install `openai` or keep Gemini as the active image backend."
+        ) from exc
+    _oai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    return _oai_client
 
 # ── SAM3D model (lazy loaded) ────────────────────────────────────────────────
 os.environ["LIDRA_SKIP_INIT"] = "true"
@@ -365,7 +382,10 @@ def _process_job(job_id, input_text, seed):
 
     # ── Try Gemini first (free tier with retry for rate limits) ──
     if GEMINI_API_KEY and args.image_backend == "gemini":
-        gemini_models = ["gemini-2.0-flash-exp-image-generation", "gemini-2.5-flash-image"]
+        raw_models = os.getenv("SAM3D_GEMINI_IMAGE_MODELS", "gemini-2.5-flash-image")
+        gemini_models = [model.strip() for model in raw_models.split(",") if model.strip()]
+        if not gemini_models:
+            gemini_models = ["gemini-2.5-flash-image"]
         for gm in gemini_models:
             if ref_image is not None:
                 break
@@ -407,6 +427,8 @@ def _process_job(job_id, input_text, seed):
             print(f"Job {job_id}: Gemini unavailable, falling back to OpenAI", flush=True)
 
     # ── Fallback to OpenAI ──
+    if ref_image is None:
+        oai_client = _get_openai_client()
     if ref_image is None and oai_client:
         try:
             print(f"Job {job_id}: Using OpenAI image generation...", flush=True)
@@ -620,7 +642,7 @@ def root():
         "service": "SAM3D Drop-in Server (TRELLIS-compatible)",
         "version": "1.0.0",
         "status": "running",
-        "backend": "sam3d + openai-image",
+        "backend": f"sam3d + {args.image_backend}-image",
     })
 
 
