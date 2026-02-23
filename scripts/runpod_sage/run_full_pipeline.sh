@@ -62,6 +62,8 @@ BP_DIR="${WORKSPACE}/BlueprintPipeline"
 SAGE_SCRIPTS="${BP_DIR}/scripts/runpod_sage"
 
 SCENE_SOURCE="${SCENE_SOURCE:-sage}"  # sage|scenesmith
+# Keep official SceneSmith run dirs by default so failed bridge runs can be resumed.
+SCENESMITH_PAPER_KEEP_RUN_DIR="${SCENESMITH_PAPER_KEEP_RUN_DIR:-1}"
 
 ROOM_TYPE="${ROOM_TYPE:-kitchen}"
 ROBOT_TYPE="${ROBOT_TYPE:-mobile_franka}"
@@ -222,6 +224,7 @@ export SAGE_MIN_GRIPPER_CONTACT_FORCE
 export SAGE_GRIPPER_CLOSED_WIDTH_THRESHOLD
 export SAGE_ENFORCE_BUNDLE_STRICT
 export SAGE_DOMAIN_RAND
+export SCENESMITH_PAPER_KEEP_RUN_DIR
 
 SAGE_RUN_ID="${SAGE_RUN_ID:-sage_$(date -u +%Y%m%dT%H%M%SZ)_${RANDOM}_$$}"
 export SAGE_RUN_ID
@@ -265,6 +268,12 @@ log "=========================================="
 log "SAGE Full Pipeline (7 Stages + BP + Interactive)"
 log "=========================================="
 log "Scene source: ${SCENE_SOURCE}"
+if [[ "${SCENE_SOURCE}" == "scenesmith" ]]; then
+    log "SceneSmith keep run dir: ${SCENESMITH_PAPER_KEEP_RUN_DIR}"
+    if [[ -n "${SCENESMITH_PAPER_EXISTING_RUN_DIR:-}" ]]; then
+        log "SceneSmith existing run dir: ${SCENESMITH_PAPER_EXISTING_RUN_DIR}"
+    fi
+fi
 log "Quality: ${SAGE_QUALITY_PROFILE} (fallback=${SAGE_QUALITY_FALLBACK_ENABLED}, iters=${SAGE_QUALITY_MAX_ITERS})"
 log "SceneSmith critic loop: enabled=${SCENESMITH_CRITIC_LOOP_ENABLED} attempts=${SCENESMITH_CRITIC_MAX_ATTEMPTS} qg=${SCENESMITH_CRITIC_REQUIRE_QUALITY_PASS} score=${SCENESMITH_CRITIC_REQUIRE_SCORE} faith=${SCENESMITH_CRITIC_REQUIRE_FAITHFULNESS}"
 log "SAGE Stage1-3 accept loop: enabled=${SAGE_STAGE13_CRITIC_LOOP_ENABLED} attempts=${SAGE_STAGE13_MAX_ATTEMPTS}"

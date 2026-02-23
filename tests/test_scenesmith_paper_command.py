@@ -33,8 +33,8 @@ def test_official_scenesmith_adapter_converts_house_state(monkeypatch: pytest.Mo
     run_dir = tmp_path / "paper-run"
     monkeypatch.setattr(module, "_run_root", lambda _scene_id: run_dir)
 
-    def _fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
-        del args, kwargs
+    def _fake_process(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
         output_dir = run_dir / "outputs" / "scene_demo_001" / "scene_000" / "combined_house"
         output_dir.mkdir(parents=True, exist_ok=True)
         house_state = {
@@ -60,16 +60,21 @@ def test_official_scenesmith_adapter_converts_house_state(monkeypatch: pytest.Mo
                 },
             ]
         }
-        (output_dir / "house_state.json").write_text(json.dumps(house_state), encoding="utf-8")
+        house_state_path = output_dir / "house_state.json"
+        house_state_path.write_text(json.dumps(house_state), encoding="utf-8")
 
-        class _Result:
-            returncode = 0
-            stdout = "ok"
-            stderr = ""
+        return {
+            "returncode": 0,
+            "stdout_tail": "ok",
+            "stderr_tail": "",
+            "stdout_log": str(run_dir / "stdout.log"),
+            "stderr_log": str(run_dir / "stderr.log"),
+            "house_state_path": str(house_state_path),
+            "forced_exit_reason": "",
+            "timed_out": False,
+        }
 
-        return _Result()
-
-    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(module, "_run_scenesmith_process", _fake_process)
     monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
     monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
     monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "true")
@@ -125,8 +130,8 @@ def test_official_scenesmith_adapter_marks_generated_cabinet_articulation_option
     run_dir = tmp_path / "paper-run"
     monkeypatch.setattr(module, "_run_root", lambda _scene_id: run_dir)
 
-    def _fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
-        del args, kwargs
+    def _fake_process(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
         output_dir = run_dir / "outputs" / "scene_demo_005" / "scene_000" / "combined_house"
         output_dir.mkdir(parents=True, exist_ok=True)
         house_state = {
@@ -143,16 +148,21 @@ def test_official_scenesmith_adapter_marks_generated_cabinet_articulation_option
                 }
             ]
         }
-        (output_dir / "house_state.json").write_text(json.dumps(house_state), encoding="utf-8")
+        house_state_path = output_dir / "house_state.json"
+        house_state_path.write_text(json.dumps(house_state), encoding="utf-8")
 
-        class _Result:
-            returncode = 0
-            stdout = "ok"
-            stderr = ""
+        return {
+            "returncode": 0,
+            "stdout_tail": "ok",
+            "stderr_tail": "",
+            "stdout_log": str(run_dir / "stdout.log"),
+            "stderr_log": str(run_dir / "stderr.log"),
+            "house_state_path": str(house_state_path),
+            "forced_exit_reason": "",
+            "timed_out": False,
+        }
 
-        return _Result()
-
-    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(module, "_run_scenesmith_process", _fake_process)
     monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
     monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
     monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "true")
@@ -188,8 +198,8 @@ def test_official_scenesmith_adapter_preserves_required_joint_articulation(
     run_dir = tmp_path / "paper-run"
     monkeypatch.setattr(module, "_run_root", lambda _scene_id: run_dir)
 
-    def _fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
-        del args, kwargs
+    def _fake_process(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
         output_dir = run_dir / "outputs" / "scene_demo_006" / "scene_000" / "combined_house"
         output_dir.mkdir(parents=True, exist_ok=True)
         house_state = {
@@ -206,16 +216,21 @@ def test_official_scenesmith_adapter_preserves_required_joint_articulation(
                 }
             ]
         }
-        (output_dir / "house_state.json").write_text(json.dumps(house_state), encoding="utf-8")
+        house_state_path = output_dir / "house_state.json"
+        house_state_path.write_text(json.dumps(house_state), encoding="utf-8")
 
-        class _Result:
-            returncode = 0
-            stdout = "ok"
-            stderr = ""
+        return {
+            "returncode": 0,
+            "stdout_tail": "ok",
+            "stderr_tail": "",
+            "stdout_log": str(run_dir / "stdout.log"),
+            "stderr_log": str(run_dir / "stderr.log"),
+            "house_state_path": str(house_state_path),
+            "forced_exit_reason": "",
+            "timed_out": False,
+        }
 
-        return _Result()
-
-    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(module, "_run_scenesmith_process", _fake_process)
     monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
     monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
     monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "true")
@@ -303,9 +318,9 @@ def test_official_scenesmith_model_chain_retries_until_success(
 
     call_count = {"value": 0}
 
-    def _fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def _fake_process(*, cmd, **kwargs):  # type: ignore[no-untyped-def]
         call_count["value"] += 1
-        cmd = args[0]
+        del kwargs
         run_dir = None
         for token in cmd:
             if isinstance(token, str) and token.startswith("hydra.run.dir="):
@@ -315,12 +330,16 @@ def test_official_scenesmith_model_chain_retries_until_success(
             raise RuntimeError("hydra.run.dir override missing in command")
 
         if call_count["value"] == 1:
-            class _FailResult:
-                returncode = 1
-                stdout = "first attempt failed"
-                stderr = "failure"
-
-            return _FailResult()
+            return {
+                "returncode": 1,
+                "stdout_tail": "first attempt failed",
+                "stderr_tail": "failure",
+                "stdout_log": str(run_dir / "stdout.log"),
+                "stderr_log": str(run_dir / "stderr.log"),
+                "house_state_path": "",
+                "forced_exit_reason": "",
+                "timed_out": False,
+            }
 
         output_dir = run_dir / "outputs" / "scene_demo_chain" / "scene_000" / "combined_house"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -338,16 +357,21 @@ def test_official_scenesmith_model_chain_retries_until_success(
                 }
             ]
         }
-        (output_dir / "house_state.json").write_text(json.dumps(house_state), encoding="utf-8")
+        house_state_path = output_dir / "house_state.json"
+        house_state_path.write_text(json.dumps(house_state), encoding="utf-8")
 
-        class _SuccessResult:
-            returncode = 0
-            stdout = "ok"
-            stderr = ""
+        return {
+            "returncode": 0,
+            "stdout_tail": "ok",
+            "stderr_tail": "",
+            "stdout_log": str(run_dir / "stdout.log"),
+            "stderr_log": str(run_dir / "stderr.log"),
+            "house_state_path": str(house_state_path),
+            "forced_exit_reason": "",
+            "timed_out": False,
+        }
 
-        return _SuccessResult()
-
-    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(module, "_run_scenesmith_process", _fake_process)
     monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
     monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
     monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "true")
@@ -368,3 +392,123 @@ def test_official_scenesmith_model_chain_retries_until_success(
     assert attempts[0]["status"] == "failed"
     assert attempts[1]["model"] == "model-b"
     assert attempts[1]["status"] == "succeeded"
+
+
+@pytest.mark.unit
+def test_official_scenesmith_accepts_nonzero_exit_with_house_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module("scenesmith_paper_command_nonzero_resume_module", "scenesmith-service/scenesmith_paper_command.py")
+
+    repo_dir = tmp_path / "scenesmith"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "main.py").write_text("# placeholder\n", encoding="utf-8")
+
+    run_dir = tmp_path / "paper-run-nonzero"
+    monkeypatch.setattr(module, "_run_root", lambda _scene_id: run_dir)
+
+    def _fake_process(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        output_dir = run_dir / "outputs" / "scene_demo_nonzero" / "scene_000" / "combined_house"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        house_state = {
+            "objects": [
+                {
+                    "id": "table_001",
+                    "semantic_class": "table",
+                    "extent": {"x": 1.2, "y": 0.8, "z": 0.7},
+                    "pose": {
+                        "position": {"x": 0.3, "y": 0.0, "z": -0.2},
+                        "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                    },
+                    "floor_object": True,
+                }
+            ]
+        }
+        house_state_path = output_dir / "house_state.json"
+        house_state_path.write_text(json.dumps(house_state), encoding="utf-8")
+        return {
+            "returncode": 1,
+            "stdout_tail": "Press Ctrl+C to exit",
+            "stderr_tail": "",
+            "stdout_log": str(run_dir / "stdout.log"),
+            "stderr_log": str(run_dir / "stderr.log"),
+            "house_state_path": str(house_state_path),
+            "forced_exit_reason": "exit_prompt_after_house_state",
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(module, "_run_scenesmith_process", _fake_process)
+    monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
+    monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
+    monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "true")
+
+    response = module._run_official_scenesmith(
+        {
+            "scene_id": "scene_demo_nonzero",
+            "prompt": "A room with a table",
+        }
+    )
+
+    assert len(response["objects"]) == 1
+    assert response["paper_stack"]["scenesmith_nonzero_exit_accepted"] is True
+    assert response["paper_stack"]["scenesmith_exit_code"] == 1
+    attempts = response["paper_stack"]["model_attempts"]
+    assert attempts[0]["status"] == "succeeded_with_nonzero_exit"
+
+
+@pytest.mark.unit
+def test_official_scenesmith_reuses_existing_run_dir_without_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module("scenesmith_paper_command_existing_run_module", "scenesmith-service/scenesmith_paper_command.py")
+
+    repo_dir = tmp_path / "scenesmith"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "main.py").write_text("# placeholder\n", encoding="utf-8")
+
+    existing_run_dir = tmp_path / "existing-run"
+    output_dir = existing_run_dir / "scene_demo_resume" / "scene_000" / "combined_house"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    house_state = {
+        "objects": [
+            {
+                "id": "table_001",
+                "semantic_class": "table",
+                "extent": {"x": 1.2, "y": 0.8, "z": 0.7},
+                "pose": {
+                    "position": {"x": 0.3, "y": 0.0, "z": -0.2},
+                    "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                },
+                "floor_object": True,
+            }
+        ]
+    }
+    (output_dir / "house_state.json").write_text(json.dumps(house_state), encoding="utf-8")
+
+    def _unexpected_process_call(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        raise AssertionError("Subprocess should not be launched when reusing existing run dir")
+
+    monkeypatch.setattr(module, "_run_scenesmith_process", _unexpected_process_call)
+    monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
+    monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
+    monkeypatch.setenv("SCENESMITH_PAPER_EXISTING_RUN_DIR", str(existing_run_dir))
+    monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "false")
+
+    response = module._run_official_scenesmith(
+        {
+            "scene_id": "scene_demo_resume",
+            "prompt": "Reuse completed SceneSmith artifacts",
+        }
+    )
+
+    assert len(response["objects"]) == 1
+    assert response["paper_stack"]["run_dir"] == str(existing_run_dir.resolve())
+    assert response["paper_stack"]["scenesmith_existing_run_reused"] is True
+    attempts = response["paper_stack"]["model_attempts"]
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "reused_existing_run"
+    assert existing_run_dir.exists()
