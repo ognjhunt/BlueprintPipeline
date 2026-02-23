@@ -27,6 +27,8 @@
 #   OPENAI_MODEL_CLAUDE  — claude slot model (default: OPENAI_MODEL)
 #   ANTHROPIC_API_KEY    — Claude API key
 #   SAM3D_IMAGE_BACKEND  — gemini or openai (default: gemini)
+#   SAM3D_GEMINI_IMAGE_MODELS — comma-separated Gemini image models (default: gemini-2.5-flash-image)
+#   SAM3D_ENABLE_OPENAI_FALLBACK — set 1/true to allow fallback when Gemini fails (default: false)
 #   SAM3D_PORT           — SAM3D server port (default: 8080)
 #   SKIP_ISAAC_SIM       — Set to 1 to skip Isaac Sim startup
 #   SKIP_SAM3D           — Set to 1 to skip SAM3D startup
@@ -49,6 +51,8 @@ OPENAI_MODEL_OPENAI="${OPENAI_MODEL_OPENAI:-moonshotai/kimi-k2.5}"
 OPENAI_MODEL_GLMV="${OPENAI_MODEL_GLMV:-${OPENAI_MODEL}}"
 OPENAI_MODEL_CLAUDE="${OPENAI_MODEL_CLAUDE:-${OPENAI_MODEL}}"
 SAM3D_IMAGE_BACKEND="${SAM3D_IMAGE_BACKEND:-gemini}"
+SAM3D_GEMINI_IMAGE_MODELS="${SAM3D_GEMINI_IMAGE_MODELS:-gemini-2.5-flash-image}"
+SAM3D_ENABLE_OPENAI_FALLBACK="${SAM3D_ENABLE_OPENAI_FALLBACK:-0}"
 SAM3D_TEXTURE_BAKING="${SAM3D_TEXTURE_BAKING:-1}"
 SKIP_PATCHES="${SKIP_PATCHES:-0}"
 RUN_MODE="${RUN_MODE:-services}"  # services|full_pipeline
@@ -98,6 +102,8 @@ fi
 export SLURM_JOB_ID
 export SAM3D_TEXTURE_BAKING
 export SAM3D_PORT
+export SAM3D_GEMINI_IMAGE_MODELS
+export SAM3D_ENABLE_OPENAI_FALLBACK
 export REQUIRE_LOCAL_ROBOT_ASSET="${REQUIRE_LOCAL_ROBOT_ASSET:-1}"
 export SAGE_ALLOW_REMOTE_ISAAC_ASSETS="${SAGE_ALLOW_REMOTE_ISAAC_ASSETS:-0}"
 export SAGE_SENSOR_FAILURE_POLICY="${SAGE_SENSOR_FAILURE_POLICY:-fail}"

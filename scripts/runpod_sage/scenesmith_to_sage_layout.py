@@ -864,6 +864,7 @@ def _run_scenesmith_paper_stack(
     os.environ.setdefault("SCENESMITH_PAPER_REPO_DIR", "/opt/scenesmith")
     os.environ.setdefault("SCENESMITH_PAPER_PYTHON_BIN", "/opt/scenesmith/.venv/bin/python")
     os.environ.setdefault("SCENESMITH_PAPER_ALL_SAM3D", "true")
+    os.environ.setdefault("PYTORCH_JIT", "0")
 
     payload = {
         "request_id": uuid.uuid4().hex,

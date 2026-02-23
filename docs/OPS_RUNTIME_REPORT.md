@@ -21,6 +21,15 @@ python tools/quality_gates/runtime_slo_summary.py \
   --update-ops-doc
 ```
 
+If `bp_metric` export is unavailable (for example during active runpod debugging),
+capture a coarse health signal directly from the run log:
+
+```bash
+python tools/quality_gates/runpod_log_health_summary.py \
+  --log-path /path/to/pipeline_run.log \
+  --output analysis_outputs/triage/run_log_health_summary.json
+```
+
 ## Runtime Metrics Summary
 
 <!-- RUNTIME_TABLE_START -->

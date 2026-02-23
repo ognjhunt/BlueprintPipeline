@@ -1727,6 +1727,31 @@ if [[ -d "${LAYOUT_DIR}/usd_cache" ]]; then
     log "  Included: USD cache (per-object)"
 fi
 
+# Copy pose augmentation configs (needed for pipeline resume at stage 5+)
+for pa_dir in "${LAYOUT_DIR}"/pose_aug_*; do
+    if [[ -d "${pa_dir}" ]]; then
+        cp -r "${pa_dir}" "${ARTIFACT_DIR}/" 2>/dev/null || true
+        log "  Included: $(basename "${pa_dir}")/"
+    fi
+done
+
+# Copy room JSONs (needed for pipeline resume)
+for rj in "${LAYOUT_DIR}"/room_*.json; do
+    [[ -f "${rj}" ]] && cp "${rj}" "${ARTIFACT_DIR}/" 2>/dev/null || true
+done
+
+# Copy the layout ID JSON itself (the main scene definition)
+if [[ -f "${LAYOUT_DIR}/${LAYOUT_ID}.json" ]]; then
+    cp "${LAYOUT_DIR}/${LAYOUT_ID}.json" "${ARTIFACT_DIR}/" 2>/dev/null || true
+    log "  Included: ${LAYOUT_ID}.json (scene definition)"
+fi
+
+# Copy SceneSmith run directory if it exists (for full provenance)
+if [[ -d "${LAYOUT_DIR}/scenesmith_run" ]]; then
+    cp -r "${LAYOUT_DIR}/scenesmith_run/" "${ARTIFACT_DIR}/scenesmith_run/" 2>/dev/null || true
+    log "  Included: scenesmith_run/ (full provenance)"
+fi
+
 # Copy assembled scene USD(s) from stage 7 output
 for usd in "${LAYOUT_DIR}"/demos/scene_*.usd; do
     [[ -f "${usd}" ]] && cp "${usd}" "${ARTIFACT_DIR}/" 2>/dev/null || true

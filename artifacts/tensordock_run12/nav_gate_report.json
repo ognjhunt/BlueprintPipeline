@@ -1,0 +1,30 @@
+{
+  "status": "pass",
+  "anchor_source": "heuristic",
+  "pick_object_id": "dinner_plate_0",
+  "place_surface_id": "kitchen_island_0",
+  "grid_res_m": 0.05,
+  "room_dims_m": {
+    "width": 1.5,
+    "length": 1.5
+  },
+  "robot_radius_m": 0.481800011317338,
+  "pick_radius_min_m": 0.55,
+  "pick_radius_max_m": 1.4,
+  "obstacle_object_count": 32,
+  "grid_cells_total": 900,
+  "grid_cells_blocked": 740,
+  "grid_blocked_ratio": 0.822222,
+  "pick_candidate_cells": 160,
+  "place_candidate_cells": 160,
+  "path_exists": true,
+  "pick_anchor_xy": {
+    "x": 0.75,
+    "y": 0.75
+  },
+  "place_anchor_xy": {
+    "x": 0.75,
+    "y": 0.75
+  },
+  "reason": "ok"
+}

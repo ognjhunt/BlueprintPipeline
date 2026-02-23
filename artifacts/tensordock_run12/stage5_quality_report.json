@@ -1,0 +1,619 @@
+{
+  "run_id": "sage_20260223T065633Z_27278_33771",
+  "layout_id": "layout_1771825904_4fa605",
+  "status": "fail",
+  "required_min_grasps": 10,
+  "max_retries": 3,
+  "num_demos_requested": 16,
+  "num_demos_planned": 14,
+  "num_failed_demos": 2,
+  "failed_demos": [
+    {
+      "demo_idx": 6,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 199323,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.646411
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 199323,
+          "elapsed_s": 1.712244
+        }
+      ],
+      "passed": false,
+      "stage6_error": "Stage 6 failed to plan arm trajectory for demo=6. No feasible grasps in top-K (24). last_error=cuRobo plan_single failed (success=False)"
+    },
+    {
+      "demo_idx": 15,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 33,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 33,
+          "elapsed_s": 1.735358
+        }
+      ],
+      "passed": false,
+      "stage6_error": "Stage 6 failed to plan arm trajectory for demo=15. No feasible grasps in top-K (24). last_error=cuRobo plan_single failed (success=False)"
+    }
+  ],
+  "demos": [
+    {
+      "demo_idx": 0,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 161545,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.893519
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 161545,
+          "elapsed_s": 1.677943
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 8,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 1,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 187829,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.620254
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 187829,
+          "elapsed_s": 1.701147
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 2,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 226235,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.641019
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 226235,
+          "elapsed_s": 1.755017
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 3,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 213751,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.713056
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 213751,
+          "elapsed_s": 1.833314
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 4,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 193567,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.726545
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 193567,
+          "elapsed_s": 1.711621
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 5,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 168885,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.632026
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 168885,
+          "elapsed_s": 1.683807
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 2,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 6,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 199323,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.646411
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 199323,
+          "elapsed_s": 1.712244
+        }
+      ],
+      "passed": false,
+      "stage6_error": "Stage 6 failed to plan arm trajectory for demo=6. No feasible grasps in top-K (24). last_error=cuRobo plan_single failed (success=False)"
+    },
+    {
+      "demo_idx": 7,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 178691,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.620224
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 178691,
+          "elapsed_s": 1.682564
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 1,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 8,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 174411,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.609014
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 174411,
+          "elapsed_s": 1.685873
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 9,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 156777,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.841606
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 156777,
+          "elapsed_s": 1.711025
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 10,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 173603,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.638503
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 173603,
+          "elapsed_s": 1.705867
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 11,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 195451,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.649083
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 195451,
+          "elapsed_s": 1.787838
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 12,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 173469,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.717221
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 173469,
+          "elapsed_s": 1.797493
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 13,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 159623,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.732977
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 159623,
+          "elapsed_s": 1.708521
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 14,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 198741,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 0,
+          "elapsed_s": 1.707342
+        },
+        {
+          "attempt": 2,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.1
+          ],
+          "num_views_m2t2": 2,
+          "num_grasps": 198741,
+          "elapsed_s": 1.817883
+        }
+      ],
+      "passed": true,
+      "selected_grasp_idx": 0,
+      "evaluated_candidates": 24
+    },
+    {
+      "demo_idx": 15,
+      "variant_layout_json": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json",
+      "pick_object_id": "salt_shaker_0",
+      "pick_object_type": "salt_shaker",
+      "required_min_grasps": 10,
+      "num_grasps": 33,
+      "attempts": [
+        {
+          "attempt": 1,
+          "base_pos": [
+            0.45,
+            0.75,
+            0.0
+          ],
+          "num_views_m2t2": 1,
+          "num_grasps": 33,
+          "elapsed_s": 1.735358
+        }
+      ],
+      "passed": false,
+      "stage6_error": "Stage 6 failed to plan arm trajectory for demo=15. No feasible grasps in top-K (24). last_error=cuRobo plan_single failed (success=False)"
+    }
+  ],
+  "timestamp_utc": "2026-02-23T06:58:32Z"
+}

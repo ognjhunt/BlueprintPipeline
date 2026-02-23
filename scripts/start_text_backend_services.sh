@@ -80,6 +80,7 @@ start_one() {
   local port="$4"
   local mode_env_name="$5"
   local module_path="$6"
+  local extra_env_args=()
 
   if is_running "${pid_file}"; then
     echo "${name} already running (pid=$(cat "${pid_file}"))"
@@ -91,6 +92,9 @@ start_one() {
 
   if [[ "${name}" == "scenesmith-service" ]] && [[ "${mode}" == "paper" || "${mode}" == "paper_stack" ]]; then
     local paper_repo_dir
+    local paper_python_bin
+    local patch_script
+    local paper_pytorch_jit
     paper_repo_dir="${SCENESMITH_PAPER_REPO_DIR:-${HOME}/scenesmith}"
     paper_repo_dir="${paper_repo_dir/#\~/${HOME}}"
     if [[ ! -d "${paper_repo_dir}" ]]; then
@@ -98,11 +102,28 @@ start_one() {
       mode="internal"
     else
       export SCENESMITH_PAPER_REPO_DIR="${paper_repo_dir}"
+      patch_script="${REPO_ROOT}/scripts/apply_scenesmith_paper_patches.sh"
+      if [[ -x "${patch_script}" ]]; then
+        paper_python_bin="${SCENESMITH_PAPER_PYTHON_BIN:-${paper_repo_dir}/.venv/bin/python}"
+        echo "Applying SceneSmith runtime patches (${patch_script})"
+        if ! SCENESMITH_PAPER_REPO_DIR="${paper_repo_dir}" \
+             SCENESMITH_PAPER_PYTHON_BIN="${paper_python_bin}" \
+             "${patch_script}"; then
+          echo "WARNING: SceneSmith runtime patch step failed; starting service anyway." >&2
+        fi
+      else
+        echo "WARNING: SceneSmith runtime patch script not found at ${patch_script}" >&2
+      fi
+
+      # Kaolin/timm JIT stability: default to disabling Torch JIT for paper-stack
+      # runs unless explicitly overridden.
+      paper_pytorch_jit="${SCENESMITH_PAPER_PYTORCH_JIT:-${PYTORCH_JIT:-0}}"
+      extra_env_args+=("PYTORCH_JIT=${paper_pytorch_jit}")
     fi
   fi
 
   echo "Starting ${name} on port ${port} (mode=${mode})"
-  nohup env PORT="${port}" "${mode_env_name}=${mode}" "${PYTHON_BIN}" "${module_path}" >"${log_file}" 2>&1 &
+  nohup env PORT="${port}" "${mode_env_name}=${mode}" "${extra_env_args[@]}" "${PYTHON_BIN}" "${module_path}" >"${log_file}" 2>&1 &
   local pid=$!
   echo "${pid}" >"${pid_file}"
   sleep 1

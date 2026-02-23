@@ -61,6 +61,21 @@ Typical failure signatures:
 - `missing_videos=...` or `exported_videos=...`: video export failed/empty
 - `timeout>...`: attempt hung past timeout
 
+## Fast Log Health Summary (while run is active)
+
+```bash
+python tools/quality_gates/runpod_log_health_summary.py \
+  --log-path /path/to/pipeline_run.log \
+  --output analysis_outputs/triage/run_log_health_summary.json
+```
+
+Interpretation:
+- `status=pass`: no warning/blocking signatures detected.
+- `status=warn`: warning signatures present (for example `sensor_qc_failed`).
+- `status=fail`: blocking signatures present (`rgb_all_black` and/or `called_process_error`).
+
+This gives a quick early signal without manually scanning thousands of log lines.
+
 ## Recovery If All Modes Fail
 
 1. Increase probe timeout:
@@ -95,4 +110,3 @@ python scripts/runpod_sage/stage7_rgb_mode_probe.py \
 
 After validation/collection, stop billable GPU resources immediately:
 - Stop TensorDock/Vast/RunPod instance once artifacts are downloaded.
-

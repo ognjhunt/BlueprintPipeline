@@ -36,6 +36,26 @@ starting point for incident response, on-call routines, and runtime troubleshoot
 6. **Post-incident**
    - File follow-up actions, update runbooks, and capture metrics in [`docs/OPS_RUNTIME_REPORT.md`](../OPS_RUNTIME_REPORT.md).
 
+## In-flight 60-minute loop (while a long run is active)
+
+Use this loop when a pipeline run is expected to take 1 hour or more.
+
+1. **Capture a log health snapshot (5 min)**
+   - `python tools/quality_gates/runpod_log_health_summary.py --log-path <pipeline_log> --output analysis_outputs/triage/run_log_health_summary.json`
+   - Review `status`, `blocking_signals`, and top bucket counts.
+2. **Refresh failure triage artifacts (10 min)**
+   - Extract known failure signatures with `rg` and update a triage note in `analysis_outputs/triage/`.
+   - Keep a short ranked list of root-cause buckets for the active run.
+3. **Validate next-run inputs (10 min)**
+   - Re-run `python tools/scene_manifest/validate_manifest.py validate <scene_manifest.json>` on upcoming scenes.
+   - Confirm `task_config.json` files are parseable and include task lists (`suggested_tasks` or `tasks`).
+4. **Run fast regression checks (10 min)**
+   - `pytest -q -c /dev/null tests/test_runpod_stage7_defaults.py tests/test_run_pipeline_gcs_defaults.py`
+   - Add focused tests if a new regression signature appears.
+5. **Update runbook deltas (10-15 min)**
+   - Add exact symptom strings and matching commands to [`docs/troubleshooting.md`](../troubleshooting.md).
+   - Keep changes small and tied to concrete observed failure signatures.
+
 ## Dataset export failure handling
 
 Use this workflow when export artifacts (e.g., `scene.usda`, replicator outputs) are missing or corrupt.
@@ -134,6 +154,7 @@ continue. The gate expects the following assets to exist by exact name:
 ## Operational entrypoints and scripts
 
 - Local pipeline validation: [`tools/run_local_pipeline.py`](../../tools/run_local_pipeline.py)
+- Runpod log health summary: [`tools/quality_gates/runpod_log_health_summary.py`](../../tools/quality_gates/runpod_log_health_summary.py)
 - Regen3d mock export generator: [`fixtures/generate_mock_stage1.py`](../../fixtures/generate_mock_stage1.py)
 - Genie Sim health check: [`tools/geniesim_adapter/geniesim_healthcheck.py`](../../tools/geniesim_adapter/geniesim_healthcheck.py)
 - Genie Sim server/health check: [`tools/geniesim_adapter/geniesim_server.py`](../../tools/geniesim_adapter/geniesim_server.py)

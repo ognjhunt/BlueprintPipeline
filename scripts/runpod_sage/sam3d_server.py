@@ -3,8 +3,12 @@
 SAM3D Drop-in Server for SAGE Pipeline
 =======================================
 TRELLIS-compatible API that uses:
-  1. OpenAI image generation (gpt-image-1) to create reference images from text
+  1. Gemini 2.5 Flash Image generation (default) to create reference images from text
+     before SAM3D reconstruction.
   2. SAM3D (Meta's SAM-3D-Objects) for image-to-3D mesh generation
+
+OpenAI image generation is available only when explicitly selected as backend
+or when OpenAI fallback is explicitly enabled.
 
 Exposes the same HTTP API contract as TRELLIS:
   - GET  /health          → {"status": "healthy", "gpu_available": true}
@@ -80,6 +84,12 @@ parser.add_argument("--image-size", type=str, default="1024x1024",
 parser.add_argument("--image-backend", type=str, default="gemini",
                     choices=["gemini", "openai"],
                     help="Primary image generation backend (default: gemini)")
+parser.add_argument(
+    "--allow-openai-fallback",
+    action="store_true",
+    default=str(os.getenv("SAM3D_ENABLE_OPENAI_FALLBACK", "0")).strip().lower() in {"1", "true", "yes", "on"},
+    help="Allow fallback to OpenAI when Gemini image generation fails (default: disabled).",
+)
 args = parser.parse_args()
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -105,26 +115,31 @@ if not GEMINI_API_KEY:
 if GEMINI_API_KEY:
     print(f"Gemini API key loaded (primary image backend)")
 else:
-    print("WARNING: No Gemini API key. Will use OpenAI for images.")
+    print("WARNING: No Gemini API key found.")
 
 # ── OpenAI client (fallback) ────────────────────────────────────────────────
-OPENAI_API_KEY = args.openai_key or os.getenv("OPENAI_API_KEY") or os.getenv("API_TOKEN")
-if not OPENAI_API_KEY:
-    key_json_paths = [
-        "/workspace/SAGE/server/key.json",
-        os.path.join(os.path.dirname(__file__), "key.json"),
-    ]
-    for kp in key_json_paths:
-        if os.path.exists(kp):
-            with open(kp) as f:
-                kd = json.load(f)
-            OPENAI_API_KEY = kd.get("API_TOKEN", "")
-            if OPENAI_API_KEY:
-                print(f"Loaded OpenAI key from {kp}")
-                break
+OPENAI_FALLBACK_ENABLED = bool(args.allow_openai_fallback)
+OPENAI_API_KEY = ""
+if args.image_backend == "openai" or OPENAI_FALLBACK_ENABLED:
+    OPENAI_API_KEY = args.openai_key or os.getenv("OPENAI_API_KEY") or os.getenv("API_TOKEN") or ""
+    if not OPENAI_API_KEY:
+        key_json_paths = [
+            "/workspace/SAGE/server/key.json",
+            os.path.join(os.path.dirname(__file__), "key.json"),
+        ]
+        for kp in key_json_paths:
+            if os.path.exists(kp):
+                with open(kp) as f:
+                    kd = json.load(f)
+                OPENAI_API_KEY = kd.get("API_TOKEN", "")
+                if OPENAI_API_KEY:
+                    print(f"Loaded OpenAI key from {kp}")
+                    break
 
-if not OPENAI_API_KEY:
-    print("WARNING: No OpenAI API key found.")
+    if not OPENAI_API_KEY:
+        print("WARNING: No OpenAI API key found.")
+else:
+    print("OpenAI fallback disabled (SAM3D_ENABLE_OPENAI_FALLBACK=0).")
 
 _oai_client = None
 
@@ -368,7 +383,7 @@ def _process_job(job_id, input_text, seed):
 
     t0 = time.time()
 
-    # ── Step 1: Generate reference image (Gemini primary, OpenAI fallback) ──
+    # ── Step 1: Generate reference image (Gemini primary) ──
     print(f"Job {job_id}: Generating reference image for: {input_text[:80]}...", flush=True)
     import base64
     import requests as req
@@ -380,8 +395,8 @@ def _process_job(job_id, input_text, seed):
     )
     ref_image = None
 
-    # ── Try Gemini first (free tier with retry for rate limits) ──
-    if GEMINI_API_KEY and args.image_backend == "gemini":
+    # ── Try Gemini first (retry for transient limits/failures) ──
+    if args.image_backend == "gemini" and GEMINI_API_KEY:
         raw_models = os.getenv("SAM3D_GEMINI_IMAGE_MODELS", "gemini-2.5-flash-image")
         gemini_models = [model.strip() for model in raw_models.split(",") if model.strip()]
         if not gemini_models:
@@ -424,12 +439,23 @@ def _process_job(job_id, input_text, seed):
                     print(f"Job {job_id}: Gemini {gm} failed ({e})", flush=True)
                     break
         if ref_image is None:
-            print(f"Job {job_id}: Gemini unavailable, falling back to OpenAI", flush=True)
+            print(f"Job {job_id}: Gemini image generation failed for all models {gemini_models}", flush=True)
 
-    # ── Fallback to OpenAI ──
-    if ref_image is None:
+    # ── OpenAI path: explicit backend or explicit fallback opt-in ──
+    use_openai = args.image_backend == "openai" or (ref_image is None and OPENAI_FALLBACK_ENABLED)
+    if ref_image is None and args.image_backend == "gemini" and not GEMINI_API_KEY:
+        if not use_openai:
+            raise RuntimeError(
+                "Gemini backend selected but GEMINI_API_KEY is missing and OpenAI fallback is disabled. "
+                "Set GEMINI_API_KEY, or explicitly enable fallback with "
+                "SAM3D_ENABLE_OPENAI_FALLBACK=1 / --allow-openai-fallback."
+            )
+    if ref_image is None and use_openai:
         oai_client = _get_openai_client()
-    if ref_image is None and oai_client:
+    else:
+        oai_client = None
+
+    if ref_image is None and use_openai and oai_client:
         try:
             print(f"Job {job_id}: Using OpenAI image generation...", flush=True)
             response = oai_client.images.generate(
@@ -452,7 +478,12 @@ def _process_job(job_id, input_text, seed):
             raise RuntimeError(f"Image generation failed: {e}") from e
 
     if ref_image is None:
-        raise RuntimeError("No image backend available or all failed")
+        if args.image_backend == "openai":
+            raise RuntimeError("OpenAI image backend selected but no usable OpenAI client/key was available")
+        raise RuntimeError(
+            "Gemini image generation failed and OpenAI fallback is disabled. "
+            "Set SAM3D_ENABLE_OPENAI_FALLBACK=1 only if you explicitly want fallback."
+        )
 
     t_image = time.time() - t0
     print(f"Job {job_id}: Reference image generated in {t_image:.1f}s", flush=True)
@@ -687,7 +718,11 @@ if __name__ == "__main__":
     print("SAM3D Drop-in Server (TRELLIS-compatible API)")
     print("=" * 60)
     print(f"Port: {args.port}")
-    print(f"Image model: {args.image_model}")
+    print(f"Image backend: {args.image_backend}")
+    print(f"Gemini models: {os.getenv('SAM3D_GEMINI_IMAGE_MODELS', 'gemini-2.5-flash-image')}")
+    print(f"OpenAI fallback enabled: {OPENAI_FALLBACK_ENABLED}")
+    if args.image_backend == "openai" or OPENAI_FALLBACK_ENABLED:
+        print(f"OpenAI image model: {args.image_model}")
     print(f"Checkpoint: {args.checkpoint_dir}")
     print(f"Endpoints:")
     print(f"  GET  /health")

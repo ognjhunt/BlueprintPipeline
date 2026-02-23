@@ -46,6 +46,9 @@ done
 cd "${SCENESMITH_DIR}"
 [[ -f .venv/bin/activate ]] && source .venv/bin/activate
 
+# Kaolin/timm JIT stability on some CUDA/driver combinations.
+export PYTORCH_JIT="${PYTORCH_JIT:-0}"
+
 # Kill zombie processes from previous runs
 fuser -k 7005/tcp 7006/tcp 7007/tcp 7008/tcp 7009/tcp 2>/dev/null || true
 sleep 2

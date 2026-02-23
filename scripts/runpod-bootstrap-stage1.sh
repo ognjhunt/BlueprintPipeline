@@ -36,6 +36,21 @@ BP_DIR="${WORKSPACE}/BlueprintPipeline"
 SS_DIR="${WORKSPACE}/scenesmith"
 MARKER="${WORKSPACE}/.bootstrap_complete"
 
+run_scenesmith_runtime_patch() {
+  local patch_script="${BP_DIR}/scripts/apply_scenesmith_paper_patches.sh"
+  if [[ ! -x "${patch_script}" ]]; then
+    log "WARNING: SceneSmith runtime patch script missing: ${patch_script}"
+    return 0
+  fi
+
+  log "Applying SceneSmith runtime patches..."
+  if ! SCENESMITH_PAPER_REPO_DIR="${SS_DIR}" \
+       SCENESMITH_PAPER_PYTHON_BIN="${SS_DIR}/.venv/bin/python" \
+       "${patch_script}"; then
+    log "WARNING: SceneSmith runtime patch step failed (continuing)"
+  fi
+}
+
 # =============================================================================
 # Skip if already bootstrapped (persistent volume from previous run)
 # =============================================================================
@@ -61,6 +76,8 @@ if [[ -f "${MARKER}" ]] && [[ -d "${SS_DIR}/.venv" ]] && [[ -d "${BP_DIR}/.git" 
   # Source env
   [[ -f "${WORKSPACE}/.env" ]] && source "${WORKSPACE}/.env"
   export LIDRA_SKIP_INIT=1
+
+  run_scenesmith_runtime_patch
 
   log "Quick re-bootstrap complete."
   exit 0
@@ -182,8 +199,8 @@ uv pip install \
     open3d optree roma loguru \
     astor einops-exts point-cloud-utils scikit-image trimesh \
     easydict einops fvcore \
-    plyfile spconv-cu120 timm \
-    lightning pyvista pymeshfix igraph \
+    plyfile spconv-cu120 'timm>=1.0.25' \
+    lightning pyvista pymeshfix igraph utils3d \
     2>&1 | tail -5
 uv pip install \
     'MoGe @ git+https://github.com/microsoft/MoGe.git@a8c37341bc0325ca99b9d57981cc3bb2bd3e255b' \
@@ -201,6 +218,7 @@ if [[ ! -f "${WORKSPACE}/.env" ]]; then
 export LIDRA_SKIP_INIT=1
 export CUDA_VISIBLE_DEVICES=0
 export HYDRA_FULL_ERROR=1
+export PYTORCH_JIT=0
 ENVEOF
   chmod 600 "${WORKSPACE}/.env"
 fi
@@ -223,9 +241,13 @@ _append_if_set OPENROUTER_BASE_URL
 if ! grep -q 'LIDRA_SKIP_INIT' "${WORKSPACE}/.env"; then
   echo 'export LIDRA_SKIP_INIT=1' >> "${WORKSPACE}/.env"
 fi
+if ! grep -q '^export PYTORCH_JIT=' "${WORKSPACE}/.env"; then
+  echo 'export PYTORCH_JIT=0' >> "${WORKSPACE}/.env"
+fi
 
 source "${WORKSPACE}/.env"
 export LIDRA_SKIP_INIT=1
+export PYTORCH_JIT="${PYTORCH_JIT:-0}"
 
 # =============================================================================
 # Phase 9: Download checkpoints
@@ -262,9 +284,15 @@ else
 fi
 
 # =============================================================================
-# Phase 10: BlueprintPipeline deps (for text-scene-gen and adapter)
+# Phase 10: SceneSmith runtime patch pass
 # =============================================================================
-log "Phase 10: BlueprintPipeline deps..."
+log "Phase 10: SceneSmith runtime patch pass..."
+run_scenesmith_runtime_patch
+
+# =============================================================================
+# Phase 11: BlueprintPipeline deps (for text-scene-gen and adapter)
+# =============================================================================
+log "Phase 11: BlueprintPipeline deps..."
 cd "${BP_DIR}"
 if [[ -f requirements.txt ]]; then
   uv pip install -r requirements.txt 2>&1 | tail -5 || \

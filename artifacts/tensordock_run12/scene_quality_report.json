@@ -1,0 +1,419 @@
+{
+  "layout_dir": "/workspace/SAGE/server/results/layout_1771825904_4fa605",
+  "profile": "standard",
+  "timestamp_utc": "2026-02-23T06:56:39Z",
+  "max_iters": 6,
+  "write": true,
+  "all_pass": false,
+  "any_changed": false,
+  "files": [
+    {
+      "pass_before": false,
+      "errors_before": [
+        "room_has_zero_objects"
+      ],
+      "before": {
+        "num_objects": 0,
+        "num_colliding_pairs": 0,
+        "num_objects_in_collision": 0,
+        "collision_rate_objects": 0.0,
+        "mean_penetration_m": 0.0,
+        "max_penetration_m": 0.0,
+        "sample_pairs": [],
+        "floor_violations": 0,
+        "floating_violations": 0,
+        "tabletop_support_violations": 0,
+        "num_surfaces": 0,
+        "num_manipulable": 0,
+        "num_known_mass_objects": 0,
+        "mass_outlier_count": 0,
+        "mass_outliers": []
+      },
+      "iters": [
+        {
+          "iter": 1,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 2,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 3,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 4,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 5,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 6,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        }
+      ],
+      "auto_fix": true,
+      "max_corrected_ratio": 0.2,
+      "pass_after": false,
+      "errors_after": [
+        "room_has_zero_objects"
+      ],
+      "after": {
+        "num_objects": 0,
+        "num_colliding_pairs": 0,
+        "num_objects_in_collision": 0,
+        "collision_rate_objects": 0.0,
+        "mean_penetration_m": 0.0,
+        "max_penetration_m": 0.0,
+        "sample_pairs": [],
+        "floor_violations": 0,
+        "floating_violations": 0,
+        "tabletop_support_violations": 0,
+        "num_surfaces": 0,
+        "num_manipulable": 0,
+        "num_known_mass_objects": 0,
+        "mass_outlier_count": 0,
+        "mass_outliers": []
+      },
+      "iterations_used": 6,
+      "changed": false,
+      "corrections": [],
+      "corrected_object_count": 0,
+      "corrected_object_ratio": 0.0,
+      "path": "/workspace/SAGE/server/results/layout_1771825904_4fa605/room_0.json"
+    },
+    {
+      "pass_before": false,
+      "errors_before": [
+        "room_has_zero_objects"
+      ],
+      "before": {
+        "num_objects": 0,
+        "num_colliding_pairs": 0,
+        "num_objects_in_collision": 0,
+        "collision_rate_objects": 0.0,
+        "mean_penetration_m": 0.0,
+        "max_penetration_m": 0.0,
+        "sample_pairs": [],
+        "floor_violations": 0,
+        "floating_violations": 0,
+        "tabletop_support_violations": 0,
+        "num_surfaces": 0,
+        "num_manipulable": 0,
+        "num_known_mass_objects": 0,
+        "mass_outlier_count": 0,
+        "mass_outliers": []
+      },
+      "iters": [
+        {
+          "iter": 1,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 2,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 3,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 4,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 5,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        },
+        {
+          "iter": 6,
+          "changed_fields": 0,
+          "pass": false,
+          "errors": [
+            "room_has_zero_objects"
+          ],
+          "metrics": {
+            "num_objects": 0,
+            "num_colliding_pairs": 0,
+            "num_objects_in_collision": 0,
+            "collision_rate_objects": 0.0,
+            "mean_penetration_m": 0.0,
+            "max_penetration_m": 0.0,
+            "sample_pairs": [],
+            "floor_violations": 0,
+            "floating_violations": 0,
+            "tabletop_support_violations": 0,
+            "num_surfaces": 0,
+            "num_manipulable": 0,
+            "num_known_mass_objects": 0,
+            "mass_outlier_count": 0,
+            "mass_outliers": []
+          }
+        }
+      ],
+      "auto_fix": true,
+      "max_corrected_ratio": 0.2,
+      "pass_after": false,
+      "errors_after": [
+        "room_has_zero_objects"
+      ],
+      "after": {
+        "num_objects": 0,
+        "num_colliding_pairs": 0,
+        "num_objects_in_collision": 0,
+        "collision_rate_objects": 0.0,
+        "mean_penetration_m": 0.0,
+        "max_penetration_m": 0.0,
+        "sample_pairs": [],
+        "floor_violations": 0,
+        "floating_violations": 0,
+        "tabletop_support_violations": 0,
+        "num_surfaces": 0,
+        "num_manipulable": 0,
+        "num_known_mass_objects": 0,
+        "mass_outlier_count": 0,
+        "mass_outliers": []
+      },
+      "iterations_used": 6,
+      "changed": false,
+      "corrections": [],
+      "corrected_object_count": 0,
+      "corrected_object_ratio": 0.0,
+      "path": "/workspace/SAGE/server/results/layout_1771825904_4fa605/pose_aug_0/variant_000.json"
+    }
+  ]
+}

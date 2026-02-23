@@ -1048,7 +1048,7 @@ def _hydra_overrides(*, payload: Mapping[str, Any], run_dir: Path, scene_name: s
             )
 
     image_backend = (
-        str(os.getenv("SCENESMITH_PAPER_IMAGE_BACKEND", "")).strip().lower()
+        str(os.getenv("SCENESMITH_PAPER_IMAGE_BACKEND", "gemini")).strip().lower()
     )
     if image_backend in {"openai", "gemini"}:
         for prefix in _PLACEMENT_AGENT_CONFIG_PREFIXES:
@@ -1074,6 +1074,42 @@ def _hydra_overrides(*, payload: Mapping[str, Any], run_dir: Path, scene_name: s
     return overrides
 
 
+def _run_runtime_patch_script(*, repo_dir: Path, python_bin: str) -> None:
+    if _is_truthy(os.getenv("SCENESMITH_PAPER_SKIP_RUNTIME_PATCHES"), default=False):
+        return
+
+    bp_root = Path(__file__).resolve().parents[1]
+    patch_script = bp_root / "scripts" / "apply_scenesmith_paper_patches.sh"
+    if not patch_script.exists():
+        return
+
+    patch_env = os.environ.copy()
+    patch_env.setdefault("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
+    patch_env.setdefault("SCENESMITH_PAPER_PYTHON_BIN", python_bin)
+    patch_env.setdefault("PYTORCH_JIT", os.getenv("PYTORCH_JIT", "0") or "0")
+
+    timeout = max(
+        60,
+        _safe_int(os.getenv("SCENESMITH_PAPER_PATCH_TIMEOUT_SECONDS"), default=1200),
+    )
+    proc = subprocess.run(
+        ["bash", str(patch_script)],
+        cwd=str(bp_root),
+        env=patch_env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "SceneSmith runtime patch script failed: "
+            f"exit={proc.returncode} "
+            f"stderr_tail={(proc.stderr or '')[-4000:]!r} "
+            f"stdout_tail={(proc.stdout or '')[-4000:]!r}"
+        )
+
+
 def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
     repo_dir_raw = str(os.getenv("SCENESMITH_PAPER_REPO_DIR", "")).strip()
     if not repo_dir_raw:
@@ -1083,6 +1119,9 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
         raise RuntimeError(f"SCENESMITH_PAPER_REPO_DIR not found: {repo_dir}")
 
     python_bin = str(os.getenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")).strip() or "python3"
+    os.environ.setdefault("PYTORCH_JIT", "0")
+    _run_runtime_patch_script(repo_dir=repo_dir, python_bin=python_bin)
+
     timeout = _safe_int(os.getenv("SCENESMITH_PAPER_TIMEOUT_SECONDS"), default=5400)
 
     scene_id = str(payload.get("scene_id") or "scene").strip() or "scene"

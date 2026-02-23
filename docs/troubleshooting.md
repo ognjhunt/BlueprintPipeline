@@ -202,6 +202,26 @@ docker run --rm usd-assembly-job:smoke python -c "from pxr import Usd, UsdGeom, 
 - Re-check scale assumptions and align object origin to the floor.
 - Increase solver iterations or reduce time step in Isaac Sim.
 
+### Runpod Stage 7 black RGB / sensor QC flood
+**Symptoms**: Stage 7 logs repeated `Sensor QC failed for demo ...`, `RGB is all-black`, and exits with `CalledProcessError`.
+
+**Quick triage**
+```bash
+python tools/quality_gates/runpod_log_health_summary.py \
+  --log-path /path/to/pipeline_run.log \
+  --output analysis_outputs/triage/run_log_health_summary.json
+```
+
+**What to check**
+- `status=fail` in the summary means blocking signals were detected (`called_process_error` and/or `rgb_all_black`).
+- `status=warn` means non-blocking warning pressure is high (for example, many `sensor_qc_failed` or `curobo_plan_single_failed` hits).
+- Probe output at `${LAYOUT_DIR}/quality/stage7_mode_probe.json` should include a valid `selected_mode`.
+
+**Fixes**
+- Keep strict RGB capture defaults: `SAGE_REQUIRE_VALID_RGB=1` and `SAGE_STAGE7_RGB_POLICY=auto_probe_fail`.
+- If all probe modes fail, increase `SAGE_STAGE7_PROBE_TIMEOUT_S` and force explicit mode order (`windowed,streaming,headless`).
+- If logs include `XIO:  fatal IO error`, treat display mode/runtime setup as suspect and prefer probe-based mode selection over direct mode forcing.
+
 ## Local pipeline execution
 
 ### Validation fails in `run_local_pipeline.py`

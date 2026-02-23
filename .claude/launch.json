@@ -1,0 +1,41 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "particulate-service",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["particulate-service/particulate_service.py"],
+      "port": 8080
+    },
+    {
+      "name": "scenesmith-service",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["scenesmith-service/scenesmith_service.py"],
+      "port": 8081
+    },
+    {
+      "name": "sage-service",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["sage-service/sage_service.py"],
+      "port": 8082
+    },
+    {
+      "name": "physx-anything-service",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["physx-anything-service/physx_anything_service.py"],
+      "port": 8080
+    },
+    {
+      "name": "infinigen-service",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["infinigen-service/infinigen_service.py"],
+      "port": 8080
+    },
+    {
+      "name": "genie-sim-import-webhook",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["genie-sim-import-webhook/main.py"],
+      "port": 8080
+    }
+  ]
+}

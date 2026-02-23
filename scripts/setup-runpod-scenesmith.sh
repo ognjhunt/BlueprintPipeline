@@ -27,6 +27,21 @@ SCRIPT_START=$(date +%s)
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 fail() { echo "[FAIL] $*" >&2; exit 1; }
 
+run_scenesmith_runtime_patch() {
+  local patch_script="/workspace/BlueprintPipeline/scripts/apply_scenesmith_paper_patches.sh"
+  if [[ ! -x "${patch_script}" ]]; then
+    log "WARNING: SceneSmith runtime patch script missing: ${patch_script}"
+    return 0
+  fi
+
+  log "Applying SceneSmith runtime patches..."
+  if ! SCENESMITH_PAPER_REPO_DIR="/workspace/scenesmith" \
+       SCENESMITH_PAPER_PYTHON_BIN="/workspace/scenesmith/.venv/bin/python" \
+       "${patch_script}"; then
+    log "WARNING: SceneSmith runtime patch step failed (continuing)"
+  fi
+}
+
 # =============================================================================
 # Phase 0: Verify basics
 # =============================================================================
@@ -186,8 +201,8 @@ uv pip install \
     open3d optree roma loguru \
     astor einops-exts point-cloud-utils scikit-image trimesh \
     easydict einops fvcore \
-    plyfile spconv-cu120 timm \
-    lightning pyvista pymeshfix igraph \
+    plyfile spconv-cu120 'timm>=1.0.25' \
+    lightning pyvista pymeshfix igraph utils3d \
     2>&1 | tail -5
 
 # MoGe (pinned commit)
@@ -218,6 +233,7 @@ export HF_TOKEN=""
 export LIDRA_SKIP_INIT=1
 export CUDA_VISIBLE_DEVICES=0
 export HYDRA_FULL_ERROR=1
+export PYTORCH_JIT=0
 ENVEOF
   chmod 600 /workspace/.env
   log "Created /workspace/.env — EDIT IT to add your API keys!"
@@ -227,6 +243,10 @@ else
   if ! grep -q 'LIDRA_SKIP_INIT' /workspace/.env; then
     echo 'export LIDRA_SKIP_INIT=1' >> /workspace/.env
     log "Added LIDRA_SKIP_INIT=1 to .env"
+  fi
+  if ! grep -q '^export PYTORCH_JIT=' /workspace/.env; then
+    echo 'export PYTORCH_JIT=0' >> /workspace/.env
+    log "Added PYTORCH_JIT=0 to .env"
   fi
 fi
 
@@ -311,9 +331,15 @@ fi
 log "Phase 9 done."
 
 # =============================================================================
-# Phase 10: Verify installation
+# Phase 10: SceneSmith runtime patch pass
 # =============================================================================
-log "Phase 10: Verifying installation..."
+log "Phase 10: SceneSmith runtime patch pass..."
+run_scenesmith_runtime_patch
+
+# =============================================================================
+# Phase 11: Verify installation
+# =============================================================================
+log "Phase 11: Verifying installation..."
 
 cd /workspace/scenesmith
 source .venv/bin/activate
