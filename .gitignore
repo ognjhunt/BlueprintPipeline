@@ -72,3 +72,7 @@ test_scenes/scenes/*/replicator/
 # Analysis outputs (per-run image/segmentation artifacts)
 analysis_outputs/
 smoke_test_results/
+
+# Local run artifacts (large binaries, downloaded datasets, generated scene files)
+artifacts/
+firebase-debug.log
