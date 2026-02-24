@@ -136,6 +136,8 @@ server_key = {
     "API_TOKEN": os.environ["OPENAI_API_KEY_EFFECTIVE"],
     "API_URL_QWEN": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     "API_URL_OPENAI": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    "OPENAI_WEBSOCKET_BASE_URL": os.environ.get("OPENAI_WEBSOCKET_BASE_URL", ""),
+    "OPENAI_USE_WEBSOCKET": os.environ.get("OPENAI_USE_WEBSOCKET", "1"),
     "MODEL_DICT": {
         "qwen": model_qwen,
         "openai": model_openai,

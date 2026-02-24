@@ -144,6 +144,44 @@ else:
 _oai_client = None
 
 
+def _is_truthy(raw, default=False):
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if not normalized:
+        return default
+    return normalized in {"1", "true", "yes", "on", "y"}
+
+
+def _openai_client_kwargs():
+    kwargs = {"api_key": OPENAI_API_KEY}
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    websocket_base_url = os.getenv("OPENAI_WEBSOCKET_BASE_URL", "").strip()
+    websocket_enabled = _is_truthy(os.getenv("OPENAI_USE_WEBSOCKET"), default=False)
+    if websocket_enabled and websocket_base_url:
+        kwargs["websocket_base_url"] = websocket_base_url
+
+    candidates = [dict(kwargs)]
+    if "websocket_base_url" in kwargs:
+        no_ws = dict(kwargs)
+        no_ws.pop("websocket_base_url", None)
+        candidates.append(no_ws)
+    if "base_url" in kwargs:
+        no_base = dict(kwargs)
+        no_base.pop("base_url", None)
+        candidates.append(no_base)
+        if "websocket_base_url" in kwargs:
+            no_base_no_ws = dict(no_base)
+            no_base_no_ws.pop("websocket_base_url", None)
+            candidates.append(no_base_no_ws)
+
+    candidates.append({"api_key": OPENAI_API_KEY})
+    return candidates
+
+
 def _get_openai_client():
     """Lazy-load OpenAI client so Gemini-only setups don't require openai package."""
     global _oai_client
@@ -158,8 +196,22 @@ def _get_openai_client():
             "OpenAI fallback requested but openai package is unavailable. "
             "Install `openai` or keep Gemini as the active image backend."
         ) from exc
-    _oai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    return _oai_client
+    seen = set()
+    last_error = None
+    for client_kwargs in _openai_client_kwargs():
+        key = tuple(sorted(client_kwargs.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            _oai_client = openai.OpenAI(**client_kwargs)
+            return _oai_client
+        except TypeError as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise RuntimeError("Failed to initialize OpenAI client for SAM3D fallback.") from last_error
+    raise RuntimeError("Failed to initialize OpenAI client for SAM3D fallback.")
 
 # ── SAM3D model (lazy loaded) ────────────────────────────────────────────────
 os.environ["LIDRA_SKIP_INIT"] = "true"

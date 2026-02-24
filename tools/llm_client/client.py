@@ -11,6 +11,8 @@ Environment Variables:
     GEMINI_API_KEY: API key for Google Gemini
     ANTHROPIC_API_KEY: API key for Anthropic Claude
     OPENAI_API_KEY: API key for OpenAI
+    OPENAI_WEBSOCKET_BASE_URL: Optional WebSocket base URL for OpenAI Responses API
+    OPENAI_USE_WEBSOCKET: "true" | "false" (default: false)
     LLM_MOCK_RESPONSE_PATH: JSON response path for mock provider
     LLM_FALLBACK_ENABLED: "true" | "false" (default: true)
     LLM_MAX_RETRIES: Number of retries (default: 3)
@@ -912,27 +914,55 @@ class OpenAIClient(LLMClient):
         self.reasoning_effort = reasoning_effort
         self.base_url = (base_url or os.getenv("OPENAI_BASE_URL", "").strip()) or None
         self.default_headers = dict(default_headers) if default_headers else None
+        self._client = None  # type: ignore[assignment]
 
         try:
             from openai import OpenAI
             self._openai = OpenAI
+            websocket_enabled = parse_bool_env(os.getenv("OPENAI_USE_WEBSOCKET"), default=False)
+            websocket_base_url = os.getenv("OPENAI_WEBSOCKET_BASE_URL", "").strip()
+
             client_kwargs: Dict[str, Any] = {"api_key": self.api_key}
             if self.base_url:
                 client_kwargs["base_url"] = self.base_url
             if self.default_headers:
                 client_kwargs["default_headers"] = self.default_headers
+            if websocket_enabled and websocket_base_url:
+                client_kwargs["websocket_base_url"] = websocket_base_url
 
-            try:
-                self._client = OpenAI(**client_kwargs)
-            except TypeError:
-                # Older SDK versions may not accept default_headers/base_url.
-                fallback_kwargs = dict(client_kwargs)
-                fallback_kwargs.pop("default_headers", None)
+            candidate_kwargs: List[Dict[str, Any]] = [dict(client_kwargs)]
+            if "websocket_base_url" in client_kwargs:
+                no_ws = dict(client_kwargs)
+                no_ws.pop("websocket_base_url", None)
+                candidate_kwargs.append(no_ws)
+            if "base_url" in client_kwargs:
+                no_base = dict(client_kwargs)
+                no_base.pop("base_url", None)
+                candidate_kwargs.append(no_base)
+                if "websocket_base_url" in client_kwargs:
+                    no_base_no_ws = dict(no_base)
+                    no_base_no_ws.pop("websocket_base_url", None)
+                    candidate_kwargs.append(no_base_no_ws)
+            fallback_kwargs = {"api_key": self.api_key}
+            candidate_kwargs.append(fallback_kwargs)
+
+            seen_kwargs = set()
+            last_error: Optional[TypeError] = None
+            for kwargs in candidate_kwargs:
+                key = tuple(sorted(kwargs.items()))
+                if key in seen_kwargs:
+                    continue
+                seen_kwargs.add(key)
                 try:
-                    self._client = OpenAI(**fallback_kwargs)
-                except TypeError:
-                    fallback_kwargs.pop("base_url", None)
-                    self._client = OpenAI(**fallback_kwargs)
+                    self._client = OpenAI(**kwargs)
+                    break
+                except TypeError as exc:  # pragma: no cover - depends on SDK version
+                    last_error = exc
+
+            if self._client is None:
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("OpenAI client initialization returned no client")
         except ImportError:
             raise ImportError("openai package is required for OpenAI support")
 

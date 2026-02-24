@@ -484,7 +484,7 @@ import json as _bp_json
 import os as _bp_os
 import re as _bp_re
 import sys as _bp_sys
-from typing import Optional as _bp_Optional
+from typing import Any as _bp_Any, Optional as _bp_Optional
 
 
 def _bp__extract_json_substring(_text: str) -> _bp_Optional[str]:
@@ -550,10 +550,65 @@ def _bp__openai_repair_json(_raw_text: str) -> _bp_Optional[str]:
     except Exception:
         return None
 
+    def _bp__truthy(v: object) -> bool:
+        if v is None:
+            return False
+        if isinstance(v, bool):
+            return v
+        s = str(v).strip().lower()
+        return s in {"1", "true", "yes", "on", "y"}
+
+    def _bp__build_openai_client_kwargs() -> list[dict[str, str]]:
+        kwargs: dict[str, str] = {"api_key": api_key}
+        base_url = _bp_os.getenv("OPENAI_BASE_URL", "").strip()
+        if base_url:
+            kwargs["base_url"] = base_url
+        websocket_base_url = _bp_os.getenv("OPENAI_WEBSOCKET_BASE_URL", "").strip()
+        websocket_enabled = _bp__truthy(_bp_os.getenv("OPENAI_USE_WEBSOCKET", ""))
+        if websocket_enabled and websocket_base_url:
+            kwargs["websocket_base_url"] = websocket_base_url
+
+        candidates = [dict(kwargs)]
+        if "websocket_base_url" in kwargs:
+            no_ws = dict(kwargs)
+            no_ws.pop("websocket_base_url", None)
+            candidates.append(no_ws)
+        if "base_url" in kwargs:
+            no_base = dict(kwargs)
+            no_base.pop("base_url", None)
+            candidates.append(no_base)
+            if "websocket_base_url" in kwargs:
+                no_base_no_ws = dict(no_base)
+                no_base_no_ws.pop("websocket_base_url", None)
+                candidates.append(no_base_no_ws)
+
+        candidates.append({"api_key": api_key})
+        return candidates
+
+    def _bp__build_openai_client() -> _bp_Any:
+        if not hasattr(_bp_openai, "OpenAI"):
+            raise AttributeError("OpenAI SDK v1 not available")
+
+        candidates = _bp__build_openai_client_kwargs()
+        seen: set[tuple[tuple[str, str], ...]] = set()
+        last_error = None
+        for candidate in candidates:
+            key = tuple(sorted(candidate.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                return _bp_openai.OpenAI(**candidate)
+            except TypeError as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        return _bp_openai.OpenAI(api_key=api_key)
+
     out = ""
     try:
         if hasattr(_bp_openai, "OpenAI"):
-            client = _bp_openai.OpenAI(api_key=api_key)
+            client = _bp__build_openai_client()
 
             # Prefer chat.completions (SDK v1 path)
             if hasattr(client, "chat") and hasattr(client.chat, "completions"):

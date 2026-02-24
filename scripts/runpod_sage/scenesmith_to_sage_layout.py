@@ -90,6 +90,54 @@ def _slug(s: str, default: str) -> str:
     return text[:80]
 
 
+def _snapshot_scenesmith_run(
+    *,
+    response: Mapping[str, Any],
+    layout_dir: Path,
+    attempt_label: str,
+    persist_enabled: bool,
+) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {
+        "attempt": str(attempt_label).strip(),
+        "persist_enabled": bool(persist_enabled),
+        "paper_stack_run_dir": "",
+        "paper_stack_house_state_path": "",
+        "status": "skipped",
+    }
+    if not persist_enabled:
+        return snapshot
+
+    paper_stack = response.get("paper_stack") if isinstance(response, Mapping) else {}
+    if not isinstance(paper_stack, Mapping):
+        snapshot["status"] = "no_paper_stack"
+        return snapshot
+
+    run_dir = Path(str(paper_stack.get("run_dir") or "")).expanduser()
+    house_state_path = Path(str(paper_stack.get("house_state_path") or "")).expanduser()
+    snapshot["paper_stack_run_dir"] = str(run_dir)
+    snapshot["paper_stack_house_state_path"] = str(house_state_path)
+
+    if not run_dir.is_dir():
+        snapshot["status"] = "run_dir_missing"
+        return snapshot
+
+    try:
+        scenesmith_run_dir = layout_dir / "scenesmith_run"
+        scenesmith_run_dir.mkdir(parents=True, exist_ok=True)
+        attempt_dir = scenesmith_run_dir / f"attempt_{snapshot['attempt']}"
+        if attempt_dir.exists():
+            shutil.rmtree(attempt_dir, ignore_errors=True)
+        shutil.copytree(run_dir, attempt_dir)
+        snapshot["status"] = "synced"
+        snapshot["synced_to"] = str(attempt_dir)
+    except Exception as exc:
+        snapshot["status"] = "sync_error"
+        snapshot["error"] = str(exc)
+        _log(f"WARNING: SceneSmith run sync failed for attempt {snapshot['attempt']}: {exc}")
+
+    return snapshot
+
+
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -864,6 +912,32 @@ def _run_scenesmith_paper_stack(
     os.environ.setdefault("SCENESMITH_PAPER_REPO_DIR", "/opt/scenesmith")
     os.environ.setdefault("SCENESMITH_PAPER_PYTHON_BIN", "/opt/scenesmith/.venv/bin/python")
     os.environ.setdefault("SCENESMITH_PAPER_ALL_SAM3D", "true")
+    os.environ.setdefault("SCENESMITH_MP_START_METHOD", "fork")
+    os.environ.setdefault("SCENESMITH_PAPER_TIMEOUT_SECONDS", "10800")
+    # Alias GEMINI_API_KEY -> GOOGLE_API_KEY if not already set (Gemini image backend requires GOOGLE_API_KEY)
+    if not os.environ.get("GOOGLE_API_KEY") and os.environ.get("GEMINI_API_KEY"):
+        os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
+    os.environ.setdefault("SCENESMITH_PAPER_SINGLE_RUN_LOCK", "1")
+    os.environ.setdefault("SCENESMITH_PAPER_CLEAN_STALE_PROCESSES", "1")
+    os.environ.setdefault("OPENAI_USE_WEBSOCKET", "1")
+    if not os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL"):
+        ws_url = os.environ.get("OPENAI_WEBSOCKET_BASE_URL", "").strip()
+        if ws_url:
+            os.environ["SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL"] = ws_url
+    if not os.environ.get("OPENAI_WEBSOCKET_BASE_URL"):
+        inherited_ws_url = os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL", "").strip()
+        if inherited_ws_url:
+            os.environ["OPENAI_WEBSOCKET_BASE_URL"] = inherited_ws_url
+    if not os.environ.get("SCENESMITH_PAPER_OPENAI_BASE_URL"):
+        paper_openai_base = os.environ.get("OPENAI_BASE_URL", "").strip()
+        if paper_openai_base:
+            os.environ["SCENESMITH_PAPER_OPENAI_BASE_URL"] = paper_openai_base
+    if not os.environ.get("SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET"):
+        os.environ["SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET"] = (
+            os.environ.get("OPENAI_USE_WEBSOCKET")
+            if os.environ.get("OPENAI_USE_WEBSOCKET")
+            else ("1" if os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL") else "0")
+        )
     os.environ.setdefault("PYTORCH_JIT", "0")
 
     payload = {
@@ -883,7 +957,7 @@ def _run_scenesmith_paper_stack(
         env=os.environ.copy(),
         cwd=str(bp_root),
         check=False,
-        timeout=int(os.getenv("SCENESMITH_PAPER_TIMEOUT_SECONDS", "5400")),
+        timeout=int(os.getenv("SCENESMITH_PAPER_TIMEOUT_SECONDS", "10800")),
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -996,6 +1070,12 @@ def main() -> int:
     parser.add_argument("--max_meshes", type=int, default=int(os.getenv("SCENESMITH_TO_SAGE_MAX_MESHES", "30")))
     parser.add_argument("--sam3d_server", default=os.getenv("SAM3D_SERVER_URL", "http://127.0.0.1:8080"))
     parser.add_argument("--stop_sam3d_before_paper", action="store_true", default=os.getenv("SCENESMITH_TO_SAGE_STOP_SAM3D_BEFORE_PAPER", "1") == "1")
+    parser.add_argument(
+        "--persist_scenesmith_run",
+        type=int,
+        choices=[0, 1],
+        default=_safe_int(os.getenv("SCENESMITH_TO_SAGE_PERSIST_SCENESMITH_RUN", "1"), 1),
+    )
     parser.add_argument(
         "--critic_loop_enabled",
         type=int,
@@ -1110,6 +1190,8 @@ def main() -> int:
     chosen_attempt: Optional[int] = None
     chosen_raw_objects: List[Mapping[str, Any]] = []
     attempt_summaries: List[Dict[str, Any]] = []
+    persist_scenesmith_run = bool(args.persist_scenesmith_run)
+    scenesmith_run_snapshots: List[Dict[str, Any]] = []
 
     last_response: Optional[Dict[str, Any]] = None
     last_seed: Optional[int] = None
@@ -1133,6 +1215,7 @@ def main() -> int:
         last_response = response
         last_seed = attempt_seed
         last_objects = list(raw_objects)
+        paper_stack = response.get("paper_stack") if isinstance(response, Mapping) else {}
 
         eval_report = _evaluate_critic(response, critic_cfg)
         failures = list(eval_report.get("failures", []))
@@ -1150,6 +1233,13 @@ def main() -> int:
             "critic": eval_report,
             "accepted": False,
         }
+        if isinstance(paper_stack, Mapping):
+            attempt_summary["paper_stack"] = {
+                "run_dir": str(paper_stack.get("run_dir") or ""),
+                "house_state_path": str(paper_stack.get("house_state_path") or ""),
+                "scenesmith_exit_code": paper_stack.get("scenesmith_exit_code"),
+                "model_selected": str(paper_stack.get("model_selected") or ""),
+            }
         attempt_summaries.append(attempt_summary)
 
         if not critic_cfg.enabled:
@@ -1213,6 +1303,16 @@ def main() -> int:
     assert chosen_seed is not None
     response = chosen_response
     raw_objects = chosen_raw_objects
+
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    scenesmith_run_snapshots.append(
+        _snapshot_scenesmith_run(
+            response=response,
+            layout_dir=layout_dir,
+            attempt_label=str(chosen_attempt or 1),
+            persist_enabled=bool(persist_scenesmith_run),
+        )
+    )
 
     # Convert objects to SAGE room dict.
     room = _convert_objects_to_sage(raw_objects, margin_m=0.6, room_type=str(args.room_type), seed=int(chosen_seed))
@@ -1288,6 +1388,8 @@ def main() -> int:
             "layout_id": layout_id,
             "accepted_attempt": int(chosen_attempt or 1),
             "accepted_seed": int(chosen_seed),
+            "persist_scenesmith_run": bool(persist_scenesmith_run),
+            "scenesmith_run_snapshots": scenesmith_run_snapshots,
             "critic_loop": {
                 "enabled": critic_cfg.enabled,
                 "max_attempts": critic_cfg.max_attempts,

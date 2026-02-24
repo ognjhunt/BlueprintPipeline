@@ -20,6 +20,8 @@
 # Optional env vars:
 #   OPENAI_MODEL         — Legacy fallback model name (default: gpt-5.1)
 #   OPENAI_BASE_URL      — Base URL (default: OPENROUTER_BASE_URL or https://api.openai.com/v1)
+#   OPENAI_WEBSOCKET_BASE_URL — OpenAI Responses websocket endpoint (e.g. wss://api.openai.com/ws/v1/realtime?provider=openai)
+#   OPENAI_USE_WEBSOCKET — Enable websocket mode for OpenAI responses (1|true|on, default: 1)
 #   OPENROUTER_BASE_URL  — OpenRouter base URL (default: https://openrouter.ai/api/v1)
 #   OPENAI_MODEL_QWEN    — qwen model (default: qwen/qwen3.5-397b-a17b)
 #   OPENAI_MODEL_OPENAI  — openai slot model (default: moonshotai/kimi-k2.5)
@@ -46,6 +48,8 @@ SAM3D_PORT=${SAM3D_PORT:-8080}
 SLURM_JOB_ID=${SLURM_JOB_ID:-12345}
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.1}"
 OPENAI_BASE_URL="${OPENAI_BASE_URL:-${OPENROUTER_BASE_URL:-https://api.openai.com/v1}}"
+OPENAI_WEBSOCKET_BASE_URL="${OPENAI_WEBSOCKET_BASE_URL:-}"
+OPENAI_USE_WEBSOCKET="${OPENAI_USE_WEBSOCKET:-1}"
 OPENAI_MODEL_QWEN="${OPENAI_MODEL_QWEN:-qwen/qwen3.5-397b-a17b}"
 OPENAI_MODEL_OPENAI="${OPENAI_MODEL_OPENAI:-moonshotai/kimi-k2.5}"
 OPENAI_MODEL_GLMV="${OPENAI_MODEL_GLMV:-${OPENAI_MODEL}}"
@@ -104,6 +108,8 @@ export SAM3D_TEXTURE_BAKING
 export SAM3D_PORT
 export SAM3D_GEMINI_IMAGE_MODELS
 export SAM3D_ENABLE_OPENAI_FALLBACK
+export OPENAI_WEBSOCKET_BASE_URL
+export OPENAI_USE_WEBSOCKET
 export REQUIRE_LOCAL_ROBOT_ASSET="${REQUIRE_LOCAL_ROBOT_ASSET:-1}"
 export SAGE_ALLOW_REMOTE_ISAAC_ASSETS="${SAGE_ALLOW_REMOTE_ISAAC_ASSETS:-0}"
 export SAGE_SENSOR_FAILURE_POLICY="${SAGE_SENSOR_FAILURE_POLICY:-fail}"
@@ -171,6 +177,8 @@ server_key = {
     "API_TOKEN": os.environ.get("OPENAI_API_KEY_EFFECTIVE", ""),
     "API_URL_QWEN": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     "API_URL_OPENAI": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    "OPENAI_WEBSOCKET_BASE_URL": os.environ.get("OPENAI_WEBSOCKET_BASE_URL", ""),
+    "OPENAI_USE_WEBSOCKET": os.environ.get("OPENAI_USE_WEBSOCKET", "1"),
     "MODEL_DICT": {
         "qwen": model_qwen,
         "openai": model_openai,

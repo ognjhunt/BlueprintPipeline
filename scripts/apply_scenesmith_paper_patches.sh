@@ -166,6 +166,11 @@ PYEOF
 }
 
 patch_floor_plan_material_fallbacks() {
+  if ! is_truthy "${SCENESMITH_PATCH_ENABLE_FLOOR_PLAN_FALLBACK_PATCH:-0}"; then
+    log "  SKIP: floor plan material fallback patch disabled (set SCENESMITH_PATCH_ENABLE_FLOOR_PLAN_FALLBACK_PATCH=1 to enable)"
+    return 0
+  fi
+
   local resolver_file="${SCENESMITH_DIR}/scenesmith/floor_plan_agents/tools/materials_resolver.py"
   if [[ ! -f "${resolver_file}" ]]; then
     warn_or_fail "materials_resolver.py not found at ${resolver_file}"
@@ -492,6 +497,131 @@ PYEOF
   warn_or_fail "Failed to patch floor_plan_tools.py defaults handling"
 }
 
+patch_parallel_start_method() {
+  local parallel_file="${SCENESMITH_DIR}/scenesmith/utils/parallel.py"
+  if [[ ! -f "${parallel_file}" ]]; then
+    warn_or_fail "parallel.py not found at ${parallel_file}"
+    return 0
+  fi
+
+  if python3 - "${parallel_file}" <<'PYEOF'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+marker = "BlueprintPipeline multiprocessing start-method patch"
+if marker in text:
+    print(f"  OK: multiprocessing start-method patch already present in {path}")
+    raise SystemExit(0)
+
+if "def run_parallel_isolated(" not in text:
+    print(f"  SKIP: run_parallel_isolated not found in {path}")
+    raise SystemExit(0)
+
+append_block = '''
+# BlueprintPipeline multiprocessing start-method patch:
+# Default to fork (stable in the current container runtime), while allowing override
+# to forkserver/spawn via SCENESMITH_MP_START_METHOD.
+def _bp_get_mp_context() -> tuple[multiprocessing.context.BaseContext, str]:
+    import os as _bp_os
+
+    requested = str(
+        _bp_os.getenv("SCENESMITH_MP_START_METHOD", "fork")
+    ).strip().lower()
+    if requested in {"", "auto", "default"}:
+        requested = "fork"
+
+    candidates = [requested]
+    if "forkserver" not in candidates:
+        candidates.append("forkserver")
+    if "spawn" not in candidates:
+        candidates.append("spawn")
+
+    for method in candidates:
+        try:
+            return multiprocessing.get_context(method), method
+        except Exception:
+            continue
+
+    # Last-resort fallback (should not happen in normal Linux/python builds).
+    return multiprocessing.get_context(), "default"
+
+
+if "run_parallel_isolated" in globals():
+    _bp_original_run_parallel_isolated = run_parallel_isolated
+    if getattr(_bp_original_run_parallel_isolated, "__name__", "") != "_bp_run_parallel_isolated":
+        def _bp_run_parallel_isolated(
+            tasks: list[tuple[str, Callable, dict]],
+            max_workers: int,
+            return_values: bool = False,
+        ) -> dict[str, tuple[bool, Any]]:
+            ctx, start_method = _bp_get_mp_context()
+            console_logger.info(
+                "BlueprintPipeline multiprocessing start-method patch: using %s",
+                start_method,
+            )
+
+            result_queue = ctx.Queue()
+            pending = list(tasks)
+            active: dict[int, tuple[multiprocessing.Process, str]] = {}
+            results: dict[str, tuple[bool, Any]] = {}
+
+            while pending or active:
+                while len(active) < max_workers and pending:
+                    task_id, target, kwargs = pending.pop(0)
+                    proc = ctx.Process(
+                        target=_worker_wrapper,
+                        args=(target, kwargs, task_id, result_queue, return_values),
+                    )
+                    proc.start()
+                    active[proc.pid] = (proc, task_id)
+                    console_logger.info(
+                        f"Started {task_id} (pid={proc.pid}, start_method={start_method})"
+                    )
+
+                if active:
+                    sentinels = [proc.sentinel for proc, _ in active.values()]
+                    wait(sentinels, timeout=1.0)
+
+                while True:
+                    try:
+                        result_task_id, success, result_or_error = result_queue.get_nowait()
+                        results[result_task_id] = (success, result_or_error)
+                        status = "completed" if success else f"failed: {result_or_error}"
+                        console_logger.info(f"{result_task_id} {status}")
+                    except queue.Empty:
+                        break
+
+                for pid, (proc, task_id) in list(active.items()):
+                    if not proc.is_alive():
+                        proc.join()
+                        del active[pid]
+                        if task_id not in results:
+                            signal_name = _get_signal_name(proc.exitcode)
+                            results[task_id] = (
+                                False,
+                                f"Process crashed (exitcode={proc.exitcode}{signal_name})",
+                            )
+                            console_logger.error(
+                                f"{task_id} crashed (exitcode={proc.exitcode}{signal_name})"
+                            )
+
+            return results
+
+        run_parallel_isolated = _bp_run_parallel_isolated
+'''
+
+path.write_text(text.rstrip() + "\n\n" + append_block.lstrip("\n"), encoding="utf-8")
+print(f"  PATCHED: multiprocessing start-method in {path}")
+PYEOF
+  then
+    return 0
+  fi
+
+  warn_or_fail "Failed to patch parallel.py multiprocessing start method"
+}
+
 patch_agents_tool_typing() {
   if is_truthy "${SCENESMITH_PATCH_SKIP_AGENTS_TOOL_PATCH:-0}"; then
     log "  SKIP: agents/tool.py patch disabled by SCENESMITH_PATCH_SKIP_AGENTS_TOOL_PATCH"
@@ -804,6 +934,7 @@ ensure_material_dirs
 ensure_sam3_repo
 patch_indoor_scene_generation
 patch_floor_plan_material_fallbacks
+patch_parallel_start_method
 patch_agents_tool_typing
 install_missing_python_modules
 ensure_timm_and_kaolin

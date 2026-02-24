@@ -36,6 +36,77 @@ class EmbeddingConfig:
     image_backend: Optional[str] = None
 
 
+def _is_truthy(raw: Any, *, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw).strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on", "y"}
+
+
+def _openai_client_kwargs(api_key: str) -> list[dict[str, Any]]:
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+    websocket_base_url = os.getenv("OPENAI_WEBSOCKET_BASE_URL", "").strip()
+    websocket_enabled = _is_truthy(os.getenv("OPENAI_USE_WEBSOCKET"), default=False)
+
+    client_kwargs: dict[str, Any] = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    if websocket_enabled and websocket_base_url:
+        client_kwargs["websocket_base_url"] = websocket_base_url
+
+    candidate_kwargs = [dict(client_kwargs)]
+    if "websocket_base_url" in client_kwargs:
+        no_ws = dict(client_kwargs)
+        no_ws.pop("websocket_base_url", None)
+        candidate_kwargs.append(no_ws)
+    if "base_url" in client_kwargs:
+        no_base = dict(client_kwargs)
+        no_base.pop("base_url", None)
+        candidate_kwargs.append(no_base)
+        if "websocket_base_url" in client_kwargs:
+            no_base_no_ws = dict(no_base)
+            no_base_no_ws.pop("websocket_base_url", None)
+            candidate_kwargs.append(no_base_no_ws)
+
+    candidate_kwargs.append({"api_key": api_key})
+    return candidate_kwargs
+
+
+def _build_openai_client(api_key: str) -> Any:
+    try:
+        from openai import OpenAI
+    except Exception as exc:
+        raise RuntimeError("openai package is required for OpenAI embeddings") from exc
+
+    seen = set()
+    last_error: Optional[TypeError] = None
+    previous_key = os.getenv("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = api_key
+    try:
+        for candidate in _openai_client_kwargs(api_key):
+            key = tuple(sorted(candidate.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                return OpenAI(**candidate)
+            except TypeError as exc:
+                last_error = exc
+    finally:
+        if previous_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = previous_key
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("OpenAI client initialization returned no client")
+
+
 class AssetEmbeddings:
     """
     Manages vector embeddings for asset search.
@@ -96,12 +167,10 @@ class AssetEmbeddings:
                 raise RuntimeError(f"Failed to initialize Vertex/Gemini embeddings: {exc}") from exc
         elif self.config.backend == "openai":
             try:
-                from openai import OpenAI
-
                 if not self.config.api_key:
                     raise ValueError("API key required for OpenAI embeddings")
 
-                self._client = OpenAI(api_key=self.config.api_key)
+                self._client = _build_openai_client(self.config.api_key)
                 self._model = self.config.model_name or "text-embedding-3-small"
             except Exception as exc:  # pragma: no cover - dependency not always installed
                 raise RuntimeError(f"Failed to initialize OpenAI embeddings: {exc}") from exc
@@ -144,12 +213,10 @@ class AssetEmbeddings:
             if openai_spec is None:
                 raise RuntimeError("openai package is required for OpenAI image embeddings")
 
-            from openai import OpenAI
-
             if not self.config.api_key:
-                raise ValueError("API key required for OpenAI embeddings")
+                raise ValueError("API key required for OpenAI image embeddings")
 
-            self._image_client = OpenAI(api_key=self.config.api_key)
+            self._image_client = _build_openai_client(self.config.api_key)
             self._image_model = model_name or "text-embedding-3-small"
         else:
             self._image_model = "stub"

@@ -303,6 +303,105 @@ def test_hydra_overrides_supports_delimited_extra_overrides(
 
 
 @pytest.mark.unit
+def test_apply_paper_openai_env_overrides_maps_websocket_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_module("scenesmith_paper_command_openai_websocket_env_module", "scenesmith-service/scenesmith_paper_command.py")
+
+    env: dict[str, str] = {}
+    monkeypatch.setenv("SCENESMITH_PAPER_OPENAI_API_KEY", "websocket-key")
+    monkeypatch.setenv("SCENESMITH_PAPER_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL", "wss://api.openai.com/ws")
+    monkeypatch.setenv("SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET", "1")
+
+    module._apply_paper_openai_env_overrides(env)
+
+    assert env["OPENAI_API_KEY"] == "websocket-key"
+    assert env["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
+    assert env["SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL"] == "wss://api.openai.com/ws"
+    assert env["OPENAI_WEBSOCKET_BASE_URL"] == "wss://api.openai.com/ws"
+    assert env["SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET"] == "1"
+    assert env["OPENAI_USE_WEBSOCKET"] == "1"
+
+
+@pytest.mark.unit
+def test_official_scenesmith_openai_wrapper_receives_websocket_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = _load_module("scenesmith_paper_command_openai_websocket_command_module", "scenesmith-service/scenesmith_paper_command.py")
+
+    repo_dir = tmp_path / "scenesmith"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "main.py").write_text("# placeholder\\n", encoding="utf-8")
+
+    run_dir = tmp_path / "paper-run-websocket"
+    monkeypatch.setattr(module, "_run_root", lambda _scene_id: run_dir)
+    monkeypatch.setattr(module, "_run_runtime_patch_script", lambda **_: None)
+
+    captured: dict[str, object] = {}
+
+    def _fake_process(**kwargs: object) -> dict[str, object]:
+        captured["cmd"] = list(kwargs["cmd"]) if isinstance(kwargs["cmd"], list) else []
+        captured["env"] = kwargs["env"] if isinstance(kwargs["env"], dict) else {}
+        output_dir = run_dir / "outputs" / "scene_demo_websocket" / "scene_000" / "combined_house"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        house_state = {
+            "objects": [
+                {
+                    "id": "table_001",
+                    "semantic_class": "table",
+                    "extent": {"x": 1.0, "y": 0.9, "z": 0.8},
+                    "pose": {
+                        "position": {"x": 0.2, "y": 0.0, "z": -0.1},
+                        "orientation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                    },
+                    "floor_object": True,
+                }
+            ]
+        }
+        house_state_path = output_dir / "house_state.json"
+        house_state_path.write_text(json.dumps(house_state), encoding="utf-8")
+        return {
+            "returncode": 0,
+            "stdout_tail": "ok",
+            "stderr_tail": "",
+            "stdout_log": str(run_dir / "stdout.log"),
+            "stderr_log": str(run_dir / "stderr.log"),
+            "house_state_path": str(house_state_path),
+            "forced_exit_reason": "",
+            "timed_out": False,
+        }
+
+    monkeypatch.setattr(module, "_run_scenesmith_process", _fake_process)
+    monkeypatch.setenv("SCENESMITH_PAPER_REPO_DIR", str(repo_dir))
+    monkeypatch.setenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")
+    monkeypatch.setenv("SCENESMITH_PAPER_KEEP_RUN_DIR", "true")
+    monkeypatch.setenv("SCENESMITH_PAPER_OPENAI_API", "responses")
+    monkeypatch.setenv("SCENESMITH_PAPER_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("SCENESMITH_PAPER_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL", "wss://api.openai.com/ws")
+    monkeypatch.setenv("SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET", "1")
+
+    module._run_official_scenesmith(
+        {
+            "scene_id": "scene_demo_websocket",
+            "prompt": "A table with a test task",
+            "seed": 7,
+            "constraints": {"room_type": "kitchen"},
+        }
+    )
+
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert cmd[0] == "python3"
+    assert cmd[1] == "-c"
+    assert "SCENESMITH_PAPER_OPENAI_API" in captured["env"]
+
+    captured_env = captured["env"]
+    assert isinstance(captured_env, dict)
+    assert captured_env["SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL"] == "wss://api.openai.com/ws"
+    assert captured_env["OPENAI_WEBSOCKET_BASE_URL"] == "wss://api.openai.com/ws"
+    assert captured_env["SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET"] == "1"
+    assert captured_env["OPENAI_USE_WEBSOCKET"] == "1"
+
+
+@pytest.mark.unit
 def test_official_scenesmith_model_chain_retries_until_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

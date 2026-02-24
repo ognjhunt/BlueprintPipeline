@@ -27,6 +27,56 @@ set -euo pipefail
 
 log() { echo "[pipeline $(date -u +%FT%TZ)] $*"; }
 
+_PIPELINE_LOCK_KIND=""
+_PIPELINE_LOCK_PATH=""
+
+_acquire_pipeline_lock() {
+    local lock_file="${SAGE_SINGLE_RUN_LOCK_FILE:-/tmp/sage_full_pipeline.lock}"
+    local lock_dir="${SAGE_SINGLE_RUN_LOCK_DIR:-/tmp/sage_full_pipeline.lockdir}"
+
+    if command -v flock >/dev/null 2>&1; then
+        _PIPELINE_LOCK_PATH="${lock_file}"
+        exec 9>"${lock_file}"
+        if ! flock -n 9; then
+            local holder_pid
+            holder_pid="$(tr -d '\n\r\t ' < "${lock_file}" 2>/dev/null || true)"
+            if [[ -n "${holder_pid}" ]]; then
+                log "ERROR: Another pipeline run is active (lock=${lock_file}, holder_pid=${holder_pid})."
+            else
+                log "ERROR: Another pipeline run is active (lock=${lock_file})."
+            fi
+            exit 1
+        fi
+        printf '%s\n' "$$" 1>&9
+        _PIPELINE_LOCK_KIND="flock"
+        return 0
+    fi
+
+    _PIPELINE_LOCK_PATH="${lock_dir}"
+    if ! mkdir "${lock_dir}" 2>/dev/null; then
+        local holder_pid
+        holder_pid="$(tr -d '\n\r\t ' < "${lock_dir}/pid" 2>/dev/null || true)"
+        if [[ -n "${holder_pid}" ]]; then
+            log "ERROR: Another pipeline run is active (lock=${lock_dir}, holder_pid=${holder_pid})."
+        else
+            log "ERROR: Another pipeline run is active (lock=${lock_dir})."
+        fi
+        exit 1
+    fi
+    printf '%s\n' "$$" > "${lock_dir}/pid" 2>/dev/null || true
+    _PIPELINE_LOCK_KIND="mkdir"
+}
+
+_release_pipeline_lock() {
+    if [[ "${_PIPELINE_LOCK_KIND}" == "flock" ]]; then
+        exec 9>&- || true
+    elif [[ "${_PIPELINE_LOCK_KIND}" == "mkdir" ]]; then
+        rm -rf "${_PIPELINE_LOCK_PATH}" 2>/dev/null || true
+    fi
+    _PIPELINE_LOCK_KIND=""
+    _PIPELINE_LOCK_PATH=""
+}
+
 _norm_room_type() {
     local rt="${1:-}"
     rt="${rt,,}"
@@ -64,6 +114,9 @@ SAGE_SCRIPTS="${BP_DIR}/scripts/runpod_sage"
 SCENE_SOURCE="${SCENE_SOURCE:-sage}"  # sage|scenesmith
 # Keep official SceneSmith run dirs by default so failed bridge runs can be resumed.
 SCENESMITH_PAPER_KEEP_RUN_DIR="${SCENESMITH_PAPER_KEEP_RUN_DIR:-1}"
+SCENESMITH_TO_SAGE_PERSIST_SCENESMITH_RUN="${SCENESMITH_TO_SAGE_PERSIST_SCENESMITH_RUN:-1}"
+SCENESMITH_PAPER_TIMEOUT_SECONDS="${SCENESMITH_PAPER_TIMEOUT_SECONDS:-10800}"
+SAGE_SINGLE_RUN_LOCK="${SAGE_SINGLE_RUN_LOCK:-1}"  # 1|0 (prevent parallel runs)
 
 ROOM_TYPE="${ROOM_TYPE:-kitchen}"
 ROBOT_TYPE="${ROBOT_TYPE:-mobile_franka}"
@@ -247,6 +300,8 @@ export SAGE_STAGE7_STREAMING_PORT
 export SAGE_STAGE7_PROBE_KEEP_ARTIFACTS
 export NAV_GATE_REQUIRE_TASK_ANCHORS
 export SCENESMITH_PAPER_KEEP_RUN_DIR
+export SCENESMITH_TO_SAGE_PERSIST_SCENESMITH_RUN
+export SCENESMITH_PAPER_TIMEOUT_SECONDS
 export SCENESMITH_PAPER_EXISTING_RUN_DIR="${SCENESMITH_PAPER_EXISTING_RUN_DIR:-}"
 
 SAGE_RUN_ID="${SAGE_RUN_ID:-sage_$(date -u +%Y%m%dT%H%M%SZ)_${RANDOM}_$$}"
@@ -287,12 +342,22 @@ if ! command -v "${PY_SYS}" &>/dev/null; then
     PY_SYS="python3"
 fi
 
+_lock_flag="$(printf '%s' "${SAGE_SINGLE_RUN_LOCK}" | tr '[:upper:]' '[:lower:]')"
+case "${_lock_flag}" in
+    1|true|yes|on|y)
+        _acquire_pipeline_lock
+        trap _release_pipeline_lock EXIT
+        log "Single-run lock acquired (${_PIPELINE_LOCK_PATH})"
+        ;;
+esac
+
 log "=========================================="
 log "SAGE Full Pipeline (7 Stages + BP + Interactive)"
 log "=========================================="
 log "Scene source: ${SCENE_SOURCE}"
 if [[ "${SCENE_SOURCE}" == "scenesmith" ]]; then
     log "SceneSmith keep run dir: ${SCENESMITH_PAPER_KEEP_RUN_DIR}"
+    log "SceneSmith run snapshot sync: ${SCENESMITH_TO_SAGE_PERSIST_SCENESMITH_RUN}"
     if [[ -n "${SCENESMITH_PAPER_EXISTING_RUN_DIR:-}" ]]; then
         log "SceneSmith existing run dir: ${SCENESMITH_PAPER_EXISTING_RUN_DIR}"
     fi
@@ -301,6 +366,7 @@ log "Quality: ${SAGE_QUALITY_PROFILE} (fallback=${SAGE_QUALITY_FALLBACK_ENABLED}
 log "SceneSmith critic loop: enabled=${SCENESMITH_CRITIC_LOOP_ENABLED} attempts=${SCENESMITH_CRITIC_MAX_ATTEMPTS} qg=${SCENESMITH_CRITIC_REQUIRE_QUALITY_PASS} score=${SCENESMITH_CRITIC_REQUIRE_SCORE} faith=${SCENESMITH_CRITIC_REQUIRE_FAITHFULNESS}"
 log "SAGE Stage1-3 accept loop: enabled=${SAGE_STAGE13_CRITIC_LOOP_ENABLED} attempts=${SAGE_STAGE13_MAX_ATTEMPTS}"
 log "SAGE pre-Stage4 critic thresholds: total>=${SAGE_STAGE13_CRITIC_MIN_TOTAL_0_10}, faith>=${SAGE_STAGE13_CRITIC_MIN_FAITHFULNESS}, collision<=${SAGE_STAGE13_CRITIC_MAX_COLLISION_RATE}"
+log "SceneSmith paper timeout: ${SCENESMITH_PAPER_TIMEOUT_SECONDS}s"
 log "Interactive: ${ENABLE_INTERACTIVE}"
 log "Room:  ${ROOM_TYPE}"
 log "Robot: ${ROBOT_TYPE}"
@@ -333,7 +399,7 @@ PIPELINE_START=$(date +%s)
 # ── SAM3D health check helper ─────────────────────────────────────────────
 SAM3D_PORT="${SAM3D_PORT:-8080}"
 SAM3D_URL="http://127.0.0.1:${SAM3D_PORT}"
-SCENE_GEN_TIMEOUT="${SCENE_GEN_TIMEOUT:-7200}"  # 2 hours max for scene generation (meshes can take ~1-2 min/object)
+SCENE_GEN_TIMEOUT="${SCENE_GEN_TIMEOUT:-10800}"  # 3 hours max for scene generation
 
 _ensure_sam3d_healthy() {
     local status

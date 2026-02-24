@@ -19,6 +19,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Tuple
 
+try:
+    import fcntl
+except Exception:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
+
 _STATIC_CLASSES = {
     "bed",
     "bookshelf",
@@ -93,6 +98,15 @@ import runpy
 import sys
 
 
+def _is_truthy(raw):
+    if raw is None:
+        return False
+    value = str(raw).strip().lower()
+    if not value:
+        return False
+    return value in {"1", "true", "yes", "on", "y"}
+
+
 def _configure_openai_agents() -> None:
     api = os.environ.get("SCENESMITH_PAPER_OPENAI_API", "").strip().lower()
     if not api:
@@ -111,8 +125,51 @@ def _configure_openai_agents() -> None:
 
     base_url = os.environ.get("OPENAI_BASE_URL")
     api_key = os.environ.get("OPENAI_API_KEY")
-    if base_url and api_key:
-        set_default_openai_client(AsyncOpenAI(base_url=base_url, api_key=api_key))
+    if not api_key:
+        return
+
+    websocket_base_url = os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL", "").strip()
+    if not websocket_base_url:
+        websocket_base_url = os.environ.get("OPENAI_WEBSOCKET_BASE_URL", "").strip()
+
+    websocket_enabled = _is_truthy(os.environ.get("SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET", "")) or _is_truthy(
+        os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_ENABLED", "")
+    ) or _is_truthy(os.environ.get("OPENAI_USE_WEBSOCKET", ""))
+
+    client_kwargs = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    if websocket_enabled and websocket_base_url:
+        client_kwargs["websocket_base_url"] = websocket_base_url
+
+    candidates = [dict(client_kwargs)]
+    if "websocket_base_url" in client_kwargs:
+        no_ws = dict(client_kwargs)
+        no_ws.pop("websocket_base_url", None)
+        candidates.append(no_ws)
+    if "base_url" in client_kwargs:
+        no_base = dict(client_kwargs)
+        no_base.pop("base_url", None)
+        candidates.append(no_base)
+        if "websocket_base_url" in client_kwargs:
+            no_base_no_ws = dict(no_base)
+            no_base_no_ws.pop("websocket_base_url", None)
+            candidates.append(no_base_no_ws)
+
+    fallback = {"api_key": api_key}
+    candidates.append(fallback)
+
+    seen = set()
+    for candidate in candidates:
+        key = tuple(sorted(candidate.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            set_default_openai_client(AsyncOpenAI(**candidate))
+            return
+        except TypeError:
+            pass
 
 
 _configure_openai_agents()
@@ -273,6 +330,26 @@ def _apply_paper_openai_env_overrides(
     tracing_key = str(os.getenv("SCENESMITH_PAPER_OPENAI_TRACING_KEY", "")).strip()
     if tracing_key:
         env["OPENAI_TRACING_KEY"] = tracing_key
+
+    ws_base_url = str(
+        os.getenv(
+            "SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL",
+            os.getenv("OPENAI_WEBSOCKET_BASE_URL", ""),
+        )
+    ).strip()
+    if ws_base_url:
+        env["SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL"] = ws_base_url
+        env["OPENAI_WEBSOCKET_BASE_URL"] = ws_base_url
+
+    ws_enabled = str(
+        os.getenv(
+            "SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET",
+            os.getenv("SCENESMITH_PAPER_OPENAI_WEBSOCKET_ENABLED", os.getenv("OPENAI_USE_WEBSOCKET", "")),
+        )
+    ).strip()
+    if ws_enabled:
+        env["SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET"] = ws_enabled
+        env["OPENAI_USE_WEBSOCKET"] = ws_enabled
 
     # Bridge selected model into the OpenAI Agents SDK default model.
     if model_override is None:
@@ -1110,6 +1187,195 @@ def _run_runtime_patch_script(*, repo_dir: Path, python_bin: str) -> None:
         )
 
 
+def _signal_name(exit_code: int) -> str:
+    if exit_code >= 0:
+        return ""
+    try:
+        return signal.Signals(-exit_code).name
+    except Exception:
+        return ""
+
+
+def _looks_like_segfault(*, exit_code: int, stdout_tail: str, stderr_tail: str) -> bool:
+    if exit_code in (-11, 139):
+        return True
+    signal_name = _signal_name(exit_code)
+    if signal_name == "SIGSEGV":
+        return True
+    blob = f"{stdout_tail}\n{stderr_tail}".lower()
+    return "segmentation fault" in blob or "sigsegv" in blob
+
+
+def _acquire_single_run_lock() -> Any:
+    if not _is_truthy(os.getenv("SCENESMITH_PAPER_SINGLE_RUN_LOCK"), default=True):
+        return None
+    if fcntl is None:
+        return None
+
+    lock_path = Path(
+        os.getenv("SCENESMITH_PAPER_LOCK_PATH", "/tmp/scenesmith_paper.lock")
+    ).expanduser()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    timeout_s = max(
+        0,
+        _safe_int(
+            os.getenv("SCENESMITH_PAPER_LOCK_TIMEOUT_SECONDS"),
+            default=0,
+        ),
+    )
+    deadline = time.monotonic() + float(timeout_s)
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise RuntimeError(
+                    f"Another SceneSmith paper run is active (lock={lock_path}). "
+                    "Refusing to run in parallel to avoid duplicate GPU/token spend."
+                )
+            time.sleep(0.5)
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    return handle
+
+
+def _release_single_run_lock(handle: Any) -> None:
+    if handle is None:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
+def _iter_process_rows() -> List[Tuple[int, str]]:
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+
+    rows: List[Tuple[int, str]] = []
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid = _safe_int(parts[0], default=-1)
+        if pid <= 0:
+            continue
+        rows.append((pid, parts[1]))
+    return rows
+
+
+def _cleanup_stale_scenesmith_processes(*, repo_dir: Path) -> Dict[str, Any]:
+    if not _is_truthy(
+        os.getenv("SCENESMITH_PAPER_CLEAN_STALE_PROCESSES"), default=True
+    ):
+        return {"matched": [], "killed": [], "remaining": []}
+
+    patterns = [
+        f"{repo_dir.as_posix()}/main.py",
+        "/opt/scenesmith/.venv/bin/python main.py",
+        "scenesmith_paper_command.py",
+        "agent_utils/blender/standalone_server.py",
+        "hydra.run.dir=/tmp/scenesmith-paper-runs",
+    ]
+    extra_patterns = str(
+        os.getenv("SCENESMITH_PAPER_STALE_PROCESS_PATTERNS", "")
+    ).strip()
+    if extra_patterns:
+        patterns.extend([p.strip() for p in extra_patterns.split(";;") if p.strip()])
+
+    protected = {os.getpid(), os.getppid()}
+    matched: List[int] = []
+    matched_cmds: Dict[int, str] = {}
+    for pid, cmd in _iter_process_rows():
+        if pid in protected:
+            continue
+        if "ps -eo pid=,args=" in cmd:
+            continue
+        if any(token in cmd for token in patterns):
+            matched.append(pid)
+            matched_cmds[pid] = cmd
+
+    if not matched:
+        return {"matched": [], "killed": [], "remaining": []}
+
+    for pid in matched:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+
+    grace_s = max(
+        1.0,
+        _safe_float(
+            os.getenv("SCENESMITH_PAPER_STALE_PROCESS_TERM_GRACE_SECONDS"),
+            default=4.0,
+        ),
+    )
+    deadline = time.monotonic() + grace_s
+    while time.monotonic() < deadline:
+        alive = []
+        for pid in matched:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except Exception:
+                pass
+        if not alive:
+            break
+        time.sleep(0.2)
+
+    remaining: List[int] = []
+    for pid in matched:
+        try:
+            os.kill(pid, 0)
+            remaining.append(pid)
+        except Exception:
+            pass
+
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+    final_remaining: List[int] = []
+    for pid in remaining:
+        try:
+            os.kill(pid, 0)
+            final_remaining.append(pid)
+        except Exception:
+            pass
+
+    return {
+        "matched": [{"pid": pid, "cmd": matched_cmds.get(pid, "")} for pid in matched],
+        "killed": [pid for pid in matched if pid not in final_remaining],
+        "remaining": final_remaining,
+    }
+
+
 def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
     repo_dir_raw = str(os.getenv("SCENESMITH_PAPER_REPO_DIR", "")).strip()
     if not repo_dir_raw:
@@ -1118,16 +1384,21 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
     if not repo_dir.is_dir():
         raise RuntimeError(f"SCENESMITH_PAPER_REPO_DIR not found: {repo_dir}")
 
+    # Keep only one paper-stack run active per host by default.
+    single_run_lock = _acquire_single_run_lock()
+
     python_bin = str(os.getenv("SCENESMITH_PAPER_PYTHON_BIN", "python3")).strip() or "python3"
     os.environ.setdefault("PYTORCH_JIT", "0")
     _run_runtime_patch_script(repo_dir=repo_dir, python_bin=python_bin)
 
-    timeout = _safe_int(os.getenv("SCENESMITH_PAPER_TIMEOUT_SECONDS"), default=5400)
+    timeout = _safe_int(os.getenv("SCENESMITH_PAPER_TIMEOUT_SECONDS"), default=10800)
 
     scene_id = str(payload.get("scene_id") or "scene").strip() or "scene"
     scene_name = _slug(scene_id, default="scene")
     existing_run_dir = _resolve_existing_run_dir()
+    stale_process_cleanup: Dict[str, Any] = {"matched": [], "killed": [], "remaining": []}
     if existing_run_dir is None:
+        stale_process_cleanup = _cleanup_stale_scenesmith_processes(repo_dir=repo_dir)
         root_run_dir = _run_root(scene_name)
         root_run_dir.mkdir(parents=True, exist_ok=True)
         cleanup_root_run_dir = True
@@ -1205,6 +1476,8 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
                     "scenesmith_existing_run_reused": True,
                     "scenesmith_stdout_log": str(run_dir / "official_scenesmith.stdout.log"),
                     "scenesmith_stderr_log": str(run_dir / "official_scenesmith.stderr.log"),
+                    "single_run_lock_enabled": single_run_lock is not None,
+                    "stale_process_cleanup": stale_process_cleanup,
                     "model_attempts": attempt_records,
                     "critic_found_keys": critic_summary.get("found_keys", []),
                     "critic_source_files": critic_summary.get("source_files", []),
@@ -1254,6 +1527,18 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
             timed_out = bool(process_report.get("timed_out"))
             house_state_hint = str(process_report.get("house_state_path") or "").strip()
             accepted_nonzero_exit = bool(exit_code != 0 and house_state_hint)
+
+            if _looks_like_segfault(
+                exit_code=exit_code,
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+            ):
+                raise RuntimeError(
+                    "Official SceneSmith crashed with SIGSEGV; refusing model retries "
+                    "because this is a process/runtime failure (not a prompt/model issue). "
+                    f"exit={exit_code} "
+                    f"stdout_tail={stdout_tail!r} stderr_tail={stderr_tail!r}"
+                )
 
             if exit_code != 0 and not accepted_nonzero_exit:
                 attempt_records.append(
@@ -1340,6 +1625,8 @@ def _run_official_scenesmith(payload: Mapping[str, Any]) -> Dict[str, Any]:
                     "scenesmith_existing_run_reused": False,
                     "scenesmith_stdout_log": str(process_report.get("stdout_log") or ""),
                     "scenesmith_stderr_log": str(process_report.get("stderr_log") or ""),
+                    "single_run_lock_enabled": single_run_lock is not None,
+                    "stale_process_cleanup": stale_process_cleanup,
                     "model_attempts": attempt_records,
                     "critic_found_keys": critic_summary.get("found_keys", []),
                     "critic_source_files": critic_summary.get("source_files", []),
