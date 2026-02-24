@@ -110,7 +110,7 @@ def _is_truthy(raw):
 def _configure_openai_agents() -> None:
     api = os.environ.get("SCENESMITH_PAPER_OPENAI_API", "").strip().lower()
     if not api:
-        return
+        api = "responses"
 
     try:
         from agents import set_default_openai_api, set_default_openai_client
@@ -131,10 +131,25 @@ def _configure_openai_agents() -> None:
     websocket_base_url = os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL", "").strip()
     if not websocket_base_url:
         websocket_base_url = os.environ.get("OPENAI_WEBSOCKET_BASE_URL", "").strip()
+    if (
+        not websocket_base_url
+        and (not base_url or "api.openai.com" in (base_url or "").lower())
+    ):
+        websocket_base_url = "wss://api.openai.com/ws/v1/realtime?provider=openai"
 
+    explicit_ws_flag = any(
+        os.environ.get(name)
+        for name in (
+            "SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET",
+            "SCENESMITH_PAPER_OPENAI_WEBSOCKET_ENABLED",
+            "OPENAI_USE_WEBSOCKET",
+        )
+    )
     websocket_enabled = _is_truthy(os.environ.get("SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET", "")) or _is_truthy(
         os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_ENABLED", "")
     ) or _is_truthy(os.environ.get("OPENAI_USE_WEBSOCKET", ""))
+    if not explicit_ws_flag and websocket_base_url:
+        websocket_enabled = True
 
     client_kwargs = {"api_key": api_key}
     if base_url:
@@ -337,6 +352,12 @@ def _apply_paper_openai_env_overrides(
             os.getenv("OPENAI_WEBSOCKET_BASE_URL", ""),
         )
     ).strip()
+    if not ws_base_url:
+        base_url = str(os.getenv("SCENESMITH_PAPER_OPENAI_BASE_URL", "")).strip()
+        if not base_url:
+            base_url = str(os.getenv("OPENAI_BASE_URL", "")).strip()
+        if not base_url or "api.openai.com" in base_url.lower():
+            ws_base_url = "wss://api.openai.com/ws/v1/realtime?provider=openai"
     if ws_base_url:
         env["SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL"] = ws_base_url
         env["OPENAI_WEBSOCKET_BASE_URL"] = ws_base_url
@@ -347,6 +368,8 @@ def _apply_paper_openai_env_overrides(
             os.getenv("SCENESMITH_PAPER_OPENAI_WEBSOCKET_ENABLED", os.getenv("OPENAI_USE_WEBSOCKET", "")),
         )
     ).strip()
+    if not ws_enabled and ws_base_url:
+        ws_enabled = "1"
     if ws_enabled:
         env["SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET"] = ws_enabled
         env["OPENAI_USE_WEBSOCKET"] = ws_enabled
@@ -361,9 +384,8 @@ def _apply_paper_openai_env_overrides(
         # Some stacks read OPENAI_MODEL instead.
         env["OPENAI_MODEL"] = model
 
-    api = _normalize_paper_openai_api(os.getenv("SCENESMITH_PAPER_OPENAI_API"))
-    if api:
-        env["SCENESMITH_PAPER_OPENAI_API"] = api
+    api = _normalize_paper_openai_api(os.getenv("SCENESMITH_PAPER_OPENAI_API", "responses"))
+    env["SCENESMITH_PAPER_OPENAI_API"] = api
 
 
 def _classify_role(semantic_class: str, raw_obj: Mapping[str, Any]) -> str:

@@ -62,12 +62,20 @@ if [[ -z "${TRELLIS_SERVER_URL:-}" ]]; then
 fi
 
 OPENAI_BASE_URL="${OPENAI_BASE_URL:-${OPENROUTER_BASE_URL:-https://api.openai.com/v1}}"
+OPENAI_WEBSOCKET_BASE_URL="${OPENAI_WEBSOCKET_BASE_URL:-}"
+if [[ -z "${OPENAI_WEBSOCKET_BASE_URL}" && "${OPENAI_BASE_URL,,}" == *"api.openai.com"* ]]; then
+  OPENAI_WEBSOCKET_BASE_URL="wss://api.openai.com/ws/v1/realtime?provider=openai"
+fi
+OPENAI_USE_WEBSOCKET="${OPENAI_USE_WEBSOCKET:-1}"
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o}"
 OPENAI_MODEL_QWEN="${OPENAI_MODEL_QWEN:-qwen/qwen3.5-397b-a17b}"
 OPENAI_MODEL_OPENAI="${OPENAI_MODEL_OPENAI:-moonshotai/kimi-k2.5}"
 OPENAI_MODEL_GLMV="${OPENAI_MODEL_GLMV:-${OPENAI_MODEL}}"
 OPENAI_MODEL_CLAUDE="${OPENAI_MODEL_CLAUDE:-${OPENAI_MODEL}}"
 export OPENAI_API_KEY_EFFECTIVE
+export OPENAI_BASE_URL
+export OPENAI_WEBSOCKET_BASE_URL
+export OPENAI_USE_WEBSOCKET
 
 log "Preflight: GPU visibility"
 if ! command -v nvidia-smi >/dev/null 2>&1; then

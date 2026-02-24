@@ -156,11 +156,17 @@ def _is_truthy(raw, default=False):
 def _openai_client_kwargs():
     kwargs = {"api_key": OPENAI_API_KEY}
     base_url = os.getenv("OPENAI_BASE_URL", "").strip()
-    if base_url:
-        kwargs["base_url"] = base_url
 
     websocket_base_url = os.getenv("OPENAI_WEBSOCKET_BASE_URL", "").strip()
-    websocket_enabled = _is_truthy(os.getenv("OPENAI_USE_WEBSOCKET"), default=False)
+    websocket_flag = os.getenv("OPENAI_USE_WEBSOCKET")
+    websocket_enabled = _is_truthy(websocket_flag, default=False)
+    if not websocket_base_url and (not base_url or "api.openai.com" in base_url.lower()):
+        websocket_base_url = "wss://api.openai.com/ws/v1/realtime?provider=openai"
+    if websocket_flag is None and websocket_base_url:
+        websocket_enabled = True
+
+    if base_url:
+        kwargs["base_url"] = base_url
     if websocket_enabled and websocket_base_url:
         kwargs["websocket_base_url"] = websocket_base_url
 

@@ -1576,6 +1576,8 @@ run_text_jobs_on_runpod:
                               "SCENESMITH_PAPER_OPENAI_API_KEY",
                               "SCENESMITH_PAPER_OPENAI_BASE_URL",
                               "SCENESMITH_PAPER_OPENAI_TRACING_KEY",
+                              "SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET",
+                              "SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL",
                               "SCENESMITH_PAPER_TIMEOUT_SECONDS",
                               "SCENESMITH_PAPER_ALL_SAM3D",
                               "SCENESMITH_PAPER_FORCE_GENERATED_ASSETS",
@@ -1594,6 +1596,8 @@ run_text_jobs_on_runpod:
                               "GITHUB_TOKEN",
                               "OPENROUTER_API_KEY",
                               "OPENROUTER_BASE_URL",
+                              "OPENAI_USE_WEBSOCKET",
+                              "OPENAI_WEBSOCKET_BASE_URL",
                           ]
 
                           gen_env = {

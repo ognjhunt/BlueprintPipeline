@@ -45,6 +45,7 @@ _SURFACE_TOKENS = ("table", "counter", "desk", "island", "bench")
 
 
 _PASS_TOKENS = {"pass", "passed", "ok", "success", "succeeded"}
+_SAM3D_REQUIRED_MODULES = ("flask", "flask_cors", "psutil", "requests")
 _FAIL_TOKENS = {"fail", "failed", "error", "invalid", "rejected"}
 
 
@@ -64,6 +65,110 @@ def _safe_int(v: Any, default: int) -> int:
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+def _mapping_or_empty(v: Any) -> Mapping[str, Any]:
+    return v if isinstance(v, Mapping) else {}
+
+
+def _first_mapping(raw: Mapping[str, Any], paths: Sequence[Sequence[str]]) -> Mapping[str, Any]:
+    for path in paths:
+        cursor: Any = raw
+        ok = True
+        for key in path:
+            if not isinstance(cursor, Mapping):
+                ok = False
+                break
+            cursor = cursor.get(key)
+        if ok and isinstance(cursor, Mapping):
+            return cursor
+    return {}
+
+
+def _to_xyz(v: Any) -> Tuple[float, float, float]:
+    if isinstance(v, Mapping):
+        return (
+            _safe_float(v.get("x"), 0.0),
+            _safe_float(v.get("y"), 0.0),
+            _safe_float(v.get("z"), 0.0),
+        )
+    if (
+        isinstance(v, Sequence)
+        and not isinstance(v, (str, bytes))
+        and len(v) >= 3
+    ):
+        return (_safe_float(v[0], 0.0), _safe_float(v[1], 0.0), _safe_float(v[2], 0.0))
+    return 0.0, 0.0, 0.0
+
+
+def _python_modules_report(python_bin: str, *, modules: Sequence[str]) -> List[str]:
+    try:
+        module_list = ", ".join(repr(str(m)) for m in modules)
+        probe = (
+            "import importlib.util, sys\n"
+            f"mods = [{module_list}]\n"
+            "missing = [m for m in mods if importlib.util.find_spec(m) is None]\n"
+            "if missing:\n"
+            "    print('\\n'.join(missing))\n"
+            "    raise SystemExit(1)\n"
+        )
+        proc = subprocess.run(
+            [python_bin, "-c", probe],
+            capture_output=True,
+            check=False,
+            timeout=12,
+            text=True,
+        )
+        if proc.returncode != 0:
+            out = (proc.stdout or "").strip()
+            if out:
+                return [m.strip() for m in out.splitlines() if m.strip()]
+            return [m for m in modules]
+        return []
+    except Exception:
+        return list(modules)
+
+
+def _python_install_modules(python_bin: str, modules: Sequence[str]) -> None:
+    missing_pkgs = [str(m).replace("_", "-") for m in modules]
+    if not missing_pkgs:
+        return
+    _log(f"Installing SAM3D deps in {python_bin}: {', '.join(missing_pkgs)}")
+    proc = subprocess.run(
+        [python_bin, "-m", "pip", "install", "--disable-pip-version-check", *missing_pkgs],
+        capture_output=True,
+        check=False,
+        timeout=420,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"Failed to install SAM3D dependencies in {python_bin}: {err}")
+
+
+def _python_has_modules(python_bin: str, *, modules: Sequence[str]) -> List[str]:
+    return _python_modules_report(python_bin, modules=modules)
+
+
+def _ensure_sam3d_modules(python_bin: str) -> None:
+    missing = _python_has_modules(python_bin, modules=_SAM3D_REQUIRED_MODULES)
+    if not missing:
+        return
+
+    auto_install = _is_truthy(os.getenv("SAM3D_AUTO_INSTALL_DEPS", "1"), default=True)
+    if not auto_install:
+        raise RuntimeError(
+            f"SAM3D python={python_bin} missing required modules: {', '.join(sorted(missing))}. "
+            f"Set SAM3D_AUTO_INSTALL_DEPS=1 to install automatically."
+        )
+
+    _python_install_modules(python_bin, _SAM3D_REQUIRED_MODULES)
+    still_missing = _python_has_modules(python_bin, modules=_SAM3D_REQUIRED_MODULES)
+    if still_missing:
+        raise RuntimeError(
+            "SAM3D dependency repair failed for "
+            f"{python_bin}: still missing {', '.join(sorted(still_missing))}"
+        )
 
 
 def _is_truthy(v: Any, *, default: bool = False) -> bool:
@@ -808,21 +913,52 @@ def _sam3d_start_if_needed(server_base: str) -> None:
     if not server_script.exists():
         raise FileNotFoundError(f"Cannot start SAM3D server; missing: {server_script}")
 
-    python_bin = str(os.getenv("SAM3D_PYTHON_BIN", "")).strip()
-    if python_bin:
-        python_path = Path(python_bin).expanduser()
-        if python_path.exists():
-            python_bin = str(python_path.resolve())
+    env_python = str(os.getenv("SAM3D_PYTHON_BIN", "")).strip()
+    python_candidates: List[str] = []
+    if env_python:
+        env_python_path = Path(env_python).expanduser()
+        if env_python_path.exists():
+            python_candidates.append(str(env_python_path.resolve()))
         else:
-            resolved = shutil.which(python_bin)
+            resolved = shutil.which(env_python)
             if resolved:
-                python_bin = resolved
+                python_candidates.append(resolved)
             else:
-                raise FileNotFoundError(f"SAM3D_PYTHON_BIN not found: {python_bin}")
-    else:
-        python_bin = sys.executable
+                raise FileNotFoundError(f"SAM3D_PYTHON_BIN not found: {env_python}")
+
+    python_candidates.extend(
+        [
+            "/workspace/miniconda3/envs/sage/bin/python",
+            "/workspace/miniconda3/envs/sage/bin/python3",
+            "/workspace/miniconda3/bin/python",
+            str(sys.executable),
+            "/usr/bin/python3.11",
+            "/usr/bin/python3",
+        ]
+    )
+
+    resolved_candidates: List[str] = []
+    for candidate in python_candidates:
+        if not candidate:
+            continue
+        candidate = str(Path(candidate).expanduser())
+        if candidate not in resolved_candidates:
+            resolved_candidates.append(candidate)
+
+    python_bin = ""
+    for candidate in resolved_candidates:
+        if shutil.which(candidate):
+            missing = _python_has_modules(candidate, modules=_SAM3D_REQUIRED_MODULES)
+            if not missing:
+                python_bin = candidate
+                break
+            if not python_bin:
+                python_bin = candidate
+
     if not python_bin:
         python_bin = "python3.11" if shutil.which("python3.11") else "python3"
+    _ensure_sam3d_modules(python_bin)
+
     image_backend = os.getenv("SAM3D_IMAGE_BACKEND", "gemini")
     checkpoint_dir = os.getenv("SAM3D_CHECKPOINT_DIR", "/workspace/sam3d/checkpoints/hf")
 
@@ -911,15 +1047,25 @@ def _run_scenesmith_paper_stack(
     # Defaults expected in the hybrid image.
     os.environ.setdefault("SCENESMITH_PAPER_REPO_DIR", "/opt/scenesmith")
     os.environ.setdefault("SCENESMITH_PAPER_PYTHON_BIN", "/opt/scenesmith/.venv/bin/python")
+    os.environ.setdefault("SCENESMITH_PAPER_OPENAI_API", "responses")
     os.environ.setdefault("SCENESMITH_PAPER_ALL_SAM3D", "true")
+    os.environ.setdefault("SCENESMITH_PAPER_KEEP_RUN_DIR", "1")
     os.environ.setdefault("SCENESMITH_MP_START_METHOD", "fork")
     os.environ.setdefault("SCENESMITH_PAPER_TIMEOUT_SECONDS", "10800")
+    os.environ.setdefault("OPENAI_USE_WEBSOCKET", "1")
+    openai_base_url = str(os.environ.get("OPENAI_BASE_URL", "")).strip().lower()
+    if (
+        not os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL")
+        and not os.environ.get("OPENAI_WEBSOCKET_BASE_URL")
+        and (not openai_base_url or "api.openai.com" in openai_base_url)
+    ):
+        os.environ["SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL"] = "wss://api.openai.com/ws/v1/realtime?provider=openai"
+
     # Alias GEMINI_API_KEY -> GOOGLE_API_KEY if not already set (Gemini image backend requires GOOGLE_API_KEY)
     if not os.environ.get("GOOGLE_API_KEY") and os.environ.get("GEMINI_API_KEY"):
         os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
     os.environ.setdefault("SCENESMITH_PAPER_SINGLE_RUN_LOCK", "1")
     os.environ.setdefault("SCENESMITH_PAPER_CLEAN_STALE_PROCESSES", "1")
-    os.environ.setdefault("OPENAI_USE_WEBSOCKET", "1")
     if not os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL"):
         ws_url = os.environ.get("OPENAI_WEBSOCKET_BASE_URL", "").strip()
         if ws_url:
@@ -928,16 +1074,16 @@ def _run_scenesmith_paper_stack(
         inherited_ws_url = os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL", "").strip()
         if inherited_ws_url:
             os.environ["OPENAI_WEBSOCKET_BASE_URL"] = inherited_ws_url
-    if not os.environ.get("SCENESMITH_PAPER_OPENAI_BASE_URL"):
-        paper_openai_base = os.environ.get("OPENAI_BASE_URL", "").strip()
-        if paper_openai_base:
-            os.environ["SCENESMITH_PAPER_OPENAI_BASE_URL"] = paper_openai_base
     if not os.environ.get("SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET"):
         os.environ["SCENESMITH_PAPER_OPENAI_USE_WEBSOCKET"] = (
             os.environ.get("OPENAI_USE_WEBSOCKET")
             if os.environ.get("OPENAI_USE_WEBSOCKET")
             else ("1" if os.environ.get("SCENESMITH_PAPER_OPENAI_WEBSOCKET_BASE_URL") else "0")
         )
+    if not os.environ.get("SCENESMITH_PAPER_OPENAI_BASE_URL"):
+        paper_openai_base = os.environ.get("OPENAI_BASE_URL", "").strip()
+        if paper_openai_base:
+            os.environ["SCENESMITH_PAPER_OPENAI_BASE_URL"] = paper_openai_base
     os.environ.setdefault("PYTORCH_JIT", "0")
 
     payload = {
@@ -979,15 +1125,37 @@ def _convert_objects_to_sage(
     seed: int,
 ) -> Dict[str, Any]:
     objs: List[Dict[str, Any]] = []
+    zero_pose_count = 0
     for idx, raw in enumerate(raw_objs, start=1):
-        transform = raw.get("transform") if isinstance(raw.get("transform"), Mapping) else {}
-        pos = transform.get("position") if isinstance(transform.get("position"), Mapping) else {}
-        quat = transform.get("rotation_quaternion") if isinstance(transform.get("rotation_quaternion"), Mapping) else {}
-        dims = raw.get("dimensions_est") if isinstance(raw.get("dimensions_est"), Mapping) else {}
+        pos = _first_mapping(
+            raw,
+            [
+                ("transform", "position"),
+                ("transform", "translation"),
+                ("pose", "position"),
+                ("pose", "translation"),
+                ("position",),
+                ("translation",),
+            ],
+        )
+        quat = _first_mapping(
+            raw,
+            [
+                ("transform", "rotation_quaternion"),
+                ("transform", "orientation"),
+                ("pose", "rotation_quaternion"),
+                ("pose", "orientation"),
+                ("rotation_quaternion",),
+                ("orientation",),
+            ],
+        )
+        dims = _mapping_or_empty(raw.get("dimensions_est"))
+        if not dims:
+            dims = _mapping_or_empty(raw.get("dimensions"))
 
-        px = _safe_float(pos.get("x"), 0.0)
-        py = _safe_float(pos.get("y"), 0.0)
-        pz = _safe_float(pos.get("z"), 0.0)
+        px, py, pz = _to_xyz(pos)
+        if px == 0.0 and py == 0.0 and pz == 0.0:
+            zero_pose_count += 1
         xg, yg, zg = _scenesmith_pos_to_sage(px, py, pz)
 
         width_s = max(0.01, abs(_safe_float(dims.get("width"), 0.3)))
@@ -1008,6 +1176,12 @@ def _convert_objects_to_sage(
                 "rotation": {"x": 0.0, "y": 0.0, "z": float(yaw_deg)},
                 "dimensions": {"width": float(width_s), "length": float(depth_s), "height": float(height_s)},
             }
+        )
+
+    if len(objs) > 1 and zero_pose_count == len(objs):
+        raise RuntimeError(
+            "SceneSmith object poses are all zero; refusing to build SAGE layout with degenerate placements. "
+            "Expected non-zero transform/pose data in scenesmith_response.json or house_state-based snapshots."
         )
 
     # Shift into positive room coordinates and compute room bounds.
@@ -1069,6 +1243,12 @@ def main() -> int:
     parser.add_argument("--mesh_policy", default=os.getenv("SCENESMITH_TO_SAGE_MESH_POLICY", "key_only"), choices=["key_only", "all"])
     parser.add_argument("--max_meshes", type=int, default=int(os.getenv("SCENESMITH_TO_SAGE_MAX_MESHES", "30")))
     parser.add_argument("--sam3d_server", default=os.getenv("SAM3D_SERVER_URL", "http://127.0.0.1:8080"))
+    parser.add_argument(
+        "--mesh_fallback",
+        type=int,
+        choices=[0, 1],
+        default=_safe_int(os.getenv("SCENESMITH_TO_SAGE_MESH_FALLBACK", "0"), 0),
+    )
     parser.add_argument("--stop_sam3d_before_paper", action="store_true", default=os.getenv("SCENESMITH_TO_SAGE_STOP_SAM3D_BEFORE_PAPER", "1") == "1")
     parser.add_argument(
         "--persist_scenesmith_run",
@@ -1337,12 +1517,14 @@ def main() -> int:
 
     _log(f"Meshes: policy={args.mesh_policy} max_meshes={args.max_meshes} candidates={len(candidates)}/{len(objs)}")
 
+    mesh_fallback_enabled = bool(args.mesh_fallback)
     for i, obj in enumerate(objs):
         source_id = str(obj.get("source_id") or "").strip()
         if not source_id:
             continue
         out_obj = layout_dir / "generation" / f"{source_id}.obj"
         raw_obj = raw_objects[i] if i < len(raw_objects) else {}
+        wrote_mesh = False
 
         # First preference: reuse SceneSmith-generated GLBs from the existing run.
         existing_glb = _pick_existing_glb_for_object(existing_glb_pool, raw_obj)
@@ -1350,9 +1532,16 @@ def main() -> int:
             try:
                 _convert_glb_to_obj(existing_glb, out_obj)
                 _log(f"Reused SceneSmith GLB [{i+1}/{len(objs)}]: {existing_glb.name} -> {out_obj.name}")
+                wrote_mesh = True
                 continue
             except Exception as exc:
-                _log(f"WARNING: Failed GLB->OBJ conversion for {existing_glb}: {exc}")
+                if i in candidate_set:
+                    if mesh_fallback_enabled:
+                        _log(f"WARNING: Failed GLB->OBJ conversion for {existing_glb}: {exc} (falling back later)")
+                    else:
+                        raise RuntimeError(f"Required SAM3D input failed for candidate object index={i}: {exc}") from exc
+                else:
+                    _log(f"WARNING: Failed GLB->OBJ conversion for {existing_glb}: {exc}")
 
         if i in candidate_set:
             prompt_i = mesh_prompts.get(i, str(obj.get("type") or "object"))
@@ -1360,10 +1549,15 @@ def main() -> int:
                 _sam3d_start_if_needed(str(args.sam3d_server))
                 _log(f"SAM3D mesh [{i+1}/{len(objs)}]: {prompt_i!r} -> {out_obj.name}")
                 _sam3d_generate_obj(prompt=prompt_i, out_obj_path=out_obj, seed=int(chosen_seed) + i, server_base=str(args.sam3d_server))
+                wrote_mesh = True
                 continue
             except Exception as exc:
-                _log(f"WARNING: SAM3D mesh failed for {prompt_i!r}: {exc} (falling back to unit box)")
-        _write_unit_box_obj(out_obj)
+                if mesh_fallback_enabled:
+                    _log(f"WARNING: SAM3D mesh failed for {prompt_i!r}: {exc} (falling back to unit box)")
+                else:
+                    raise RuntimeError(f"SAM3D mesh generation failed for candidate object {prompt_i!r}: {exc}") from exc
+        if not wrote_mesh and (mesh_fallback_enabled or i not in candidate_set):
+            _write_unit_box_obj(out_obj)
 
     # Write room jsons and pose-aug meta/variant.
     room_json = layout_dir / "room_0.json"

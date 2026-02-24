@@ -564,7 +564,12 @@ def _bp__openai_repair_json(_raw_text: str) -> _bp_Optional[str]:
         if base_url:
             kwargs["base_url"] = base_url
         websocket_base_url = _bp_os.getenv("OPENAI_WEBSOCKET_BASE_URL", "").strip()
-        websocket_enabled = _bp__truthy(_bp_os.getenv("OPENAI_USE_WEBSOCKET", ""))
+        websocket_flag = _bp_os.getenv("OPENAI_USE_WEBSOCKET")
+        websocket_enabled = _bp__truthy(websocket_flag)
+        if not websocket_base_url and (not base_url or "api.openai.com" in base_url.lower()):
+            websocket_base_url = "wss://api.openai.com/ws/v1/realtime?provider=openai"
+        if websocket_flag is None and websocket_base_url:
+            websocket_enabled = True
         if websocket_enabled and websocket_base_url:
             kwargs["websocket_base_url"] = websocket_base_url
 

@@ -49,6 +49,9 @@ SLURM_JOB_ID=${SLURM_JOB_ID:-12345}
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.1}"
 OPENAI_BASE_URL="${OPENAI_BASE_URL:-${OPENROUTER_BASE_URL:-https://api.openai.com/v1}}"
 OPENAI_WEBSOCKET_BASE_URL="${OPENAI_WEBSOCKET_BASE_URL:-}"
+if [[ -z "${OPENAI_WEBSOCKET_BASE_URL}" && "${OPENAI_BASE_URL,,}" == *"api.openai.com"* ]]; then
+  OPENAI_WEBSOCKET_BASE_URL="wss://api.openai.com/ws/v1/realtime?provider=openai"
+fi
 OPENAI_USE_WEBSOCKET="${OPENAI_USE_WEBSOCKET:-1}"
 OPENAI_MODEL_QWEN="${OPENAI_MODEL_QWEN:-qwen/qwen3.5-397b-a17b}"
 OPENAI_MODEL_OPENAI="${OPENAI_MODEL_OPENAI:-moonshotai/kimi-k2.5}"
@@ -58,6 +61,7 @@ SAM3D_IMAGE_BACKEND="${SAM3D_IMAGE_BACKEND:-gemini}"
 SAM3D_GEMINI_IMAGE_MODELS="${SAM3D_GEMINI_IMAGE_MODELS:-gemini-2.5-flash-image}"
 SAM3D_ENABLE_OPENAI_FALLBACK="${SAM3D_ENABLE_OPENAI_FALLBACK:-0}"
 SAM3D_TEXTURE_BAKING="${SAM3D_TEXTURE_BAKING:-1}"
+SAM3D_AUTO_INSTALL_DEPS="${SAM3D_AUTO_INSTALL_DEPS:-1}"
 SKIP_PATCHES="${SKIP_PATCHES:-0}"
 RUN_MODE="${RUN_MODE:-services}"  # services|full_pipeline
 
@@ -108,6 +112,7 @@ export SAM3D_TEXTURE_BAKING
 export SAM3D_PORT
 export SAM3D_GEMINI_IMAGE_MODELS
 export SAM3D_ENABLE_OPENAI_FALLBACK
+export SAM3D_AUTO_INSTALL_DEPS
 export OPENAI_WEBSOCKET_BASE_URL
 export OPENAI_USE_WEBSOCKET
 export REQUIRE_LOCAL_ROBOT_ASSET="${REQUIRE_LOCAL_ROBOT_ASSET:-1}"
@@ -251,6 +256,82 @@ if [[ "${SAGE_ONLY:-0}" == "1" ]]; then
 fi
 
 # ── 4. Start SAM3D server ───────────────────────────────────────────────────
+_sam3d_modules_missing() {
+    local py="$1"
+    shift
+    local out=""
+    local status=0
+    if ! out=$("${py}" -c "import importlib.util, sys; mods = sys.argv[1:]; missing = [m for m in mods if importlib.util.find_spec(m) is None]; print(' '.join(missing)); raise SystemExit(0 if not missing else 1)" "$@"); then
+        status=$?
+    fi
+    if [[ "${status}" == "0" ]]; then
+        return 0
+    fi
+    if [[ -n "${out}" ]]; then
+        echo "${out}"
+    fi
+    return 1
+}
+
+_sam3d_install_modules() {
+    local py="$1"
+    "${py}" -m pip install --disable-pip-version-check flask flask-cors psutil requests
+}
+
+_sam3d_resolve_python() {
+    local -a _py_candidates=()
+    local -a _mods=(flask flask_cors psutil requests)
+    local py
+    local missing
+    local probe_py=""
+
+    [[ -n "${SAM3D_PYTHON_BIN:-}" ]] && _py_candidates+=("${SAM3D_PYTHON_BIN}")
+    [[ -x "/workspace/miniconda3/envs/sage/bin/python" ]] && _py_candidates+=("/workspace/miniconda3/envs/sage/bin/python")
+    [[ -x "/workspace/miniconda3/envs/sage/bin/python3" ]] && _py_candidates+=("/workspace/miniconda3/envs/sage/bin/python3")
+    [[ -x "/workspace/miniconda3/bin/python" ]] && _py_candidates+=("/workspace/miniconda3/bin/python")
+    [[ -x /usr/bin/python3.11 ]] && _py_candidates+=("/usr/bin/python3.11")
+    [[ -x /usr/bin/python3 ]] && _py_candidates+=("/usr/bin/python3")
+
+    local -a _seen=()
+    local -A _uniq=()
+    for py in "${_py_candidates[@]}"; do
+        [[ -z "${py}" ]] && continue
+        [[ -x "${py}" ]] || continue
+        if [[ -n "${_uniq[${py}]:-}" ]]; then
+            continue
+        fi
+        _seen+=("${py}")
+        _uniq["${py}"]=1
+    done
+
+    for py in "${_seen[@]}"; do
+        if missing=$(_sam3d_modules_missing "${py}" "${_mods[@]}"); then
+            echo "${py}"
+            return 0
+        fi
+        if [[ -z "${probe_py}" ]]; then
+            probe_py="${py}"
+        fi
+        log "SAM3D candidate ${py} missing modules: ${missing}"
+    done
+
+    if [[ -z "${probe_py}" ]]; then
+        return 1
+    fi
+    if [[ "${SAM3D_AUTO_INSTALL_DEPS}" != "1" ]]; then
+        return 1
+    fi
+    log "Attempting to install required SAM3D Python modules into ${probe_py}..."
+    if ! _sam3d_install_modules "${probe_py}"; then
+        return 1
+    fi
+    if _sam3d_modules_missing "${probe_py}" "${_mods[@]}"; then
+        echo "${probe_py}"
+        return 0
+    fi
+    return 1
+}
+
 if [[ "${SKIP_SAM3D:-0}" != "1" ]]; then
     SAM3D_SCRIPT="${WORKSPACE}/BlueprintPipeline/scripts/runpod_sage/sam3d_server.py"
     if [[ ! -f "${SAM3D_SCRIPT}" ]]; then
@@ -271,12 +352,13 @@ if [[ "${SKIP_SAM3D:-0}" != "1" ]]; then
         fi
 
         # Prefer conda env if it has SAM3D deps (portable for snapshot-based images).
-        SAM3D_CMD=(python3.11)
-        if [[ -x "/workspace/miniconda3/bin/conda" ]]; then
-            if /workspace/miniconda3/bin/conda run -n sage python -c "import sam3d_objects" >/dev/null 2>&1; then
-                SAM3D_CMD=(/workspace/miniconda3/bin/conda run -n sage python)
-            fi
+        if ! SAM3D_CMD_PATH="$(_sam3d_resolve_python)"; then
+            log "ERROR: No SAM3D-capable Python interpreter found."
+            log "Set SAM3D_PYTHON_BIN to a usable interpreter and ensure Flask/psutil/requests are installed."
+            exit 1
         fi
+        export SAM3D_PYTHON_BIN="${SAM3D_CMD_PATH}"
+        SAM3D_CMD=("${SAM3D_CMD_PATH}")
 
         nohup "${SAM3D_CMD[@]}" "${SAM3D_SCRIPT}" ${SAM3D_ARGS} \
             > /tmp/sam3d_server.log 2>&1 &

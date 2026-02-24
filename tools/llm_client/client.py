@@ -12,7 +12,7 @@ Environment Variables:
     ANTHROPIC_API_KEY: API key for Anthropic Claude
     OPENAI_API_KEY: API key for OpenAI
     OPENAI_WEBSOCKET_BASE_URL: Optional WebSocket base URL for OpenAI Responses API
-    OPENAI_USE_WEBSOCKET: "true" | "false" (default: false)
+    OPENAI_USE_WEBSOCKET: "true" | "false" (default: false unless OPENAI_BASE_URL is OpenAI and websocket URL is resolvable)
     LLM_MOCK_RESPONSE_PATH: JSON response path for mock provider
     LLM_FALLBACK_ENABLED: "true" | "false" (default: true)
     LLM_MAX_RETRIES: Number of retries (default: 3)
@@ -919,8 +919,15 @@ class OpenAIClient(LLMClient):
         try:
             from openai import OpenAI
             self._openai = OpenAI
-            websocket_enabled = parse_bool_env(os.getenv("OPENAI_USE_WEBSOCKET"), default=False)
+            websocket_flag = os.getenv("OPENAI_USE_WEBSOCKET")
+            websocket_enabled = parse_bool_env(websocket_flag, default=False)
             websocket_base_url = os.getenv("OPENAI_WEBSOCKET_BASE_URL", "").strip()
+            if not websocket_base_url:
+                effective_base_url = self.base_url or os.getenv("OPENAI_BASE_URL", "").strip()
+                if not effective_base_url or "api.openai.com" in effective_base_url.lower():
+                    websocket_base_url = "wss://api.openai.com/ws/v1/realtime?provider=openai"
+            if websocket_flag is None and websocket_base_url:
+                websocket_enabled = True
 
             client_kwargs: Dict[str, Any] = {"api_key": self.api_key}
             if self.base_url:

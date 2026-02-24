@@ -116,6 +116,12 @@ SCENE_SOURCE="${SCENE_SOURCE:-sage}"  # sage|scenesmith
 SCENESMITH_PAPER_KEEP_RUN_DIR="${SCENESMITH_PAPER_KEEP_RUN_DIR:-1}"
 SCENESMITH_TO_SAGE_PERSIST_SCENESMITH_RUN="${SCENESMITH_TO_SAGE_PERSIST_SCENESMITH_RUN:-1}"
 SCENESMITH_PAPER_TIMEOUT_SECONDS="${SCENESMITH_PAPER_TIMEOUT_SECONDS:-10800}"
+OPENAI_USE_WEBSOCKET="${OPENAI_USE_WEBSOCKET:-1}"
+OPENAI_BASE_URL="${OPENAI_BASE_URL:-${OPENROUTER_BASE_URL:-https://api.openai.com/v1}}"
+OPENAI_WEBSOCKET_BASE_URL="${OPENAI_WEBSOCKET_BASE_URL:-}"
+if [[ -z "${OPENAI_WEBSOCKET_BASE_URL}" && "${OPENAI_BASE_URL,,}" == *"api.openai.com"* ]]; then
+  OPENAI_WEBSOCKET_BASE_URL="wss://api.openai.com/ws/v1/realtime?provider=openai"
+fi
 SAGE_SINGLE_RUN_LOCK="${SAGE_SINGLE_RUN_LOCK:-1}"  # 1|0 (prevent parallel runs)
 
 ROOM_TYPE="${ROOM_TYPE:-kitchen}"
@@ -303,6 +309,9 @@ export SCENESMITH_PAPER_KEEP_RUN_DIR
 export SCENESMITH_TO_SAGE_PERSIST_SCENESMITH_RUN
 export SCENESMITH_PAPER_TIMEOUT_SECONDS
 export SCENESMITH_PAPER_EXISTING_RUN_DIR="${SCENESMITH_PAPER_EXISTING_RUN_DIR:-}"
+export OPENAI_BASE_URL
+export OPENAI_USE_WEBSOCKET
+export OPENAI_WEBSOCKET_BASE_URL
 
 SAGE_RUN_ID="${SAGE_RUN_ID:-sage_$(date -u +%Y%m%dT%H%M%SZ)_${RANDOM}_$$}"
 export SAGE_RUN_ID
@@ -400,8 +409,86 @@ PIPELINE_START=$(date +%s)
 SAM3D_PORT="${SAM3D_PORT:-8080}"
 SAM3D_URL="http://127.0.0.1:${SAM3D_PORT}"
 SCENE_GEN_TIMEOUT="${SCENE_GEN_TIMEOUT:-10800}"  # 3 hours max for scene generation
+SAM3D_AUTO_INSTALL_DEPS="${SAM3D_AUTO_INSTALL_DEPS:-1}"
 
 _ensure_sam3d_healthy() {
+    _sam3d_modules_missing() {
+        local py="$1"
+        shift
+        local out=""
+        local status=0
+        if ! out=$("${py}" -c "import importlib.util, sys; mods = sys.argv[1:]; missing = [m for m in mods if importlib.util.find_spec(m) is None]; print(' '.join(missing)); raise SystemExit(0 if not missing else 1)" "$@"); then
+            status=$?
+        fi
+        if [[ "${status}" == "0" ]]; then
+            return 0
+        fi
+        if [[ -n "${out}" ]]; then
+            echo "${out}"
+        fi
+        return 1
+    }
+
+    _sam3d_install_modules() {
+        local py="$1"
+        "${py}" -m pip install --disable-pip-version-check flask flask-cors psutil requests
+    }
+
+    _sam3d_resolve_python() {
+        local -a _py_candidates=()
+        local -a _mods=(flask flask_cors psutil requests)
+        local py
+        local missing
+        local probe_py=""
+
+        [[ -n "${SAM3D_PYTHON_BIN:-}" ]] && _py_candidates+=("${SAM3D_PYTHON_BIN}")
+        [[ -x "/workspace/miniconda3/envs/sage/bin/python" ]] && _py_candidates+=("/workspace/miniconda3/envs/sage/bin/python")
+        [[ -x "/workspace/miniconda3/envs/sage/bin/python3" ]] && _py_candidates+=("/workspace/miniconda3/envs/sage/bin/python3")
+        [[ -x "/workspace/miniconda3/bin/python" ]] && _py_candidates+=("/workspace/miniconda3/bin/python")
+        [[ -x "${PY_SYS}" ]] && _py_candidates+=("${PY_SYS}")
+        [[ -x /usr/bin/python3.11 ]] && _py_candidates+=("/usr/bin/python3.11")
+        [[ -x /usr/bin/python3 ]] && _py_candidates+=("/usr/bin/python3")
+
+        local -a _seen=()
+        local -A _uniq=()
+        for py in "${_py_candidates[@]}"; do
+            [[ -z "${py}" ]] && continue
+            [[ -x "${py}" ]] || continue
+            if [[ -n "${_uniq[${py}]:-}" ]]; then
+                continue
+            fi
+            _seen+=("${py}")
+            _uniq["${py}"]=1
+        done
+
+        for py in "${_seen[@]}"; do
+            if missing=$(_sam3d_modules_missing "${py}" "${_mods[@]}"); then
+                echo "${py}"
+                return 0
+            fi
+            if [[ -z "${probe_py}" ]]; then
+                probe_py="${py}"
+            fi
+            log "SAM3D candidate ${py} missing modules: ${missing}"
+        done
+
+        if [[ -z "${probe_py}" ]]; then
+            return 1
+        fi
+        if [[ "${SAM3D_AUTO_INSTALL_DEPS}" != "1" ]]; then
+            return 1
+        fi
+        log "Attempting to install required SAM3D Python modules into ${probe_py}..."
+        if ! _sam3d_install_modules "${probe_py}"; then
+            return 1
+        fi
+        if _sam3d_modules_missing "${probe_py}" "${_mods[@]}"; then
+            echo "${probe_py}"
+            return 0
+        fi
+        return 1
+    }
+
     local status
     status=$(curl -sf -o /dev/null -w "%{http_code}" "${SAM3D_URL}/health" 2>/dev/null || echo "000")
     if [[ "${status}" == "200" ]]; then
@@ -413,8 +500,12 @@ _ensure_sam3d_healthy() {
     sleep 3
 
     # Determine python binary for SAM3D
-    local sam3d_py="${PY_SYS}"
-    [[ -x "/workspace/miniconda3/envs/sage/bin/python" ]] && sam3d_py="/workspace/miniconda3/envs/sage/bin/python"
+    local sam3d_py=""
+    if ! sam3d_py="$(_sam3d_resolve_python)"; then
+        log "ERROR: Unable to find SAM3D-capable Python interpreter."
+        return 1
+    fi
+    export SAM3D_PYTHON_BIN="${sam3d_py}"
 
     local sam3d_args="--port ${SAM3D_PORT} --image-backend ${SAM3D_IMAGE_BACKEND:-gemini}"
     [[ -f /workspace/sam3d/checkpoints/hf/pipeline.yaml ]] && sam3d_args="${sam3d_args} --checkpoint-dir /workspace/sam3d/checkpoints/hf"
@@ -471,8 +562,11 @@ _run_sage_stage13_once() {
                 echo "[pipeline $(date -u +%FT%TZ)] SAM3D watchdog: unhealthy (${wd_status}), restarting..." >&2
                 pkill -f sam3d_server.py 2>/dev/null || true
                 sleep 3
-                wd_py="${PY_SYS}"
-                [[ -x "/workspace/miniconda3/envs/sage/bin/python" ]] && wd_py="/workspace/miniconda3/envs/sage/bin/python"
+                if ! wd_py="$(_sam3d_resolve_python)"; then
+                    echo "[pipeline $(date -u +%FT%TZ)] SAM3D watchdog: no SAM3D interpreter available." >&2
+                    return
+                fi
+                export SAM3D_PYTHON_BIN="${wd_py}"
                 wd_args="--port ${SAM3D_PORT} --image-backend ${SAM3D_IMAGE_BACKEND:-gemini}"
                 [[ -f /workspace/sam3d/checkpoints/hf/pipeline.yaml ]] && wd_args="${wd_args} --checkpoint-dir /workspace/sam3d/checkpoints/hf"
                 nohup "${wd_py}" "${SAGE_SCRIPTS}/sam3d_server.py" ${wd_args} >> /tmp/sam3d_server.log 2>&1 &

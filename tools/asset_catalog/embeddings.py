@@ -50,7 +50,12 @@ def _is_truthy(raw: Any, *, default: bool = False) -> bool:
 def _openai_client_kwargs(api_key: str) -> list[dict[str, Any]]:
     base_url = os.getenv("OPENAI_BASE_URL", "").strip()
     websocket_base_url = os.getenv("OPENAI_WEBSOCKET_BASE_URL", "").strip()
-    websocket_enabled = _is_truthy(os.getenv("OPENAI_USE_WEBSOCKET"), default=False)
+    websocket_flag = os.getenv("OPENAI_USE_WEBSOCKET")
+    websocket_enabled = _is_truthy(websocket_flag, default=False)
+    if not websocket_base_url and (not base_url or "api.openai.com" in base_url.lower()):
+        websocket_base_url = "wss://api.openai.com/ws/v1/realtime?provider=openai"
+    if websocket_flag is None and websocket_base_url:
+        websocket_enabled = True
 
     client_kwargs: dict[str, Any] = {"api_key": api_key}
     if base_url:

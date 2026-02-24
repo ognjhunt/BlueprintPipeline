@@ -163,7 +163,7 @@ Or official SceneSmith paper stack (still through same local endpoint):
   - `SCENESMITH_PAPER_BACKEND=openai|gemini|anthropic` (default `openai`)
   - `SCENESMITH_PAPER_MODEL=<backend-specific model id>` (highest precedence)
   - `SCENESMITH_PAPER_MODEL_CHAIN=<comma list or JSON list of model ids>`
-  - `SCENESMITH_PAPER_TIMEOUT_SECONDS=5400`
+  - `SCENESMITH_PAPER_TIMEOUT_SECONDS=10800`
   - `SCENESMITH_PAPER_KEEP_RUN_DIR=false`
 
 Example VM launch for paper stack:
