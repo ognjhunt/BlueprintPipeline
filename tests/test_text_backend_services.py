@@ -28,12 +28,14 @@ def _load_module(module_name: str, relative_path: str):
 def test_scenesmith_service_internal_generate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEXT_GEN_USE_LLM", "false")
     monkeypatch.setenv("SCENESMITH_SERVICE_MODE", "internal")
+    monkeypatch.setenv("SCENESMITH_SERVICE_AUTH_TOKEN", "scene-token")
 
     module = _load_module("scenesmith_service_module", "scenesmith-service/scenesmith_service.py")
     client = module.app.test_client()
 
     response = client.post(
         "/v1/generate",
+        headers={"Authorization": "Bearer scene-token"},
         json={
             "scene_id": "svc_scene_001",
             "prompt": "A kitchen with a table and mug",
@@ -58,12 +60,14 @@ def test_scenesmith_service_internal_generate(monkeypatch: pytest.MonkeyPatch) -
 def test_sage_service_internal_refine(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEXT_GEN_USE_LLM", "false")
     monkeypatch.setenv("SAGE_SERVICE_MODE", "internal")
+    monkeypatch.setenv("SAGE_SERVICE_AUTH_TOKEN", "sage-token")
 
     module = _load_module("sage_service_module", "sage-service/sage_service.py")
     client = module.app.test_client()
 
     response = client.post(
         "/v1/refine",
+        headers={"Authorization": "Bearer sage-token"},
         json={
             "scene_id": "svc_scene_002",
             "prompt": "Move the bowl to the shelf",
@@ -123,6 +127,7 @@ def test_scenesmith_service_command_mode(monkeypatch: pytest.MonkeyPatch, tmp_pa
     cmd_script.chmod(0o755)
 
     monkeypatch.setenv("SCENESMITH_SERVICE_MODE", "command")
+    monkeypatch.setenv("SCENESMITH_SERVICE_AUTH_TOKEN", "scene-token")
     monkeypatch.setenv("SCENESMITH_COMMAND", str(cmd_script))
 
     module = _load_module("scenesmith_service_cmd_module", "scenesmith-service/scenesmith_service.py")
@@ -130,6 +135,7 @@ def test_scenesmith_service_command_mode(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     response = client.post(
         "/v1/generate",
+        headers={"Authorization": "Bearer scene-token"},
         json={
             "scene_id": "svc_scene_003",
             "prompt": "A test prompt",
@@ -147,6 +153,7 @@ def test_scenesmith_service_command_mode(monkeypatch: pytest.MonkeyPatch, tmp_pa
 @pytest.mark.unit
 def test_scenesmith_service_paper_stack_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCENESMITH_SERVICE_MODE", "paper_stack")
+    monkeypatch.setenv("SCENESMITH_SERVICE_AUTH_TOKEN", "scene-token")
     monkeypatch.setenv("SCENESMITH_PAPER_COMMAND", "python /tmp/paper_cmd.py")
 
     module = _load_module("scenesmith_service_paper_module", "scenesmith-service/scenesmith_service.py")
@@ -173,6 +180,7 @@ def test_scenesmith_service_paper_stack_mode(monkeypatch: pytest.MonkeyPatch) ->
 
     response = module.app.test_client().post(
         "/v1/generate",
+        headers={"Authorization": "Bearer scene-token"},
         json={
             "scene_id": "svc_scene_005",
             "prompt": "A test prompt",
@@ -191,6 +199,7 @@ def test_scenesmith_service_paper_stack_mode(monkeypatch: pytest.MonkeyPatch) ->
 @pytest.mark.unit
 def test_sage_service_http_forward_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SAGE_SERVICE_MODE", "http_forward")
+    monkeypatch.setenv("SAGE_SERVICE_AUTH_TOKEN", "sage-token")
     monkeypatch.setenv("SAGE_UPSTREAM_URL", "https://sage-upstream.example/v1/refine")
     monkeypatch.setenv("SAGE_SERVICE_TIMEOUT_SECONDS", "12")
 
@@ -235,6 +244,7 @@ def test_sage_service_http_forward_mode(monkeypatch: pytest.MonkeyPatch) -> None
     client = module.app.test_client()
     response = client.post(
         "/v1/refine",
+        headers={"Authorization": "Bearer sage-token"},
         json={
             "scene_id": "svc_scene_004",
             "prompt": "A test prompt",
@@ -251,9 +261,34 @@ def test_sage_service_http_forward_mode(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.unit
+def test_services_require_bearer_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCENESMITH_SERVICE_MODE", "internal")
+    monkeypatch.setenv("SCENESMITH_SERVICE_AUTH_TOKEN", "scene-token")
+    monkeypatch.setenv("SAGE_SERVICE_MODE", "internal")
+    monkeypatch.setenv("SAGE_SERVICE_AUTH_TOKEN", "sage-token")
+
+    scenesmith = _load_module("scenesmith_service_auth_module", "scenesmith-service/scenesmith_service.py")
+    sage = _load_module("sage_service_auth_module", "sage-service/sage_service.py")
+
+    scenesmith_resp = scenesmith.app.test_client().post(
+        "/v1/generate",
+        json={"prompt": "A room"},
+    )
+    sage_resp = sage.app.test_client().post(
+        "/v1/refine",
+        json={"prompt": "Refine room"},
+    )
+
+    assert scenesmith_resp.status_code == 401
+    assert sage_resp.status_code == 401
+
+
+@pytest.mark.unit
 def test_backend_services_health_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCENESMITH_SERVICE_MODE", "internal")
+    monkeypatch.setenv("SCENESMITH_SERVICE_AUTH_TOKEN", "scene-token")
     monkeypatch.setenv("SAGE_SERVICE_MODE", "internal")
+    monkeypatch.setenv("SAGE_SERVICE_AUTH_TOKEN", "sage-token")
 
     scenesmith = _load_module("scenesmith_service_health_module", "scenesmith-service/scenesmith_service.py")
     sage = _load_module("sage_service_health_module", "sage-service/sage_service.py")

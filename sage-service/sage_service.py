@@ -13,6 +13,7 @@ Modes:
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -83,6 +84,25 @@ def _apply_security_headers(response):  # type: ignore[override]
 
 def _json_error(status_code: int, message: str) -> tuple[Any, int]:
     return jsonify({"status": "error", "error": message}), status_code
+
+
+def _authorize_request() -> tuple[Any, int] | None:
+    expected_token = os.getenv("SAGE_SERVICE_AUTH_TOKEN", "").strip()
+    if not expected_token:
+        logger.error("SAGE_SERVICE_AUTH_TOKEN is not configured")
+        return _json_error(503, "service auth is not configured")
+
+    auth_header = request.headers.get("Authorization", "")
+    prefix = "Bearer "
+    if not auth_header.startswith(prefix):
+        return _json_error(401, "Missing bearer token")
+
+    provided_token = auth_header[len(prefix) :].strip()
+    if not provided_token:
+        return _json_error(401, "Missing bearer token")
+    if not hmac.compare_digest(provided_token, expected_token):
+        return _json_error(403, "Invalid bearer token")
+    return None
 
 
 @contextlib.contextmanager
@@ -322,6 +342,10 @@ def healthz() -> tuple[Any, int]:
 
 @app.route("/v1/refine", methods=["POST"])
 def refine() -> tuple[Any, int]:
+    auth_error = _authorize_request()
+    if auth_error is not None:
+        return auth_error
+
     payload = request.get_json(silent=True)
     if not isinstance(payload, Mapping):
         return _json_error(400, "Request body must be a JSON object")
