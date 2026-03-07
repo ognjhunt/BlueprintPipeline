@@ -493,6 +493,15 @@ def _materialize_payload_zip_base64(
     ensure_dir(payload_root)
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            payload_root_resolved = payload_root.resolve()
+            for member in zf.infolist():
+                member_path = Path(member.filename)
+                if member_path.is_absolute():
+                    return None, None
+
+                destination = (payload_root / member_path).resolve()
+                destination.relative_to(payload_root_resolved)
+
             zf.extractall(payload_root)
     except Exception:
         return None, None
