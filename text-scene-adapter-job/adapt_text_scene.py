@@ -76,6 +76,7 @@ def main() -> int:
         seg_prefix=seg_prefix,
         textgen_payload=textgen_payload,
         source_request=source_request,
+        enforce_quality_gate=True,
     )
 
     adapter_summary = {

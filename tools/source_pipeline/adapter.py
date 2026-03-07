@@ -1068,6 +1068,57 @@ def _asset_embedding_enabled() -> bool:
     return _is_truthy(os.getenv("TEXT_ASSET_ANN_ENABLED"), default=True)
 
 
+def _stage1_quality_gate_passed(*, textgen_payload: Mapping[str, Any]) -> bool:
+    quality_report = textgen_payload.get("quality_gate_report")
+    if not isinstance(quality_report, Mapping):
+        return False
+
+    metrics = quality_report.get("metrics")
+    if not isinstance(metrics, Mapping):
+        return False
+
+    object_count_raw = metrics.get("object_count")
+    collision_rate_raw = metrics.get("collision_rate_pct")
+    stability_raw = metrics.get("stability_pct")
+
+    if object_count_raw is None or collision_rate_raw is None or stability_raw is None:
+        return False
+
+    try:
+        object_count = int(object_count_raw)
+        collision_rate_pct = float(collision_rate_raw)
+        stability_pct = float(stability_raw)
+    except (TypeError, ValueError):
+        return False
+
+    min_objects = int(os.getenv("TEXT_GEN_MIN_OBJECT_COUNT", "0"))
+    max_collision = float(os.getenv("TEXT_GEN_MAX_COLLISION_RATE_PCT", "6.0"))
+    min_stability = float(os.getenv("TEXT_GEN_MIN_STABILITY_PCT", "85.0"))
+
+    faithfulness_report = (
+        textgen_payload.get("faithfulness_report")
+        if isinstance(textgen_payload.get("faithfulness_report"), Mapping)
+        else {}
+    )
+    quality_faithfulness = quality_report.get("faithfulness") if isinstance(quality_report.get("faithfulness"), Mapping) else {}
+    try:
+        faithfulness_score = float(faithfulness_report.get("score", quality_faithfulness.get("score", 1.0)))
+    except (TypeError, ValueError):
+        return False
+    min_faithfulness = float(os.getenv("TEXT_GEN_MIN_FAITHFULNESS_SCORE", "0.0"))
+
+    if object_count < min_objects:
+        return False
+    if collision_rate_pct > max_collision:
+        return False
+    if stability_pct < min_stability:
+        return False
+    if faithfulness_score < min_faithfulness:
+        return False
+
+    return True
+
+
 def _enqueue_asset_embedding_request(
     *,
     root: Path,
@@ -1651,6 +1702,7 @@ def build_manifest_layout_inventory(
     seg_prefix: str,
     textgen_payload: Mapping[str, Any],
     source_request: Mapping[str, Any],
+    enforce_quality_gate: bool = False,
 ) -> Dict[str, Any]:
     """Materialize canonical artifacts and compatibility markers from textgen payload."""
 
@@ -1734,6 +1786,9 @@ def build_manifest_layout_inventory(
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     layout_path.write_text(json.dumps(layout, indent=2), encoding="utf-8")
     inventory_path.write_text(json.dumps(inventory, indent=2), encoding="utf-8")
+
+    if enforce_quality_gate and not _stage1_quality_gate_passed(textgen_payload=textgen_payload):
+        raise ValueError("stage1 quality gate failed; refusing to write completion marker")
 
     completion_marker = assets_root / ".stage1_complete"
     completion_marker.write_text(

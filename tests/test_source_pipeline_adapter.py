@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from tools.asset_catalog.vector_store import VectorRecord, VectorStoreClient, VectorStoreConfig
 from tools.source_pipeline.adapter import (
@@ -159,13 +160,22 @@ def _base_source_request(scene_id: str = "scene_adapter") -> dict:
 
 
 def _base_textgen_payload(scene_id: str = "scene_adapter", objects: list | None = None) -> dict:
+    resolved_objects = objects or []
     return {
         "schema_version": "v1",
         "scene_id": scene_id,
         "seed": 1,
         "quality_tier": "standard",
         "provider_used": "openai",
-        "objects": objects or [],
+        "objects": resolved_objects,
+        "quality_gate_report": {
+            "status": "passed",
+            "metrics": {
+                "object_count": len(resolved_objects),
+                "collision_rate_pct": 0.0,
+                "stability_pct": 100.0,
+            },
+        },
     }
 
 
@@ -370,6 +380,70 @@ def test_adapter_stage1_complete_marker_content(tmp_path: Path) -> None:
     assert adapter_marker["scene_id"] == "scene_marker"
     assert adapter_marker["status"] == "completed"
 
+
+def test_adapter_blocks_stage1_marker_when_quality_report_missing(tmp_path: Path) -> None:
+    objects = [{"id": "obj_bad", "category": "box"}]
+
+    with pytest.raises(ValueError, match="stage1 quality gate failed"):
+        build_manifest_layout_inventory(
+            root=tmp_path,
+            scene_id="scene_marker_blocked",
+            assets_prefix="scenes/scene_marker_blocked/assets",
+            layout_prefix="scenes/scene_marker_blocked/layout",
+            seg_prefix="scenes/scene_marker_blocked/seg",
+            textgen_payload={
+                "schema_version": "v1",
+                "scene_id": "scene_marker_blocked",
+                "seed": 1,
+                "quality_tier": "standard",
+                "provider_used": "openai",
+                "objects": objects,
+            },
+            source_request=_base_source_request("scene_marker_blocked"),
+            enforce_quality_gate=True,
+        )
+
+    marker_path = tmp_path / "scenes" / "scene_marker_blocked" / "assets" / ".stage1_complete"
+    assert not marker_path.exists()
+
+
+def test_adapter_blocks_stage1_marker_when_quality_report_metrics_fail(tmp_path: Path) -> None:
+    scene_id = "scene_quality_fail"
+    assets_prefix = f"scenes/{scene_id}/assets"
+    layout_prefix = f"scenes/{scene_id}/layout"
+    seg_prefix = f"scenes/{scene_id}/seg"
+
+    textgen_payload = _base_textgen_payload(
+        scene_id,
+        [
+            {
+                "id": "obj_ok",
+                "category": "chair",
+                "sim_role": "static",
+                "transform": {"position": {"x": 0.0, "y": 0.0, "z": 0.0}},
+                "dimensions_est": {"width": 1.0, "height": 1.0, "depth": 1.0},
+            }
+        ],
+    )
+    textgen_payload["quality_gate_report"] = {
+        "status": "passed",
+        "metrics": {"object_count": 1, "collision_rate_pct": 99.0, "stability_pct": 99.0},
+    }
+
+    with pytest.raises(ValueError, match="stage1 quality gate failed"):
+        build_manifest_layout_inventory(
+            root=tmp_path,
+            scene_id=scene_id,
+            assets_prefix=assets_prefix,
+            layout_prefix=layout_prefix,
+            seg_prefix=seg_prefix,
+            textgen_payload=textgen_payload,
+            source_request=_base_source_request(scene_id),
+            enforce_quality_gate=True,
+        )
+
+    marker_path = tmp_path / assets_prefix / ".stage1_complete"
+    assert not marker_path.exists()
 
 def test_adapter_retrieves_real_asset_from_library_when_available(tmp_path: Path, monkeypatch) -> None:
     scene_id = "scene_retrieve"
