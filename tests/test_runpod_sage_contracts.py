@@ -186,3 +186,131 @@ def test_validate_stage7_contract_fails_on_unexpected_video(tmp_path, monkeypatc
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["status"] == "fail"
     assert any("video set mismatch" in err for err in report["errors"])
+
+
+@pytest.mark.unit
+def test_validate_stage7_contract_rejects_manifest_path_traversal(tmp_path, monkeypatch):
+    from scripts.runpod_sage import validate_stage7_contract as v
+    h5py = pytest.importorskip("h5py")
+
+    run_id = "run_escape"
+    layout_dir = tmp_path / "layout_escape"
+    (layout_dir / "generation").mkdir(parents=True, exist_ok=True)
+    (layout_dir / "usd_cache").mkdir(parents=True, exist_ok=True)
+    demos_dir = layout_dir / "demos"
+    (demos_dir / "videos").mkdir(parents=True, exist_ok=True)
+    plans_dir = layout_dir / "plans"
+    (layout_dir / "quality").mkdir(parents=True, exist_ok=True)
+    plans_dir.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(str(demos_dir / "dataset.hdf5"), "w") as f:
+        data = f.create_group("data")
+        data.create_group("demo_0")
+        metadata = f.create_group("metadata")
+        provenance = metadata.create_group("provenance")
+        provenance.attrs["run_id"] = run_id
+
+    (demos_dir / "scene_variant_000.usd").write_text("#usda 1.0\n", encoding="utf-8")
+    (demos_dir / "videos" / "demo_0.mp4").write_bytes(b"mp4")
+
+    _write_json(plans_dir / "plan_bundle.json", {"run_id": run_id})
+    _write_json(demos_dir / "demo_metadata.json", {"run_id": run_id})
+    _write_json(demos_dir / "quality_report.json", {"run_id": run_id, "status": "pass"})
+    outside_file = layout_dir / "outside.txt"
+    outside_file.write_text("outside", encoding="utf-8")
+    entries = [
+        {
+            "path": "../outside.txt",
+            "size_bytes": int(outside_file.stat().st_size),
+            "sha256": _sha256(outside_file),
+        }
+    ]
+    _write_json(demos_dir / "artifact_manifest.json", {"run_id": run_id, "status": "ok", "files": entries})
+
+    report_path = layout_dir / "quality" / "contract_report.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "validate_stage7_contract.py",
+            "--layout-dir",
+            str(layout_dir),
+            "--run-id",
+            run_id,
+            "--expected-demos",
+            "1",
+            "--strict-artifact-contract",
+            "1",
+            "--strict-provenance",
+            "1",
+            "--report-path",
+            str(report_path),
+        ],
+    )
+    assert v.main() == 3
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "fail"
+    assert any("escapes demos directory" in err for err in report["errors"])
+
+
+@pytest.mark.unit
+def test_validate_stage7_contract_rejects_manifest_absolute_path(tmp_path, monkeypatch):
+    from scripts.runpod_sage import validate_stage7_contract as v
+    h5py = pytest.importorskip("h5py")
+
+    run_id = "run_abs"
+    layout_dir = tmp_path / "layout_abs"
+    (layout_dir / "generation").mkdir(parents=True, exist_ok=True)
+    (layout_dir / "usd_cache").mkdir(parents=True, exist_ok=True)
+    demos_dir = layout_dir / "demos"
+    (demos_dir / "videos").mkdir(parents=True, exist_ok=True)
+    plans_dir = layout_dir / "plans"
+    (layout_dir / "quality").mkdir(parents=True, exist_ok=True)
+    plans_dir.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(str(demos_dir / "dataset.hdf5"), "w") as f:
+        data = f.create_group("data")
+        data.create_group("demo_0")
+        metadata = f.create_group("metadata")
+        provenance = metadata.create_group("provenance")
+        provenance.attrs["run_id"] = run_id
+
+    (demos_dir / "scene_variant_000.usd").write_text("#usda 1.0\n", encoding="utf-8")
+    (demos_dir / "videos" / "demo_0.mp4").write_bytes(b"mp4")
+
+    _write_json(plans_dir / "plan_bundle.json", {"run_id": run_id})
+    _write_json(demos_dir / "demo_metadata.json", {"run_id": run_id})
+    _write_json(demos_dir / "quality_report.json", {"run_id": run_id, "status": "pass"})
+    outside_file = layout_dir / "outside_abs.txt"
+    outside_file.write_text("outside", encoding="utf-8")
+    entries = [
+        {
+            "path": str(outside_file.resolve()),
+            "size_bytes": int(outside_file.stat().st_size),
+            "sha256": _sha256(outside_file),
+        }
+    ]
+    _write_json(demos_dir / "artifact_manifest.json", {"run_id": run_id, "status": "ok", "files": entries})
+
+    report_path = layout_dir / "quality" / "contract_report.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "validate_stage7_contract.py",
+            "--layout-dir",
+            str(layout_dir),
+            "--run-id",
+            run_id,
+            "--expected-demos",
+            "1",
+            "--strict-artifact-contract",
+            "1",
+            "--strict-provenance",
+            "1",
+            "--report-path",
+            str(report_path),
+        ],
+    )
+    assert v.main() == 3
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "fail"
+    assert any("escapes demos directory" in err for err in report["errors"])
