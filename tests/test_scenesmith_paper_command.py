@@ -735,3 +735,28 @@ def test_collect_critic_outputs_falls_back_to_yaml(tmp_path: Path) -> None:
     assert merged["quality_gate_report"]["all_pass"] is True
     assert merged["faithfulness_report"]["score"] == 9.0
     assert "scores.yaml" in summary["source_files"][-1]
+
+
+@pytest.mark.unit
+def test_cleanup_stale_processes_does_not_expose_command_lines(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    module = _load_module("scenesmith_paper_command_cleanup_redaction", "scenesmith-service/scenesmith_paper_command.py")
+
+    repo_dir = tmp_path / "scenesmith"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("SCENESMITH_PAPER_STALE_PROCESS_PATTERNS", "SUPERSECRET")
+
+    monkeypatch.setattr(module, "_iter_process_rows", lambda: [(4242, "python main.py --token=SUPERSECRET")])
+
+    def _fake_kill(pid: int, sig: int) -> None:
+        del pid
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(module.os, "kill", _fake_kill)
+
+    result = module._cleanup_stale_scenesmith_processes(repo_dir=repo_dir)
+
+    assert result["matched"] == [{"pid": 4242}]
+    assert result["killed"] == [4242]
+    assert result["remaining"] == []
