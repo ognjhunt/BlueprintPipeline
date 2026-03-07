@@ -1330,7 +1330,6 @@ def _cleanup_stale_scenesmith_processes(*, repo_dir: Path) -> Dict[str, Any]:
 
     protected = {os.getpid(), os.getppid()}
     matched: List[int] = []
-    matched_cmds: Dict[int, str] = {}
     for pid, cmd in _iter_process_rows():
         if pid in protected:
             continue
@@ -1338,7 +1337,6 @@ def _cleanup_stale_scenesmith_processes(*, repo_dir: Path) -> Dict[str, Any]:
             continue
         if any(token in cmd for token in patterns):
             matched.append(pid)
-            matched_cmds[pid] = cmd
 
     if not matched:
         return {"matched": [], "killed": [], "remaining": []}
@@ -1392,7 +1390,7 @@ def _cleanup_stale_scenesmith_processes(*, repo_dir: Path) -> Dict[str, Any]:
             pass
 
     return {
-        "matched": [{"pid": pid, "cmd": matched_cmds.get(pid, "")} for pid in matched],
+        "matched": [{"pid": pid} for pid in matched],
         "killed": [pid for pid in matched if pid not in final_remaining],
         "remaining": final_remaining,
     }
