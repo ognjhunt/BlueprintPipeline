@@ -358,6 +358,22 @@ def test_adapter_placeholder_usd_is_valid_syntax(tmp_path: Path) -> None:
     assert meta["class_name"] == "mug"
 
 
+def test_adapter_rejects_path_traversal_object_id(tmp_path: Path) -> None:
+    objects = [{"id": "../escape", "category": "mug"}]
+
+    try:
+        materialize_placeholder_assets(
+            root=tmp_path,
+            scene_id="scene_escape",
+            assets_prefix="assets",
+            objects=objects,
+        )
+    except ValueError as exc:
+        assert "safe relative path segment" in str(exc) or "path separators" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for unsafe object id")
+
+
 def test_adapter_stage1_complete_marker_content(tmp_path: Path) -> None:
     """Verify .stage1_complete marker has correct structure."""
     objects = [{"id": "obj_m", "category": "bottle"}]
