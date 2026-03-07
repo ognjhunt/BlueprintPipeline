@@ -92,11 +92,13 @@ if [ "${SKIP_RGB_CAPTURE:-true}" = "false" ] && [ "${ENABLE_CAMERAS:-0}" = "1" ]
   if [ ! -S /tmp/.X11-unix/X99 ]; then
     echo "[run_pipeline] Starting headless Xorg on :99 for camera RGB rendering..."
     if command -v nvidia-xconfig >/dev/null 2>&1 && command -v Xorg >/dev/null 2>&1; then
+      XORG_TMP_DIR="$(mktemp -d /tmp/xorg-pipeline.XXXXXX)"
+      XORG_CONFIG_PATH="${XORG_TMP_DIR}/xorg.conf"
       # Generate xorg.conf with NVIDIA driver for headless rendering
       sudo nvidia-xconfig --no-xinerama --use-display-device=None \
-        --virtual=1280x720 -o /tmp/xorg-pipeline.conf 2>/dev/null || true
-      if [ -f /tmp/xorg-pipeline.conf ]; then
-        sudo Xorg :99 -config /tmp/xorg-pipeline.conf -noreset +extension GLX &>/dev/null &
+        --virtual=1280x720 -o "${XORG_CONFIG_PATH}" 2>/dev/null || true
+      if [ -f "${XORG_CONFIG_PATH}" ]; then
+        sudo Xorg :99 -config "${XORG_CONFIG_PATH}" -noreset +extension GLX &>/dev/null &
         sleep 2
         if [ -S /tmp/.X11-unix/X99 ]; then
           echo "[run_pipeline] Xorg :99 started with NVIDIA GLX support"
