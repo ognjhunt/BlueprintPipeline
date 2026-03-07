@@ -29,8 +29,10 @@ RUN pip install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/cu121
 
 ENV PHYSX_ANYTHING_ROOT=/opt/physx-anything
+ARG PHYSX_ANYTHING_COMMIT=95f7274263b78c0ed8f02151d69823cb5d7b4c3c
 WORKDIR /opt
-RUN git clone https://github.com/ziangcao0312/PhysX-Anything.git "${PHYSX_ANYTHING_ROOT}"
+RUN git clone https://github.com/ziangcao0312/PhysX-Anything.git "${PHYSX_ANYTHING_ROOT}" \
+    && git -C "${PHYSX_ANYTHING_ROOT}" checkout "${PHYSX_ANYTHING_COMMIT}"
 
 WORKDIR ${PHYSX_ANYTHING_ROOT}
 
@@ -69,4 +71,3 @@ CMD ["gunicorn", \
      "--error-logfile", "-", \
      "--capture-output", \
      "physx_anything_service:app"]
-
