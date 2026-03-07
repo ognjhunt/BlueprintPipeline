@@ -32,6 +32,7 @@
 #   SAM3D_GEMINI_IMAGE_MODELS — comma-separated Gemini image models (default: gemini-2.5-flash-image)
 #   SAM3D_ENABLE_OPENAI_FALLBACK — set 1/true to allow fallback when Gemini fails (default: false)
 #   SAM3D_PORT           — SAM3D server port (default: 8080)
+#   SAM3D_BIND_HOST      — SAM3D bind host (default: 127.0.0.1; set 0.0.0.0 only when explicitly needed)
 #   SKIP_ISAAC_SIM       — Set to 1 to skip Isaac Sim startup
 #   SKIP_SAM3D           — Set to 1 to skip SAM3D startup
 #   SAGE_ONLY            — Set to 1 to only write configs (manual start)
@@ -45,6 +46,7 @@ SAGE_DIR="${WORKSPACE}/SAGE"
 BP_DIR="${WORKSPACE}/BlueprintPipeline"
 MCP_RESOLVER="${BP_DIR}/scripts/runpod_sage/mcp_extension_paths.py"
 SAM3D_PORT=${SAM3D_PORT:-8080}
+SAM3D_BIND_HOST="${SAM3D_BIND_HOST:-127.0.0.1}"
 SLURM_JOB_ID=${SLURM_JOB_ID:-12345}
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.1}"
 OPENAI_BASE_URL="${OPENAI_BASE_URL:-${OPENROUTER_BASE_URL:-https://api.openai.com/v1}}"
@@ -110,6 +112,7 @@ fi
 export SLURM_JOB_ID
 export SAM3D_TEXTURE_BAKING
 export SAM3D_PORT
+export SAM3D_BIND_HOST
 export SAM3D_GEMINI_IMAGE_MODELS
 export SAM3D_ENABLE_OPENAI_FALLBACK
 export SAM3D_AUTO_INSTALL_DEPS
@@ -337,9 +340,9 @@ if [[ "${SKIP_SAM3D:-0}" != "1" ]]; then
     if [[ ! -f "${SAM3D_SCRIPT}" ]]; then
         log "ERROR: sam3d_server.py not found at ${SAM3D_SCRIPT}"
     else
-        log "Starting SAM3D server on :${SAM3D_PORT} (backend=${SAM3D_IMAGE_BACKEND})..."
+        log "Starting SAM3D server on ${SAM3D_BIND_HOST}:${SAM3D_PORT} (backend=${SAM3D_IMAGE_BACKEND})..."
 
-        SAM3D_ARGS="--port ${SAM3D_PORT} --image-backend ${SAM3D_IMAGE_BACKEND}"
+        SAM3D_ARGS="--host ${SAM3D_BIND_HOST} --port ${SAM3D_PORT} --image-backend ${SAM3D_IMAGE_BACKEND}"
         [[ -n "${OPENAI_API_KEY_EFFECTIVE:-}" ]] && SAM3D_ARGS="${SAM3D_ARGS} --openai-key ${OPENAI_API_KEY_EFFECTIVE}"
         [[ -n "${GEMINI_API_KEY_EFFECTIVE:-}" ]] && SAM3D_ARGS="${SAM3D_ARGS} --gemini-key ${GEMINI_API_KEY_EFFECTIVE}"
 
@@ -536,7 +539,7 @@ log "Startup complete."
 log ""
 log "Services:"
 SAM3D_HEALTH=$(curl -sf "http://127.0.0.1:${SAM3D_PORT}/health" 2>/dev/null || echo "not running")
-log "  SAM3D:    http://0.0.0.0:${SAM3D_PORT} (${SAM3D_HEALTH})"
+log "  SAM3D:    http://${SAM3D_BIND_HOST}:${SAM3D_PORT} (${SAM3D_HEALTH})"
 if [[ "${SKIP_ISAAC_SIM:-0}" != "1" ]]; then
     log "  Isaac Sim: MCP port ${MCP_PORT:-unknown}"
 fi

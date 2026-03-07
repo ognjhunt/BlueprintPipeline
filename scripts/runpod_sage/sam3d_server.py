@@ -64,12 +64,16 @@ for _k, _v in {
 }.items():
     sys.modules[_k] = _v
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 
 # ── CLI args ──────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="SAM3D Drop-in Server for SAGE")
 parser.add_argument("--port", type=int, default=8080)
+parser.add_argument("--host", type=str, default=os.getenv("SAM3D_BIND_HOST", "127.0.0.1"),
+                    help="Bind host for Flask server (default: 127.0.0.1)")
+parser.add_argument("--auth-token", type=str, default=os.getenv("SAM3D_AUTH_TOKEN", ""),
+                    help="Bearer token required for mutating endpoints (optional)")
 parser.add_argument("--openai-key", type=str, default=None,
                     help="OpenAI API key (or set OPENAI_API_KEY env)")
 parser.add_argument("--gemini-key", type=str, default=None,
@@ -94,7 +98,7 @@ args = parser.parse_args()
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/health": {"origins": "*"}, r"/job/*": {"origins": "*"}, r"/generate": {"origins": []}})
 
 # ── Gemini client ────────────────────────────────────────────────────────────
 GEMINI_API_KEY = args.gemini_key or os.getenv("GEMINI_API_KEY")
@@ -659,9 +663,22 @@ def health_check():
     return jsonify({"status": "healthy", "gpu_available": True, "backend": "sam3d"})
 
 
+def _check_bearer_auth() -> None:
+    expected = (args.auth_token or "").strip()
+    if not expected:
+        return
+    auth_header = request.headers.get("Authorization", "")
+    token = ""
+    if auth_header.startswith("Bearer "):
+        token = auth_header[len("Bearer "):].strip()
+    if token != expected:
+        abort(401, description="Unauthorized")
+
+
 @app.route("/generate", methods=["POST"])
 def generate():
-    data = request.get_json()
+    _check_bearer_auth()
+    data = request.get_json(silent=True) or {}
     input_text = data.get("input_text", "A simple 3D object")
     seed = data.get("seed", random.randint(1, 1000000))
     job_id = f"{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
@@ -791,4 +808,4 @@ if __name__ == "__main__":
     print(f"  GET  /job/{{id}}")
     print("=" * 60)
 
-    app.run(host="0.0.0.0", port=args.port, debug=False)
+    app.run(host=args.host, port=args.port, debug=False)
