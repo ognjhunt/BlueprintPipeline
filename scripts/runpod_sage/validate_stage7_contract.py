@@ -82,6 +82,15 @@ def _manifest_file_entries(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _resolve_manifest_path(demos_dir: Path, rel: str) -> Optional[Path]:
+    candidate = (demos_dir / rel).resolve()
+    try:
+        candidate.relative_to(demos_dir.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate Stage 7 artifact and provenance contract")
     parser.add_argument("--layout-dir", required=True)
@@ -204,7 +213,11 @@ def main() -> int:
                 rel = str(item.get("path", "")).strip()
                 if not rel:
                     continue
-                abs_path = demos_dir / rel
+                abs_path = _resolve_manifest_path(demos_dir, rel)
+                if abs_path is None:
+                    _record(checks, f"manifest_path_within_demos:{rel}", False, str(demos_dir))
+                    errors.append(f"manifest path escapes demos directory: {rel}")
+                    continue
                 ok_exists = abs_path.exists() and abs_path.is_file()
                 _record(checks, f"manifest_exists:{rel}", ok_exists, str(abs_path))
                 if not ok_exists:
