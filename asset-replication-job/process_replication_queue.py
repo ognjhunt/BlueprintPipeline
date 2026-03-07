@@ -97,6 +97,7 @@ def _upload_asset_files(
     uploaded = 0
     skipped = 0
     errors: List[str] = []
+    root_resolved = root.resolve()
 
     for asset in assets:
         files = asset.get("files")
@@ -111,7 +112,18 @@ def _upload_asset_files(
                 skipped += 1
                 continue
 
-            local_path = root / rel
+            rel_path = Path(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                errors.append(f"invalid_path:{rel}")
+                continue
+
+            local_path = (root / rel_path).resolve(strict=False)
+            try:
+                local_path.relative_to(root_resolved)
+            except ValueError:
+                errors.append(f"invalid_path:{rel}")
+                continue
+
             if not local_path.is_file():
                 errors.append(f"missing_file:{rel}")
                 continue
@@ -222,4 +234,3 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"[ASSET-REPL] ERROR: {exc}", file=sys.stderr)
         raise
-

@@ -94,3 +94,36 @@ def test_asset_replication_job_moves_failed_item(tmp_path, monkeypatch) -> None:
     assert summary["status"] == "failed"
     assert summary["result"]["errors"]
 
+
+def test_asset_replication_job_rejects_unsafe_file_paths(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(process_replication_queue, "GCS_ROOT", tmp_path)
+    monkeypatch.setenv("BUCKET", "unit-bucket")
+    monkeypatch.setenv("TEXT_ASSET_REPLICATION_DRY_RUN", "true")
+    monkeypatch.setenv("TEXT_ASSET_REPLICATION_FAIL_ON_ERROR", "false")
+
+    queue_object = "automation/asset_replication/queue/scene_unsafe.json"
+    queue_payload = {
+        "scene_id": "scene_unsafe",
+        "assets": [
+            {
+                "asset_id": "text::scene_unsafe::obj_001",
+                "files": [
+                    {"path": "/etc/passwd", "target_key": "assets/etc/passwd"},
+                    {"path": "../etc/hosts", "target_key": "assets/etc/hosts"},
+                ],
+            }
+        ],
+    }
+    _write_json(tmp_path / queue_object, queue_payload)
+
+    monkeypatch.setenv("QUEUE_OBJECT", queue_object)
+    rc = process_replication_queue.main()
+    assert rc == 0
+
+    failed = tmp_path / "automation/asset_replication/failed/scene_unsafe.json"
+    assert failed.is_file()
+    summary = json.loads(failed.read_text(encoding="utf-8"))
+    assert summary["status"] == "failed"
+    assert summary["result"]["uploaded"] == 0
+    assert "invalid_path:/etc/passwd" in summary["result"]["errors"]
+    assert "invalid_path:../etc/hosts" in summary["result"]["errors"]
