@@ -142,6 +142,21 @@ def Xform "Root"
     path.write_text(payload, encoding="utf-8")
 
 
+def _validate_object_id_for_asset_path(object_id: str) -> str:
+    """Validate object ID before using it as an on-disk directory name."""
+
+    candidate = object_id.strip()
+    if not candidate:
+        raise ValueError("Object id is empty")
+    if "/" in candidate or "\\" in candidate:
+        raise ValueError(f"Object id contains path separators: {candidate!r}")
+
+    candidate_path = Path(candidate)
+    if candidate_path.is_absolute() or any(part in {"", ".", ".."} for part in candidate_path.parts):
+        raise ValueError(f"Object id is not a safe relative path segment: {candidate!r}")
+    return candidate
+
+
 def _tokenize(text: str) -> List[str]:
     return [token for token in re.split(r"[^a-z0-9]+", text.lower()) if len(token) >= 2]
 
@@ -838,9 +853,10 @@ def materialize_placeholder_assets(
     validation_enabled = is_validation_enabled()
 
     for obj in objects:
-        oid = str(obj.get("id") or "")
-        if not oid:
+        raw_oid = str(obj.get("id") or "")
+        if not raw_oid:
             continue
+        oid = _validate_object_id_for_asset_path(raw_oid)
         obj_dir = assets_root / oid
         obj_dir.mkdir(parents=True, exist_ok=True)
 
