@@ -84,19 +84,27 @@ echo ""
 echo "=== TIER 1: GCP L4 — Layout & Placement ==="
 
 # Build the request payload
-python3 -c "
+python3 - <<'PAYLOAD_EOF' "${SCENE_ID}" "${PROMPT}" "${QUALITY_TIER}" "${WORK_DIR}/scene_request.json"
 import json
+import sys
+
+scene_id = sys.argv[1]
+prompt = sys.argv[2]
+quality_tier = sys.argv[3]
+output_path = sys.argv[4]
+
 payload = {
-    'scene_id': '${SCENE_ID}',
-    'prompt': '''${PROMPT}''',
-    'quality_tier': '${QUALITY_TIER}',
-    'seed': 1,
-    'constraints': {'object_density': 'high'},
-    'provider_policy': 'openrouter_qwen_primary'
+    "scene_id": scene_id,
+    "prompt": prompt,
+    "quality_tier": quality_tier,
+    "seed": 1,
+    "constraints": {"object_density": "high"},
+    "provider_policy": "openrouter_qwen_primary",
 }
-with open('${WORK_DIR}/scene_request.json', 'w') as f:
+
+with open(output_path, "w") as f:
     json.dump(payload, f, indent=2)
-"
+PAYLOAD_EOF
 
 echo "[Tier1] Sending request to SceneSmith service..."
 
