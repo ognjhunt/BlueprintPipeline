@@ -4892,6 +4892,7 @@ class GenieSimGRPCClient:
                 logger.warning("No observation available for camera data.")
                 return None
             obs = obs_result.payload or {}
+            initial_obs = obs
             camera_observation = obs.get("camera_observation") or {}
             images = camera_observation.get("images") if camera_observation else None
 
@@ -11642,6 +11643,43 @@ class GenieSimLocalFramework:
             # END EPISODE VALIDITY GATE
             # =================================================================
 
+            # Failure diagnosis (gated by ENABLE_LLM_FAILURE_DIAGNOSIS=1)
+            failure_diagnosis = self._diagnose_failure_with_llm(
+                validity_errors=_validity_errors if "_validity_errors" in dir() else [],
+                frames=frames,
+                quality_score=quality_score,
+                task=task,
+            )
+
+            retry_attempted = False
+            retry_info = {
+                "attempted": False,
+                "success": False,
+                "error": None,
+                "retry_params": {},
+                "waypoint_count": None,
+            }
+            if failure_diagnosis and failure_diagnosis.get("retry_possible") and not retry_attempted:
+                retry_attempted = True
+                retry_info["attempted"] = True
+                retry_params = failure_diagnosis.get("retry_params") or {}
+                retry_info["retry_params"] = retry_params
+                retry_task = self._apply_retry_params_to_task(task, retry_params)
+                retry_trajectory = self._generate_trajectory(retry_task, initial_obs)
+                if retry_trajectory is None:
+                    retry_info["error"] = "Retry trajectory generation failed."
+                else:
+                    retry_trajectory = self._apply_retry_params_to_trajectory(
+                        retry_trajectory,
+                        retry_params,
+                    )
+                    retry_info["success"] = True
+                    retry_info["waypoint_count"] = len(retry_trajectory)
+                    self.log(
+                        f"  🔁 Retry trajectory generated: {retry_info['waypoint_count']} waypoints",
+                        "INFO",
+                    )
+
             # Clean up internal metadata fields from frames before serialization
             for _f in frames:
                 _f.pop("_initial_object_poses", None)
@@ -12101,6 +12139,8 @@ class GenieSimLocalFramework:
                     "collector_warning": result.get("collector_warning"),
                     "stall_info": result["stall_info"],
                     "frame_validation": frame_validation,
+                    "failure_diagnosis": failure_diagnosis,
+                    "retry": retry_info,
                     "phase_list": [
                         "home",
                         "approach",
@@ -12134,6 +12174,16 @@ class GenieSimLocalFramework:
                     "domain_randomization": domain_randomization,
                 }, f, default=_json_default)
 
+            # VLM-based quality audit (gated by ENABLE_VLM_QUALITY_AUDIT=1)
+            vlm_audit = self._audit_episode_with_vlm(frames, task, quality_score)
+            if vlm_audit and not vlm_audit.get("skipped"):
+                # Use blended score if VLM audit succeeded
+                quality_score = vlm_audit.get("blended_quality_score", quality_score)
+                validation_passed = quality_score >= min_quality
+
+            # Sim-to-real gap assessment (gated by ENABLE_SIM2REAL_ASSESSMENT=1)
+            sim2real = self._assess_sim_to_real_gap(frames)
+
             result["success"] = True
             result["frame_count"] = len(frames)
             result["quality_score"] = quality_score
@@ -12150,6 +12200,7 @@ class GenieSimLocalFramework:
             result["physics_data_provenance"] = physics_data_provenance
             result["output_path"] = str(episode_path)
             result["frame_validation"] = frame_validation
+            result["retry"] = retry_info
             if vlm_audit:
                 result["vlm_audit"] = vlm_audit
             if sim2real:
@@ -16537,6 +16588,64 @@ class GenieSimLocalFramework:
             "ERROR",
         )
         return None
+
+    def _apply_retry_params_to_task(
+        self,
+        task: Dict[str, Any],
+        retry_params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not retry_params:
+            return task
+        updated_task = dict(task)
+        position_offset = (
+            retry_params.get("position_offset_m")
+            or retry_params.get("waypoint_offset_m")
+            or retry_params.get("position_offset")
+        )
+        if position_offset is not None:
+            try:
+                offset = np.array(position_offset, dtype=float)
+                if offset.shape == (3,):
+                    for key in ("target_position", "place_position"):
+                        value = updated_task.get(key)
+                        if value is None:
+                            continue
+                        try:
+                            updated_task[key] = (np.array(value, dtype=float) + offset).tolist()
+                        except (TypeError, ValueError):
+                            self.log(
+                                f"  ⚠️  Invalid {key} for retry offset; leaving unchanged.",
+                                "WARNING",
+                            )
+                else:
+                    self.log("  ⚠️  Invalid position_offset_m shape for retry; ignoring.", "WARNING")
+            except (TypeError, ValueError):
+                self.log("  ⚠️  Invalid position_offset_m for retry; ignoring.", "WARNING")
+
+        force_multiplier = retry_params.get("force_multiplier")
+        if force_multiplier is not None:
+            try:
+                updated_task["gripper_force_multiplier"] = float(force_multiplier)
+            except (TypeError, ValueError):
+                self.log("  ⚠️  Invalid force_multiplier for retry; ignoring.", "WARNING")
+        return updated_task
+
+    def _apply_retry_params_to_trajectory(
+        self,
+        trajectory: List[Dict[str, Any]],
+        retry_params: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        force_multiplier = retry_params.get("force_multiplier")
+        if force_multiplier is None:
+            return trajectory
+        try:
+            force_value = float(force_multiplier)
+        except (TypeError, ValueError):
+            self.log("  ⚠️  Invalid force_multiplier for retry trajectory; ignoring.", "WARNING")
+            return trajectory
+        for waypoint in trajectory:
+            waypoint.setdefault("gripper_force_multiplier", force_value)
+        return trajectory
 
     def _resolve_task_orientation(
         self,
