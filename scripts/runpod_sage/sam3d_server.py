@@ -753,7 +753,10 @@ def metrics():
 @app.route("/shutdown", methods=["POST"])
 def shutdown():
     """Gracefully shut down the server to free VRAM for later pipeline stages."""
-    import signal
+    remote_addr = request.remote_addr or ""
+    if remote_addr not in {"127.0.0.1", "::1"}:
+        return jsonify({"error": "forbidden"}), 403
+
     print("[SAM3D] Shutdown requested — freeing GPU memory...")
     # Return response before shutting down
     response = jsonify({"status": "shutting_down", "message": "SAM3D server stopping to free VRAM"})
