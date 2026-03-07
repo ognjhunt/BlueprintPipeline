@@ -294,13 +294,13 @@ Minimax M2.5 via OpenRouter has generous limits. If rate limited, add delays or 
 
 ## RunPod Pod Details
 
-- **Pod ID**: `tyb4t32f4tn2t8`
-- **Name**: `blueprint-l40s-migration`
+- **Pod ID**: `<your-pod-id>`
+- **Name**: `<your-pod-name>`
 - **Image**: `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`
 - **GPU**: NVIDIA L40S (48GB)
-- **SSH Proxy**: `tyb4t32f4tn2t8-64411879@ssh.runpod.io`
-- **Direct TCP**: `root@160.250.71.210:50571`
-- **Web Terminal**: Port 19123
+- **SSH Proxy**: `<your-pod-id>-<ssh-proxy-id>@ssh.runpod.io`
+- **Direct TCP**: `root@<public-ip>:<tcp-port>`
+- **Web Terminal**: Port `<web-terminal-port>`
 
 ## Automated Bootstrap Script
 
