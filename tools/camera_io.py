@@ -133,9 +133,21 @@ def resolve_npy_path(
     """Resolve a .npy path reference across episode and frames directories."""
     if not val:
         return None
+
+    def _is_within_root(candidate: Path, root: Optional[Path]) -> bool:
+        if root is None:
+            return False
+        try:
+            candidate.resolve().relative_to(root.resolve())
+            return True
+        except Exception:
+            return False
+
     raw_path = Path(val)
     if raw_path.is_absolute() and raw_path.exists():
-        return raw_path
+        if _is_within_root(raw_path, ep_dir) or _is_within_root(raw_path, frames_dir):
+            return raw_path
+        return None
     if ep_dir is not None:
         candidate = ep_dir / val
         if candidate.exists():
@@ -186,7 +198,10 @@ def load_camera_frame(
             return None
         if not npy_path.exists():
             return None
-        return np.load(npy_path)
+        try:
+            return np.load(npy_path, allow_pickle=False)
+        except Exception:
+            return None
     if isinstance(val, bytes):
         return decode_camera_bytes(val, width=width, height=height, encoding=encoding, kind=key)
     if isinstance(val, bytearray):

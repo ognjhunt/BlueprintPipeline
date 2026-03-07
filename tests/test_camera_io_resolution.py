@@ -31,3 +31,33 @@ def test_load_camera_frame_resolves_frames_dir(tmp_path: Path) -> None:
     loaded_scan = load_camera_frame(cam_data, "rgb", ep_dir=tmp_path)
     assert loaded_scan is not None
     assert loaded_scan.shape == arr.shape
+
+
+def test_load_camera_frame_rejects_absolute_path_outside_roots(tmp_path: Path) -> None:
+    secret = tmp_path / "secret.npy"
+    arr = np.ones((2, 2, 3), dtype=np.uint8)
+    np.save(secret, arr)
+
+    cam_data = {
+        "rgb": str(secret.resolve()),
+        "width": 2,
+        "height": 2,
+    }
+
+    # No trusted roots passed in (as in physics certification); absolute paths are rejected.
+    loaded = load_camera_frame(cam_data, "rgb")
+    assert loaded is None
+
+
+def test_load_camera_frame_handles_malformed_npy(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.npy"
+    bad.write_bytes(b"not-a-valid-npy")
+
+    cam_data = {
+        "rgb": str(bad.resolve()),
+        "width": 2,
+        "height": 2,
+    }
+
+    loaded = load_camera_frame(cam_data, "rgb", ep_dir=tmp_path)
+    assert loaded is None
