@@ -31,6 +31,7 @@ SAGE_ENV="sage"
 BP_DIR="${WORKSPACE}/BlueprintPipeline"
 
 PHYSX_ANYTHING_DIR="${WORKSPACE}/PhysX-Anything"
+PHYSX_ANYTHING_COMMIT="95f7274263b78c0ed8f02151d69823cb5d7b4c3c"
 INFINIGEN_DIR="${WORKSPACE}/infinigen"
 
 # ── 0. Preflight checks ─────────────────────────────────────────────────────
@@ -105,6 +106,10 @@ else
     else
         git clone https://github.com/ziangcao0312/PhysX-Anything.git "${PHYSX_ANYTHING_DIR}"
     fi
+
+    log "Checking out pinned PhysX-Anything commit ${PHYSX_ANYTHING_COMMIT}..."
+    git -C "${PHYSX_ANYTHING_DIR}" fetch --depth 1 origin "${PHYSX_ANYTHING_COMMIT}"
+    git -C "${PHYSX_ANYTHING_DIR}" checkout --detach "${PHYSX_ANYTHING_COMMIT}"
 
     log "Installing PhysX-Anything Python dependencies..."
     # Filter out torch/torchvision (already in sage env with correct CUDA version)
