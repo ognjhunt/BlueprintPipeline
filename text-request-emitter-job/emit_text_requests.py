@@ -55,6 +55,14 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 def _resolve_run_date(timezone_name: str, override: str) -> str:
     if override:
+        try:
+            parsed = datetime.strptime(override, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError(
+                "TEXT_AUTONOMY_RUN_DATE must be an ISO date in YYYY-MM-DD format"
+            ) from exc
+        if parsed.strftime("%Y-%m-%d") != override:
+            raise ValueError("TEXT_AUTONOMY_RUN_DATE must be zero-padded as YYYY-MM-DD")
         return override
     now = datetime.utcnow()
     if ZoneInfo is not None:
