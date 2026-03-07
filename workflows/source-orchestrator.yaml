@@ -1441,7 +1441,7 @@ run_text_jobs_on_runpod:
 
     - ensure_runpod_api_key:
         switch:
-          - condition: '${default(sys.get_env("RUNPOD_API_KEY"), "") == ""}'
+          - condition: '${default(sys.get_env("RUNPOD_API_KEY_SECRET"), "") == ""}'
             next: missing_runpod_api_key
         next: run_runpod_text_stage_via_cloud_build
 
@@ -1485,10 +1485,13 @@ run_text_jobs_on_runpod:
                     - '${"SAGE_LIVE_REQUIRED=" + sageLiveRequired}'
                     - '${"TEXT_ENFORCE_LIVE_BACKENDS=" + textEnforceLiveBackends}'
                     - '${"TEXT_SAGE_ACTION_DEMO_ENABLED=" + textSageActionDemoEnabled}'
-                    - '${"RUNPOD_API_KEY=" + default(sys.get_env("RUNPOD_API_KEY"), "")}'
-                    - '${"OPENAI_API_KEY=" + default(sys.get_env("OPENAI_API_KEY"), "")}'
-                    - '${"GOOGLE_API_KEY=" + default(sys.get_env("BP_GOOGLE_API_KEY"), "")}'
-                    - '${"GEMINI_API_KEY=" + default(sys.get_env("GEMINI_API_KEY"), "")}'
+                    - '${"RUNPOD_API_KEY_SECRET=" + default(sys.get_env("RUNPOD_API_KEY_SECRET"), "")}'
+                    - '${"RUNPOD_GCP_SERVICE_ACCOUNT_JSON_B64_SECRET=" + default(sys.get_env("RUNPOD_GCP_SERVICE_ACCOUNT_JSON_B64_SECRET"), "")}'
+                    - '${"OPENAI_API_KEY_SECRET=" + default(sys.get_env("OPENAI_API_KEY_SECRET"), "")}'
+                    - '${"BP_GOOGLE_API_KEY_SECRET=" + default(sys.get_env("BP_GOOGLE_API_KEY_SECRET"), "")}'
+                    - '${"GEMINI_API_KEY_SECRET=" + default(sys.get_env("GEMINI_API_KEY_SECRET"), "")}'
+                    - '${"HF_TOKEN_SECRET=" + default(sys.get_env("HF_TOKEN_SECRET"), "")}'
+                    - '${"GITHUB_TOKEN_SECRET=" + default(sys.get_env("GITHUB_TOKEN_SECRET"), "")}'
                     - '${"RUNPOD_EXTRA_JSON=" + default(sys.get_env("RUNPOD_EXTRA_JSON"), "{}")}'
                     - '${"SCENESMITH_PAPER_JSON=" + default(sys.get_env("SCENESMITH_PAPER_JSON"), "{}")}'
                   args:
@@ -1504,6 +1507,7 @@ run_text_jobs_on_runpod:
                       import tempfile
                       import time
                       import urllib.error
+                      import urllib.parse
                       import urllib.request
 
 
@@ -1544,8 +1548,55 @@ run_text_jobs_on_runpod:
                           return data
 
 
+                      def _access_secret(secret_name: str) -> str:
+                          secret_name = str(secret_name or "").strip()
+                          if not secret_name:
+                              return ""
+                          project_id = os.environ.get("PROJECT_ID", "").strip()
+                          if not project_id:
+                              raise RuntimeError("PROJECT_ID is required to access Secret Manager")
+                          safe_secret = urllib.parse.quote(secret_name, safe="")
+                          url = (
+                              f"https://secretmanager.googleapis.com/v1/projects/{project_id}/secrets/"
+                              f"{safe_secret}/versions/latest:access"
+                          )
+                          token = subprocess.check_output(
+                              ["gcloud", "auth", "print-access-token"],
+                              text=True,
+                          ).strip()
+                          req = urllib.request.Request(
+                              url,
+                              headers={"Authorization": f"Bearer {token}"},
+                              method="GET",
+                          )
+                          with urllib.request.urlopen(req, timeout=60) as response:
+                              payload = json.loads(response.read().decode("utf-8"))
+                          data = payload.get("payload") if isinstance(payload, dict) else None
+                          if not isinstance(data, dict) or "data" not in data:
+                              raise RuntimeError(f"Secret Manager returned malformed payload for secret {secret_name}")
+                          encoded = data.get("data") or ""
+                          return subprocess.check_output(
+                              ["python3", "-c", "import base64,sys;print(base64.b64decode(sys.argv[1]).decode())", encoded],
+                              text=True,
+                          ).rstrip("\n")
+
+
+                      def _inject_secret_env(secret_env_name: str, target_env_name: str) -> None:
+                          secret_name = os.environ.get(secret_env_name, "").strip()
+                          if secret_name and not os.environ.get(target_env_name):
+                              os.environ[target_env_name] = _access_secret(secret_name)
+
+
                       def _build_remote_command() -> str:
                           q = shlex.quote
+
+                          # Resolve secrets via Secret Manager before composing remote env.
+                          _inject_secret_env("RUNPOD_GCP_SERVICE_ACCOUNT_JSON_B64_SECRET", "RUNPOD_GCP_SERVICE_ACCOUNT_JSON_B64")
+                          _inject_secret_env("OPENAI_API_KEY_SECRET", "OPENAI_API_KEY")
+                          _inject_secret_env("BP_GOOGLE_API_KEY_SECRET", "GOOGLE_API_KEY")
+                          _inject_secret_env("GEMINI_API_KEY_SECRET", "GEMINI_API_KEY")
+                          _inject_secret_env("HF_TOKEN_SECRET", "HF_TOKEN")
+                          _inject_secret_env("GITHUB_TOKEN_SECRET", "GITHUB_TOKEN")
 
                           # Unpack JSON blobs into os.environ so downstream code
                           # reads them the same way as individual env vars.
@@ -1677,7 +1728,7 @@ run_text_jobs_on_runpod:
                           return " && ".join(remote_parts)
 
 
-                      runpod_api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+                      runpod_api_key = _access_secret(os.environ.get("RUNPOD_API_KEY_SECRET", ""))
                       if not runpod_api_key:
                           raise RuntimeError("[runpod_non_transient] RUNPOD_API_KEY is missing")
 
