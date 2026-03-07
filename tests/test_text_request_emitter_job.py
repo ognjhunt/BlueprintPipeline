@@ -199,3 +199,31 @@ def test_text_request_emitter_rejects_invalid_backend(tmp_path: Path, monkeypatc
         assert "TEXT_AUTONOMY_TEXT_BACKEND must be scenesmith|sage|hybrid_serial" in str(exc)
     else:
         raise AssertionError("Expected ValueError for unsupported TEXT_AUTONOMY_TEXT_BACKEND")
+
+
+def test_text_request_emitter_rejects_invalid_run_date_override(tmp_path: Path, monkeypatch) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    module = _load_module(
+        "text_request_emitter_job_invalid_run_date_test",
+        repo_root / "text-request-emitter-job" / "emit_text_requests.py",
+    )
+
+    gcs_root = tmp_path / "gcs"
+    monkeypatch.setattr(module, "GCS_ROOT", gcs_root)
+
+    monkeypatch.setenv("BUCKET", "test-bucket")
+    monkeypatch.setenv("TEXT_AUTONOMY_STORAGE_MODE", "filesystem")
+    monkeypatch.setenv("TEXT_AUTONOMY_STATE_PREFIX", "automation/text_daily")
+    monkeypatch.setenv("TEXT_AUTONOMY_RUN_DATE", "../../../../tmp/bad")
+    monkeypatch.setenv("TEXT_DAILY_QUOTA", "1")
+    monkeypatch.setenv("TEXT_AUTONOMY_PROVIDER_POLICY", "openai_primary")
+    monkeypatch.setenv("TEXT_AUTONOMY_TEXT_BACKEND", "scenesmith")
+    monkeypatch.setenv("TEXT_AUTONOMY_QUALITY_TIER", "premium")
+    monkeypatch.setenv("TEXT_PROMPT_USE_LLM", "false")
+
+    try:
+        module.main()
+    except ValueError as exc:
+        assert "TEXT_AUTONOMY_RUN_DATE" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for invalid TEXT_AUTONOMY_RUN_DATE")
