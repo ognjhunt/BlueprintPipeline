@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import re
 import shutil
 import time
 import urllib.parse
 import urllib.request
+from ipaddress import ip_address
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -353,9 +355,62 @@ def _mesh_filename_from_url(url: str) -> str:
     return f"{Path(name).stem}.glb"
 
 
+def _validated_download_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported_download_scheme:{scheme or 'missing'}")
+
+    host = parsed.hostname
+    if not host:
+        raise ValueError("missing_download_host")
+
+    try:
+        host_ip = ip_address(host)
+    except ValueError:
+        host_ip = None
+
+    if host_ip is not None:
+        if (
+            host_ip.is_loopback
+            or host_ip.is_private
+            or host_ip.is_link_local
+            or host_ip.is_multicast
+            or host_ip.is_unspecified
+            or host_ip.is_reserved
+        ):
+            raise ValueError(f"disallowed_download_host:{host}")
+        return url
+
+    lowered_host = host.lower().rstrip(".")
+    if lowered_host in {"localhost", "localhost.localdomain"}:
+        raise ValueError(f"disallowed_download_host:{host}")
+
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"unresolvable_download_host:{host}") from exc
+
+    for info in infos:
+        resolved_ip = info[4][0]
+        resolved_addr = ip_address(resolved_ip)
+        if (
+            resolved_addr.is_loopback
+            or resolved_addr.is_private
+            or resolved_addr.is_link_local
+            or resolved_addr.is_multicast
+            or resolved_addr.is_unspecified
+            or resolved_addr.is_reserved
+        ):
+            raise ValueError(f"disallowed_download_host:{host}")
+
+    return url
+
+
 def _download_file(url: str, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    urllib.request.urlretrieve(url, out_path)  # noqa: S310 - URL is controlled by provider response
+    validated_url = _validated_download_url(url)
+    urllib.request.urlretrieve(validated_url, out_path)  # noqa: S310 - URL is validated by _validated_download_url
 
 
 def _cache_generated_asset_bundle(
