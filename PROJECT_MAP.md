@@ -25,6 +25,10 @@
 
 **BlueprintPipeline** is a production-ready, end-to-end pipeline that converts scene images into simulation-ready USD scenes with Isaac Lab RL training packages.
 
+### Blueprint Product Boundary
+
+Within the broader Blueprint product system, this repo supports generated/simulator/post-training data lanes. Its outputs can feed Post-Training Data Packages and optional robot-evaluation workflows, but they are not the primary public offer and cannot upgrade capture truth, package proof, robot readiness, simulator completion, safety validation, or customer outcomes without exact owner-system proof.
+
 ### Core Transformation Flow
 
 ```
@@ -98,7 +102,7 @@ Scene Image → Stage 1 text generation Reconstruction → Physics-Ready Assets 
 
 **Experimental add-ons (disabled by default):**
 - `dream2flow-preparation-job` for egocentric video/flow bundles.
-- `dwm-preparation-job` for dexterous world model conditioning bundles.
+- `dwm-preparation-job` for dexterous world-model conditioning bundles as generated data-package support.
 
 ---
 
