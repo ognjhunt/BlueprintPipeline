@@ -138,7 +138,7 @@ class Sim2RealValidationConfig:
         if self.tracked_metrics is None:
             self.tracked_metrics = [
                 "sim_success_rate",
-                "real_success_rate",
+                "accepted_anchor_success_rate",
                 "transfer_gap",
                 "transfer_gap_percentage",
                 "confidence_interval_lower",
@@ -297,7 +297,7 @@ class DefaultSim2RealValidationExporter:
 | Metric | Value |
 |--------|-------|
 | **Simulation Success Rate** | {{{{sim_success_rate}}}} |
-| **Real-World Success Rate** | {{{{real_success_rate}}}} |
+| **Policy-Ranking Agreement Rate** | {{{{accepted_anchor_success_rate}}}} |
 | **Transfer Gap** | {{{{transfer_gap}}}} |
 | **Transfer Quality** | **{{{{transfer_quality}}}}** |
 | **Production Ready** | {{{{production_ready}}}} |
@@ -379,7 +379,7 @@ Consider:
                 "min_real_trials": self.config.guarantee_config.min_real_trials_for_guarantee,
                 "max_ci_width": self.config.guarantee_config.min_confidence_interval_width,
                 "required_metrics": [
-                    "real_success_rate",
+                    "accepted_anchor_success_rate",
                     "confidence_interval",
                     "failure_analysis",
                 ],

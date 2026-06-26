@@ -27,7 +27,7 @@
 
 ### Blueprint Product Boundary
 
-Within the broader Blueprint product system, this repo supports generated/simulator/post-training data lanes. Its outputs can feed Post-Training Data Packages and optional robot-evaluation workflows, but they are not the primary public offer and cannot upgrade capture truth, package proof, robot readiness, simulator completion, safety validation, or customer outcomes without exact owner-system proof.
+Within the broader Blueprint product system, this repo supports generated/simulator/post-training data lanes. Its outputs can feed Post-Training Data Packages and optional robot-evaluation workflows, but they are not the primary public offer and cannot upgrade capture truth, package proof, generated-world rank fidelity, simulator completion, off-scope validation, or customer outcomes without exact owner-system proof.
 
 ### Core Transformation Flow
 

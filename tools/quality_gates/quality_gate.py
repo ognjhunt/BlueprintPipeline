@@ -3346,13 +3346,13 @@ class QualityGateRegistry:
             # Extract metrics
             transfer_gap = sim2real_metrics.get("transfer_gap", 1.0)
             sim_success_rate = sim2real_metrics.get("sim_success_rate", 0.0)
-            real_success_rate = sim2real_metrics.get("real_success_rate", 0.0)
+            accepted_anchor_success_rate = sim2real_metrics.get("accepted_anchor_success_rate", 0.0)
             production_ready = sim2real_metrics.get("production_ready", False)
             confidence_interval = sim2real_metrics.get("confidence_interval")
             failure_modes = sim2real_metrics.get("failure_modes", {})
 
             # Determine quality level based on transfer gap
-            # Transfer gap = |sim_success - real_success| / max(sim_success, 0.01)
+            # Transfer gap = |sim_success - accepted_anchor_success| / max(sim_success, 0.01)
             # <10%: Excellent, 10-20%: Good, 20-35%: Moderate, >35%: Poor
             if transfer_gap < 0.10:
                 quality_level = "excellent"
@@ -3374,10 +3374,10 @@ class QualityGateRegistry:
                 recommendations.append("Review domain randomization settings")
                 recommendations.append("Consider fine-tuning on more diverse scenes")
 
-            # Check if real-world success rate is acceptable
-            min_real_success_rate = sim2real_metrics.get("min_real_success_rate", 0.6)
-            if real_success_rate < min_real_success_rate:
-                issues.append(f"Real-world success rate {real_success_rate:.1%} below threshold {min_real_success_rate:.0%}")
+            # Check if rank fidelity rate is acceptable
+            min_accepted_anchor_success_rate = sim2real_metrics.get("min_accepted_anchor_success_rate", 0.6)
+            if accepted_anchor_success_rate < min_accepted_anchor_success_rate:
+                issues.append(f"Policy-ranking agreement rate {accepted_anchor_success_rate:.1%} below threshold {min_accepted_anchor_success_rate:.0%}")
                 recommendations.append("Increase training episodes")
                 recommendations.append("Review task difficulty and gripper settings")
 
@@ -3396,13 +3396,13 @@ class QualityGateRegistry:
                 checkpoint=QualityGateCheckpoint.EPISODES_GENERATED,
                 passed=passed,
                 severity=severity,
-                message=f"Sim2Real transfer: {quality_level} (gap: {transfer_gap:.1%}, real: {real_success_rate:.1%})",
+                message=f"Sim2Real transfer: {quality_level} (gap: {transfer_gap:.1%}, real: {accepted_anchor_success_rate:.1%})",
                 details={
                     "transfer_gap": transfer_gap,
                     "transfer_gap_threshold": transfer_gap_threshold,
                     "quality_level": quality_level,
                     "sim_success_rate": sim_success_rate,
-                    "real_success_rate": real_success_rate,
+                    "accepted_anchor_success_rate": accepted_anchor_success_rate,
                     "production_ready": production_ready,
                     "confidence_interval": confidence_interval,
                     "failure_modes": failure_modes,

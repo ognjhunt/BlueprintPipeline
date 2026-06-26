@@ -161,7 +161,7 @@ def track_training_outcome(
     delivery_id: str,
     policy_success_rate: float,
     real_world_tested: bool = False,
-    real_world_success_rate: Optional[float] = None,
+    accepted_anchor_success_rate: Optional[float] = None,
 ) -> None:
     """Record policy training and deployment outcomes.
 
@@ -169,7 +169,7 @@ def track_training_outcome(
         delivery_id: Delivery identifier
         policy_success_rate: Success rate in simulation (0-1)
         real_world_tested: Whether policy was tested in real world
-        real_world_success_rate: Real-world success rate if tested
+        accepted_anchor_success_rate: Policy-ranking agreement rate if tested
 
     Example:
         # After simulation training
@@ -183,7 +183,7 @@ def track_training_outcome(
             delivery_id="abc123",
             policy_success_rate=0.92,
             real_world_tested=True,
-            real_world_success_rate=0.78
+            accepted_anchor_success_rate=0.78
         )
     """
     tracker = get_tracker()
@@ -192,7 +192,7 @@ def track_training_outcome(
         policy_trained=True,
         policy_success_rate=policy_success_rate,
         real_world_tested=real_world_tested,
-        real_world_success_rate=real_world_success_rate,
+        accepted_anchor_success_rate=accepted_anchor_success_rate,
     )
 
 
@@ -249,7 +249,7 @@ def get_success_summary() -> Dict[str, Any]:
         "avg_quality_score": pipeline.avg_quality_score,
         "policies_trained_rate": business["outcomes"]["policies_trained_rate"],
         "avg_sim_success_rate": business["outcomes"]["avg_policy_success_rate"],
-        "avg_real_success_rate": business["outcomes"]["avg_real_world_success_rate"],
+        "avg_accepted_anchor_success_rate": business["outcomes"]["avg_accepted_anchor_success_rate"],
         "avg_transfer_gap": business["outcomes"]["avg_transfer_gap"],
         "active_customers": business["customers"]["active_customers"],
     }
@@ -296,7 +296,7 @@ if __name__ == "__main__":
         print(f"Avg Quality Score:    {summary['avg_quality_score']:.2f}")
         print(f"Policies Trained:     {summary['policies_trained_rate']:.1%}")
         print(f"Avg Sim Success:      {summary['avg_sim_success_rate']:.1%}")
-        print(f"Avg Real Success:     {summary['avg_real_success_rate']:.1%}")
+        print(f"Avg Real Success:     {summary['avg_accepted_anchor_success_rate']:.1%}")
         if summary['avg_transfer_gap']:
             print(f"Avg Transfer Gap:     {summary['avg_transfer_gap']:.1%}")
         print(f"Active Customers:     {summary['active_customers']}")

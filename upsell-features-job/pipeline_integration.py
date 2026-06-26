@@ -302,7 +302,7 @@ class EnhancedPipeline:
         self.metrics["sim2real"] = {
             "tier": tier.value,
             "sim_success_rate": report.sim_success_rate,
-            "real_success_rate": report.real_success_rate,
+            "accepted_anchor_success_rate": report.accepted_anchor_success_rate,
             "transfer_gap": report.transfer_gap,
             "transfer_quality": report.transfer_quality,
             "production_ready": report.production_ready,

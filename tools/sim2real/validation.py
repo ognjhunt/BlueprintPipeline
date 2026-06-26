@@ -59,7 +59,7 @@ class TransferMetrics:
     """Metrics measuring sim-to-real transfer quality."""
     # Core success metrics
     sim_success_rate: float = 0.0  # Success rate in simulation
-    real_success_rate: float = 0.0  # Success rate in real world
+    accepted_anchor_success_rate: float = 0.0  # Success rate in real world
     transfer_gap: float = 0.0  # sim - real (lower is better)
 
     # Trial counts
@@ -83,7 +83,7 @@ class TransferMetrics:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "sim_success_rate": self.sim_success_rate,
-            "real_success_rate": self.real_success_rate,
+            "accepted_anchor_success_rate": self.accepted_anchor_success_rate,
             "transfer_gap": self.transfer_gap,
             "sim_trials": self.sim_trials,
             "real_trials": self.real_trials,
@@ -211,12 +211,12 @@ class Sim2RealExperiment:
 
         # Real-world metrics
         if self.real_trials:
-            real_successes = sum(
+            accepted_anchor_successes = sum(
                 1 for t in self.real_trials
                 if t.outcome == TrialOutcome.SUCCESS
             )
             metrics.real_trials = len(self.real_trials)
-            metrics.real_success_rate = real_successes / len(self.real_trials)
+            metrics.accepted_anchor_success_rate = accepted_anchor_successes / len(self.real_trials)
 
             real_times = [
                 t.duration_seconds for t in self.real_trials
@@ -236,11 +236,11 @@ class Sim2RealExperiment:
                     metrics.real_failure_modes[mode] = metrics.real_failure_modes.get(mode, 0) + 1
 
         # Transfer gap
-        metrics.transfer_gap = metrics.sim_success_rate - metrics.real_success_rate
+        metrics.transfer_gap = metrics.sim_success_rate - metrics.accepted_anchor_success_rate
 
         # Confidence interval (Wilson score interval approximation)
         if metrics.real_trials >= 10:
-            p = metrics.real_success_rate
+            p = metrics.accepted_anchor_success_rate
             n = metrics.real_trials
             z = 1.96  # 95% confidence
 
@@ -313,7 +313,7 @@ class Sim2RealResult:
 
     # Key metrics
     sim_success_rate: float
-    real_success_rate: float
+    accepted_anchor_success_rate: float
     transfer_gap: float
 
     # Verdict
@@ -329,7 +329,7 @@ class Sim2RealResult:
             "scene_id": self.scene_id,
             "task_type": self.task_type,
             "sim_success_rate": self.sim_success_rate,
-            "real_success_rate": self.real_success_rate,
+            "accepted_anchor_success_rate": self.accepted_anchor_success_rate,
             "transfer_gap": self.transfer_gap,
             "transfer_successful": self.transfer_successful,
             "transfer_quality": self.transfer_quality,
@@ -515,7 +515,7 @@ class Sim2RealValidator:
             scene_id=experiment.scene_id,
             task_type=experiment.task_type.value,
             sim_success_rate=metrics.sim_success_rate,
-            real_success_rate=metrics.real_success_rate,
+            accepted_anchor_success_rate=metrics.accepted_anchor_success_rate,
             transfer_gap=gap,
             transfer_successful=successful,
             transfer_quality=quality,
@@ -528,7 +528,7 @@ class Sim2RealValidator:
 
         self.log(f"Experiment {experiment_id} analyzed:")
         self.log(f"  Sim success: {metrics.sim_success_rate:.1%}")
-        self.log(f"  Real success: {metrics.real_success_rate:.1%}")
+        self.log(f"  Real success: {metrics.accepted_anchor_success_rate:.1%}")
         self.log(f"  Transfer gap: {gap:.1%}")
         self.log(f"  Quality: {quality}")
 
@@ -562,7 +562,7 @@ class Sim2RealValidator:
         total_real_trials = sum(e.metrics.real_trials for e in analyzed)
 
         avg_transfer_gap = statistics.mean(e.metrics.transfer_gap for e in analyzed)
-        avg_real_success = statistics.mean(e.metrics.real_success_rate for e in analyzed)
+        avg_accepted_anchor_success = statistics.mean(e.metrics.accepted_anchor_success_rate for e in analyzed)
 
         # By task type
         by_task = {}
@@ -583,7 +583,7 @@ class Sim2RealValidator:
             "total_sim_trials": total_sim_trials,
             "total_real_trials": total_real_trials,
             "avg_transfer_gap": avg_transfer_gap,
-            "avg_real_success_rate": avg_real_success,
+            "avg_accepted_anchor_success_rate": avg_accepted_anchor_success,
             "by_task_type": by_task,
             "experiments_with_poor_transfer": sum(
                 1 for e in analyzed
@@ -660,7 +660,7 @@ class Sim2RealValidator:
             m = data["metrics"]
             experiment.metrics = TransferMetrics(
                 sim_success_rate=m.get("sim_success_rate", 0.0),
-                real_success_rate=m.get("real_success_rate", 0.0),
+                accepted_anchor_success_rate=m.get("accepted_anchor_success_rate", 0.0),
                 transfer_gap=m.get("transfer_gap", 0.0),
                 sim_trials=m.get("sim_trials", 0),
                 real_trials=m.get("real_trials", 0),

@@ -440,7 +440,7 @@ if __name__ == "__main__":
             "tier": self.config.premium_analytics_tier,
             "data_quality_score": report.data_quality_score,
             "training_readiness_score": report.training_readiness_score,
-            "deployment_readiness_score": report.deployment_readiness_score,
+            "evaluation_readiness_score": report.evaluation_readiness_score,
             "key_findings_count": len(report.key_findings),
             "recommendations_count": len(report.recommendations),
             "estimated_value": report.estimated_value,

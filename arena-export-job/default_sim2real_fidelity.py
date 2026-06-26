@@ -20,7 +20,7 @@ Features (DEFAULT - FREE):
 Output:
 - sim2real_fidelity_matrix.json - Complete fidelity assessment
 - trust_matrix.json - What sim results to trust
-- transfer_confidence_report.json - Deployment readiness score
+- transfer_confidence_report.json - Policy ranking readiness score
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ class Sim2RealFidelityMatrix:
     # Overall scores
     overall_fidelity_score: float = 0.0
     transfer_confidence: float = 0.0
-    deployment_readiness: str = "needs_validation"
+    evaluation_readiness: str = "needs_validation"
 
     # Domain randomization
     domain_rand_coverage: Dict[str, float] = field(default_factory=dict)
@@ -182,15 +182,15 @@ def create_default_sim2real_fidelity_exporter(
     # Transfer confidence based on fidelity
     transfer_confidence = overall_fidelity * 0.95  # Slight discount for unknown unknowns
 
-    # Deployment readiness
+    # Policy ranking readiness
     if transfer_confidence >= 0.85:
-        deployment_readiness = "high_confidence"
+        evaluation_readiness = "high_confidence"
     elif transfer_confidence >= 0.70:
-        deployment_readiness = "medium_confidence_validate_recommended"
+        evaluation_readiness = "medium_confidence_validate_recommended"
     elif transfer_confidence >= 0.50:
-        deployment_readiness = "low_confidence_validation_required"
+        evaluation_readiness = "low_confidence_validation_required"
     else:
-        deployment_readiness = "not_ready_collect_real_data"
+        evaluation_readiness = "not_ready_collect_real_data"
 
     # Domain randomization coverage
     domain_rand_coverage = {
@@ -253,7 +253,7 @@ def create_default_sim2real_fidelity_exporter(
         robot_model_fidelity=robot_model_score,
         overall_fidelity_score=overall_fidelity,
         transfer_confidence=transfer_confidence,
-        deployment_readiness=deployment_readiness,
+        evaluation_readiness=evaluation_readiness,
         domain_rand_coverage=domain_rand_coverage,
         critical_gaps=critical_gaps,
         moderate_gaps=moderate_gaps,
@@ -297,7 +297,7 @@ def create_default_sim2real_fidelity_exporter(
             "overall_scores": {
                 "fidelity_score": f"{overall_fidelity:.1%}",
                 "transfer_confidence": f"{transfer_confidence:.1%}",
-                "deployment_readiness": deployment_readiness,
+                "evaluation_readiness": evaluation_readiness,
             },
             "domain_randomization_coverage": {
                 k: f"{v:.1%}" for k, v in domain_rand_coverage.items()
@@ -350,7 +350,7 @@ def create_default_sim2real_fidelity_exporter(
     with open(confidence_report_path, "w") as f:
         json.dump({
             "overall_confidence": f"{transfer_confidence:.1%}",
-            "deployment_readiness": deployment_readiness,
+            "evaluation_readiness": evaluation_readiness,
             "confidence_breakdown": {
                 "physics_transfer": f"{physics_score.score:.1%}",
                 "visual_transfer": f"{visual_score.score:.1%}",

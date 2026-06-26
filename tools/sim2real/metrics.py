@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 def compute_transfer_gap(
     sim_success_rate: float,
-    real_success_rate: float,
+    accepted_anchor_success_rate: float,
 ) -> float:
     """Compute transfer gap between sim and real success rates.
 
@@ -19,12 +19,12 @@ def compute_transfer_gap(
 
     Args:
         sim_success_rate: Success rate in simulation (0-1)
-        real_success_rate: Success rate in real world (0-1)
+        accepted_anchor_success_rate: Success rate in real world (0-1)
 
     Returns:
         Transfer gap (sim - real)
     """
-    return sim_success_rate - real_success_rate
+    return sim_success_rate - accepted_anchor_success_rate
 
 
 def compute_success_rate(
@@ -241,14 +241,14 @@ def compute_sample_size_for_power(
 
 def interpret_transfer_quality(
     transfer_gap: float,
-    real_success_rate: float,
+    accepted_anchor_success_rate: float,
     real_trials: int,
 ) -> Dict[str, Any]:
     """Interpret transfer quality and provide recommendations.
 
     Args:
         transfer_gap: Difference between sim and real success
-        real_success_rate: Actual real-world success rate
+        accepted_anchor_success_rate: Actual rank fidelity rate
         real_trials: Number of real-world trials
 
     Returns:
@@ -283,7 +283,7 @@ def interpret_transfer_quality(
             "Check camera calibration and observation alignment",
         ])
 
-    if real_success_rate < 0.50:
+    if accepted_anchor_success_rate < 0.50:
         recommendations.extend([
             "Consider sim2real fine-tuning with real data",
             "Review failure modes for systematic issues",
@@ -298,7 +298,7 @@ def interpret_transfer_quality(
     # Confidence assessment
     if real_trials >= 20:
         lower, upper = compute_confidence_interval(
-            int(real_success_rate * real_trials),
+            int(accepted_anchor_success_rate * real_trials),
             real_trials
         )
         confidence_note = f"95% CI for real success: [{lower:.1%}, {upper:.1%}]"
@@ -309,7 +309,7 @@ def interpret_transfer_quality(
         "quality": quality,
         "quality_color": color,
         "transfer_gap": f"{transfer_gap:.1%}",
-        "real_success_rate": f"{real_success_rate:.1%}",
+        "accepted_anchor_success_rate": f"{accepted_anchor_success_rate:.1%}",
         "confidence_note": confidence_note,
         "recommendations": recommendations,
         "production_ready": quality in ["excellent", "good"] and real_trials >= 20,

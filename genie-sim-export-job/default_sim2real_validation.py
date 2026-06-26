@@ -138,7 +138,7 @@ class Sim2RealValidationConfig:
         if self.tracked_metrics is None:
             self.tracked_metrics = [
                 "sim_success_rate",
-                "real_success_rate",
+                "accepted_anchor_success_rate",
                 "transfer_gap",
                 "transfer_gap_percentage",
                 "confidence_interval_lower",
@@ -303,7 +303,7 @@ class DefaultSim2RealValidationExporter:
 | Metric | Value |
 |--------|-------|
 | **Simulation Success Rate** | {{{{sim_success_rate}}}} |
-| **Real-World Success Rate** | {{{{real_success_rate}}}} |
+| **Policy-Ranking Agreement Rate** | {{{{accepted_anchor_success_rate}}}} |
 | **Transfer Gap** | {{{{transfer_gap}}}} |
 | **Transfer Quality** | **{{{{transfer_quality}}}}** |
 | **Production Ready** | {{{{production_ready}}}} |
@@ -385,7 +385,7 @@ Consider:
                 "min_real_trials": self.config.guarantee_config.min_real_trials_for_guarantee,
                 "max_ci_width": self.config.guarantee_config.min_confidence_interval_width,
                 "required_metrics": [
-                    "real_success_rate",
+                    "accepted_anchor_success_rate",
                     "confidence_interval",
                     "failure_analysis",
                 ],
@@ -547,7 +547,7 @@ def execute_sim2real_validation(
                 "robot_type": config_payload.get("robot_type"),
                 "generated_at": datetime.utcnow().isoformat() + "Z",
                 "sim_success_rate": 0.82,
-                "real_success_rate": 0.76,
+                "accepted_anchor_success_rate": 0.76,
                 "transfer_gap": 0.06,
                 "confidence_interval": [0.68, 0.83],
                 "production_ready": False,

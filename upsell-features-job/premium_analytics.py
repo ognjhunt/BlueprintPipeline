@@ -219,7 +219,7 @@ class PremiumAnalyticsReport:
     # Overall scores
     data_quality_score: float = 0.0
     training_readiness_score: float = 0.0
-    deployment_readiness_score: float = 0.0
+    evaluation_readiness_score: float = 0.0
 
     # Key findings
     key_findings: List[Dict[str, Any]] = field(default_factory=list)
@@ -240,7 +240,7 @@ class PremiumAnalyticsReport:
             "scores": {
                 "data_quality": f"{self.data_quality_score:.1%}",
                 "training_readiness": f"{self.training_readiness_score:.1%}",
-                "deployment_readiness": f"{self.deployment_readiness_score:.1%}",
+                "evaluation_readiness": f"{self.evaluation_readiness_score:.1%}",
             },
             "key_findings": self.key_findings,
             "recommendations": self.recommendations,
@@ -425,7 +425,7 @@ class PremiumAnalyticsService:
         # Compute overall scores
         report.data_quality_score = self._compute_data_quality_score(report)
         report.training_readiness_score = self._compute_training_readiness(report)
-        report.deployment_readiness_score = self._compute_deployment_readiness(report)
+        report.evaluation_readiness_score = self._compute_evaluation_readiness(report)
 
         # Value assessment
         report.estimated_value = self._compute_value_assessment(report)
@@ -1068,11 +1068,11 @@ class PremiumAnalyticsService:
 
         return sum(factors) / len(factors) if factors else 0.5
 
-    def _compute_deployment_readiness(
+    def _compute_evaluation_readiness(
         self,
         report: PremiumAnalyticsReport,
     ) -> float:
-        """Compute deployment readiness score."""
+        """Compute generated-world rank fidelity score."""
         factors = []
 
         if report.fidelity_matrix:
@@ -1154,7 +1154,7 @@ class PremiumAnalyticsService:
 |--------|-------|
 | **Data Quality** | {report.data_quality_score:.1%} |
 | **Training Readiness** | {report.training_readiness_score:.1%} |
-| **Deployment Readiness** | {report.deployment_readiness_score:.1%} |
+| **Generated-World Rank Fidelity** | {report.evaluation_readiness_score:.1%} |
 
 """
 
@@ -1269,7 +1269,7 @@ if __name__ == "__main__":
     print(f"\nScores:")
     print(f"  Data Quality: {report.data_quality_score:.1%}")
     print(f"  Training Readiness: {report.training_readiness_score:.1%}")
-    print(f"  Deployment Readiness: {report.deployment_readiness_score:.1%}")
+    print(f"  Generated-World Rank Fidelity: {report.evaluation_readiness_score:.1%}")
     print(f"\nKey Findings: {len(report.key_findings)}")
     print(f"Recommendations: {len(report.recommendations)}")
     print(f"\nValue: {report.estimated_value.get('estimated_dataset_value', 'N/A')}")

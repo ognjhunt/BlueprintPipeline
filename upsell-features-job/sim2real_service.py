@@ -68,7 +68,7 @@ class ValidationReport:
 
     # Core metrics
     sim_success_rate: float
-    real_success_rate: float
+    accepted_anchor_success_rate: float
     transfer_gap: float
     transfer_quality: str  # excellent, good, moderate, poor
 
@@ -106,7 +106,7 @@ class ValidationReport:
             "tier": self.tier.value,
             "metrics": {
                 "sim_success_rate": f"{self.sim_success_rate:.1%}",
-                "real_success_rate": f"{self.real_success_rate:.1%}",
+                "accepted_anchor_success_rate": f"{self.accepted_anchor_success_rate:.1%}",
                 "transfer_gap": f"{self.transfer_gap:.1%}",
                 "transfer_quality": self.transfer_quality,
                 "confidence_interval_95": (
@@ -152,7 +152,7 @@ class ValidationReport:
 | Metric | Value |
 |--------|-------|
 | **Simulation Success Rate** | {self.sim_success_rate:.1%} |
-| **Real-World Success Rate** | {self.real_success_rate:.1%} |
+| **Policy-Ranking Agreement Rate** | {self.accepted_anchor_success_rate:.1%} |
 | **Transfer Gap** | {self.transfer_gap:.1%} |
 | **Transfer Quality** | **{self.transfer_quality.upper()}** |
 | **Production Ready** | {'✅ Yes' if self.production_ready else '❌ No'} |
@@ -202,7 +202,7 @@ class ValidationReport:
 
 ✅ **This scene is eligible for a {self.guarantee_level} Success Rate Guarantee**
 
-Based on the validation results, we guarantee a minimum {self.guarantee_level} real-world success rate
+Based on the validation results, we guarantee a minimum {self.guarantee_level} rank fidelity rate
 when deployed with the recommended configuration.
 
 """
@@ -470,7 +470,7 @@ class Sim2RealService:
             key=lambda x: x[1],
             reverse=True,
         ):
-            if metrics.real_success_rate >= threshold:
+            if metrics.accepted_anchor_success_rate >= threshold:
                 guarantee_level = level
                 guarantee_eligible = True
                 break
@@ -478,9 +478,9 @@ class Sim2RealService:
         # Compute confidence interval
         confidence_interval = None
         if metrics.real_trials >= 10:
-            real_successes = int(metrics.real_success_rate * metrics.real_trials)
+            accepted_anchor_successes = int(metrics.accepted_anchor_success_rate * metrics.real_trials)
             confidence_interval = compute_confidence_interval(
-                real_successes, metrics.real_trials
+                accepted_anchor_successes, metrics.real_trials
             )
 
         # Generate failure recommendations
@@ -521,7 +521,7 @@ class Sim2RealService:
         # General recommendations
         recommendations = result.recommendations.copy()
 
-        if metrics.real_success_rate < 0.7:
+        if metrics.accepted_anchor_success_rate < 0.7:
             recommendations.append(
                 "Consider sim2real fine-tuning with 50-100 real demonstrations"
             )
@@ -539,7 +539,7 @@ class Sim2RealService:
             created_at=datetime.utcnow().isoformat() + "Z",
             tier=tier,
             sim_success_rate=metrics.sim_success_rate,
-            real_success_rate=metrics.real_success_rate,
+            accepted_anchor_success_rate=metrics.accepted_anchor_success_rate,
             transfer_gap=metrics.transfer_gap,
             transfer_quality=result.transfer_quality,
             total_sim_trials=metrics.sim_trials,

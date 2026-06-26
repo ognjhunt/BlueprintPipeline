@@ -4,7 +4,7 @@ A production-ready pipeline for converting scene images into simulation-ready US
 
 ## Blueprint Product Boundary
 
-In the Blueprint system, this repo is simulator/data-generation support infrastructure. Its USD scenes, domain randomization, generated episodes, synthetic-to-real exports, and RL/VLA packages can support Post-Training Data Packages and optional robot-evaluation work after capture-grounded scope exists. They are not the primary public offer, do not replace raw capture truth, and do not prove robot readiness, simulator completion, safety validation, or customer outcomes without exact run artifacts and owner-system proof.
+In the Blueprint system, this repo is simulator/data-generation support infrastructure. Its USD scenes, domain randomization, generated episodes, synthetic-to-real exports, and RL/VLA packages can support Post-Training Data Packages and optional robot-evaluation work after capture-grounded scope exists. They are not the primary public offer, do not replace raw capture truth, and do not prove generated-world rank fidelity, simulator completion, off-scope validation, or customer outcomes without exact run artifacts and owner-system proof.
 
 For a summary of recent changes, see [CHANGELOG.md](CHANGELOG.md).
 

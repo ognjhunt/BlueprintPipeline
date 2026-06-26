@@ -76,7 +76,7 @@ class SceneDelivery:
     policy_trained: bool = False
     policy_success_rate: Optional[float] = None
     real_world_tested: bool = False
-    real_world_success_rate: Optional[float] = None
+    accepted_anchor_success_rate: Optional[float] = None
 
     def __post_init__(self):
         if not self.delivery_id:
@@ -116,7 +116,7 @@ class SceneDelivery:
             "policy_trained": self.policy_trained,
             "policy_success_rate": self.policy_success_rate,
             "real_world_tested": self.real_world_tested,
-            "real_world_success_rate": self.real_world_success_rate,
+            "accepted_anchor_success_rate": self.accepted_anchor_success_rate,
         }
 
 
@@ -136,7 +136,7 @@ class CustomerOutcome:
     policies_trained: int = 0
     policies_deployed: int = 0
     avg_sim_success_rate: float = 0.0
-    avg_real_success_rate: float = 0.0
+    avg_accepted_anchor_success_rate: float = 0.0
     avg_transfer_gap: float = 0.0
 
     # Satisfaction
@@ -164,7 +164,7 @@ class CustomerOutcome:
             "policies_trained": self.policies_trained,
             "policies_deployed": self.policies_deployed,
             "avg_sim_success_rate": self.avg_sim_success_rate,
-            "avg_real_success_rate": self.avg_real_success_rate,
+            "avg_accepted_anchor_success_rate": self.avg_accepted_anchor_success_rate,
             "avg_transfer_gap": self.avg_transfer_gap,
             "avg_feedback_score": self.avg_feedback_score,
             "nps_score": self.nps_score,
@@ -347,7 +347,7 @@ class SuccessMetricsTracker:
         policy_trained: bool = True,
         policy_success_rate: Optional[float] = None,
         real_world_tested: bool = False,
-        real_world_success_rate: Optional[float] = None,
+        accepted_anchor_success_rate: Optional[float] = None,
     ) -> None:
         """Record policy training and deployment outcomes."""
         if delivery_id not in self.deliveries:
@@ -357,7 +357,7 @@ class SuccessMetricsTracker:
         delivery.policy_trained = policy_trained
         delivery.policy_success_rate = policy_success_rate
         delivery.real_world_tested = real_world_tested
-        delivery.real_world_success_rate = real_world_success_rate
+        delivery.accepted_anchor_success_rate = accepted_anchor_success_rate
         self._save_delivery(delivery)
 
         # Update customer
@@ -479,8 +479,8 @@ class SuccessMetricsTracker:
             statistics.mean(d.policy_success_rate for d in with_policy if d.policy_success_rate)
             if with_policy else 0
         )
-        avg_real_success = (
-            statistics.mean(d.real_world_success_rate for d in with_real_world if d.real_world_success_rate)
+        avg_accepted_anchor_success = (
+            statistics.mean(d.accepted_anchor_success_rate for d in with_real_world if d.accepted_anchor_success_rate)
             if with_real_world else 0
         )
 
@@ -509,8 +509,8 @@ class SuccessMetricsTracker:
                 "policies_trained_rate": len(with_policy) / len(delivered) if delivered else 0,
                 "real_world_tested": len(with_real_world),
                 "avg_policy_success_rate": avg_policy_success,
-                "avg_real_world_success_rate": avg_real_success,
-                "avg_transfer_gap": avg_policy_success - avg_real_success if avg_real_success > 0 else None,
+                "avg_accepted_anchor_success_rate": avg_accepted_anchor_success,
+                "avg_transfer_gap": avg_policy_success - avg_accepted_anchor_success if avg_accepted_anchor_success > 0 else None,
             },
         }
 
@@ -554,11 +554,11 @@ class SuccessMetricsTracker:
         customer.policies_deployed = len(tested)
 
         if tested:
-            real_rates = [d.real_world_success_rate for d in tested if d.real_world_success_rate]
+            real_rates = [d.accepted_anchor_success_rate for d in tested if d.accepted_anchor_success_rate]
             if real_rates:
-                customer.avg_real_success_rate = statistics.mean(real_rates)
+                customer.avg_accepted_anchor_success_rate = statistics.mean(real_rates)
 
-        customer.avg_transfer_gap = customer.avg_sim_success_rate - customer.avg_real_success_rate
+        customer.avg_transfer_gap = customer.avg_sim_success_rate - customer.avg_accepted_anchor_success_rate
 
         self._save_customer(customer)
 
@@ -633,7 +633,7 @@ class SuccessMetricsTracker:
             policy_trained=data.get("policy_trained", False),
             policy_success_rate=data.get("policy_success_rate"),
             real_world_tested=data.get("real_world_tested", False),
-            real_world_success_rate=data.get("real_world_success_rate"),
+            accepted_anchor_success_rate=data.get("accepted_anchor_success_rate"),
         )
 
     def _customer_from_dict(self, data: Dict[str, Any]) -> CustomerOutcome:
@@ -648,7 +648,7 @@ class SuccessMetricsTracker:
             policies_trained=data.get("policies_trained", 0),
             policies_deployed=data.get("policies_deployed", 0),
             avg_sim_success_rate=data.get("avg_sim_success_rate", 0.0),
-            avg_real_success_rate=data.get("avg_real_success_rate", 0.0),
+            avg_accepted_anchor_success_rate=data.get("avg_accepted_anchor_success_rate", 0.0),
             avg_transfer_gap=data.get("avg_transfer_gap", 0.0),
             avg_feedback_score=data.get("avg_feedback_score", 0.0),
             nps_score=data.get("nps_score"),
